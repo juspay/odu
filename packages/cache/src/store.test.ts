@@ -9,11 +9,12 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { narHashModuloHasher, nixDump, parsePathInfoTable, verifyNarFile } from "./store";
+import { fifoStream, narHashModuloHasher, nixDump, parsePathInfoTable, verifyNarFile } from "./store";
 import { contentAddressOf } from "./storePath";
 
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
@@ -119,6 +120,65 @@ describe("a NAR stream", () => {
       restore();
       rmSync(empty, { recursive: true, force: true });
     }
+  });
+
+  /**
+   * THE DEFECT, FORCED. A non-blocking FIFO read answers `EAGAIN` — "a writer
+   * holds me and has nothing this instant" — and the loop used to report that
+   * as a zero-byte read, which ends the stream as soon as the pipeline's exit
+   * is known. Both are true at once for any NAR small enough that zstd's only
+   * write and the pipeline's exit land in the same breath.
+   */
+  it("keeps reading when a writer has nothing YET and the exit is already known", async () => {
+    scratch = mkdtempSync(join(tmpdir(), "odu-cache-fifo-"));
+    const fifo = join(scratch, "nar.zst");
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    // O_RDWR never blocks and counts as a writer, so the FIFO has one from the
+    // first poll — which is what makes the read answer EAGAIN rather than 0.
+    const writer = await open(fifo, constants.O_RDWR);
+    const cleaned = Promise.withResolvers<void>();
+    // THE SIGNAL, NOT A SLEEP: the loop asks for the exit code exactly when a
+    // read came back EAGAIN. One such question is the whole defect — the old
+    // loop ended the stream right there.
+    const polled = Promise.withResolvers<void>();
+    const reader = fifoStream(fifo, {
+      exited: () => {
+        polled.resolve();
+        return 0;
+      },
+      failure: (code) => new Error(`exited ${code}`),
+      stop: () => {},
+      clean: async () => {
+        cleaned.resolve();
+      },
+    }).getReader();
+    try {
+      await polled.promise;
+      await writer.write("a NAR that arrived late");
+      const first = await reader.read();
+      expect(new TextDecoder().decode(first.value)).toBe("a NAR that arrived late");
+      await writer.close();
+      expect((await reader.read()).done).toBe(true);
+      await cleaned.promise;
+    } finally {
+      await writer.close().catch(() => {});
+    }
+  });
+
+  /**
+   * WHAT A REFUSAL HAS TO SAY. `zstd exited 1` is the same sentence for an
+   * empty upload, a truncated one and a corrupt one, and it is the sentence
+   * that cost a day of guessing which. zstd knows; the refusal repeats it.
+   */
+  it("refuses an empty upload with the decompressor's own reason", async () => {
+    scratch = mkdtempSync(join(tmpdir(), "odu-cache-nar-"));
+    const path = join(scratch, "nar.zst");
+    writeFileSync(path, "");
+    const checked = await verifyNarFile(path, "zstd");
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.message).toContain("zstd exited 1");
+    expect(checked.message).toContain("unexpected end of");
   });
 });
 

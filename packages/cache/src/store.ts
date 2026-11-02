@@ -32,7 +32,7 @@
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { constants, createReadStream, createWriteStream, mkdtempSync, statSync } from "node:fs";
-import { mkdir, open, rm, unlink } from "node:fs/promises";
+import { type FileHandle, mkdir, open, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -179,6 +179,102 @@ export async function nixClosure(paths: readonly string[], store: string | null)
 }
 
 /**
+ * THE PIPELINE A {@link fifoStream} READS — everything about the children that
+ * the reader itself must not know.
+ */
+export interface FifoPipeline {
+  /** Its exit code, or `null` while it is still running. */
+  exited: () => number | null;
+  /** What a non-zero exit means to whoever is reading. */
+  failure: (code: number) => Error;
+  /** Stop it: the stream was cancelled. */
+  stop: () => void;
+  /** Everything but the read end — the FIFO and the directory holding it. */
+  clean: () => Promise<void>;
+}
+
+/**
+ * A FIFO A CHILD WRITES, AS A PULL STREAM — one 64 KiB read per pull, nothing
+ * spooled.
+ *
+ * The read end is opened NON-BLOCKING, because a pipeline that could not spawn
+ * never opens the write end and a blocking open would wait for ever. That
+ * makes a read answer three different things, and conflating two of them is
+ * how a valid NAR became an empty upload:
+ *
+ * | Answer | What the FIFO is saying | What to do |
+ * | --- | --- | --- |
+ * | `n > 0` | here are n bytes | hand them over |
+ * | `EAGAIN` | a writer holds me and has nothing THIS INSTANT | read again |
+ * | `0` | no process holds the write end at all | the pipeline's exit decides |
+ *
+ * **`EAGAIN` IS "NOT YET", NEVER "NO MORE".** It used to be answered as a
+ * zero-byte read, and a zero-byte read ends the stream as soon as the pipeline
+ * has exited. For a small NAR those two happen in the same breath — zstd
+ * writes its frame and the pipeline exits microseconds later — so a read
+ * issued just before the bytes landed resolved `EAGAIN`, found the exit code
+ * already set, and closed a stream that had published nothing. The pusher then
+ * PUT an empty body, staging kept a 0-byte file, and the narinfo was refused
+ * with `zstd exited 1`. Measured at 24 empty dumps in 640 on a 95-byte NAR.
+ *
+ * A ZERO-BYTE READ is unambiguous once the pipeline has exited: the FIFO's
+ * buffer is empty and nothing will open the write end again. Until then it
+ * only means the pipeline has not reached its redirection yet.
+ */
+export function fifoStream(fifo: string, producer: FifoPipeline): ReadableStream<Uint8Array> {
+  /** Not a byte count: the read answered "a writer is here, ask again". */
+  const AGAIN = -1;
+  let handle: FileHandle | null = null;
+  let closed = false;
+  const clean = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    await handle?.close().catch(() => {});
+    await producer.clean();
+  };
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      handle = await open(fifo, constants.O_RDONLY | constants.O_NONBLOCK).catch((err) => {
+        controller.error(err);
+        return null;
+      });
+    },
+    async pull(controller) {
+      if (handle === null) {
+        controller.error(new Error("the NAR FIFO could not be opened"));
+        return;
+      }
+      // THE LOOP THAT MEASURED 17 MiB: one 64 KiB read per pull.
+      for (;;) {
+        const buffer = new Uint8Array(64 * 1024);
+        const read = await handle.read(buffer, 0, buffer.length, null).catch((err: unknown) => {
+          if ((err as NodeJS.ErrnoException).code === "EAGAIN") return { bytesRead: AGAIN };
+          controller.error(err);
+          return null;
+        });
+        if (read === null) return;
+        if (read.bytesRead > 0) {
+          controller.enqueue(buffer.subarray(0, read.bytesRead));
+          return;
+        }
+        const code = producer.exited();
+        if (read.bytesRead === 0 && code !== null) {
+          if (code === 0) controller.close();
+          else controller.error(producer.failure(code));
+          await clean();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    },
+    async cancel() {
+      producer.stop();
+      await clean();
+    },
+  });
+}
+
+/**
  * A NAR as a zstd stream, through a FIFO.
  *
  * BOTH CHILD PIPES BUFFER: `node:child_process` and `Bun.spawn` read a child's
@@ -192,7 +288,7 @@ export async function nixClosure(paths: readonly string[], store: string | null)
  * The read does not END until the pipeline exited 0 (`pipefail` makes nix's
  * exit the pipeline's); a non-zero exit errors the stream rather than handing
  * out a valid frame of a truncated NAR. Cancel kills the pipeline's process
- * group.
+ * group. {@link fifoStream} is the reading half.
  */
 export function nixDump(storePath: string, store: string | null): ReadableStream<Uint8Array> {
   const dir = mkdtempSync(join(tmpdir(), "odu-nar-"));
@@ -223,77 +319,27 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
     tail = `${tail}${chunk.toString("utf8")}`.slice(-2000);
   });
   let exitCode: number | null = null;
-  const exited = new Promise<number>((resolve) => {
-    const settle = (code: number): void => {
-      exitCode = code;
-      resolve(code);
-    };
-    child.on("error", () => settle(-1));
-    child.on("close", (code) => settle(code ?? -1));
-  });
-  let handle: Awaited<ReturnType<typeof open>> | null = null;
-  let cleaned = false;
-  const clean = async (): Promise<void> => {
-    if (cleaned) return;
-    cleaned = true;
-    await handle?.close().catch(() => {});
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  const settle = (code: number): void => {
+    exitCode = code;
   };
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      // NON-BLOCKING: a pipeline that could not spawn never opens the write
-      // end, and a blocking open would wait for ever. `pull` retries an empty
-      // read until the child has exited, which is when EOF is real.
-      handle = await open(fifo, constants.O_RDONLY | constants.O_NONBLOCK).catch((err) => {
-        controller.error(err);
-        return null;
-      });
-    },
-    async pull(controller) {
-      if (handle === null) {
-        controller.error(new Error("the NAR FIFO could not be opened"));
-        return;
-      }
-      // THE LOOP THAT MEASURED 17 MiB: one 64 KiB read per pull.
-      for (;;) {
-        const buffer = new Uint8Array(64 * 1024);
-        const read = await handle.read(buffer, 0, buffer.length, null).catch((err: unknown) => {
-          if ((err as NodeJS.ErrnoException).code === "EAGAIN") return { bytesRead: 0 };
-          controller.error(err);
-          return null;
-        });
-        if (read === null) return;
-        if (read.bytesRead > 0) {
-          controller.enqueue(buffer.subarray(0, read.bytesRead));
-          return;
-        }
-        // No byte yet. EOF is only real once the pipeline has exited.
-        if (exitCode !== null) {
-          if (exitCode === 0) controller.close();
-          else {
-            controller.error(
-              new Error(
-                `nix store dump-path | zstd exited ${exitCode}` +
-                  (tail.trim() === "" ? "" : `: ${tail.trim().split("\n").at(-1)}`),
-              ),
-            );
-          }
-          await clean();
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 5));
+  child.on("error", () => settle(-1));
+  child.on("close", (code) => settle(code ?? -1));
+  return fifoStream(fifo, {
+    exited: () => exitCode,
+    failure: (code) =>
+      new Error(
+        `nix store dump-path | zstd exited ${code}` +
+          (tail.trim() === "" ? "" : `: ${tail.trim().split("\n").at(-1)}`),
+      ),
+    stop: () => {
+      if (child.pid === undefined) return;
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
       }
     },
-    async cancel() {
-      if (child.pid !== undefined) {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          child.kill("SIGKILL");
-        }
-      }
-      await clean();
-    },
+    clean: () => rm(dir, { recursive: true, force: true }).catch(() => {}),
   });
 }
 
@@ -449,12 +495,22 @@ async function verifyNar(
   let fileEnded = false;
   let code: number | null = decompressor === null ? 0 : null;
   let settled = false;
+  /** WHAT THE DECOMPRESSOR SAID. A bare "zstd exited 1" is the same sentence
+   *  for an empty upload, a truncated one and a corrupt one; the operator
+   *  reading a refused push needs the one zstd actually printed. */
+  let said = "";
 
   const settle = (): void => {
     if (settled || !ended || !fileEnded || code === null) return;
     settled = true;
     if (code !== 0) {
-      resolve({ ok: false, absent: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}` });
+      resolve({
+        ok: false,
+        absent: false,
+        message:
+          `${decompressor?.[0] ?? "the NAR"} exited ${code}` +
+          (said.trim() === "" ? "" : `: ${said.trim().split("\n").at(-1)}`),
+      });
       return;
     }
     // THE DECOMPRESSOR CAN EXIT 0 EARLY (bzip2 warns about trailing garbage),
@@ -495,7 +551,11 @@ async function verifyNar(
       // reads nothing and exits non-zero, which would refuse every upload.
       stdio: ["pipe", "pipe", "pipe"],
     });
-    child.stderr?.resume();
+    // Drained either way — a child whose stderr nobody reads blocks on a full
+    // pipe — but the last 2 KB are kept, because they are the refusal's reason.
+    child.stderr?.on("data", (chunk: Buffer) => {
+      said = `${said}${chunk.toString("utf8")}`.slice(-2000);
+    });
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
