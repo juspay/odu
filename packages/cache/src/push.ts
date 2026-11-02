@@ -158,6 +158,19 @@ export interface PushSummary {
   /** One line per failure, for a caller that wants to say which paths did not
    *  make it. */
   failures: readonly { path: string; message: string }[];
+  /** WHAT THE BUCKET SERVES NOW, by name: everything in the closure it already
+   *  had, plus everything this push stored. A caller that promises "every
+   *  pushed path answers" checks THIS list, not the closure — the closure also
+   *  holds the upstream-signed paths the bucket refuses by design and the paths
+   *  whose upload was refused, so verifying it would go red on the paths the
+   *  bucket is right to lack. */
+  served: readonly string[];
+  /** THE ADDRESS A NIX CLIENT SUBSTITUTES IT FROM — the bucket's own domain
+   *  when it has one, else the mount path. A caller PROVING the push asks this
+   *  address, because it is the one Nix asks: `<substituter>/<hash>.narinfo`.
+   *  Read from the bucket, not assembled here: only the daemon knows whether a
+   *  name stands in front. */
+  substituter: string;
   /** The daemon that answered, for a refusal's follow-up. */
   pageUrl: string;
 }
@@ -241,7 +254,11 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   // An empty closure has nothing to ask; the summary below is the one shape.
   const answer =
     closure.size === 0
-      ? { missing: [] as readonly string[], skippedUpstream: [] as readonly string[] }
+      ? {
+          missing: [] as readonly string[],
+          skippedUpstream: [] as readonly string[],
+          substituter: null,
+        }
       : await askMissing(resolved, headers, closure);
   const present = closure.size - answer.missing.length;
   const alreadyPresent = present - answer.skippedUpstream.length;
@@ -292,6 +309,15 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   }
 
   const board = resolved.origin;
+  // SERVED, derived from the three verdicts rather than from a fourth query:
+  // a closure member is served when the bucket either already had it or took
+  // it now, and it is not served when an upstream key signed it or the upload
+  // was refused.
+  const refused = new Set(failures.map((failure) => failure.path));
+  const upstream = new Set(answer.skippedUpstream);
+  const served = [...closure.keys()].filter(
+    (storePath) => !refused.has(storePath) && !upstream.has(storePath),
+  );
   return {
     pushed,
     skippedUpstream: answer.skippedUpstream.length,
@@ -299,6 +325,12 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     alreadyPresent,
     failed: failures.length,
     failures,
+    served,
+    // THE BUCKET'S OWN ANSWER when it gave one — a daemon that predates the
+    // field gets the path form this client addressed it at, which is the same
+    // URL for a bucket with no domain and the honest approximation for one
+    // that has a name nobody here was told.
+    substituter: answer.substituter ?? base,
     pageUrl: `${board.replace(/\/$/, "")}/#/cache/${encodeURIComponent(resolved.name)}`,
   };
 }
@@ -335,6 +367,10 @@ function orderByDepth(closure: Map<string, ClosureEntry>, missing: Set<string>):
 interface MissingAnswer {
   missing: string[];
   skippedUpstream: string[];
+  /** The address the bucket says Nix substitutes it from. `null` from a daemon
+   *  that predates the field, so a caller falls back to the mount path it
+   *  built its request from. */
+  substituter: string | null;
 }
 
 async function askMissing(
@@ -373,9 +409,12 @@ async function askMissing(
   const skipped = "skippedUpstream" in body && Array.isArray(body.skippedUpstream)
     ? body.skippedUpstream
     : [];
+  const substituter =
+    "substituter" in body && typeof body.substituter === "string" ? body.substituter : null;
   return {
     missing: missing.filter((path): path is string => typeof path === "string"),
     skippedUpstream: skipped.filter((path): path is string => typeof path === "string"),
+    substituter,
   };
 }
 
