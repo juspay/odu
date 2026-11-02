@@ -9,12 +9,22 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, constants, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { open } from "node:fs/promises";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { fifoStream, narHashModuloHasher, nixDump, parsePathInfoTable, verifyNarFile } from "./store";
+import { fifoStream } from "./fifo";
+import { narHashModuloHasher, nixDump, parsePathInfoTable, verifyNarFile } from "./store";
 import { contentAddressOf } from "./storePath";
 
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
@@ -125,43 +135,50 @@ describe("a NAR stream", () => {
   /**
    * THE DEFECT, FORCED. A non-blocking FIFO read answers `EAGAIN` — "a writer
    * holds me and has nothing this instant" — and the loop used to report that
-   * as a zero-byte read, which ends the stream as soon as the pipeline's exit
-   * is known. Both are true at once for any NAR small enough that zstd's only
+   * as a zero-byte read, which ends the stream as soon as the writer has
+   * ended. Both are true at once for any NAR small enough that zstd's only
    * write and the pipeline's exit land in the same breath.
    */
-  it("keeps reading when a writer has nothing YET and the exit is already known", async () => {
-    scratch = mkdtempSync(join(tmpdir(), "odu-cache-fifo-"));
-    const fifo = join(scratch, "nar.zst");
-    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
-    // O_RDWR never blocks and counts as a writer, so the FIFO has one from the
-    // first poll — which is what makes the read answer EAGAIN rather than 0.
-    const writer = await open(fifo, constants.O_RDWR);
-    const cleaned = Promise.withResolvers<void>();
-    // THE SIGNAL, NOT A SLEEP: the loop asks for the exit code exactly when a
-    // read came back EAGAIN. One such question is the whole defect — the old
-    // loop ended the stream right there.
-    const polled = Promise.withResolvers<void>();
-    const reader = fifoStream(fifo, {
-      exited: () => {
-        polled.resolve();
-        return 0;
-      },
-      failure: (code) => new Error(`exited ${code}`),
-      stop: () => {},
-      clean: async () => {
-        cleaned.resolve();
-      },
+  it("keeps reading when a writer has nothing YET", async () => {
+    let fifo = "";
+    let fd = -1;
+    let asked = 0;
+    const reader = fifoStream((path) => {
+      fifo = path;
+      // O_RDWR never blocks and counts as a writer, so the FIFO has one from
+      // the first poll — which is what makes a read with nothing in it answer
+      // EAGAIN rather than 0.
+      fd = openSync(path, constants.O_RDWR);
+      return {
+        ended: () => {
+          asked += 1;
+          return { ok: true };
+        },
+        stop: () => {},
+      };
     }).getReader();
     try {
-      await polled.promise;
-      await writer.write("a NAR that arrived late");
-      const first = await reader.read();
-      expect(new TextDecoder().decode(first.value)).toBe("a NAR that arrived late");
-      await writer.close();
+      writeSync(fd, "first");
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
+      // A REAL CLOCK, deliberately: the loop polls the OS every few ms, and
+      // the defect was a race between that syscall and a process exit. No fake
+      // timer drives a FIFO. The old loop ended the stream on the first of
+      // these polls, because it took EAGAIN for end of file.
+      const late = reader.read();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      writeSync(fd, "late");
+      expect(new TextDecoder().decode((await late).value)).toBe("late");
+      // And it never even asked: while a writer holds the FIFO, how that
+      // writer ended is not a question the reader has any business putting.
+      expect(asked).toBe(0);
+      closeSync(fd);
+      fd = -1;
       expect((await reader.read()).done).toBe(true);
-      await cleaned.promise;
+      // The node belongs to the stream, and is gone before the consumer is
+      // told the stream ended.
+      expect(existsSync(fifo)).toBe(false);
     } finally {
-      await writer.close().catch(() => {});
+      if (fd !== -1) closeSync(fd);
     }
   });
 
