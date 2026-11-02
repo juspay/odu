@@ -126,7 +126,7 @@ import { servingOptions } from "./serving";
 import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
 import { cacheRow } from "@odu/cache/server";
 import { CACHE_AGENT, CACHE_CONTRACT_VERSION, CACHE_KEY } from "@odu/cache/surface";
-import { CI_CONTRACT_VERSION, ifMounted, type RowNeeds } from "@odu/service-client/surface";
+import { CI_CONTRACT_VERSION, type RowNeeds } from "@odu/service-client/surface";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import {
   BoundOrigin,
@@ -665,6 +665,12 @@ export async function webCommand(opts: {
   upgrade: boolean;
   json: boolean;
   background: boolean;
+  /** WHAT THE BOARD THIS COMMAND HANDS OUT READS — declared by the root, which
+   *  names the rows; a running daemon a major behind on any of them is refused
+   *  here with the upgrade sentence. The page itself needs no check of its own:
+   *  it is served by the daemon it would check, and a tab that outlives its
+   *  daemon is reloaded by the shell's `retired`. */
+  needs: RowNeeds;
 }): Promise<number> {
   return opts.background ? backgroundWeb(opts) : foregroundWeb(opts);
 }
@@ -774,31 +780,17 @@ async function foregroundWeb(opts: {
  * in `./webLauncher`, because that is the part a test has to be able to drive
  * without a terminal.
  */
-/**
- * WHAT THE BOARD `odu web` HANDS OUT READS — the runs and the cache always, the
- * door and the tunnel when the daemon mounts them. The browser declares the same
- * rows for itself (`packages/web-ui/src/main.tsx`); this is the launcher's copy,
- * so a daemon a major behind on any of them is refused with the upgrade sentence
- * here, at the command a person runs to open it, rather than met as a broken
- * control later.
- */
-const BOARD_NEEDS: RowNeeds = {
-  [CI_KEY]: CI_CONTRACT_VERSION,
-  [CACHE_KEY]: CACHE_CONTRACT_VERSION,
-  [AUTH_KEY]: ifMounted(AUTH_CONTRACT_VERSION),
-  [CLOUDFLARE_KEY]: ifMounted(CLOUDFLARE_CONTRACT_VERSION),
-};
-
 async function backgroundWeb(opts: {
   upgrade: boolean;
   json: boolean;
+  needs: RowNeeds;
 }): Promise<number> {
   const origin = serviceOrigin();
   const outcome = await ensureService({
     origin,
     home: webHome(origin),
     baked: bakedBuild(),
-    needs: BOARD_NEEDS,
+    needs: opts.needs,
     upgrade: opts.upgrade,
     spawn: spawnWebDaemon,
   });

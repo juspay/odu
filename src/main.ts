@@ -83,7 +83,7 @@ import { serviceMcpCommand } from "@odu/cli/serviceMcp";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { surfaceCliMain } from "@odu/cli/serviceCli";
 import { webCommand, webDaemonCommand } from "@odu/host/web";
-import { connectToService } from "@odu/cli/wire";
+import { connectToService, EVERY_ROW_NEEDS } from "@odu/cli/wire";
 import { authCommand } from "@odu/auth/cli";
 import { AUTH_NEEDS } from "@odu/auth/surface";
 import { cloudflareCommand } from "@odu/cloudflare/cli";
@@ -787,6 +787,9 @@ async function dispatch(argv: string[]): Promise<number> {
         upgrade: values.upgrade ?? false,
         background: values.background ?? false,
         json: values.output === "json",
+        // The board reads every row the daemon mounts — the same set the
+        // composed faces declare, from the one place it is spelled.
+        needs: EVERY_ROW_NEEDS,
       });
     }
     // The daemon `odu web --background` spawns. Deliberately absent from USAGE:

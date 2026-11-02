@@ -56,8 +56,10 @@ export const SERVICE_SIBLINGS = {
 export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLINGS);
 
 /**
- * WHAT THE COMPOSED FACES READ — `odu surface` and the `odu mcp` bridge project
- * every row the daemon mounts: the runs always, each sibling when it is there.
+ * WHAT THE COMPOSED FACES READ — `odu surface`, the `odu mcp` bridge and the
+ * board `odu web` hands out each project every row the daemon mounts: the runs
+ * always, each sibling when it is there (the board draws no control for a row
+ * `/_odu/rows` does not list — the cache included).
  *
  * Every other command declares only its own row (`odu run` the runs, `odu cache`
  * the cache — each row's `*_NEEDS`), so a daemon whose cache moved a major is
