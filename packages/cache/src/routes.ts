@@ -179,8 +179,9 @@ function narResponse(
   return Effect.map(
     Effect.promise(() => source.read(range ?? undefined)),
     (body) => {
-      // GONE BETWEEN THE HEAD AND THE READ (a collection won the race): the
-      // honest answer is the one a missing object always gets.
+      // THE ROW'S OBJECT IS GONE (a collection, perhaps, won the race): the
+      // read's own first GET decides it, before any header is sent, and the
+      // answer is the one a missing object always gets.
       if (body === null) return HttpServerResponse.empty({ status: 404 });
       const length = range === null ? source.size : range.end - range.start + 1;
       return streamed(body, "object", {
