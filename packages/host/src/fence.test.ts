@@ -324,9 +324,15 @@ describe("the row's word", () => {
     }
   });
 
-  it("is the key the roster serves it under", () => {
+  it("is the key the row's own record serves it under, and the roster lists that record", () => {
+    // The record is the ROW's: the host names it whole and spells none of its
+    // parts, so the key is asserted where the row declares it.
+    expect(source("packages/ci/src/row.ts")).toMatch(/\{\s*name:\s*CI_KEY,\s*key:\s*null,/);
+    expect(source("packages/cache/src/server.ts")).toMatch(
+      /\{\s*name:\s*CACHE_KEY,\s*key:\s*CACHE_KEY,/,
+    );
     const roster = source("packages/host/src/web.ts");
-    expect(roster).toMatch(/\{\s*name:\s*CI_KEY,\s*key:\s*null,/);
-    expect(roster).toMatch(/\{\s*name:\s*CACHE_KEY,\s*key:\s*CACHE_KEY,/);
+    expect(roster).toMatch(/ROWS: ReadonlyArray<Row> = \[\s*ciRowRecord,\s*cacheRowRecord,/);
+    expect(roster).not.toMatch(/_CONTRACT_VERSION/);
   });
 });

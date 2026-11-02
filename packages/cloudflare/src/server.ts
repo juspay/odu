@@ -33,6 +33,8 @@
  * would be an orphan holding the tunnel token, and a restart would run two.
  */
 
+import type { Row } from "@odu/cordis/services";
+import { CLOUDFLARE_AGENT, CLOUDFLARE_CONTRACT_VERSION } from "./surface";
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { Effect } from "effect";
@@ -796,3 +798,17 @@ function hostOnly(origin: string): string {
 
 /** Re-exported for the host: the row's ONE environment read. */
 export { readCloudflareConfig };
+
+/**
+ * THIS ROW, AS THE HOST LISTS IT — the tunnel, when the host read a token file. One value the row owns: its word on
+ * the wire, its plugin, what an agent is told and its own contract version,
+ * read off its own modules. The host composes these records and names none of
+ * their parts.
+ */
+export const cloudflareRowRecord = (config: CloudflareRowConfig): Row => ({
+  name: CLOUDFLARE_KEY,
+  key: CLOUDFLARE_KEY,
+  plugin: cloudflareRow(config),
+  agent: CLOUDFLARE_AGENT,
+  contract: CLOUDFLARE_CONTRACT_VERSION,
+});

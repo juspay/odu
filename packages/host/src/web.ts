@@ -94,19 +94,9 @@ import {
   NOBODY_ADMISSION,
   PrincipalBroker,
 } from "@odu/cordis/principal";
-import { authRow, readGithubConfig, signInPageHtml } from "@odu/auth/server";
-import { cloudflareRow, readCloudflareConfig } from "@odu/cloudflare/server";
-import {
-  CLOUDFLARE_AGENT,
-  CLOUDFLARE_CONTRACT_VERSION,
-  CLOUDFLARE_KEY,
-} from "@odu/cloudflare/surface";
-import {
-  AUTH_AGENT,
-  AUTH_ANONYMOUS_TAGS,
-  AUTH_CONTRACT_VERSION,
-  AUTH_KEY,
-} from "@odu/auth/surface";
+import { authRowRecord, readGithubConfig, signInPageHtml } from "@odu/auth/server";
+import { cloudflareRowRecord, readCloudflareConfig } from "@odu/cloudflare/server";
+import { AUTH_ANONYMOUS_TAGS } from "@odu/auth/surface";
 import {
   admissionDispatch,
   admissionStore,
@@ -123,10 +113,10 @@ import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
 import { bucketDomainGate } from "./bucketDomain";
 import { reservedPaths } from "./reserved";
 import { servingOptions } from "./serving";
-import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
-import { cacheRow } from "@odu/cache/server";
-import { CACHE_AGENT, CACHE_CONTRACT_VERSION, CACHE_KEY } from "@odu/cache/surface";
-import { CI_CONTRACT_VERSION, type RowNeeds } from "@odu/service-client/surface";
+import { ciRowRecord } from "@odu/ci/row";
+import { cacheRowRecord } from "@odu/cache/server";
+import { CACHE_KEY } from "@odu/cache/surface";
+import type { RowNeeds } from "@odu/service-client/surface";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import {
   BoundOrigin,
@@ -312,56 +302,31 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   //
   // EVERY ROW, NAMED ONCE, HERE — and this file is a root, which is what makes
   // that legal: a root names every row, a row names only itself, and the host
-  // is the one package that composes them. A row record carries the word its
-  // surface is served under, the plugin it mounts, and what an agent is told
-  // about it. The runs' row is a plugin like any other — `ciRow` builds the
-  // rooted bundle in its own `apply` and OFFERS it, which is why `key` is null
-  // (its members keep the bare `surface/runs/...` tags) while `plugin` is not.
-  // `contract` is the row's OWN version, read off its own surface module; the
-  // host gathers them onto the identity cell and reads none of them.
+  // is the one package that composes them. Each row hands over ONE record it
+  // owns — its word on the wire, its plugin, what an agent is told and its own
+  // contract version — and the host lists them, naming none of their parts.
+  // A row that needs config is a row-owned factory taking the config the host
+  // read. The runs' record has `key: null`: its plugin builds the rooted bundle
+  // and OFFERS it, so its members keep the bare `surface/runs/...` tags.
   const ROWS: ReadonlyArray<Row> = [
-    { name: CI_KEY, key: null, plugin: ciRow, agent: CI_AGENT, contract: CI_CONTRACT_VERSION },
-    {
-      name: CACHE_KEY,
-      key: CACHE_KEY,
-      plugin: cacheRow,
-      agent: CACHE_AGENT,
-      contract: CACHE_CONTRACT_VERSION,
-    },
+    ciRowRecord,
+    cacheRowRecord,
     // THE DOOR, when this daemon has one. A GitHub App configured means the row
     // is mounted, and with none configured nothing asks who is calling — which
     // is loopback mode, unchanged.
-    ...(github.kind === "config"
-      ? [
-          {
-            name: AUTH_KEY,
-            key: AUTH_KEY,
-            plugin: authRow(github.config),
-            agent: AUTH_AGENT,
-            contract: AUTH_CONTRACT_VERSION,
-          },
-        ]
-      : []),
+    ...(github.kind === "config" ? [authRowRecord(github.config)] : []),
     // THE TUNNEL, when a token file is configured. It reacts to the cache row's
     // published domains; the roster order is the mount order, so the cache (and
     // its `BucketDomains` offer) is standing before this row asks for it.
     ...(cloudflare.kind === "config"
       ? [
-          {
-            name: CLOUDFLARE_KEY,
-            key: CLOUDFLARE_KEY,
-            plugin: cloudflareRow({
-              token: cloudflare.config.token,
-              ...(cloudflare.config.apiBase === null
-                ? {}
-                : { apiBase: cloudflare.config.apiBase }),
-              ...(cloudflare.config.probeBase === null
-                ? {}
-                : { probeBase: cloudflare.config.probeBase }),
-            }),
-            agent: CLOUDFLARE_AGENT,
-            contract: CLOUDFLARE_CONTRACT_VERSION,
-          },
+          cloudflareRowRecord({
+            token: cloudflare.config.token,
+            ...(cloudflare.config.apiBase === null ? {} : { apiBase: cloudflare.config.apiBase }),
+            ...(cloudflare.config.probeBase === null
+              ? {}
+              : { probeBase: cloudflare.config.probeBase }),
+          }),
         ]
       : []),
   ];

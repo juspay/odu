@@ -39,6 +39,8 @@
  * bundle to mount on, and the router mount for the protocol routes.
  */
 
+import type { Row } from "@odu/cordis/services";
+import { CACHE_AGENT, CACHE_CONTRACT_VERSION } from "./surface";
 import { Effect, Fiber } from "effect";
 import { definePlugin, offer } from "@olai/effect-cordis";
 import type { ImplementSurfaceDeps } from "@kolu/surface/server";
@@ -550,3 +552,17 @@ export const cacheRow = definePlugin({
 /** The routes this row registers, with their claim — for the host's gate test,
  *  which records what the layer registers and checks the claim covers it. */
 export { cacheRoutes } from "./routes";
+
+/**
+ * THIS ROW, AS THE HOST LISTS IT — the cache, a sibling under its own key. One value the row owns: its word on
+ * the wire, its plugin, what an agent is told and its own contract version,
+ * read off its own modules. The host composes these records and names none of
+ * their parts.
+ */
+export const cacheRowRecord: Row = {
+  name: CACHE_KEY,
+  key: CACHE_KEY,
+  plugin: cacheRow,
+  agent: CACHE_AGENT,
+  contract: CACHE_CONTRACT_VERSION,
+};

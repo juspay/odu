@@ -29,7 +29,7 @@ import { Effect } from "effect";
 import { definePlugin, offer } from "@olai/effect-cordis";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import { createOduService, type OduService } from "@odu/service/service";
-import { CI_ROW, oduServiceSurface } from "@odu/service-client/surface";
+import { CI_CONTRACT_VERSION, CI_ROW, oduServiceSurface } from "@odu/service-client/surface";
 import {
   ODU_SERVICE_EXPOSE,
   ODU_SERVICE_MCP_INSTRUCTIONS,
@@ -40,6 +40,7 @@ import {
   Bundle,
   DaemonHome,
   Log,
+  type Row,
   type RowAgent,
   RowContracts,
   Shutdown,
@@ -102,3 +103,17 @@ export const ciRow = definePlugin({
     yield* Effect.addFinalizer(() => Effect.promise(() => service.close()));
   }),
 });
+
+/**
+ * THIS ROW, AS THE HOST LISTS IT — the runs, the wire's ROOT, so `key` is null. One value the row owns: its word on
+ * the wire, its plugin, what an agent is told and its own contract version,
+ * read off its own modules. The host composes these records and names none of
+ * their parts.
+ */
+export const ciRowRecord: Row = {
+  name: CI_KEY,
+  key: null,
+  plugin: ciRow,
+  agent: CI_AGENT,
+  contract: CI_CONTRACT_VERSION,
+};
