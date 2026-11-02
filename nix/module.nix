@@ -128,9 +128,6 @@ let
   # assertion above refuses a partial one.
   serverMode = cfg.github.clientId != null;
 
-  # A WEBSOCKET IS NOT A REQUEST. nginx needs the upgrade pair on the location
-  # that carries `/rpc/ws`, and `recommendedProxySettings` is what defines
-  # `$connection_upgrade` — so this only works with it on, which the vhost sets.
   # THE DECLARED STORES, as the daemon reads them: one JSON file in the store,
   # naming each store and the RUNTIME path of its credentials. The credentials
   # themselves never enter the Nix store — systemd copies each file into the
@@ -145,6 +142,9 @@ let
       cfg.cache.stores
   ));
 
+  # A WEBSOCKET IS NOT A REQUEST. nginx needs the upgrade pair on the location
+  # that carries `/rpc/ws`, and `recommendedProxySettings` is what defines
+  # `$connection_upgrade` — so this only works with it on, which the vhost sets.
   websocketRules = proxyRules + ''
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;
@@ -415,15 +415,19 @@ in
               versitygw's and MinIO's default).
             '';
           };
+          # A STRING, NOT `types.path`: a literal path (`./r2.env`) would be
+          # copied into the world-readable Nix store, so only an absolute path
+          # on the host — an agenix or sops secret — is accepted.
           credentialsFile = mkOption {
-            type = types.path;
+            type = types.strMatching "/.*";
             example = "/run/secrets/odu-r2";
             description = ''
               A file of `AWS_ACCESS_KEY_ID=…` and `AWS_SECRET_ACCESS_KEY=…`
-              lines (and optionally `AWS_SESSION_TOKEN=…`). Loaded as a systemd
-              credential, never copied into the Nix store, never written to the
-              database and never logged. The key needs object read, write,
-              delete and list on the bucket.
+              lines (and optionally `AWS_SESSION_TOKEN=…`), named by an absolute
+              path string on the host. Loaded as a systemd credential, never
+              copied into the Nix store, never written to the database and
+              never logged. The key needs object read, write, delete and list
+              on the bucket.
             '';
           };
         };
@@ -600,7 +604,7 @@ in
           ] ++ optionals (cfg.cloudflare.apiTokenFile != null) [
             "cloudflare-api-token:${toString cfg.cloudflare.apiTokenFile}"
           ] ++ lib.mapAttrsToList
-            (name: store: "store-${name}:${toString store.credentialsFile}")
+            (name: store: "store-${name}:${store.credentialsFile}")
             cfg.cache.stores;
         };
     };
