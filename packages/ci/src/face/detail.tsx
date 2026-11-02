@@ -43,11 +43,31 @@ import { ansiSpans } from "./ansi";
 import {
   type LaneSpan,
   laneSpan,
+  runElapsedMs,
   timelineTicks,
 } from "@odu/service-client/board";
-import { Button, CommitRef, Confirm, Hint, Pill, Receipt } from "./dom";
+import {
+  BackLink,
+  Button,
+  Confirm,
+  Hint,
+  LaneStrip,
+  PageHead,
+  Pill,
+  Receipt,
+} from "@odu/face/ui";
 import { bytes } from "@odu/cordis/format";
-import { duration, NODE_STATUS, OUTCOME, projectOf, scopeLabel } from "./format";
+import { CommitRef } from "./commit";
+import {
+  duration,
+  laneCells,
+  lanesOf,
+  NODE_STATUS,
+  NODE_WORD,
+  OUTCOME,
+  projectOf,
+  scopeLabel,
+} from "./format";
 import type {
   LogPage,
   LogTail,
@@ -92,27 +112,26 @@ export interface DetailControls {
   dismiss: () => void;
 }
 
-/** The platform half of `<namepath>@<platform>`. Read from the id rather than
- *  carried beside it — the id is the address and every face in this tree
- *  already reads it that way. */
-function platformOf(nodeId: string): string {
-  const at = nodeId.lastIndexOf("@");
-  return at < 0 ? "" : nodeId.slice(at + 1);
-}
-
 /** The statuses a lane counts, in the vocabulary's own order — so two lanes read
  *  left to right the same way whatever each of them happens to hold. */
 const STATUS_ORDER = Object.keys(NODE_STATUS) as NodeStatus[];
 
 /**
- * A LANE'S HEADER — one platform's worth of the DAG, named.
+ * A LANE'S HEADER — one platform's worth of the DAG, named, counted and
+ * DRAWN.
  *
  * A run's nodes arrive as one flat list whose only clue about which machine a
  * row belongs to is the `@platform` suffix at the end of an id that is already
- * too long to scan. Grouping them puts the three facts a person wants about a
- * lane — which platform, which machine, how far along — in one row above the
- * work, and puts the button that drops the lane ON the lane rather than in a bar
- * of near-identical buttons at the top of the page.
+ * too long to scan. Grouping them puts the four facts a person wants about a
+ * lane — which platform, which machine, how far along, and the shape of that
+ * progress — in one row above the work, and puts the button that drops the
+ * lane ON the lane rather than in a bar of near-identical buttons at the top
+ * of the page.
+ *
+ * The strip is the SAME component the board draws in its pipeline column, fed
+ * from the same reading: the eleven pixels a person recognised on the board
+ * are the eleven pixels they find here, in the same order, when they open the
+ * run to see which of them went red.
  */
 function LaneHead(props: {
   platform: string;
@@ -166,7 +185,7 @@ function LaneHead(props: {
       <span class="lane-counts">
         <For each={counts()}>
           {(entry) => (
-            <span title={`${entry.count} ${entry.status}`}>
+            <span title={`${entry.count} ${NODE_WORD[entry.status]}`}>
               <span class={`glyph hue-${NODE_STATUS[entry.status].hue}`}>
                 {NODE_STATUS[entry.status].glyph}
               </span>
@@ -175,6 +194,10 @@ function LaneHead(props: {
           )}
         </For>
       </span>
+      {/* THE LANE, AS CELLS — no label, because the platform is already the
+          first thing on this line and a strip that repeated it would be the
+          one piece of furniture in a row of facts. */}
+      <LaneStrip cells={laneCells(props.nodes)} />
       {/* A lane with no platform has no lane to cancel: `run.cancel` addresses a
           lane BY platform, so the button here would name nothing. */}
       <Show when={props.canRun && props.platform !== ""}>
@@ -679,10 +702,10 @@ export function Detail(props: {
    *  change to it was a three-file edit through a component with no opinion
    *  about logs. It is built in `app.tsx`, where the wire already is.
    *
-   *  Safe against the `<Show>`-disposal hazard `./dom`'s header documents: this
-   *  sits in `.detail-body` with no `<Show>` or `<Match>` above it inside
-   *  `Detail`, and the whole `Detail` element is re-minted on route re-entry
-   *  because a `<Match>`'s children compile to a getter. */
+   *  Safe against the `<Show>`-disposal hazard `@odu/face`'s `ui.tsx` header
+   *  documents: this sits in `.detail-body` with no `<Show>` or `<Match>`
+   *  above it inside `Detail`, and the whole `Detail` element is re-minted on
+   *  route re-entry because a `<Match>`'s children compile to a getter. */
   log: JSX.Element;
   control: ControlState;
   controls: DetailControls;
@@ -690,88 +713,119 @@ export function Detail(props: {
 }): JSX.Element {
   const busy = createMemo(() => props.control.kind === "pending");
   const nodes = createMemo<RunNode[]>(() => [...(props.frame?.nodes ?? [])]);
-  /** The nodes, grouped by the kind of machine that runs them, in the order the
-   *  frame first mentions each platform — the coordinator's own order, which is
-   *  stable between ticks, unlike a sort that would re-order the lanes as nodes
-   *  appear under them. */
-  const laneMap = createMemo(() => {
-    const byPlatform = new Map<string, RunNode[]>();
-    for (const node of nodes()) {
-      const platform = platformOf(node.id);
-      const lane = byPlatform.get(platform);
-      if (lane === undefined) byPlatform.set(platform, [node]);
-      else lane.push(node);
-    }
-    return byPlatform;
-  });
+  /** The nodes, grouped by the kind of machine that runs them, in the order
+   *  the frame first mentions each platform — the coordinator's own order,
+   *  which is stable between ticks, unlike a sort that would re-order the
+   *  lanes as nodes appear under them. The grouping itself is `./format`'s,
+   *  because the board's pipeline column performs the same one and two
+   *  spellings of "which lane is this node in" is how a board and a run come
+   *  to draw a different number of lanes for one piece of work. */
+  const laneMap = createMemo(
+    () => new Map(lanesOf(nodes()).map((lane) => [lane.platform, lane.nodes])),
+  );
   const lanes = createMemo(() => [...laneMap().keys()]);
-  const laneNodes = (platform: string): RunNode[] =>
+  const laneNodes = (platform: string): readonly RunNode[] =>
     laneMap().get(platform) ?? [];
   /** The whole-run cancel, held behind a question — see the `Confirm` below. */
   const [confirmingCancel, setConfirmingCancel] = createSignal(false);
   return (
     <section class="detail">
+      {/* THE WAY BACK. The rail beside this page lists the ROWS — Runs,
+          Cache, Machines — and one run is not a row: it is a page inside the
+          runs, so it keeps its own way out. "All runs" rather than "Runs"
+          because the rail already offers a control by that name, and two
+          buttons sharing one accessible name are ambiguous to a person and
+          unaddressable to anything that finds a control by what it says. */}
+      <BackLink onClick={props.onBack}>All runs</BackLink>
       {/* THE HEADER, in the order somebody reads it: what project, on what
-          branch, at what commit, and how it went. The h1 used to be the commit
-          ref on its own — the one thing here nobody recognises at a glance —
-          while the project this run is even about appeared nowhere. */}
-      <header class="detail-head">
-        <Button onClick={props.onBack}>← Runs</Button>
-        <h1>
-          {props.run === undefined ? "run" : projectOf(props.run.repoRoot)}
-          <Show when={props.run?.branch}>
-            {(branch) => <span class="branch">{branch()}</span>}
+          branch, how it went — and under that, in mono, the four strings a
+          person compares or pastes. The h1 used to be the commit ref on its
+          own — the one thing here nobody recognises at a glance — while the
+          project this run is even about appeared nowhere.
+
+          It is a `PageHead` like every other screen's, carrying `detail-head`
+          as well: that is the class the outcome pill is addressed through,
+          and a run's header being "the page head, plus a verdict" is exactly
+          what it is. */}
+      <PageHead
+        class="detail-head"
+        title={
+          <>
+            {props.run === undefined ? "run" : projectOf(props.run.repoRoot)}
+            <Show when={props.run?.branch}>
+              {(branch) => <span class="branch">{`/ ${branch()}`}</span>}
+            </Show>{" "}
+            {/* THE VERDICT, beside the name and not off at the far edge of
+                the page: "did it pass" is read in the same glance as "what is
+                it", and an outcome parked with the controls reads as another
+                control. Absent until there IS one — a run that has not
+                finished has no verdict, and a grey "no outcome yet" pill
+                would be a verdict about that. */}
+            <Show when={props.run?.outcome}>
+              {(outcome) => (
+                <Pill hue={OUTCOME[outcome()].hue}>{OUTCOME[outcome()].label}</Pill>
+              )}
+            </Show>
+          </>
+        }
+        sub={
+          <>
+            {/* The ref, in mono, because it is the string a person PASTES.
+                Empty until the row lands rather than filled with a
+                placeholder: an invented ref is worse than no ref. */}
+            <span class="detail-ref">
+              <Show when={props.run}>
+                {(run) => (
+                  <CommitRef sha={run().sha} seq={run().seq} dirty={run().dirty} />
+                )}
+              </Show>
+            </span>
+            <span class="detail-scope">
+              {props.run === undefined ? "" : scopeLabel(props.run.scope)}
+            </span>
+            {/* HOW LONG IT TOOK, from the one elapsed rule the board's own
+                `Took` column uses, so the two cannot disagree by a tick. */}
+            <span class="detail-sub">
+              {props.run === undefined
+                ? ""
+                : duration(runElapsedMs(props.run, props.now))}
+            </span>
+            <Show when={props.run?.parentRunId}>
+              {(parent) => (
+                <span class="detail-parent">{`replay of ${parent()}`}</span>
+              )}
+            </Show>
+            <span class="detail-sub">{props.run?.repoRoot ?? ""}</span>
+          </>
+        }
+        actions={
+          /* The run-wide controls, and only those. `Run again` is a NEW run at
+             the same commit and the same selection; `Cancel run` is this
+             one's teardown. The per-lane cancels used to sit here too — a row
+             of near-identical buttons whose only difference was a platform
+             triple, detached from the nodes they were about. Each rides its
+             own lane now, and a node's retry rides its node. */
+          <Show when={props.canRun}>
+            <div class="detail-controls">
+              <Button
+                title="start a NEW run of this selection, at this commit"
+                disabled={busy()}
+                onClick={props.controls.runAgain}
+              >
+                Run again
+              </Button>
+              <Button
+                class="btn-danger"
+                title="stop the whole run"
+                disabled={busy()}
+                onClick={() => setConfirmingCancel(true)}
+              >
+                Cancel run
+              </Button>
+            </div>
           </Show>
-        </h1>
-        {/* The ref stays, in mono, because it is the string a person PASTES.
-            Empty until the row lands rather than filled with a placeholder: an
-            invented ref is worse than no ref. */}
-        <span class="detail-ref">
-          <Show when={props.run}>
-            {(run) => (
-              <CommitRef sha={run().sha} seq={run().seq} dirty={run().dirty} />
-            )}
-          </Show>
-        </span>
-        <Show when={props.run?.outcome}>
-          {(outcome) => (
-            <Pill hue={OUTCOME[outcome()].hue}>{OUTCOME[outcome()].label}</Pill>
-          )}
-        </Show>
-        <Show when={props.run?.parentRunId}>
-          {(parent) => (
-            <span class="detail-parent">{`replay of ${parent()}`}</span>
-          )}
-        </Show>
-        <span class="detail-scope">
-          {props.run === undefined ? "" : scopeLabel(props.run.scope)}
-        </span>
-        <span class="detail-sub">{props.run?.repoRoot ?? ""}</span>
-      </header>
-      {/* The run-wide controls, and only those. `Run again` is a NEW run at the
-          same commit and the same selection; `Cancel run` is this one's
-          teardown. The per-lane cancels used to sit here too — a row of
-          near-identical buttons whose only difference was a platform triple,
-          detached from the nodes they were about. Each rides its own lane now. */}
-      <Show when={props.canRun}>
-        <div class="detail-controls">
-          <Button
-            title="start a NEW run of this selection, at this commit"
-            disabled={busy()}
-            onClick={props.controls.runAgain}
-          >
-            Run again
-          </Button>
-          <Button
-            class="btn-danger"
-            title="stop the whole run"
-            disabled={busy()}
-            onClick={() => setConfirmingCancel(true)}
-          >
-            Cancel run
-          </Button>
-        </div>
-      </Show>
+        }
+      />
       {/* ARE YOU SURE — for this one control and no other. Cancelling the whole
           run throws away every lane's work at once, cannot be undone, and sits
           one button away from "Run again"; a lane's cancel and a node's are
