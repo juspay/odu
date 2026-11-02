@@ -252,7 +252,7 @@ describe("LogView — search", () => {
  * ONE PALETTE, TWO FACES.
  *
  * The browser's log pane is a `<pre>` with `--ansi-0..15` tokens rather than an
- * emulator (see `packages/web-ui/src/ansi.ts` for why), so the sixteen colours
+ * emulator (see `packages/ci/src/face/ansi.ts` for why), so the sixteen colours
  * above exist a second time, in CSS, in a package that cannot import this one.
  * That agreement was a comment at each end — and this file is the only place
  * that can hold it, because the CLI is node-side and may read the stylesheet
@@ -263,7 +263,7 @@ describe("LogView — search", () => {
  */
 describe("the browser draws this view's sixteen colours", () => {
   const css = readFileSync(
-    join(import.meta.dirname, "..", "..", "web-ui", "src", "styles.css"),
+    join(import.meta.dirname, "..", "..", "face", "src", "theme.css"),
     "utf-8",
   );
 

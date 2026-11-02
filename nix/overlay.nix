@@ -86,4 +86,37 @@ in
   # — to re-prove something upstream already proved at this exact revision.
   osfacts = ((import (import ../npins).osfacts { pkgs = final; }).overrideAttrs
     (_: { doCheck = false; }));
+
+  # THE BOARD'S TWO TYPEFACES, in the format the web has.
+  #
+  # nixpkgs' `geist-font` ships TrueType only, and `@kolu/surface-app`'s asset
+  # pipeline precompresses TEXT siblings (`br`/`zstd`/`gzip`) — a `.ttf` goes
+  # over the wire raw, which is 320 KB of font on a cold load. A woff2 IS a
+  # brotli-compressed TrueType, so converting here gets the same bytes the
+  # pipeline would have got if it compressed binaries, at a third of the size
+  # and with no change to the server half.
+  #
+  # The VARIABLE cuts, one file per family: `wght` spans every weight the
+  # board draws (400, 500, 600, 700), so two files replace eight.
+  #
+  # A derivation rather than a step in the bundle's build, because it is the
+  # same artefact for the dev shell and for `.#web-ui` — `nix/env.nix` hands
+  # both this path as `$ODU_GEIST_FONTS`, and a conversion run twice is two
+  # chances to convert differently.
+  odu-geist-fonts = final.runCommand "odu-geist-fonts"
+    {
+      nativeBuildInputs = [ final.woff2 ];
+      meta.description = "Geist and Geist Mono, variable, as woff2";
+    }
+    ''
+      mkdir -p "$out"
+      # Quoted: the names really do contain brackets, and an unquoted path
+      # would be read as a glob and silently match nothing.
+      cp "${final.geist-font}/share/fonts/truetype/Geist[wght].ttf" "$out/Geist.ttf"
+      cp "${final.geist-font}/share/fonts/truetype/GeistMono[wght].ttf" "$out/GeistMono.ttf"
+      woff2_compress "$out/Geist.ttf"
+      woff2_compress "$out/GeistMono.ttf"
+      rm "$out/Geist.ttf" "$out/GeistMono.ttf"
+      test -s "$out/Geist.woff2" && test -s "$out/GeistMono.woff2"
+    '';
 }

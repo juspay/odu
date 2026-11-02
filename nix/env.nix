@@ -24,4 +24,11 @@
   ODU_OLAI_EFFECT_CORDIS = pkgs.olai-effect-cordis;
   ODU_CORDIS_HYDRATE = pkgs.cordis.hydrateArgs;
   ODU_CORDIS_REVISION = pkgs.cordis.revision;
+  # THE BOARD'S TWO TYPEFACES. `scripts/build-web-ui.ts` reads the variable
+  # Geist and Geist Mono out of this directory and ships them content-hashed
+  # beside the bundle, so a tailnet-only or air-gapped deployment renders the
+  # same page as a public one — a font fetched from a CDN would not. The
+  # derivation (`nix/overlay.nix`) is nixpkgs' `geist-font` converted to
+  # woff2, because the asset pipeline precompresses text and not binaries.
+  ODU_GEIST_FONTS = pkgs.odu-geist-fonts;
 }
