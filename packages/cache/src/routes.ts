@@ -369,9 +369,9 @@ const bad = (message: string): HttpServerResponse.HttpServerResponse =>
 
 /**
  * THE UPLOAD SESSION a chunked upload's parts and join carry (`x-odu-upload`,
- * contract 2.4): the parts are that upload's own, so two clients sending one
- * NAR cannot have theirs joined together. Absent is a 2.x client, and keeps
- * the shared part names; malformed (`undefined`) is refused.
+ * since the cache row's 2.4): the parts are that upload's own, so two clients
+ * sending one NAR cannot have theirs joined together. Absent is an older
+ * pusher, and keeps the shared part names; malformed (`undefined`) is refused.
  */
 function uploadSession(request: HttpServerRequest.HttpServerRequest): string | null | undefined {
   const value = request.headers[UPLOAD_SESSION_HEADER];
@@ -624,20 +624,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     // registration (a second one is a duplicate-route error), and the handler
     // answers both requests.
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket`, consumerFacts),
-
-    /**
-     * DEPRECATED, ALWAYS EMPTY. The cache no longer holds an upload for a
-     * reference; a 2.x `--wait`/client reads the list it always did and sees
-     * nothing waiting. REMOVED AT THE CACHE ROW'S NEXT MAJOR.
-     */
-    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/held`, (request) =>
-      Effect.gen(function* () {
-        const bucket = yield* param("bucket");
-        const admitted = admit(cache, request, bucket, "read");
-        if (!admitted.ok) return admitted.response;
-        return HttpServerResponse.jsonUnsafe({ held: [] });
-      }),
-    ),
 
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {

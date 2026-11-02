@@ -73,10 +73,9 @@ interface Server {
   failNar: Map<string, number>;
   /** Status to answer a nar upload with, before the failure count applies. */
   narStatus: Map<string, number>;
-  /** Store paths whose narinfo answers 202 the first time it is asked. */
-  deferOnce: Set<string>;
-  /** Store paths whose narinfo answers 202 every time — a hold nobody fixes. */
-  alwaysDefer: Set<string>;
+  /** Store paths whose narinfo answers 202 — a success code that is not
+   *  "stored", so a refusal to this pusher. */
+  answer202: Set<string>;
   /** Parts received, keyed `${file}:${index}`. */
   parts: Map<string, string>;
   /** How many times a part answers 500 before succeeding, keyed the same. */
@@ -92,9 +91,6 @@ interface Server {
   /** Answer a narinfo PUT that carries no preceding NAR with a 400 saying the
    *  bytes are gone — what a restarted server says. */
   narinfoOnlyRefusal: boolean;
-  /** `--wait` reads THIS endpoint; `null` keeps every hold forever. */
-  heldLandAfter: number | null;
-  heldPolls: number;
   missing: string[];
   skipped: string[];
   stop: () => void;
@@ -107,8 +103,7 @@ function startServer(): Server {
     seen: [],
     failNar: new Map(),
     narStatus: new Map(),
-    deferOnce: new Set(),
-    alwaysDefer: new Set(),
+    answer202: new Set(),
     parts: new Map(),
     partFailures: new Map(),
     completed: [],
@@ -116,8 +111,6 @@ function startServer(): Server {
     missingCalls: 0,
     missingOnlyFor: undefined,
     narinfoOnlyRefusal: false,
-    heldLandAfter: null,
-    heldPolls: 0,
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
     stop: () => {},
@@ -139,23 +132,6 @@ function startServer(): Server {
         // THE BUCKET'S CONSUMER FACTS: the push asks where THIS INSTANCE is,
         // rather than guessing from its own environment.
         return Response.json({ board: state.board });
-      }
-      if (request.method === "GET" && url.pathname === "/cache/main/held") {
-        state.heldPolls += 1;
-        const keep = state.heldLandAfter === null || state.heldPolls <= state.heldLandAfter;
-        return Response.json({
-          held: keep
-            ? [
-                {
-                  storePath: LIBC,
-                  reason: `fetching 1 upstream reference`,
-                  missing: [LIBC],
-                  fetching: 1,
-                  fetched: [],
-                },
-              ]
-            : [],
-        });
       }
       if (url.pathname.endsWith("/missing")) {
         state.missingCalls += 1;
@@ -204,7 +180,7 @@ function startServer(): Server {
       }
       if (request.method === "PUT" && url.pathname.endsWith(".narinfo")) {
         const hash = url.pathname.slice(url.pathname.lastIndexOf("/") + 1, -".narinfo".length);
-        if (state.alwaysDefer.has(hash) || state.deferOnce.delete(hash)) {
+        if (state.answer202.has(hash)) {
           return new Response(
             `waiting for 1 reference that is neither here nor upstream: ${GLIBC}`,
             { status: 202 },
@@ -502,11 +478,11 @@ describe("pushing a closure", () => {
     }
   });
 
-  it("reports a 202 from an older daemon as held, not stored", async () => {
+  it("refuses a success code it does not know, once, rather than counting it stored", async () => {
     const server = startServer();
     try {
       server.missing = [LIBC];
-      server.alwaysDefer.add(storePathHash(LIBC));
+      server.answer202.add(storePathHash(LIBC));
       const lines: string[] = [];
       const summary = await pushToCache({
         bucket: `${server.origin}/main`,
@@ -517,10 +493,15 @@ describe("pushing a closure", () => {
       });
       expect(summary).toMatchObject({
         pushed: 0,
-        held: [{ path: LIBC, reason: expect.stringContaining("neither here nor upstream") }],
-        failed: 0,
+        failed: 1,
+        failures: [{ path: LIBC, message: expect.stringContaining("answered 202") }],
       });
-      expect(lines.some((line) => line.startsWith(`⏸ ${LIBC} held`))).toBe(true);
+      expect(summary).not.toHaveProperty("held");
+      expect(lines.some((line) => line.startsWith(`❌ ${LIBC} refused`))).toBe(true);
+      const narinfoPuts = server.seen.filter(
+        (request) => request.method === "PUT" && request.path.endsWith(".narinfo"),
+      );
+      expect(narinfoPuts).toHaveLength(1);
     } finally {
       server.stop();
     }

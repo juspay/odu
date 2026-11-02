@@ -30,7 +30,7 @@
  * without holding a database.
  */
 
-import type { RowAgent } from "@odu/cordis/services";
+import type { RowAgent, RowFacts } from "@odu/cordis/services";
 import { Schema } from "effect";
 import { defineSurface } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
@@ -129,40 +129,6 @@ export const CachePathSchema = Schema.Struct({
   lastAccessed: Schema.Number,
 });
 export type CachePath = typeof CachePathSchema.Type;
-
-/**
- * ONE UPLOAD A BUCKET ONCE HELD FOR A MISSING REFERENCE.
- *
- * DEPRECATED, AND ALWAYS EMPTY IN THIS RELEASE. The cache keeps what it was
- * pushed, so references are names and nothing is held; the collection and the
- * `/held` endpoint remain so a 2.x client keeps working. REMOVED IN THE NEXT
- * MAJOR. Every 2.3 client must tolerate an empty list today.
- */
-export const CacheHeldSchema = Schema.Struct({
-  bucket: Schema.String,
-  storePath: Schema.String,
-  reason: Schema.String,
-  missing: Schema.Array(Schema.String),
-  fetching: Schema.Int,
-  fetched: Schema.Array(Schema.String),
-  since: Schema.Number,
-});
-export type CacheHeld = typeof CacheHeldSchema.Type;
-
-export const heldKey = (held: { bucket: string; storePath: string }): string =>
-  `${held.bucket}|${held.storePath}`;
-
-/** Deprecated with the collection: retained for a 2.x caller's types. */
-export function heldReason(missing: readonly string[] | null, fetching = 0): string {
-  if (fetching > 0) {
-    return `fetching ${fetching} upstream reference${fetching === 1 ? "" : "s"}`;
-  }
-  if (missing === null) return "waiting for a reference that is neither here nor upstream";
-  const n = missing.length;
-  return `waiting for ${n} reference${n === 1 ? "" : "s"} that ${
-    n === 1 ? "is" : "are"
-  } neither here nor upstream`;
-}
 
 // ── the refusal ─────────────────────────────────────────────────────────────
 
@@ -483,14 +449,11 @@ odu cache push ${input.bucket} <paths> --origin ${input.origin.replace(/\/$/, ""
  * No cells: a bucket is not a singleton fact, and nothing else about the cache
  * is a value on the wire.
  *
- * **AND NO VERSION OF ITS OWN.** This surface used to carry a
- * `CACHE_CONTRACT_VERSION` that nothing read; the version it belongs to is
- * `@odu/service-client/surface`'s `SERVICE_CONTRACT_VERSION`, which covers the
- * COMPOSED WIRE — the runs' root surface and every row served beside it, over
- * one connection, admitted once. So **any change to this file bumps that
- * number**: adding a verb is a minor bump, changing a shape is a major one. A
- * row-local version would be a promise nothing enforces, and the failure it
- * would hide is a stale tab calling a member the daemon no longer serves.
+ * **AND A VERSION OF ITS OWN** — {@link CACHE_CONTRACT_VERSION}, which any
+ * change to this surface bumps: adding a verb is a minor bump, changing a shape
+ * is a major one. It is enforced, which is what an earlier row-local version
+ * was not: `contract.test.ts` pins it to a fingerprint of this surface, and the
+ * host publishes it so a client is admitted against the rows it reads.
  */
 export const oduCacheSurface = defineSurface({
   collections: {
@@ -502,16 +465,6 @@ export const oduCacheSurface = defineSurface({
       // whose only effect is to disagree with the database until the next
       // publish. The row fills them through the sibling's own `ctx`, which is
       // not a wire member.
-      verbs: ["keys", "get", "deltas"],
-    },
-    /**
-     * DEPRECATED: the uploads a bucket is holding for references. Always
-     * empty in 2.3 — kept so a 2.x reader sees the same collection it always
-     * subscribed to. REMOVED AT THE CACHE ROW'S NEXT MAJOR.
-     */
-    held: {
-      keySchema: Schema.String,
-      schema: CacheHeldSchema,
       verbs: ["keys", "get", "deltas"],
     },
   },
@@ -574,8 +527,6 @@ export type OduCacheSurface = typeof oduCacheSurface;
  */
 export const ODU_CACHE_EXPOSE = {
   buckets: "resource",
-  /** DEPRECATED and always empty; removed at the cache row's next major. */
-  held: "resource",
   "bucket.create": { tool: { mutates: true } },
   "bucket.list": { tool: { mutates: false } },
   "bucket.describe": { tool: { mutates: false } },
@@ -627,6 +578,26 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
 export const CACHE_KEY = "cache";
 
 /**
+ * THIS ROW'S OWN CONTRACT VERSION, `major.minor` — the cache's surface above and
+ * nothing served beside it. The host publishes it on the identity cell's `rows`;
+ * a client that reads the cache is admitted against it, and one that reads only
+ * the runs (kolu) never consults it. The rule is the host's: the MINOR when the
+ * surface only grows, the MAJOR when something a reader uses changes.
+ *
+ * 2.4: where the composed wire stood when each row took a version of its own.
+ *
+ * 3.0: the deprecated `held` collection (always empty since the cache kept what
+ * it was pushed), its `/held` route and `odu cache push --wait` are gone. A
+ * MAJOR, because a 2.x reader could subscribe to `held`; the host and the other
+ * rows stay where they were, so a runs-only client never notices.
+ */
+export const CACHE_CONTRACT_VERSION = "3.0";
+
+/** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
+ *  (`odu cache …`), in the shape `admitService` takes. */
+export const CACHE_NEEDS = { [CACHE_KEY]: { requires: CACHE_CONTRACT_VERSION } } as const;
+
+/**
  * WHAT AN AGENT IS TOLD about the cache: its surface, its exposure policy and
  * the paragraph taught at `initialize`.
  *
@@ -639,4 +610,14 @@ export const CACHE_AGENT: RowAgent = {
   surface: oduCacheSurface,
   expose: ODU_CACHE_EXPOSE,
   instructions: ODU_CACHE_MCP_INSTRUCTIONS,
+};
+
+/** THIS ROW'S FACTS — its word on the wire, what an agent is told and its own
+ *  contract version, in one value beside the surface. The server's record adds
+ *  the plugin; a face that composes rows reads these. */
+export const CACHE_ROW: RowFacts = {
+  name: CACHE_KEY,
+  key: CACHE_KEY,
+  agent: CACHE_AGENT,
+  contract: CACHE_CONTRACT_VERSION,
 };

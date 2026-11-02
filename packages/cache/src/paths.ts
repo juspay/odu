@@ -22,7 +22,7 @@
 export const CACHE_MOUNT = "/cache";
 
 /** A chunked upload's two headers, spelled once for the server and the
- *  client: the join's part count, and (contract 2.4) the upload session whose
+ *  client: the join's part count, and (since the cache row's 2.4) the upload session whose
  *  parts are its own. */
 export const PARTS_HEADER = "x-odu-parts";
 export const UPLOAD_SESSION_HEADER = "x-odu-upload";

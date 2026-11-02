@@ -35,6 +35,8 @@
  * minted them.
  */
 
+import type { Row } from "@odu/cordis/services";
+import { AUTH_ROW } from "./surface";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { Effect } from "effect";
@@ -639,3 +641,13 @@ export { signInPageHtml } from "./routes";
 /** The routes this row registers, with their claim — for the host's gate test,
  *  which records what the layer registers and checks the claim covers it. */
 export { authRoutes } from "./routes";
+
+/**
+ * THIS ROW, AS THE HOST LISTS IT — the door, when the host read a GitHub App's config.
+ * Its own facts (`AUTH_ROW`, beside its surface) and its plugin, in one
+ * value. The host composes these records and names none of their parts.
+ */
+export const authRowRecord = (config: GithubConfig): Row => ({
+  ...AUTH_ROW,
+  plugin: authRow(config),
+});

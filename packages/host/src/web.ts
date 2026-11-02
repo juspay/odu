@@ -94,10 +94,9 @@ import {
   NOBODY_ADMISSION,
   PrincipalBroker,
 } from "@odu/cordis/principal";
-import { authRow, readGithubConfig, signInPageHtml } from "@odu/auth/server";
-import { cloudflareRow, readCloudflareConfig } from "@odu/cloudflare/server";
-import { CLOUDFLARE_AGENT, CLOUDFLARE_KEY } from "@odu/cloudflare/surface";
-import { AUTH_AGENT, AUTH_ANONYMOUS_TAGS, AUTH_KEY } from "@odu/auth/surface";
+import { authRowRecord, readGithubConfig, signInPageHtml } from "@odu/auth/server";
+import { cloudflareRowRecord, readCloudflareConfig } from "@odu/cloudflare/server";
+import { AUTH_ANONYMOUS_TAGS } from "@odu/auth/surface";
 import {
   admissionDispatch,
   admissionStore,
@@ -114,9 +113,10 @@ import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
 import { bucketDomainGate } from "./bucketDomain";
 import { reservedPaths } from "./reserved";
 import { servingOptions } from "./serving";
-import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
-import { cacheRow } from "@odu/cache/server";
-import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
+import { ciRowRecord } from "@odu/ci/row";
+import { cacheRowRecord } from "@odu/cache/server";
+import { CACHE_KEY } from "@odu/cache/surface";
+import type { RowNeeds } from "@odu/service-client/surface";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import {
   BoundOrigin,
@@ -133,6 +133,7 @@ import {
   NixStore,
   PublicOrigin,
   RootToken,
+  RowContracts,
   Routes,
   Shutdown,
   StateDir,
@@ -301,51 +302,31 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   //
   // EVERY ROW, NAMED ONCE, HERE — and this file is a root, which is what makes
   // that legal: a root names every row, a row names only itself, and the host
-  // is the one package that composes them. A row record carries the word its
-  // surface is served under, the plugin it mounts, and what an agent is told
-  // about it. The runs' row is a plugin like any other — `ciRow` builds the
-  // rooted bundle in its own `apply` and OFFERS it, which is why `key` is null
-  // (its members keep the bare `surface/runs/...` tags) while `plugin` is not.
+  // is the one package that composes them. Each row hands over ONE record it
+  // owns — its word on the wire, its plugin, what an agent is told and its own
+  // contract version — and the host lists them, naming none of their parts.
+  // A row that needs config is a row-owned factory taking the config the host
+  // read. The runs' record has `key: null`: its plugin builds the rooted bundle
+  // and OFFERS it, so its members keep the bare `surface/runs/...` tags.
   const ROWS: ReadonlyArray<Row> = [
-    { name: CI_KEY, key: null, plugin: ciRow, agent: CI_AGENT },
-    {
-      name: CACHE_KEY,
-      key: CACHE_KEY,
-      plugin: cacheRow,
-      agent: CACHE_AGENT,
-    },
+    ciRowRecord,
+    cacheRowRecord,
     // THE DOOR, when this daemon has one. A GitHub App configured means the row
     // is mounted, and with none configured nothing asks who is calling — which
     // is loopback mode, unchanged.
-    ...(github.kind === "config"
-      ? [
-          {
-            name: AUTH_KEY,
-            key: AUTH_KEY,
-            plugin: authRow(github.config),
-            agent: AUTH_AGENT,
-          },
-        ]
-      : []),
+    ...(github.kind === "config" ? [authRowRecord(github.config)] : []),
     // THE TUNNEL, when a token file is configured. It reacts to the cache row's
     // published domains; the roster order is the mount order, so the cache (and
     // its `BucketDomains` offer) is standing before this row asks for it.
     ...(cloudflare.kind === "config"
       ? [
-          {
-            name: CLOUDFLARE_KEY,
-            key: CLOUDFLARE_KEY,
-            plugin: cloudflareRow({
-              token: cloudflare.config.token,
-              ...(cloudflare.config.apiBase === null
-                ? {}
-                : { apiBase: cloudflare.config.apiBase }),
-              ...(cloudflare.config.probeBase === null
-                ? {}
-                : { probeBase: cloudflare.config.probeBase }),
-            }),
-            agent: CLOUDFLARE_AGENT,
-          },
+          cloudflareRowRecord({
+            token: cloudflare.config.token,
+            ...(cloudflare.config.apiBase === null ? {} : { apiBase: cloudflare.config.apiBase }),
+            ...(cloudflare.config.probeBase === null
+              ? {}
+              : { probeBase: cloudflare.config.probeBase }),
+          }),
         ]
       : []),
   ];
@@ -418,6 +399,13 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await run(provide(host, Log, () => log));
     await run(provide(host, Shutdown, () => () => controller.abort()));
     await run(provide(host, Routes, () => routes));
+    // EVERY ROW'S OWN VERSION, by name, for the identity cell — the roster's
+    // fields copied, and nothing about them understood here.
+    await run(
+      provide(host, RowContracts, () =>
+        Object.fromEntries(ROWS.map((row) => [row.name, row.contract])),
+      ),
+    );
 
     // EVERY ROW IS A PLUGIN, and the runs' row OWNS ITS BUNDLE: its `apply`
     // builds the runtime and `offer`s it, the cache row is held PENDING on that
@@ -642,6 +630,12 @@ export async function webCommand(opts: {
   upgrade: boolean;
   json: boolean;
   background: boolean;
+  /** WHAT THE BOARD THIS COMMAND HANDS OUT READS — declared by the root, which
+   *  names the rows; a running daemon a major behind on any of them is refused
+   *  here with the upgrade sentence. The page itself needs no check of its own:
+   *  it is served by the daemon it would check, and a tab that outlives its
+   *  daemon is reloaded by the shell's `retired`. */
+  needs: RowNeeds;
 }): Promise<number> {
   return opts.background ? backgroundWeb(opts) : foregroundWeb(opts);
 }
@@ -754,12 +748,14 @@ async function foregroundWeb(opts: {
 async function backgroundWeb(opts: {
   upgrade: boolean;
   json: boolean;
+  needs: RowNeeds;
 }): Promise<number> {
   const origin = serviceOrigin();
   const outcome = await ensureService({
     origin,
     home: webHome(origin),
     baked: bakedBuild(),
+    needs: opts.needs,
     upgrade: opts.upgrade,
     spawn: spawnWebDaemon,
   });

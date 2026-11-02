@@ -55,7 +55,7 @@ import type {
   NodesFrame,
   OduServiceClient,
 } from "@odu/service-client/surface";
-import { isCommitPrefix, ServiceRefused } from "@odu/service-client/surface";
+import { CI_NEEDS, isCommitPrefix, ServiceRefused } from "@odu/service-client/surface";
 import { Effect, type Stream } from "effect";
 import { connectToService, SERVICE_WIRE_GROUP } from "./wire";
 
@@ -160,7 +160,9 @@ async function dial(
   origin: string | undefined,
 ): Promise<ServiceConnection | number> {
   try {
-    return await connectToService(origin ?? serviceOrigin());
+    // The board and nothing else: a daemon whose cache moved is still one
+    // these commands can drive.
+    return await connectToService(origin ?? serviceOrigin(), { needs: CI_NEEDS });
   } catch (err) {
     process.stderr.write(`${errorMessage(err)}\n`);
     return WAIT_EXITS.ownerLost;

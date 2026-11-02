@@ -321,7 +321,6 @@ terminal.
 | one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastAccessed`), `next?` — newest first, 100 a page |
 | the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
 | the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits` — one row per bucket, published as it moves |
-| the deprecated held list | `odu surface watch cache held` | the `held` resource | *(none)* | always empty since 2.3; kept for 2.x clients, removed at the cache row's next major |
 | mint a cache token | `odu surface cache token_mint --input '{…}' --json` | `cache_token_mint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
 | list cache tokens | `odu surface cache token_list --input '{…}' --json` | `cache_token_list` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
 | revoke a cache token | `odu surface cache token_revoke --input '{…}' --json` | `cache_token_revoke` | `rootToken`, `id` | `id`, `revoked` |
@@ -343,8 +342,7 @@ terminal.
 **A cache bucket keeps the compressed NAR a push uploaded** (`FileHash`/`FileSize`
 are real, `CA:` is proved from name, references and bytes) and keeps no Nix
 store: references are names, so a push records a path even when they are not in
-the bucket. `--wait` is deprecated and returns at once; `watch cache held` answers
-an empty list. Both are removed at the cache row's next major.
+the bucket. The cache row is at contract 3.0, which removed `held` and `--wait`.
 
 - **`requestId` is an idempotency key on these three too.** A repeat with the
   same id replays the recorded answer and performs nothing — which is what
@@ -535,6 +533,13 @@ macOS host, or a Linux one on Nix ≥ 2.35, must trust the cache odu's flake
 declares.
 
 ## What changed (state it honestly if asked)
+
+- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 3.0,
+  and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
+  major of a row **it reads** differs. The refusal names that row
+  (`serves the cache row at 3.0; this build reads cache 2.4`): run `odu web --upgrade`.
+  A runs-only reader is never refused because the cache moved.
+- The cache's `held` resource and `odu cache push --wait` are gone (cache 3.0).
 
 - `odu runs` is gone. Use `odu history list` (or the `runs` resource); the JSON
   shape differs.

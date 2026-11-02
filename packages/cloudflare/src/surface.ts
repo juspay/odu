@@ -11,12 +11,26 @@
  * client, the connector and the database are behind `./server`.
  */
 
-import type { RowAgent } from "@odu/cordis/services";
+import type { RowAgent, RowFacts } from "@odu/cordis/services";
 import { Schema } from "effect";
 import { defineSurface } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
 
 export const CLOUDFLARE_KEY = "cloudflare";
+
+/**
+ * THIS ROW'S OWN CONTRACT VERSION, `major.minor` — the tunnel's surface below
+ * and nothing served beside it. The host publishes it on the identity cell's
+ * `rows`; the rule is the host's (MINOR grows, MAJOR changes what a reader
+ * uses), and `contract.test.ts` pins it to a fingerprint of the surface.
+ *
+ * 2.4: where the composed wire stood when each row took a version of its own.
+ */
+export const CLOUDFLARE_CONTRACT_VERSION = "2.4";
+
+/** THE TUNNEL AND NOTHING ELSE — what `odu cloudflare …` declares, in the shape
+ *  `admitService` takes. */
+export const CLOUDFLARE_NEEDS = { [CLOUDFLARE_KEY]: { requires: CLOUDFLARE_CONTRACT_VERSION } } as const;
 
 // ── the facts ───────────────────────────────────────────────────────────────
 
@@ -152,4 +166,14 @@ export const CLOUDFLARE_AGENT: RowAgent = {
   surface: oduCloudflareSurface,
   expose: ODU_CLOUDFLARE_EXPOSE,
   instructions: ODU_CLOUDFLARE_MCP_INSTRUCTIONS,
+};
+
+/** THIS ROW'S FACTS — its word on the wire, what an agent is told and its own
+ *  contract version, in one value beside the surface. The server's record adds
+ *  the plugin; a face that composes rows reads these. */
+export const CLOUDFLARE_ROW: RowFacts = {
+  name: CLOUDFLARE_KEY,
+  key: CLOUDFLARE_KEY,
+  agent: CLOUDFLARE_AGENT,
+  contract: CLOUDFLARE_CONTRACT_VERSION,
 };

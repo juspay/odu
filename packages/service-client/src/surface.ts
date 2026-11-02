@@ -41,13 +41,11 @@
  * this contract's. The cut is the point: the cache owns its contract, its
  * refusals and its URLs, and this file stops spelling a bucket at all.
  *
- * **BUT THE VERSION HERE STILL COVERS IT.** {@link SERVICE_CONTRACT_VERSION} is
- * the version of the COMPOSED WIRE — this surface and every row served beside
- * it — because that is what one daemon speaks on one connection and what one
- * client is admitted against. So a change to `@odu/cache/surface` bumps THIS
- * number, exactly as a change here does: the alternative is a second version
- * nothing enforces, and a stale tab talking to a daemon whose cache verbs it
- * does not read.
+ * **AND THE VERSION HERE COVERS ONLY THIS SURFACE.** {@link CI_CONTRACT_VERSION}
+ * versions the runs; the cache, the door and the tunnel each version their own
+ * surface beside it, and the host versions its own verbs and the admission
+ * cell ({@link HOST_CONTRACT_VERSION}). One number for the whole composed wire
+ * meant a change to the cache refused kolu, which reads nothing but the runs.
  *
  * **Every public command is one of these.** Not most of them: the inventory is
  * the contract. A capability odu offers a person that has no operation here
@@ -108,14 +106,16 @@ export type { NodeStatus };
 export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
 
 /**
- * The contract version this build speaks, `major.minor`.
+ * THE HOST'S CONTRACT VERSION, `major.minor` — its own verbs (the frozen control
+ * fragment), the identity cell below, and the rule a client is admitted by.
  *
  * A daemon and the client that dialled it are routinely DIFFERENT BUILDS — the
  * whole point of a singleton is that it outlives the process that started it,
  * including across an upgrade — so the two have to be able to discover they
- * disagree. {@link admitService} is the one judge, and its rule is ADDITIVE:
+ * disagree. {@link admitService} is the one judge, and its rule is ADDITIVE, for
+ * this number and for every row's:
  *
- *   - **the MINOR moves when the wire only GROWS** — a new verb, a new row
+ *   - **the MINOR moves when the surface only GROWS** — a new verb, a new row
  *     member, a new optional input key, a new output field a reader may
  *     ignore. Every reader on the same major is adopted, in BOTH directions: an
  *     older reader never names the new member, and a newer reader that calls
@@ -126,34 +126,49 @@ export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
  *     retyped, a refusal code a reader branches on taken away. A different
  *     major is refused, with a sentence.
  *
- * **IT VERSIONS THE COMPOSED WIRE, not this file.** The daemon serves this
- * surface as the wire's ROOT and every row beside it as a sibling — the cache
- * and the door — over ONE connection, and a client is admitted against this
- * number before it reads anything. So a change to `@odu/cache/surface` or
- * `@odu/auth/surface` bumps THIS number too. A row must not keep a version of
- * its own: nothing would enforce it.
+ * **EACH ROW VERSIONS ITS OWN SURFACE.** This number used to version the whole
+ * composed wire, so a change to the cache refused a client that reads only the
+ * runs. Now the runs are {@link CI_CONTRACT_VERSION}, the cache, the door and
+ * the tunnel each declare theirs beside their surface, the host publishes every
+ * mounted row's version on the identity cell (`rows`), and a client is admitted
+ * against the rows it NEEDS. Each version is pinned to a fingerprint of the
+ * surface it describes (`contract.test.ts` beside each), so a surface cannot
+ * move without its number.
  *
- * 2.2: `auth.grant.list` — the people page's verb — and the `venues` cell, the
- * last probe as a fact (PR 2.5); and six kinds of input
- * LOOSENED so the verb, not the schema, refuses an empty field (a checkout
- * path, prune's retention, a bucket's and a pin's name, a grant's login, a
- * personal token's name).
- * Additive: every input 2.1 accepted, 2.2 accepts.
+ * 2.2: `auth.grant.list` and the `venues` cell (PR 2.5); six kinds of input
+ * loosened so the verb, not the schema, refuses an empty field. Additive.
  *
- * 2.3: `cache.bucket.domain` (a bucket's own DNS name, clearable), the `held`
- * collection (paths accepted and waiting on references), `Bucket.domain` and
- * `Bucket.pushUrl` as new output fields, and `auth.token.create`'s optional
- * `expiresDays`. Additive: every input 2.2 accepted, 2.3 accepts.
+ * 2.3: `cache.bucket.domain`, the `held` collection, `Bucket.domain` and
+ * `Bucket.pushUrl`, and `auth.token.create`'s optional `expiresDays`. Additive.
  *
- * 2.3 remains: the object cache is ADDITIVE. `held` and `--wait` are DEPRECATED
- * and answer an empty list / return at once; they are REMOVED AT THE CACHE ROW'S NEXT MAJOR.
+ * 2.4: a chunked upload's parts may carry `x-odu-upload: <session>`. Additive.
  *
- * 2.4: a chunked upload's parts and join may carry `x-odu-upload: <session>`,
- * and then the parts are that upload's own — two pushers of one path cannot
- * have their parts joined together. Additive: a request without it keeps the
- * shared part names every 2.x client used.
+ * — until here this number versioned the composed wire; each row starts at the
+ * 2.4 it already spoke —
+ *
+ * 2.5: the identity cell's `rows`, every mounted row's own version, and
+ * admission per row. Additive: a 2.x client ignores the field and is admitted as
+ * before.
  */
-export const SERVICE_CONTRACT_VERSION = "2.4";
+export const HOST_CONTRACT_VERSION = "2.5";
+
+/**
+ * THE RUNS' CONTRACT VERSION — this surface, and nothing served beside it. The
+ * rule is {@link HOST_CONTRACT_VERSION}'s.
+ *
+ * The identity cell is SERVED on this surface (its tag is the root's, and every
+ * deployed reader dials it there) but it is the host's fact, so its shape is the
+ * host's version, not this one.
+ *
+ * 2.4: where the composed wire stood when each row took a version of its own.
+ */
+export const CI_CONTRACT_VERSION = "2.4";
+
+/** THE RUNS' ROW NAME — the word the identity cell's `rows` publishes them
+ *  under, a face's needs name them by, and the plugin's own name (what the
+ *  runtime binds its fibre under and `settled()` waits on). One word, one
+ *  constant: the runs are the wire's ROOT, so it is never a sibling segment. */
+export const CI_ROW = "ci";
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
@@ -254,12 +269,12 @@ const REFUSES = ServiceRefused;
 /**
  * WHO is serving, and whether a caller may believe what it says.
  *
- * `protocolVersion` and `storageVersion` are the two axes a compatible reuse is
- * decided on: the first is this surface's contract, the second is the on-disk
- * record format the catalog is written in. A caller that finds a daemon
- * already running compares both before adopting it — a service speaking a
- * contract it cannot decode is a recycle, and one writing a storage format it
- * cannot read is a refusal a person has to settle.
+ * `protocolVersion` with `rows`, and `storageVersion`, are the two axes a
+ * compatible reuse is decided on: the first is the host's contract and each
+ * mounted row's own (judged by {@link admitService} against the rows a caller
+ * reads), the second is the on-disk record format the catalog is written in. A
+ * service speaking a contract a caller cannot decode is a recycle, and one
+ * writing a storage format it cannot read is a refusal a person has to settle.
  */
 export const ServiceIdentitySchema = Schema.Struct({
   /** The daemon's own process, so an operator can find it. */
@@ -272,8 +287,14 @@ export const ServiceIdentitySchema = Schema.Struct({
   origin: Schema.String,
   /** The catalog directory whose runs this service is a face onto. */
   catalog: Schema.String,
+  /** The HOST's contract ({@link HOST_CONTRACT_VERSION}) — its own verbs, this
+   *  cell, and the admission rule. */
   protocolVersion: Schema.String,
   storageVersion: Schema.Int,
+  /** EVERY MOUNTED ROW'S OWN CONTRACT VERSION, by row name (`ci`, `cache`, …),
+   *  filled by the host from the rows it mounted. Absent on a daemon from
+   *  before 2.5, whose `protocolVersion` covered every row at once. */
+  rows: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
 });
 export type ServiceIdentity = typeof ServiceIdentitySchema.Type;
 
@@ -344,26 +365,67 @@ export const UNKNOWN_SERVICE: ServiceCell = {
   readiness: { state: "starting", since: 0, reconciled: 0 },
 };
 
+/**
+ * WHAT A BUILD READS OF ONE ROW — the version its code was written against.
+ *
+ * Two values, each carrying its version:
+ *
+ *   - `{ requires }` — the client is refused when that row is not mounted,
+ *     because a face that needs the cache and is admitted without it would meet
+ *     `unknown verb` on its first call and read it as a skew;
+ *   - `{ ifMounted }` — for a face that draws a row only when the daemon has it
+ *     (the door, the tunnel): absent is fine, mounted at another major is not.
+ */
+export type RowNeed = { readonly requires: string } | { readonly ifMounted: string };
+
+/** The rows a face reads, by row name, and at which version. */
+export type RowNeeds = Readonly<Record<string, RowNeed>>;
+
+/** A row this build cannot work without. */
+export const requires = (version: string): RowNeed => ({ requires: version });
+
+/** A row read only when the daemon mounts it. */
+export const ifMounted = (version: string): RowNeed => ({ ifMounted: version });
+
+/**
+ * THE RUNS AND NOTHING ELSE — the need of every consumer that reads only the
+ * board: kolu's padi, a socket dial, `odu run`/`wait`/`logs`. A daemon is
+ * adopted on this however far the cache, the door or the tunnel has moved.
+ */
+export const CI_NEEDS: RowNeeds = { [CI_ROW]: requires(CI_CONTRACT_VERSION) };
+
 /** The verdict on a daemon that ANSWERED — whether this build can speak to it.
  *
  *  THE ONE COMPARISON. A daemon and the client that dialled it are routinely
  *  different builds, so somebody has to decide whether the two can talk; the
  *  decision is made here, once, and every face receives it as a VALUE. A
- *  consumer that compared {@link SERVICE_CONTRACT_VERSION} against the cell
- *  itself would be a second judge of compatibility — and the second judge is
- *  the one that gets the direction of the comparison wrong, because "older
- *  client, newer daemon" is fine and its mirror is not. */
+ *  consumer that compared versions against the cell itself would be a second
+ *  judge of compatibility — and the second judge is the one that gets the
+ *  direction of the comparison wrong, because "older client, newer daemon" is
+ *  fine and its mirror is not.
+ *
+ *  A refusal is {@link ServiceRefusal}: which contract it is ON, and only the
+ *  facts that arm has. */
 export type ServiceAdmission =
   | { kind: "adopt"; identity: ServiceIdentity }
-  | {
-      kind: "refuse";
-      /** The contract the daemon publishes about itself. */
-      speaks: string;
-      /** The contract this build reads. */
-      expected: string;
-      /** The whole sentence, for a face that only has somewhere to print. */
-      message: string;
-    };
+  | ({ kind: "refuse" } & ServiceRefusal);
+
+/**
+ * WHY A DAEMON WAS REFUSED — three different facts, so three arms, each
+ * carrying only its own:
+ *
+ *   - `host` — the host's major differs;
+ *   - `row` — a row this build reads is mounted at another major;
+ *   - `absent` — a row this build requires is not mounted at all (so there is
+ *     nothing it `speaks`).
+ *
+ * `expected` is always the version this build reads; `message` is the whole
+ * sentence, for a face that only has somewhere to print.
+ */
+export type ServiceRefusal =
+  | { on: "host"; speaks: string; expected: string; message: string }
+  | { on: "row"; row: string; speaks: string; expected: string; message: string }
+  | { on: "absent"; row: string; expected: string; message: string };
 
 /** `major.minor` (an optional patch or prerelease suffix allowed), or null —
  *  the framework's grammar, so `2.1garbage` is not read as 2.1. */
@@ -372,59 +434,122 @@ function contractMajor(version: string): number | null {
   return match === null ? null : Number(match[1]);
 }
 
+function contractMinor(version: string): number | null {
+  const match = /^(\d+)\.(\d+)/.exec(version);
+  return match === null ? null : Number(match[2]);
+}
+
+const needReads = (need: RowNeed): string =>
+  "requires" in need ? need.requires : need.ifMounted;
+
+/** The version a daemon publishes for one row, or `null` when it does not
+ *  mount it. A daemon from before 2.5 publishes no `rows`: its one number
+ *  versioned the whole composed wire, so it is read as every row's. */
+function rowSpeaks(identity: ServiceIdentity, row: string): string | null {
+  if (identity.rows === undefined) return identity.protocolVersion;
+  return identity.rows[row] ?? null;
+}
+
+const UPGRADE = "upgrade the daemon (`odu web --upgrade`) or this build.";
+
 /** Read a daemon's own greeting and say whether this build may adopt it.
  *
- *  THE ADDITIVE RULE (see {@link SERVICE_CONTRACT_VERSION}): the same MAJOR is
- *  adopted whatever the minors, and a different one is refused. Not the
- *  framework's `isContractVersionCompatible`, which also refuses a daemon
- *  whose minor is behind — that made every added verb a flag day for every
- *  reader built after it, kolu's included (it defers to THIS verdict and never
- *  compares versions itself). A malformed or empty version is refused: a
+ *  THE ADDITIVE RULE (see {@link HOST_CONTRACT_VERSION}), applied twice: the
+ *  host's MAJOR must match, and so must every NEEDED row's — whatever the
+ *  minors. A row this build does not name is not consulted, which is the whole
+ *  point: a runs-only reader passes {@link CI_NEEDS} and is never refused
+ *  because the cache moved. A needed row the daemon does not mount is refused
+ *  with that fact (unless it was asked for {@link ifMounted}).
+ *
+ *  Not the framework's `isContractVersionCompatible`, which also refuses a
+ *  daemon whose minor is behind — that made every added verb a flag day for
+ *  every reader built after it. A malformed or empty version is refused: a
  *  daemon that has said nothing about itself is not a compatible one. */
 export function admitService(
   cell: ServiceCell,
   where: string,
-  /** The version this BUILD reads. A seam for tests that need a build ahead of
-   *  the constant, so "the daemon is one minor behind" stays representable. */
-  build: string = SERVICE_CONTRACT_VERSION,
+  /** The rows this build reads, and at which version. */
+  needs: RowNeeds,
 ): ServiceAdmission {
-  const speaks = cell.identity.protocolVersion;
-  const theirs = contractMajor(speaks);
-  if (theirs !== null && theirs === contractMajor(build)) {
-    return { kind: "adopt", identity: cell.identity };
+  const host = HOST_CONTRACT_VERSION;
+  const identity = cell.identity;
+  const hostSpeaks = identity.protocolVersion;
+  const hostMajor = contractMajor(hostSpeaks);
+  if (hostMajor === null || hostMajor !== contractMajor(host)) {
+    return {
+      kind: "refuse",
+      on: "host",
+      speaks: hostSpeaks,
+      expected: host,
+      message:
+        `the odu service at ${where} speaks host contract ${hostSpeaks || "nothing"}; ` +
+        `this build reads ${host} — ${UPGRADE}`,
+    };
   }
-  return {
-    kind: "refuse",
-    speaks,
-    expected: build,
-    message:
-      `the odu service at ${where} speaks contract ${speaks || "nothing"}; ` +
-      `this build reads ${build} — upgrade the daemon ` +
-      "(`odu web --upgrade`) or this build.",
-  };
+  for (const row of Object.keys(needs).sort()) {
+    const need = needs[row] as RowNeed;
+    const reads = needReads(need);
+    const speaks = rowSpeaks(identity, row);
+    if (speaks === null) {
+      if ("ifMounted" in need) continue;
+      return {
+        kind: "refuse",
+        on: "absent",
+        row,
+        expected: reads,
+        message:
+          `the odu service at ${where} does not mount the ${row} row, ` +
+          `which this build reads at ${reads} — enable the row on the daemon, or use a build that does not need it.`,
+      };
+    }
+    const major = contractMajor(speaks);
+    if (major === null || major !== contractMajor(reads)) {
+      return {
+        kind: "refuse",
+        on: "row",
+        row,
+        speaks,
+        expected: reads,
+        message:
+          `the odu service at ${where} serves the ${row} row at ${speaks || "nothing"}; ` +
+          `this build reads ${row} ${reads} — ${UPGRADE}`,
+      };
+    }
+  }
+  return { kind: "adopt", identity };
 }
 
 /** THE ONE COST OF THE ADDITIVE RULE, said where it can be acted on: a daemon
  *  ADOPTED on the same major whose minor is behind this build lacks the verbs
  *  added since, and calling one answers "unknown" from inside the RPC layer. A
  *  face that adopted such a daemon prints this once, so that answer arrives
- *  already explained. `null` when the daemon is level or ahead. */
+ *  already explained. PER ROW: it names every needed row (and the host) that is
+ *  behind, and is `null` when none is. */
 export function skewNote(
   cell: ServiceCell,
   where: string,
-  build: string = SERVICE_CONTRACT_VERSION,
+  needs: RowNeeds,
 ): string | null {
-  const minor = (version: string): number | null => {
-    const match = /^(\d+)\.(\d+)/.exec(version);
-    return match === null ? null : Number(match[2]);
+  const host = HOST_CONTRACT_VERSION;
+  const behind = (speaks: string | null, reads: string): boolean => {
+    if (speaks === null) return false;
+    const theirs = contractMinor(speaks);
+    const ours = contractMinor(reads);
+    return theirs !== null && ours !== null && theirs < ours;
   };
-  const theirs = minor(cell.identity.protocolVersion);
-  const ours = minor(build);
-  if (theirs === null || ours === null || theirs >= ours) return null;
+  const lines: string[] = [];
+  if (behind(cell.identity.protocolVersion, host)) {
+    lines.push(`host ${cell.identity.protocolVersion} (this build ${host})`);
+  }
+  for (const row of Object.keys(needs).sort()) {
+    const reads = needReads(needs[row] as RowNeed);
+    const speaks = rowSpeaks(cell.identity, row);
+    if (behind(speaks, reads)) lines.push(`${row} ${speaks as string} (this build ${reads})`);
+  }
+  if (lines.length === 0) return null;
   return (
-    `odu: the service at ${where} speaks contract ${cell.identity.protocolVersion}, ` +
-    `this build ${build} — a verb added since answers as unknown; ` +
-    "`odu web --upgrade` replaces the daemon."
+    `odu: the service at ${where} is behind this build on ${lines.join(", ")} — ` +
+    "a verb added since answers as unknown; `odu web --upgrade` replaces the daemon."
   );
 }
 

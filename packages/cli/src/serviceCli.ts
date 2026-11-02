@@ -53,7 +53,7 @@ import { ODU_VERSION } from "@odu/execution/common/version";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { composedClients } from "@odu/cordis/compose";
-import { connectToService, SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
+import { connectToService, EVERY_ROW_NEEDS, SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 import { Effect } from "effect";
@@ -86,7 +86,9 @@ const endpoint: EndpointSeam<typeof endpointFlags> = {
         // nothing for an explicitly named `--origin`, so a typo reports that
         // nothing is serving there rather than spawning a daemon that could not
         // bind the address anyway.
-        const connection = await connectToService(values.origin);
+        const connection = await connectToService(values.origin, {
+          needs: EVERY_ROW_NEEDS,
+        });
         return {
           // THE ROOTED BUNDLE, over the one dispatch: the runs as the
           // unprefixed core and the cache as the sibling its commands mount

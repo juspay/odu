@@ -42,12 +42,14 @@ import { readServiceCell } from "./dial";
 import { DEFAULT_SERVICE_ORIGIN, SERVICE_APP, serviceOrigin } from "./endpoint";
 import {
   admitService,
+  CI_NEEDS,
   handshakeTimedOut,
   oduServiceClientOver,
   type OduServiceClient,
   oduServiceSurface,
   SERVICE_HANDSHAKE_MS,
   type ServiceAdmission,
+  type ServiceRefusal,
 } from "./surface";
 
 /**
@@ -160,10 +162,7 @@ export interface ServiceSocketConnection {
  */
 export type ServiceSocketDial =
   | { kind: "absent"; socketPath: string }
-  | ({ kind: "refused"; socketPath: string } & Omit<
-      Extract<ServiceAdmission, { kind: "refuse" }>,
-      "kind"
-    >)
+  | ({ kind: "refused"; socketPath: string } & ServiceRefusal)
   | ({ kind: "connected" } & ServiceSocketConnection);
 
 /**
@@ -224,6 +223,9 @@ export async function dialServiceSocket(
         }),
       ),
       socketPath,
+      // THE RUNS AND NOTHING ELSE: this dial's link carries only the runs'
+      // group, so the rows served beside them are not this caller's to need.
+      CI_NEEDS,
     );
   } catch (err) {
     // A link nobody will use still holds the dial, ping and response fibers.

@@ -85,7 +85,10 @@ const declaration = {
   collisions: {
     cache: {
       "packages/cli/src/serviceCli.ts": 4,
-      "packages/cli/src/serviceMcp.ts": 4,
+      // The bridge's one row word: what an UNANSWERED roster offers.
+      "packages/cli/src/serviceMcp.ts": 2,
+      // The composed wire: the row's own facts, from which its surface, its
+      // key and the composed faces' need are all derived.
       "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
@@ -118,7 +121,6 @@ const declaration = {
       // The refusal a private bucket gets names the command that fixes it.
       "packages/cache/src/cli.ts": 2,
       "packages/ci/src/protect.ts": 2,
-      "packages/cli/src/serviceMcp.ts": 4,
       "packages/cli/src/wire.ts": 2,
       "packages/service/src/service.ts": 1,
       // The 401's sentence names the command a person runs to fix it.
@@ -136,10 +138,9 @@ const declaration = {
       // the door's world names the auth stub.
       "packages/web-acceptance/support/cloudflareStub.ts": 2,
       "packages/web-acceptance/support/hooks.ts": 15,
-      // The composed wires that speak the sibling's key — the tunnel's argv
-      // face and the MCP bridge beside the cache's and the door's.
+      // The composed wire: the row's own facts, from which every composed
+      // face (the argv face, the MCP bridge) reads the sibling.
       "packages/cli/src/wire.ts": 2,
-      "packages/cli/src/serviceMcp.ts": 5,
     },
   },
   // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's
@@ -313,7 +314,10 @@ describe("the row's word", () => {
 
   it("is the word every face spells", () => {
     for (const file of FACES) {
-      expect(source(file), `${file} does not name CACHE_KEY`).toContain("CACHE_KEY");
+      // The constant, or the row's own record that carries it (`CACHE_ROW`).
+      expect(source(file), `${file} names neither CACHE_KEY nor CACHE_ROW`).toMatch(
+        /\bCACHE_(KEY|ROW)\b/,
+      );
       // …and none of them spells the word itself as a sibling key.
       expect(source(file), `${file} spells the row's word`).not.toMatch(
         new RegExp(`\\b${value as string}:`),
@@ -321,9 +325,16 @@ describe("the row's word", () => {
     }
   });
 
-  it("is the key the roster serves it under", () => {
+  it("is the key the row's own record serves it under, and the roster lists that record", () => {
+    // The record is the ROW's: the host names it whole and spells none of its
+    // parts, so the key is asserted where the row declares it.
+    expect(source("packages/ci/src/row.ts")).toMatch(/\{\s*name:\s*CI_ROW,\s*key:\s*null,/);
+    expect(source("packages/cache/src/surface.ts")).toMatch(
+      /CACHE_ROW: RowFacts = \{\s*name:\s*CACHE_KEY,\s*key:\s*CACHE_KEY,/,
+    );
+    expect(source("packages/cache/src/server.ts")).toMatch(/\.\.\.CACHE_ROW,/);
     const roster = source("packages/host/src/web.ts");
-    expect(roster).toMatch(/\{\s*name:\s*CI_KEY,\s*key:\s*null,/);
-    expect(roster).toMatch(/\{\s*name:\s*CACHE_KEY,\s*key:\s*CACHE_KEY,/);
+    expect(roster).toMatch(/ROWS: ReadonlyArray<Row> = \[\s*ciRowRecord,\s*cacheRowRecord,/);
+    expect(roster).not.toMatch(/_CONTRACT_VERSION/);
   });
 });

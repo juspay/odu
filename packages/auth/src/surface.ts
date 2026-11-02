@@ -27,7 +27,7 @@
  */
 
 import { type Principal, PrincipalSchema, RoleSchema } from "@odu/cordis/principal";
-import type { RowAgent } from "@odu/cordis/services";
+import type { RowAgent, RowFacts } from "@odu/cordis/services";
 import { defineSurface } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
 import { Schema } from "effect";
@@ -35,6 +35,22 @@ import { Schema } from "effect";
 /** The word this row is served under — the sibling segment on the wire, the
  *  subcommand in argv, and the word the browser folds its health under. */
 export const AUTH_KEY = "auth";
+
+/**
+ * THIS ROW'S OWN CONTRACT VERSION, `major.minor` — the door's surface below and
+ * nothing served beside it. The host publishes it on the identity cell's `rows`
+ * and a client that reads the door is admitted against it; one that does not is
+ * never refused because it moved. The rule is the host's: the MINOR when the
+ * surface only grows, the MAJOR when something a reader uses changes.
+ * `contract.test.ts` pins it to a fingerprint of the surface.
+ *
+ * 2.4: where the composed wire stood when each row took a version of its own.
+ */
+export const AUTH_CONTRACT_VERSION = "2.4";
+
+/** THE DOOR AND NOTHING ELSE — what `odu auth …` declares, in the shape
+ *  `admitService` takes. Required: there is nothing to do without a door. */
+export const AUTH_NEEDS = { [AUTH_KEY]: { requires: AUTH_CONTRACT_VERSION } } as const;
 
 /** THE SIGN-IN PAGE'S WORDS, once — the server-rendered page (`./routes`) and
  *  the browser's own copy (`./face`) say the same three things, and a page an
@@ -302,3 +318,13 @@ export const AUTH_AGENT: RowAgent = {
 /** The role this daemon gives somebody who is allowed in but has never been
  *  granted anything. */
 export const DEFAULT_ROLE = "member";
+
+/** THIS ROW'S FACTS — its word on the wire, what an agent is told and its own
+ *  contract version, in one value beside the surface. The server's record adds
+ *  the plugin; a face that composes rows reads these. */
+export const AUTH_ROW: RowFacts = {
+  name: AUTH_KEY,
+  key: AUTH_KEY,
+  agent: AUTH_AGENT,
+  contract: AUTH_CONTRACT_VERSION,
+};

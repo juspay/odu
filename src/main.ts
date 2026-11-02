@@ -77,14 +77,17 @@ import {
   protectViaService,
 } from "@odu/cli/servicePipeline";
 import { cacheCommand } from "@odu/cache/cli";
+import { CACHE_NEEDS } from "@odu/cache/surface";
 import { internalCommand } from "@odu/cli/internalCli";
 import { serviceMcpCommand } from "@odu/cli/serviceMcp";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { surfaceCliMain } from "@odu/cli/serviceCli";
 import { webCommand, webDaemonCommand } from "@odu/host/web";
-import { connectToService } from "@odu/cli/wire";
+import { connectToService, EVERY_ROW_NEEDS } from "@odu/cli/wire";
 import { authCommand } from "@odu/auth/cli";
+import { AUTH_NEEDS } from "@odu/auth/surface";
 import { cloudflareCommand } from "@odu/cloudflare/cli";
+import { CLOUDFLARE_NEEDS } from "@odu/cloudflare/surface";
 import { errorMessage, errorStack } from "@odu/execution/common/effectEdge";
 
 const USAGE = `usage: odu <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect|cache|auth|cloudflare|web|surface|mcp> [args]
@@ -461,7 +464,7 @@ async function dispatch(argv: string[]): Promise<number> {
       // `@odu/launch`'s — starting a service is not a row's business — so the
       // root binds it, and `@odu/cache/cli` stays a client that names no host.
       return cacheCommand(sub, subRest, {
-        connect: (origin) => connectToService(origin),
+        connect: (origin) => connectToService(origin, { needs: CACHE_NEEDS }),
       });
     }
     case "auth": {
@@ -469,13 +472,13 @@ async function dispatch(argv: string[]): Promise<number> {
       // The door's argv face, bound the same way — the same connection, the same
       // credential, one more row's verbs.
       return authCommand(sub, subRest, {
-        connect: (origin) => connectToService(origin),
+        connect: (origin) => connectToService(origin, { needs: AUTH_NEEDS }),
       });
     }
     case "cloudflare": {
       const [sub, ...subRest] = rest;
       return cloudflareCommand(sub, subRest, {
-        connect: (origin) => connectToService(origin),
+        connect: (origin) => connectToService(origin, { needs: CLOUDFLARE_NEEDS }),
       });
     }
     case "attach": {
@@ -784,6 +787,9 @@ async function dispatch(argv: string[]): Promise<number> {
         upgrade: values.upgrade ?? false,
         background: values.background ?? false,
         json: values.output === "json",
+        // The board reads every row the daemon mounts — the same set the
+        // composed faces declare, from the one place it is spelled.
+        needs: EVERY_ROW_NEEDS,
       });
     }
     // The daemon `odu web --background` spawns. Deliberately absent from USAGE:

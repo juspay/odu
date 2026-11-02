@@ -12,7 +12,13 @@
 import { describe, expect, it } from "bun:test";
 import { Effect, Stream } from "effect";
 import type { OduServiceClient, ServiceCell } from "@odu/service-client/surface";
-import { SERVICE_CONTRACT_VERSION, UNKNOWN_SERVICE } from "@odu/service-client/surface";
+import {
+  CI_CONTRACT_VERSION,
+  CI_NEEDS,
+  CI_ROW,
+  HOST_CONTRACT_VERSION,
+  UNKNOWN_SERVICE,
+} from "@odu/service-client/surface";
 import type { ServiceConnection } from "@odu/service-client/dial";
 import { adoptOrRefuse, contractVerdict } from "./webLauncher";
 
@@ -20,22 +26,31 @@ const ORIGIN = "http://127.0.0.1:3737";
 
 /** A contract version one major step from this build's. */
 function majorStep(steps: number): string {
-  const [major, minor] = SERVICE_CONTRACT_VERSION.split(".");
+  const [major, minor] = HOST_CONTRACT_VERSION.split(".");
   return `${Number(major) + steps}.${minor}`;
 }
 
 /** A contract version one minor step from this build's, in either direction. */
 function minorStep(steps: number): string {
-  const [major, minor] = SERVICE_CONTRACT_VERSION.split(".");
+  const [major, minor] = HOST_CONTRACT_VERSION.split(".");
   return `${major}.${Number(minor) + steps}`;
 }
 
+/** A daemon speaking `protocolVersion` as its HOST contract, mounting the runs
+ *  at this build's version — so these tests move the host axis alone. */
 function cell(protocolVersion: string): ServiceCell {
   return {
     ...UNKNOWN_SERVICE,
-    identity: { ...UNKNOWN_SERVICE.identity, protocolVersion },
+    identity: {
+      ...UNKNOWN_SERVICE.identity,
+      protocolVersion,
+      rows: { [CI_ROW]: CI_CONTRACT_VERSION },
+    },
   };
 }
+
+/** What every caller here reads: the runs. */
+const NEEDS = { needs: CI_NEEDS };
 
 /** A connection whose `service.get` runs `get`, counting disposes. The fake's
  *  `url` matches what `dialService` really produces (a websocket route, not an
@@ -70,23 +85,24 @@ describe("adoptOrRefuse", () => {
     const other = majorStep(1);
     const { connection, disposed } = scripted(() => Stream.make(cell(other)));
 
-    const rejection = await adoptOrRefuse(connection, ORIGIN).then(
+    const rejection = await adoptOrRefuse(connection, ORIGIN, NEEDS).then(
       () => null,
       (err: unknown) => err,
     );
     // The ONE sentence, asserted by identity against the shared verdict rather
     // than as substrings — so a rewording fails the test instead of drifting.
-    const verdict = contractVerdict(cell(other), ORIGIN);
+    const verdict = contractVerdict(cell(other), ORIGIN, CI_NEEDS);
     if (verdict === null) throw new Error("other-major fixture must refuse");
     expect(messageOf(rejection)).toBe(verdict);
     expect(disposed()).toBe(1);
   });
 
   it("adopts a service whose minor is BEHIND this build — the additive rule", async () => {
-    // A minor only ADDS members: this build reads 2.3, the daemon speaks 2.2.
+    // A minor only ADDS members: the daemon's host contract is one minor behind.
     const warned: string[] = [];
     const { connection, disposed } = scripted(() => Stream.make(cell(minorStep(-1))));
     const result = await adoptOrRefuse(connection, ORIGIN, {
+      ...NEEDS,
       warn: (line) => warned.push(line),
     });
     expect(result).toBe(connection);
@@ -101,6 +117,7 @@ describe("adoptOrRefuse", () => {
     for (let dial = 0; dial < 3; dial += 1) {
       const { connection } = scripted(() => Stream.make(cell(minorStep(-1))));
       await adoptOrRefuse(connection, ORIGIN, {
+        ...NEEDS,
         warn: (line) => warned.push(line),
         warned: seen,
       });
@@ -110,9 +127,9 @@ describe("adoptOrRefuse", () => {
 
   it("says nothing when the service is level or ahead", async () => {
     const warned: string[] = [];
-    for (const version of [SERVICE_CONTRACT_VERSION, minorStep(1)]) {
+    for (const version of [HOST_CONTRACT_VERSION, minorStep(1)]) {
       const { connection } = scripted(() => Stream.make(cell(version)));
-      await adoptOrRefuse(connection, ORIGIN, { warn: (line) => warned.push(line) });
+      await adoptOrRefuse(connection, ORIGIN, { ...NEEDS, warn: (line) => warned.push(line) });
     }
     expect(warned).toEqual([]);
   });
@@ -121,7 +138,7 @@ describe("adoptOrRefuse", () => {
     const ahead = minorStep(1);
     const { connection, disposed } = scripted(() => Stream.make(cell(ahead)));
 
-    const result = await adoptOrRefuse(connection, ORIGIN);
+    const result = await adoptOrRefuse(connection, ORIGIN, NEEDS);
     expect(result).toBe(connection);
     expect(disposed()).toBe(0);
   });
@@ -129,7 +146,7 @@ describe("adoptOrRefuse", () => {
   it("refuses a service that fails the cell read, and disposes", async () => {
     const { connection, disposed } = scripted(() => Effect.fail("the link died"));
 
-    await expect(adoptOrRefuse(connection, ORIGIN)).rejects.toThrow(
+    await expect(adoptOrRefuse(connection, ORIGIN, NEEDS)).rejects.toThrow(
       /published no service cell/,
     );
     expect(disposed()).toBe(1);
@@ -142,7 +159,7 @@ describe("adoptOrRefuse", () => {
     const { connection, disposed } = scripted(() => Stream.never);
 
     await expect(
-      adoptOrRefuse(connection, ORIGIN, { handshakeMs: 50 }),
+      adoptOrRefuse(connection, ORIGIN, { ...NEEDS, handshakeMs: 50 }),
     ).rejects.toThrow(/did not answer the handshake/);
     expect(disposed()).toBe(1);
   });
@@ -150,18 +167,18 @@ describe("adoptOrRefuse", () => {
   it("refuses a service whose cell read answers with nothing, and disposes", async () => {
     const { connection, disposed } = scripted(() => Stream.empty);
 
-    await expect(adoptOrRefuse(connection, ORIGIN)).rejects.toThrow(
+    await expect(adoptOrRefuse(connection, ORIGIN, NEEDS)).rejects.toThrow(
       /published no service cell/,
     );
     expect(disposed()).toBe(1);
   });
 
   it("uses fixtures that are genuinely a lower minor, a higher minor and another major", () => {
-    expect(contractVerdict(cell(minorStep(-1)), ORIGIN)).toBeNull();
-    expect(contractVerdict(cell(minorStep(1)), ORIGIN)).toBeNull();
-    expect(contractVerdict(cell(majorStep(1)), ORIGIN)).not.toBeNull();
-    expect(contractVerdict(cell(majorStep(-1)), ORIGIN)).not.toBeNull();
-    expect(contractVerdict(cell(""), ORIGIN)).not.toBeNull();
-    expect(contractVerdict(cell("2.1garbage"), ORIGIN)).not.toBeNull();
+    expect(contractVerdict(cell(minorStep(-1)), ORIGIN, CI_NEEDS)).toBeNull();
+    expect(contractVerdict(cell(minorStep(1)), ORIGIN, CI_NEEDS)).toBeNull();
+    expect(contractVerdict(cell(majorStep(1)), ORIGIN, CI_NEEDS)).not.toBeNull();
+    expect(contractVerdict(cell(majorStep(-1)), ORIGIN, CI_NEEDS)).not.toBeNull();
+    expect(contractVerdict(cell(""), ORIGIN, CI_NEEDS)).not.toBeNull();
+    expect(contractVerdict(cell("2.1garbage"), ORIGIN, CI_NEEDS)).not.toBeNull();
   });
 });
