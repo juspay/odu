@@ -248,7 +248,7 @@ on the bucket page (both landed).
   already resolves): `cache/cache.sqlite`, `cache/objects/`, and
   `cache/staging/`. Signing keys live in the database; the database and the
   objects are the backup.
-- **GC:** per-bucket retention on last access (PR 3c moves the clock to the
+- **GC:** per-bucket retention on last access (PR 3c2 moves the clock to the
   last push that named the path); an object is evicted only when
   nothing retained in the bucket references it and it is not under a pin;
   the object file is deleted with the row, and an object with no row is swept
@@ -394,7 +394,27 @@ For users: `odu web` serves runs and buckets on one page behind GitHub sign-in;
 agent-distro CI through the domain. The pod (F12) runs master `3d66833` (#140; #141 not yet deployed),
 tailnet-only (Serve), with the cache public through Cloudflare.
 
-### PR 3c: GC and pins in every store
+### PR 3c: object storage
+
+> **Docs:** Point a bucket's objects at any S3-compatible store — Cloudflare
+> R2, Garage or versitygw on the same machine, AWS S3 — or keep them on local
+> disk. The same cache serves from either, and adding another store is one
+> `ObjectStore` implementation.
+
+What lands:
+- An S3 implementation of `ObjectStore` on Bun's built-in S3 client, beside
+  the disk one, selected per bucket by the module (`services.odu.cache`) and
+  the bucket page; credentials from a file, never the database.
+- The SAME store contract suite run against every implementation: disk, and
+  an S3 fixture (versitygw or Garage) started in CI, so the local fixture
+  exercises real S3 semantics (atomic put, list, delete, ranges, head).
+- The cache row only chooses the implementation; no route learns a second
+  dialect. Local disk stays a first-class store, not a fallback.
+
+State of master after merge: a bucket's objects live on local disk or on any
+S3-compatible store, with one contract proving both.
+
+### PR 3c2: GC and pins in every store
 
 > **Docs:** Every bucket keeps what is still wanted and nothing else, on any
 > store: local disk, any S3-compatible service (R2, Garage, versitygw, AWS), or
@@ -416,10 +436,8 @@ What lands:
   bucket's own rows) and the reference closure unchanged.
 - GC written ONLY against the `ObjectStore` interface (`list`/`delete`, and
   the live-rows re-check under the bucket write lock from #140), so every
-  store collects the same way. The store contract suite gains GC and pin
-  cases and runs against EVERY implementation: disk, plus an S3 fixture
-  (versitygw or Garage) in CI, which this PR adds as the S3 store's first
-  user. The S3 `ObjectStore` (Bun's built-in client) lands here.
+  store collects the same way. The store contract suite from PR 3c gains GC
+  and pin cases, run against every implementation (disk and the S3 fixture).
 - Deletion announces the URLs it removed through a cordis port; the
   cloudflare row provides it and purges them at the CDN; with no CDN the port
   does nothing. The cache row never names Cloudflare.
@@ -453,7 +471,7 @@ What lands:
   CDN's 404 short. A key rotation re-signs and rewrites every narinfo.
 - A bucket's substituter URL is its store's public URL when it has one. The
   cloudflare row binds the bucket domain to the R2 bucket (custom domain)
-  instead of the tunnel, and keeps the purge port from PR 3c.
+  instead of the tunnel, and keeps the purge port from PR 3c2.
 - On a store with no public URL (local disk, a private S3), odu serves the
   same layout byte for byte; switching store changes where reads come from,
   not what they read. Private buckets stay behind odu's auth.
@@ -591,11 +609,10 @@ file gets checks and cache pushes on every PR.
 Each is one adapter over the port PR 8 defines: a source event in, a status
 out. Nothing else changes.
 
-### PR 11: (folded into PR 3c, 3d and 3g)
+### PR 11: (moved earlier)
 
-Object storage, store-to-store migration and direct transfer moved earlier:
-GC and the S3 store are PR 3c, static public reads and migration are PR 3d,
-presigned uploads are PR 3g.
+Object storage is PR 3c; GC and pins on every store are PR 3c2; static public
+reads and store-to-store migration are PR 3d; presigned uploads are PR 3g.
 
 ### PR 12: Postgres
 
