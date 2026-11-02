@@ -1,6 +1,6 @@
 # Odu as a product: Nix cache + CI you run yourself
 
-Status: living, 2026-11-01. PR 0 through PR 3b are on master (see "Landed");
+Status: living, 2026-11-01. PR 0 through PR 3b, and PR 3e, are on master (see "Landed");
 the next PR is PR 4, teams. Decisions below were
 taken in conversation. There is no schedule: one phase is one PR, and the split
 is grounded in the source facts listed in "What the code is today".
@@ -385,10 +385,12 @@ nothing merges that a later PR has to finish. The order is a dependency order.
 | 2.5 — the web face has every verb | #136 `66462dd` | Every cache, auth and ci verb has a control on the board; contract 2.2. |
 | 3a — the cache serves itself | #138 `150ad5e` | Chunked push under a proxy's body cap; a bucket domain answered by `Host`; `@odu/cloudflare` (tunnel, routes, records) so `cache.kolu.dev` is live with no open port; odu's own CI pushes and pulls it; contract 2.3. |
 | 3b — the object cache | #139 `c81115a` | The pushed `.nar.zst` is kept and served with `Content-Length`/`Range`; `ObjectStore` with a contract suite; per-row compression; `CA:` proved from name, references and bytes; no Nix-store import, held rows or upstream fetch (3a's hold machinery is gone; `held`/`--wait` are deprecated no-ops); mount-first migration; constant memory per NAR. |
+| 3b fix — concurrent pushes | #140 `3d66833` | A staged NAR is claimed by atomic rename, so two pushers of one path never verify each other's bytes; chunked parts are owned by an `x-odu-upload` session; GC re-checks live rows under the bucket lock; contract 2.4. |
+| 3e — each row versions its own surface | #141 `08f0b2a` | Host contract 2.5 plus a version per row (`ci` 2.4, `cache` 3.0, `auth` 2.4, `cloudflare` 2.4) on the identity cell; `admitService` admits on the rows a client declares (`CI_NEEDS` for runs-only readers like kolu); each row's version is held to an append-only fingerprint ledger by `just test`; cache 3.0 removed `held` and `--wait`. |
 
 For users: `odu web` serves runs and buckets on one page behind GitHub sign-in;
 `cache.kolu.dev` is the `kolu` bucket, pushed by odu, kolu, olai and
-agent-distro CI through the domain. The pod (F12) runs master `c81115a`,
+agent-distro CI through the domain. The pod (F12) runs master `3d66833` (#140; #141 not yet deployed),
 tailnet-only (Serve), with the cache public through Cloudflare.
 
 ### PR 3c: object storage
@@ -411,33 +413,6 @@ the implementation; no route learns a second dialect.
 Presigned PUT/GET from the object store; the cache row handles narinfos and
 signing, not bytes. The push client and the NAR route switch to the signed
 URLs when the bucket's store supports them.
-
-### PR 3e: Each row versions its own surface
-
-> **Docs:** A client that uses only CI runs is never refused because the cache,
-> auth or cloudflare row moved. Each row publishes its own contract version, and
-> a client is admitted per row.
-
-**Decision.** The service contract version covers only the host's own verbs and
-row admission. Every row — `ci`, `cache`, `auth`, `cloudflare` — publishes its
-own contract version for its verbs, resources and routes. A client declares
-which row surfaces it needs and at which major, and is admitted per row.
-
-**What lands.** Per-row contract constants and admission in `@odu/cordis`; a
-hello/admission exchange that lists the row surfaces and their versions; the
-CLI, MCP and web clients declaring their needs; kolu's `@kolu/surface-remote`
-declaring `ci` only; docs and fence tests. Migration note: today's single
-number becomes the host's version, and each row starts at the major it already
-speaks.
-
-A client that needs a row surface the daemon did not mount is REFUSED with that
-fact — never admitted without the row it asked for. The deprecated `held`
-surface leaves at the cache row's own 3.0, not the host's version.
-
-**Not in scope.** Any row behaviour change.
-
-Placed after the two object-store phases because those are storage-only and do
-not change a client's row needs, while this one changes admission for every row.
 
 ### PR 4: teams
 
