@@ -154,9 +154,6 @@ export interface PushSummary {
    *  recipe, and its references are recipes. */
   skippedDerivation: readonly string[];
   alreadyPresent: number;
-  /** DEPRECATED server-side state: an older 2.3 daemon answered 202. Reported,
-   *  not failed; today's daemon records immediately. */
-  held: readonly { path: string; reason: string }[];
   failed: number;
   /** One line per failure, for a caller that wants to say which paths did not
    *  make it. */
@@ -267,7 +264,6 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   let pushed = 0;
 
   /** Upload one dependency depth, reporting refusals as they happen. */
-  const held: { path: string; reason: string }[] = [];
   const runWave = async (wave: readonly string[]): Promise<void> => {
     const queue = [...wave];
     const worker = async (): Promise<void> => {
@@ -279,11 +275,6 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         const outcome = await uploadOne(base, headers, entry, platform, attempts, say, {
           partSize,
         });
-        if (outcome.ok === "held") {
-          held.push({ path: storePath, reason: outcome.reason });
-          say(`⏸ ${storePath} held by the older server: ${outcome.reason}`);
-          continue;
-        }
         if (outcome.ok) {
           pushed += 1;
           say(`✅ ${storePath} stored`);
@@ -306,7 +297,6 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     skippedUpstream: answer.skippedUpstream.length,
     skippedDerivation,
     alreadyPresent,
-    held,
     failed: failures.length,
     failures,
     pageUrl: `${board.replace(/\/$/, "")}/#/cache/${encodeURIComponent(resolved.name)}`,
@@ -397,8 +387,6 @@ function asError(err: unknown): Error {
 
 type UploadOutcome =
   | { ok: true }
-  /** An older 2.3 daemon still holds this path for a reference. */
-  | { ok: "held"; reason: string }
   | { ok: false; message: string };
 
 type NarUpload =
@@ -631,18 +619,13 @@ async function uploadOne(
       lastMessage = infoResponse.message;
       continue;
     }
-    // 202 IS HELD ON AN OLDER SERVER, not stored. The 2.3 client keeps working
-    // against a daemon that still answers the old hold protocol.
-    if (infoResponse.status === 202) {
-      return {
-        ok: "held",
-        reason: (await infoResponse.text()).trim() || "the older server holds this path",
-      };
-    }
-    if (infoResponse.ok) return { ok: true };
+    // 200 IS STORED, and it is the only answer that is. Any other status —
+    // a success code this pusher does not know included — is a refusal like any
+    // other, said with the server's own words and not repeated.
+    if (infoResponse.status === 200) return { ok: true };
     const said = await infoResponse.text();
     lastMessage = `narinfo upload answered ${infoResponse.status}: ${said}`;
-    if (!worthRetrying(infoResponse.status)) break;
+    if (infoResponse.ok || !worthRetrying(infoResponse.status)) break;
   }
   return { ok: false, message: lastMessage };
 }
