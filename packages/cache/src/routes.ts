@@ -40,11 +40,11 @@
  * that will not read it.
  */
 
-import { open } from "node:fs/promises";
 import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { ClaimedRoutes } from "@odu/cordis/services";
 import { type Cache, type NarSource } from "./cache";
+import type { ByteRange } from "./objectStore";
 import {
   CACHE_MOUNT,
   CACHE_ROUTE_PATHS,
@@ -69,54 +69,6 @@ import {
   type CacheBucketIdentity,
 } from "./surface";
 
-
-/**
- * A FILE AS A PULL STREAM, 64 KiB per read.
- *
- * NEVER hand a `BunFile` to `HttpServerResponse.raw`: the Node adapter odu web
- * runs does not write that body, so the response headers go out and the socket
- * then waits for ever (the pod's post-migration hang). This reads with the same
- * `open`/`handle.read` loop the FIFO path uses, so the adapter sees a stream it
- * knows; `Content-Length`/`Content-Range` are the route's own arithmetic.
- */
-function fileBody(path: string, start: number, length: number): ReadableStream<Uint8Array> {
-  let handle: Awaited<ReturnType<typeof open>> | null = null;
-  let position = start;
-  let left = length;
-  return new ReadableStream({
-    async pull(controller) {
-      try {
-        handle ??= await open(path, "r");
-        if (left <= 0) {
-          await handle.close();
-          handle = null;
-          controller.close();
-          return;
-        }
-        const size = Math.min(64 * 1024, left);
-        const buffer = new Uint8Array(size);
-        const { bytesRead } = await handle.read(buffer, 0, size, position);
-        if (bytesRead === 0) {
-          await handle.close();
-          handle = null;
-          controller.error(new Error(`${path} ended ${left} bytes early`));
-          return;
-        }
-        position += bytesRead;
-        left -= bytesRead;
-        controller.enqueue(bytesRead === size ? buffer : buffer.subarray(0, bytesRead));
-      } catch (err) {
-        await handle?.close().catch(() => {});
-        handle = null;
-        controller.error(err);
-      }
-    },
-    async cancel() {
-      await handle?.close().catch(() => {});
-      handle = null;
-    },
-  });
-}
 
 /** Count what actually crossed to the adapter, and report it once — at close,
  *  at cancellation, or at an error. A log at response-build time is intent, not
@@ -157,10 +109,32 @@ function observedBody(
 }
 
 /**
- * SERVE THE BYTES. A kept file answers with the file itself, `Content-Length`
- * and `Accept-Ranges`; a `Range` is sliced here, so a resumed or ranged Nix
- * fetch never re-dumps the path. Only an object whose file is not there yet
- * falls back to the FIFO stream, which has no length and is logged as such.
+ * THE `Range` HEADER, against an object of `size` bytes: the whole object
+ * (`null`), the inclusive range asked for, or `"unsatisfiable"` (416).
+ */
+function rangeOf(header: string | undefined, size: number): ByteRange | null | "unsatisfiable" {
+  const range = /^bytes=(\d*)-(\d*)$/.exec(header ?? "");
+  if (range === null) return null;
+  const first = range[1] === "" ? null : Number(range[1]);
+  const last = range[2] === "" ? null : Number(range[2]);
+  // `bytes=-` names no bytes, and a zero-length suffix names none either.
+  if (first === null && (last === null || last === 0)) return "unsatisfiable";
+  // `bytes=-N` is the LAST N bytes, not "end at N". An open-ended request at or
+  // past the size has nothing to give.
+  if (first !== null && first >= size) return "unsatisfiable";
+  const start = first ?? (last === null ? 0 : Math.max(0, size - last));
+  const end = Math.min(first === null ? size - 1 : (last ?? size - 1), size - 1);
+  if (first !== null && last !== null && (first > last || end < start)) return "unsatisfiable";
+  return { start, end };
+}
+
+/**
+ * SERVE THE BYTES — ONE PATH, whichever store keeps them. A kept object answers
+ * with its length and `Accept-Ranges`, and a `Range` is the route's arithmetic
+ * and the store's read: a disk file read from an offset, a ranged GET on S3. The
+ * store streams; nothing here buffers. Only a row whose object is not there yet
+ * falls back to the old store's FIFO stream, which has no length and is logged
+ * as such.
  */
 function narResponse(
   cache: Cache,
@@ -169,11 +143,11 @@ function narResponse(
   file: string,
   source: NarSource,
   headers: Record<string, string>,
-): HttpServerResponse.HttpServerResponse {
+): Effect.Effect<HttpServerResponse.HttpServerResponse> {
   const started = performance.now();
   const at = file.indexOf(".nar");
   const hash = at === -1 ? file : file.slice(0, at);
-  const served = (kind: "file" | "object" | "transition") =>
+  const served = (kind: "object" | "transition") =>
     (bytes: number, cancelled: boolean, error: string | null): void =>
       cache.log("cache.nar.served", {
         bucket,
@@ -185,70 +159,40 @@ function narResponse(
         cancelled,
         ...(error === null ? {} : { error }),
       });
-  if (source.kind === "stream" || source.kind === "legacy") {
-    const kind = source.kind === "stream" ? "object" : "transition";
-    return HttpServerResponse.stream(
+  const streamed = (
+    body: ReadableStream<Uint8Array>,
+    kind: "object" | "transition",
+    options: { status?: number; headers: Record<string, string> },
+  ): HttpServerResponse.HttpServerResponse =>
+    HttpServerResponse.stream(
       Stream.fromReadableStream({
-        evaluate: () =>
-          observedBody(source.stream, (bytes, cancelled, error) =>
-            served(kind)(bytes, cancelled, error),
-          ),
+        evaluate: () => observedBody(body, served(kind)),
         onError: (err) => err,
       }),
-      {
-        contentType: "application/x-nix-nar",
-        headers: source.kind === "stream" ? { ...headers, "content-length": String(source.size) } : headers,
-      },
+      { contentType: "application/x-nix-nar", ...options },
     );
+  if (source.kind === "legacy") {
+    return Effect.succeed(streamed(source.stream, "transition", { headers }));
   }
-  const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers["range"] ?? "");
-  if (range !== null) {
-    const first = range[1] === "" ? null : Number(range[1]);
-    const last = range[2] === "" ? null : Number(range[2]);
-    // `bytes=-` names no bytes, and a zero-length suffix names none either.
-    if (first === null && (last === null || last === 0)) {
-      return HttpServerResponse.empty({ status: 416 });
-    }
-    // `bytes=-N` is the LAST N bytes, not "end at N". An open-ended request
-    // at or past the size has nothing to give.
-    if (first !== null && first >= source.size) return HttpServerResponse.empty({ status: 416 });
-    const start = first ?? (last === null ? 0 : Math.max(0, source.size - last));
-    const end = first === null ? source.size - 1 : (last ?? source.size - 1);
-    const bounded = Math.min(end, source.size - 1);
-    if (first !== null && last !== null && (first > last || bounded < start)) {
-      return HttpServerResponse.empty({ status: 416 });
-    }
-    const bytes = bounded - start + 1;
-    return HttpServerResponse.stream(
-      Stream.fromReadableStream({
-        evaluate: () =>
-          observedBody(fileBody(source.path, start, bytes), served("file")),
-        onError: (err) => err,
-      }),
-      {
-        status: 206,
+  const range = rangeOf(request.headers["range"], source.size);
+  if (range === "unsatisfiable") return Effect.succeed(HttpServerResponse.empty({ status: 416 }));
+  return Effect.map(
+    Effect.promise(() => source.read(range ?? undefined)),
+    (body) => {
+      // GONE BETWEEN THE HEAD AND THE READ (a collection won the race): the
+      // honest answer is the one a missing object always gets.
+      if (body === null) return HttpServerResponse.empty({ status: 404 });
+      const length = range === null ? source.size : range.end - range.start + 1;
+      return streamed(body, "object", {
+        ...(range === null ? {} : { status: 206 }),
         headers: {
           ...headers,
           "content-type": "application/x-nix-nar",
-          "content-length": String(bytes),
-          "content-range": `bytes ${start}-${bounded}/${source.size}`,
+          "content-length": String(length),
           "accept-ranges": "bytes",
+          ...(range === null ? {} : { "content-range": `bytes ${range.start}-${range.end}/${source.size}` }),
         },
-      },
-    );
-  }
-  return HttpServerResponse.stream(
-    Stream.fromReadableStream({
-      evaluate: () => observedBody(fileBody(source.path, 0, source.size), served("file")),
-      onError: (err) => err,
-    }),
-    {
-      headers: {
-        ...headers,
-        "content-type": "application/x-nix-nar",
-        "content-length": String(source.size),
-        "accept-ranges": "bytes",
-      },
+      });
     },
   );
 }
@@ -675,7 +619,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         if (!admitted.ok) return admitted.response;
         const source = yield* Effect.promise(() => cache.narSource(admitted.bucket, file));
         if (source === null) return HttpServerResponse.empty({ status: 404 });
-        return narResponse(
+        return yield* narResponse(
           cache,
           request,
           admitted.bucket.name,
@@ -773,7 +717,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         if (!admitted.ok) return admitted.response;
         const source = yield* Effect.promise(() => cache.narSource(admitted.bucket, file));
         if (source === null) return HttpServerResponse.empty({ status: 404 });
-        return narResponse(
+        return yield* narResponse(
           cache,
           request,
           admitted.bucket.name,

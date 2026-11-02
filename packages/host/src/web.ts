@@ -114,7 +114,7 @@ import { bucketDomainGate } from "./bucketDomain";
 import { reservedPaths } from "./reserved";
 import { servingOptions } from "./serving";
 import { ciRowRecord } from "@odu/ci/row";
-import { cacheRowRecord } from "@odu/cache/server";
+import { cacheRowRecord, readCacheStores, storeConfigMessage } from "@odu/cache/server";
 import { CACHE_KEY } from "@odu/cache/surface";
 import type { RowNeeds } from "@odu/service-client/surface";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
@@ -267,6 +267,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     return 1;
   }
 
+  // THE CACHE ROW'S STORES — the operator's declarations and their credentials
+  // files, read here once and handed to the row, which builds and holds them.
+  const cacheStores = readCacheStores(process.env);
+  if (cacheStores.kind === "refused") {
+    process.stderr.write(`${storeConfigMessage(cacheStores.refusal)}\n`);
+    return 1;
+  }
+
   // Claimed FIRST, so a launcher that lost the race never binds the port. The
   // framework's own gate: one atomic link, a liveness-proved holder, and a
   // stale gate reaped rather than waited on.
@@ -310,7 +318,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // and OFFERS it, so its members keep the bare `surface/runs/...` tags.
   const ROWS: ReadonlyArray<Row> = [
     ciRowRecord,
-    cacheRowRecord,
+    cacheRowRecord(cacheStores.stores),
     // THE DOOR, when this daemon has one. A GitHub App configured means the row
     // is mounted, and with none configured nothing asks who is calling — which
     // is loopback mode, unchanged.

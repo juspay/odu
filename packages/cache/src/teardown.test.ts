@@ -188,7 +188,7 @@ describe("the cache row's teardown", () => {
         }),
       }) as unknown as RootedSurfacesRuntime<never>),
     );
-    await run(mountPlugin(host, cacheRow));
+    await run(mountPlugin(host, cacheRow(new Map())));
 
     // NO REQUEST: the row's scoped fiber must put the object.
     const deadline = Date.now() + 10_000;
@@ -243,7 +243,7 @@ describe("the cache row's teardown", () => {
       );
 
       await run(mountPlugin(host, siblingRow));
-      await run(mountPlugin(host, cacheRow));
+      await run(mountPlugin(host, cacheRow(new Map())));
 
       // ONE attach, so the publish half is wired before anything moves.
       expect(layers.length).toBe(1);

@@ -45,7 +45,12 @@ async function row(publicOrigin: string): Promise<{
     rootToken: "root-token",
   });
   trash.push(cache);
-  const server = cacheServer({ cache, publicOrigin, mount: "/cache" });
+  const server = cacheServer({
+    cache,
+    publicOrigin,
+    mount: "/cache",
+    stores: [{ name: "local", kind: "local" }],
+  });
   const published = new Map<string, CacheBucket>();
   server.attach({
     buckets: {
