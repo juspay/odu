@@ -34,6 +34,10 @@ Feature: The cache is a row of the board
     And the page shows its public key
     And the page offers the netrc lines a Nix client needs
     And the pushed path is listed
+    # WANTED, NOT READ: retention counts from the last push or `missing` query
+    # that named this path, and the reads beside it never move it. The number
+    # GC decides by is the one the page prints.
+    And that path says when it was last wanted
     And there should be no page errors
 
   Scenario: The filter narrows a bucket's paths

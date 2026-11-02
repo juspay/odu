@@ -1435,9 +1435,9 @@
   .paths .path { overflow-x: auto; white-space: nowrap; font-size: 0.8rem; }
 
   /* A ROW'S ADMINISTRATION — the controls a role draws below what everyone
-     reads. One grammar for every section (a bucket's tokens, pin, GC and stats;
-     the people page; the runs' machines and maintenance): a small heading, the
-     fields, one button, and the answer under it. */
+     reads. One grammar for every section (a bucket's retention, tokens, pins,
+     GC and stats; the people page; the runs' machines and maintenance): a
+     small heading, the fields, one button, and the answer under it. */
   .cache-create,
   .admin-section {
     display: grid;
@@ -1452,8 +1452,10 @@
   .control-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .field-inline { display: flex; align-items: center; gap: 0.5rem; font: 0.85rem var(--mono); }
   .tokens,
+  .pins,
   .people { list-style: none; margin: 0; padding: 0; }
   .tokens li,
+  .pins li,
   .people li {
     display: flex;
     flex-wrap: wrap;
@@ -1463,6 +1465,9 @@
     padding: 0.4rem 0;
     border-top: 1px solid var(--line);
   }
+  /* A pin is read as two lines — what it is called, and the roots it holds —
+     so its half of the row stacks while the row itself stays one. */
+  .pins .pin { display: grid; gap: 0.2rem; min-width: 0; }
   .stats { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.75rem; margin: 0; }
   .stats dt { font: 600 0.8rem var(--mono); }
   .stats dd { margin: 0; }

@@ -30,8 +30,11 @@
  * read it — so a member's view asks them without holding anything.
  *
  * Every OTHER verb of the row has a control here too, because the board does
- * everything the row's API does: create (with the upstream switch), and per
- * bucket mint / list / revoke a token, pin a closure, run GC, read stats. They
+ * everything the row's API does, and for most of it the board is the only
+ * door a person has: create (with the upstream switch), and per bucket set
+ * the retention, mint / list / revoke a token, pin a closure and list or
+ * unpin the pins, see what the next collection would take before running it,
+ * run GC, read stats. They
  * are DRAWN for the row's floor (the shell's `canAdminister`) and REFUSED by
  * the row on its own — never one check standing in for the other.
  */
@@ -54,12 +57,16 @@ import {
 } from "solid-js";
 import {
   type CacheBucket,
+  type CacheGcPlan,
   type CachePath,
+  type CachePin,
   type CacheStats,
   type CacheToken,
   oduCacheSurface,
   PATH_PAGE_SIZE,
   ACTION_REF_PLACEHOLDER,
+  DEFAULT_RETENTION_DAYS,
+  GC_PREVIEW_PATHS,
   actionsPushBlock,
   pushBlock,
   useBlock,
@@ -209,12 +216,15 @@ export const UPSTREAM_HINT =
  *
  * A name, and the creation facts a deployment needs — the upstream switch, on
  * by default, and WHERE its objects live when this daemon declared more than
- * its own disk — beside the two it is created with (public, ninety days of
- * retention). The stores are the row's `stores` cell, drawn as the row names
- * them: the face spells no store, not even the default — the cell marks it,
- * and choosing it sends nothing, so the row's own default applies. The button is ENABLED whenever this control is drawn: the name
- * is sent as typed, empty included, and the ROW's refusal is what the person
- * reads — one rule, in one place, rather than a face's copy of it.
+ * its own disk — beside the one it is created with (public). The stores are
+ * the row's `stores` cell, drawn as the row names them: the face spells no
+ * store, not even the default — the cell marks it, and choosing it sends
+ * nothing, so the row's own default applies. Retention is spelled nowhere
+ * here for exactly that reason, now that it may be: absent is the row's
+ * ninety days, and the bucket page is where a deployment changes its mind.
+ * The button is ENABLED whenever this control is drawn: the name is sent as
+ * typed, empty included, and the ROW's refusal is what the person reads — one
+ * rule, in one place, rather than a face's copy of it.
  */
 function CreateBucket(
   props: AdminProps & { onCreated: (bucket: string | null) => void },
@@ -237,7 +247,9 @@ function CreateBucket(
         rootToken: props.rootToken(),
         name: name().trim(),
         public: true,
-        retentionDays: 90,
+        // RETENTION IS NOT A CREATION FORM'S BUSINESS: absent is the row's
+        // own default, and `bucket.retention` on the bucket page is where a
+        // deployment that wants another number says so.
         // ON is the row's own default (nixpkgs' key), so it is left ABSENT;
         // OFF is the empty list, exactly what `--no-upstream` sends.
         ...(upstream() ? {} : { upstreamKeys: [] }),
@@ -700,6 +712,13 @@ function BucketPage(
               domain={bucket()?.domain ?? null}
               tunnelRow={props.tunnelRow}
             />
+            <BucketRetention
+              client={props.client}
+              call={props.call}
+              rootToken={props.rootToken}
+              name={name}
+              retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
+            />
             <BucketAdmin
               client={props.client}
               call={props.call}
@@ -756,6 +775,9 @@ function BucketPage(
                     <span>{bytes(path.narSize)}</span>
                     <span>{ago(path.created, props.now)}</span>
                     <span>{path.hits} reads</span>
+                    {/* WANTED, not read: retention counts from here, and the
+                        reads beside it never move it. */}
+                    <span>wanted {ago(path.lastWanted, props.now)}</span>
                   </span>
                 </li>
               )}
@@ -835,7 +857,7 @@ function BucketAdmin(props: TokenProps): JSX.Element {
   return (
     <div class="bucket-admin">
       <BucketTokens {...props} />
-      <BucketPin {...props} />
+      <BucketPins {...props} />
       <BucketGc {...props} />
       <BucketStats {...props} />
     </div>
@@ -914,6 +936,81 @@ function BucketDomain(
           </button>
         </Show>
       </div>
+      <Answer control={action} />
+    </section>
+  );
+}
+
+/**
+ * HOW LONG A PATH OUTLIVES WANTING — the bucket's retention, in days.
+ *
+ * It is the one creation fact a bucket is allowed to change its mind about,
+ * and the number the facts line at the top of this page prints: the row
+ * republishes, so setting it here moves that line without this control
+ * holding a copy of it. ZERO is a real answer rather than an empty box — keep
+ * only what a reference or a pin holds, which is what a scratch bucket wants —
+ * so the field offers it and the sentence below says which it was.
+ */
+function BucketRetention(
+  props: AdminProps & { name: string; retentionDays: number },
+): JSX.Element {
+  const [typed, setTyped] = createSignal(String(props.retentionDays));
+  createEffect(
+    on(() => props.retentionDays, (days) => setTyped(String(days)), { defer: true }),
+  );
+  /** WHOLE NUMBERS ONLY, because this one field cannot be sent as typed: a box
+   *  holding "" or "two weeks" fails the contract's own encoding and never
+   *  reaches the row to be refused in words. The RANGE stays the row's — a
+   *  negative is a number, so it travels and comes back refused where every
+   *  other bad input does. */
+  const days = createMemo<number | null>(() => {
+    const parsed = Number(typed().trim());
+    return typed().trim() === "" || !Number.isInteger(parsed) ? null : parsed;
+  });
+  const action = createControl(props.call);
+  const apply = (): void => {
+    const asked = days();
+    if (asked === null) return;
+    action.run(
+      props.client.procedures.bucket.retention({
+        rootToken: props.rootToken(),
+        bucket: props.name,
+        retentionDays: asked,
+      }),
+      (row) =>
+        row.retentionDays === 0
+          ? `${row.name} now keeps only what a reference or a pin holds.`
+          : `${row.name} now keeps a path ${row.retentionDays} day${row.retentionDays === 1 ? "" : "s"} after the last time anything wanted it.`,
+    );
+  };
+  return (
+    <section class="admin-section" aria-label="retention">
+      <h3>Retention</h3>
+      <p class="hint">
+        Days a path survives from the last time anything wanted it — a push, or
+        a <code>missing</code> query that named it. Reads do not count: they are
+        leaving odu, so the busiest paths would be the first to look idle.
+      </p>
+      <label class="field-inline">
+        <span>days</span>
+        <input
+          type="number"
+          class="input"
+          min="0"
+          step="1"
+          aria-label="retention days"
+          value={typed()}
+          onInput={(event) => setTyped(event.currentTarget.value)}
+        />
+      </label>
+      <button
+        type="button"
+        class="btn btn-primary"
+        disabled={action.busy() || days() === null}
+        onClick={apply}
+      >
+        {action.busy() ? "working…" : "Set retention"}
+      </button>
       <Answer control={action} />
     </section>
   );
@@ -1076,11 +1173,53 @@ function pathsOf(raw: string): string[] {
   return raw.split(/\s+/).filter((one) => one !== "");
 }
 
-/** `pin.create` — keep a closure out of GC, by name. */
-function BucketPin(props: AdminProps & { name: string }): JSX.Element {
+/**
+ * THE PINS OF ONE BUCKET — `pin.create`, `pin.list`, `pin.delete`.
+ *
+ * A pin is the one thing on this page that CONTRADICTS a collection, so it is
+ * the one a person must be able to audit: a name on its own says that
+ * something is held, never what, and a pin nobody can read is a pin nobody
+ * dares remove. So the list names each pin's roots beside the button that
+ * takes it away, and creating or unpinning asks the row again rather than
+ * patching the list this page is holding.
+ */
+function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Element {
   const [pin, setPin] = createSignal("");
   const [paths, setPaths] = createSignal("");
   const action = createControl(props.call);
+
+  /**
+   * THE LIST FOLLOWS THE CREDENTIAL, not only the bucket.
+   *
+   * On a daemon with no door the root token is a box this page asks the local
+   * owner to fill, and a list keyed on the bucket alone reads once — before
+   * anything is typed — and then shows "the root token does not match" for
+   * as long as the page is open. Keying on the token too means the pins
+   * appear the moment the credential is right. For a signed-in admin the
+   * token is always the empty string and this is one read, as before.
+   */
+  const [pins, { refetch }] = createResource(
+    () => [props.name, props.rootToken()] as const,
+    async ([bucket]): Promise<Reading<readonly CachePin[]>> => {
+      try {
+        const answer = await props.call(
+          props.client.procedures.pin.list({ rootToken: props.rootToken(), bucket }),
+        );
+        return { ok: true, value: answer.pins };
+      } catch (err) {
+        return { ok: false, message: refusalText(err) };
+      }
+    },
+  );
+  const listed = createMemo<readonly CachePin[]>(() => {
+    const answer = pins();
+    return answer !== undefined && answer.ok ? answer.value : [];
+  });
+  const listFault = createMemo<string | null>(() => {
+    const answer = pins();
+    return answer === undefined || answer.ok ? null : answer.message;
+  });
+
   const create = (): void => {
     // Sent as typed, empty included: the ROW refuses a nameless or pathless
     // pin in its own words, and that is what the person reads.
@@ -1096,13 +1235,34 @@ function BucketPin(props: AdminProps & { name: string }): JSX.Element {
       (answer) => {
         setPin("");
         setPaths("");
-        return `Pinned ${answer.name}: ${answer.rootPaths.length} path${answer.rootPaths.length === 1 ? "" : "s"} in its closure are kept from GC.`;
+        return answer.rootPaths.length === 1
+          ? `Pinned ${answer.name}: 1 path in its closure is kept from GC.`
+          : `Pinned ${answer.name}: ${answer.rootPaths.length} paths in its closure are kept from GC.`;
       },
+      () => void refetch(),
     );
   };
+  const unpin = (name: string): void => {
+    action.run(
+      props.client.procedures.pin.delete({
+        rootToken: props.rootToken(),
+        bucket: props.name,
+        name,
+      }),
+      (answer) =>
+        `Unpinned ${answer.name}; its closure is now retention's to collect like any other path.`,
+      () => void refetch(),
+    );
+  };
+
   return (
-    <section class="admin-section" aria-label="pin">
-      <h3>Pin a closure</h3>
+    <section class="admin-section" aria-label="pins">
+      <h3>Pins</h3>
+      <p class="hint">
+        A pin holds its roots and whatever they reference inside this bucket
+        against every collection, however long nobody wants them, until it is
+        removed here.
+      </p>
       <label class="search">
         <span class="sr-only">pin name</span>
         <input
@@ -1127,19 +1287,123 @@ function BucketPin(props: AdminProps & { name: string }): JSX.Element {
         {action.busy() ? "pinning…" : "Pin closure"}
       </button>
       <Answer control={action} />
+      <Show when={listFault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show
+        when={listed().length > 0}
+        fallback={
+          <Show when={listFault() === null}>
+            <p class="hint">{pins.loading ? "reading…" : "Nothing is pinned in this bucket."}</p>
+          </Show>
+        }
+      >
+        <ul class="pins">
+          <For each={listed()}>
+            {(held) => (
+              <li>
+                <span class="pin">
+                  <span>
+                    <code>{held.name}</code>
+                    <span class="hint">
+                      {" "}
+                      {held.rootPaths.length} path
+                      {held.rootPaths.length === 1 ? "" : "s"} in its closure · pinned{" "}
+                      {ago(held.created, props.now)}
+                    </span>
+                  </span>
+                  {/* WHAT IT HOLDS, rather than that it holds something: the
+                      roots are the whole answer to "may this one go?". */}
+                  <span class="bucket-facts">
+                    <For each={held.rootPaths}>{(root) => <code>{root}</code>}</For>
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  class="text-action"
+                  aria-label={`unpin ${held.name}`}
+                  disabled={action.busy()}
+                  onClick={() => unpin(held.name)}
+                >
+                  unpin
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
     </section>
   );
 }
 
-/** `gc.run`, for this bucket. */
-function BucketGc(props: AdminProps & { name: string }): JSX.Element {
+/**
+ * `gc.plan` AND `gc.run`, for this bucket — the dry run beside the collection.
+ *
+ * The question a person asks at this button is "what am I about to lose", and
+ * a report answering it afterwards is an answer that arrived too late. So the
+ * plan is read when the page opens and again after every collection: the count
+ * and the total are the whole truth, the paths under them are as much of it as
+ * anybody reads first, and they come oldest want first, so the top line is the
+ * first to go.
+ */
+function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Element {
   const action = createControl(props.call);
+  /**
+   * THE DRY RUN IS ASKED FOR, NEVER TAKEN ON ARRIVAL.
+   *
+   * The source is null until the button is pressed, which is what keeps this
+   * resource from firing at mount — and at mount, on a daemon with no door,
+   * the root token is still an empty box, so an eager plan greeted every
+   * local owner with "the root token does not match" before they had typed
+   * anything. A question nobody asked must not answer in red.
+   */
+  const [asked, setAsked] = createSignal(0);
+  const [plan, { refetch }] = createResource(
+    () => (asked() === 0 ? null : ([props.name, asked()] as const)),
+    async ([bucket]): Promise<Reading<CacheGcPlan>> => {
+      try {
+        return {
+          ok: true,
+          value: await props.call(
+            props.client.procedures.gc.plan({ rootToken: props.rootToken(), bucket }),
+          ),
+        };
+      } catch (err) {
+        return { ok: false, message: refusalText(err) };
+      }
+    },
+  );
+  /** Ask for it: the button, and what a collection does to its own answer —
+   *  but only when somebody had asked, since a collection must not turn a
+   *  silent section into one. */
+  const askAgain = (): void => {
+    if (asked() === 0) setAsked(1);
+    else void refetch();
+  };
+  /** This bucket's share of the plan. A plan that does not mention it has
+   *  nothing to say about it, which is not the same as not having answered. */
+  const next = createMemo<CacheGcPlan["buckets"][number] | null>(() => {
+    const answer = plan();
+    if (answer === undefined || !answer.ok) return null;
+    return answer.value.buckets.find((row) => row.bucket === props.name) ?? null;
+  });
+  const planFault = createMemo<string | null>(() => {
+    const answer = plan();
+    return answer === undefined || answer.ok ? null : answer.message;
+  });
   const collect = (): void => {
     action.run(
       props.client.procedures.gc.run({ rootToken: props.rootToken(), bucket: props.name }),
       (report) =>
         `Collected: evicted ${report.evicted} path${report.evicted === 1 ? "" : "s"}` +
-        `${report.kept > 0 ? ` (${report.kept} kept by another root)` : ""}, freed ${bytes(report.bytes)}.`,
+        `${report.kept > 0 ? ` (${report.kept} kept by another root)` : ""}, freed ${bytes(report.bytes)}` +
+        // The objects no row ever named — a put whose record never landed.
+        // They are bytes nothing on this page could list, so the one moment
+        // they are visible is the pass that swept them.
+        `${report.orphans > 0 ? ` and ${report.orphans} orphaned object${report.orphans === 1 ? "" : "s"}` : ""}.`,
+      // WHATEVER THE COLLECTION ANSWERED, a plan somebody asked for is now a
+      // guess — so it is asked again, and a section nobody asked stays quiet.
+      () => {
+        if (asked() !== 0) void refetch();
+      },
     );
   };
   return (
@@ -1148,10 +1412,48 @@ function BucketGc(props: AdminProps & { name: string }): JSX.Element {
       <p class="hint">
         Evicts what retention expired AND nothing retained references AND no pin holds.
       </p>
-      <button type="button" class="btn" disabled={action.busy()} onClick={collect}>
-        {action.busy() ? "collecting…" : "Run GC"}
-      </button>
+      <div class="control-row">
+        <button type="button" class="btn" disabled={action.busy()} onClick={collect}>
+          {action.busy() ? "collecting…" : "Run GC"}
+        </button>
+        <button type="button" class="btn" disabled={plan.loading} onClick={askAgain}>
+          {plan.loading ? "counting…" : "Dry run"}
+        </button>
+      </div>
       <Answer control={action} />
+      <Show when={planFault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={next()}>
+        {(would) => (
+          <>
+            <p class="hint">
+              {would().evicted === 0
+                ? "The next collection would take nothing here: every path is retained, referenced or pinned."
+                : `The next collection would take ${would().evicted} path${would().evicted === 1 ? "" : "s"} and free ${bytes(would().bytes)}, leaving ${would().remaining} path${would().remaining === 1 ? "" : "s"} here.`}
+            </p>
+            <Show when={would().paths.length > 0}>
+              <ol class="paths">
+                <For each={would().paths}>
+                  {(path) => (
+                    <li>
+                      <code class="path">{path.storePath}</code>
+                      <span class="bucket-facts">
+                        <span>{bytes(path.bytes)}</span>
+                        <span>wanted {ago(path.lastWanted, props.now)}</span>
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ol>
+              <Show when={would().evicted > would().paths.length}>
+                <p class="hint">
+                  The {GC_PREVIEW_PATHS} oldest wants are listed; the count and the
+                  total above are the whole of it.
+                </p>
+              </Show>
+            </Show>
+          </>
+        )}
+      </Show>
     </section>
   );
 }
@@ -1202,14 +1504,20 @@ function BucketStats(props: AdminProps & { name: string; now: number }): JSX.Ele
               <span>{bytes(all().bytes)}</span>
               <span>{all().hits} reads</span>
               <span>
-                {all().lastAccessed === null
-                  ? "never read"
-                  : `last read ${ago(all().lastAccessed ?? 0, props.now)}`}
+                {all().lastWanted === null
+                  ? "nothing wanted yet"
+                  : `last wanted ${ago(all().lastWanted ?? 0, props.now)}`}
               </span>
             </dd>
           </dl>
         )}
       </Show>
+      {/* WANTED is not READ, and the difference is this bucket's whole
+          retention clock, so the page says which one the number is. */}
+      <p class="hint">
+        A path is wanted by a push or by a <code>missing</code> query that names
+        it — never by a read, which is a substitution leaving odu.
+      </p>
       <button type="button" class="text-action" disabled={stats.loading} onClick={() => refetch()}>
         refresh stats
       </button>
