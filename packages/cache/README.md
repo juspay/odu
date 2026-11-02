@@ -39,7 +39,9 @@ no row either — and it names it because this package IS a row: `./server` is a
 
 **It reads no environment** — the state root, the root token and the migration
 source arrive as arguments, because the one variable that must never be found by
-accident is a root token. The single exception is `./cli`, which is a process
+accident is a root token. The declared stores are read once by
+`readCacheStores`, which the HOST calls at boot and hands to `cacheRowRecord` —
+the row owns the reader; the host only passes what it read. The single exception is `./cli`, which is a process
 and therefore has an environment: which token to present, and where `~` is, are
 its caller's facts, not the engine's.
 
@@ -56,8 +58,11 @@ on the wire and `cache_bucket_create` to an agent.
 - **Narinfo signatures are computed at READ time.** A stored signature would
   silently survive a rotated key; one ed25519 sign per narinfo GET is nothing.
   The client's own signatures are kept beside the server's.
-- **Blobs are the compressed NAR the pusher sent.** `ObjectStore` keeps
-  `<narHash>.<ext>` under `<state>/cache/objects`; nothing is imported, and
+- **Blobs are the compressed NAR the pusher sent.** An `ObjectStore` keeps
+  `<bucket>/nar/<narHash>.<ext>` — the disk store under `<state>/cache/objects`,
+  an S3 store in its bucket — and each bucket names its store (`local` or one
+  declared in `$ODU_CACHE_STORES`). A put is put-if-absent, a read takes a
+  range, and the facts written at put are read back. Nothing is imported, and
   references are names in the narinfo. Dedup is per NarHash per bucket, and a
   twin row shares the object until GC deletes it with the last row.
 - **GC is the niks3 model.** An object is evicted only when retention has
