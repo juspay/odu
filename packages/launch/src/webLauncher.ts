@@ -171,9 +171,8 @@ export function contractVerdict(
   cell: ServiceCell,
   origin: string,
   needs: RowNeeds,
-  host?: string,
 ): string | null {
-  const verdict = admitService(cell, origin, needs, host);
+  const verdict = admitService(cell, origin, needs);
   return verdict.kind === "adopt" ? null : verdict.message;
 }
 
@@ -197,8 +196,6 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
      *  that dials more than once (the stdio bridge redials per connection), so
      *  the skew note is said once per daemon rather than once per redial. */
     warned?: Set<string>;
-    /** The host version this build reads — a test seam for a build ahead. */
-    host?: string;
   },
 ): Promise<C> {
   const handshakeMs = opts.handshakeMs ?? SERVICE_HANDSHAKE_MS;
@@ -226,7 +223,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
         "(the cell stream ended empty) — not an odu service this build can use",
     );
   }
-  const refusal = contractVerdict(cell, origin, opts.needs, opts.host);
+  const refusal = contractVerdict(cell, origin, opts.needs);
   if (refusal !== null) {
     // Disposed HERE, on the only path that refuses: the caller never sees this
     // connection, so nothing can leak the link's dial, ping and response fibers.
@@ -236,7 +233,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
   // ADOPTED BEHIND: said once, on stderr, so stdout and `-o json` are the
   // command's alone — and the "unknown" a newer verb would meet is explained
   // before it arrives.
-  const note = skewNote(cell, origin, opts.needs, opts.host);
+  const note = skewNote(cell, origin, opts.needs);
   const instance = `${cell.identity.pid}:${cell.identity.startedAt}`;
   if (note !== null && opts.warned?.has(instance) !== true) {
     opts.warned?.add(instance);
@@ -652,8 +649,6 @@ export async function connectOrStart(
     authorization?: (origin: string) => Promise<Record<string, string>>;
     /** See {@link adoptOrRefuse}: the daemons already warned about. */
     warned?: Set<string>;
-    /** The host version this build reads — a test seam for a build ahead. */
-    host?: string;
   },
 ): Promise<ServiceConnection> {
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
@@ -662,7 +657,6 @@ export async function connectOrStart(
   const adopt = {
     needs: opts.needs,
     ...(opts.warned === undefined ? {} : { warned: opts.warned }),
-    ...(opts.host === undefined ? {} : { host: opts.host }),
   };
   if (existing !== null) return adoptOrRefuse(existing, origin, adopt);
   const outcome = await ensureService({

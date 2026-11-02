@@ -327,7 +327,7 @@ describe("the row's word", () => {
   it("is the key the row's own record serves it under, and the roster lists that record", () => {
     // The record is the ROW's: the host names it whole and spells none of its
     // parts, so the key is asserted where the row declares it.
-    expect(source("packages/ci/src/row.ts")).toMatch(/\{\s*name:\s*CI_KEY,\s*key:\s*null,/);
+    expect(source("packages/ci/src/row.ts")).toMatch(/\{\s*name:\s*CI_ROW,\s*key:\s*null,/);
     expect(source("packages/cache/src/server.ts")).toMatch(
       /\{\s*name:\s*CACHE_KEY,\s*key:\s*CACHE_KEY,/,
     );

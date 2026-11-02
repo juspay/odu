@@ -164,7 +164,10 @@ export const HOST_CONTRACT_VERSION = "2.5";
  */
 export const CI_CONTRACT_VERSION = "2.4";
 
-/** The row name the runs are published under in the identity cell's `rows`. */
+/** THE RUNS' ROW NAME — the word the identity cell's `rows` publishes them
+ *  under, a face's needs name them by, and the plugin's own name (what the
+ *  runtime binds its fibre under and `settled()` waits on). One word, one
+ *  constant: the runs are the wire's ROOT, so it is never a sibling segment. */
 export const CI_ROW = "ci";
 
 // ── refusals ────────────────────────────────────────────────────────────────
@@ -473,10 +476,8 @@ export function admitService(
   where: string,
   /** The rows this build reads, and at which version. */
   needs: RowNeeds,
-  /** The host version this BUILD reads. A seam for tests that need a build
-   *  ahead of the constant. */
-  host: string = HOST_CONTRACT_VERSION,
 ): ServiceAdmission {
+  const host = HOST_CONTRACT_VERSION;
   const identity = cell.identity;
   const hostSpeaks = identity.protocolVersion;
   const hostMajor = contractMajor(hostSpeaks);
@@ -534,8 +535,8 @@ export function skewNote(
   cell: ServiceCell,
   where: string,
   needs: RowNeeds,
-  host: string = HOST_CONTRACT_VERSION,
 ): string | null {
+  const host = HOST_CONTRACT_VERSION;
   const behind = (speaks: string | null, reads: string): boolean => {
     if (speaks === null) return false;
     const theirs = contractMinor(speaks);

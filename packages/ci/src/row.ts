@@ -47,11 +47,6 @@ import {
 } from "@odu/cordis/services";
 import { webPorts } from "./webPorts";
 
-/** The word this row is mounted under. It is the wire's ROOT, so it has no
- *  sibling segment; the name is what the runtime binds its fibre under and what
- *  `settled()` waits on. */
-export const CI_KEY = CI_ROW;
-
 /** WHAT AN AGENT IS TOLD about the runs — the row's own words, beside the row. */
 export const CI_AGENT: RowAgent = {
   surface: oduServiceSurface,
@@ -60,7 +55,7 @@ export const CI_AGENT: RowAgent = {
 };
 
 export const ciRow = definePlugin({
-  name: CI_KEY,
+  name: CI_ROW,
   needs: [DaemonHome, BoundOrigin, Build, Log, Shutdown, RowContracts],
   apply: Effect.gen(function* () {
     const home = yield* DaemonHome;
@@ -111,7 +106,7 @@ export const ciRow = definePlugin({
  * their parts.
  */
 export const ciRowRecord: Row = {
-  name: CI_KEY,
+  name: CI_ROW,
   key: null,
   plugin: ciRow,
   agent: CI_AGENT,
