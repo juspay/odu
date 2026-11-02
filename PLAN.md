@@ -1,726 +1,465 @@
 # Odu as a product: Nix cache + CI you run yourself
 
-Status: living, 2026-11-01. PR 0 through PR 3b, and PR 3e, are on master (see "Landed");
-the next PR is PR 4, teams. Decisions below were
-taken in conversation. There is no schedule: one phase is one PR, and the split
-is grounded in the source facts listed in "What the code is today".
+Status: living, 2026-11-02.
+- Phase 1 and phases 2.1–2.4 are on master.
+- **Next is 2.5**, the staging fix.
+- One step is one PR, and the order is a dependency order. There is no schedule.
+
+## Contents
+
+1. [Positioning](#positioning)
+2. [Decisions](#decisions)
+3. [Architecture](#architecture)
+4. [Roadmap](#roadmap)
+   - [Phase 1: foundations](#phase-1-foundations) ✅
+   - [Phase 2: the cache as a product](#phase-2-the-cache-as-a-product) (2.1–2.4 ✅)
+   - [Phase 3: teams](#phase-3-teams)
+   - [Phase 4: CI pushes for you](#phase-4-ci-pushes-for-you)
+   - [Phase 5: hosted CI](#phase-5-hosted-ci)
+   - [Phase 6: scale and hosting](#phase-6-scale-and-hosting)
+5. [Risks](#risks)
+6. [Appendix: facts the plan rests on](#appendix-facts-the-plan-rests-on)
+7. [Appendix: old PR names](#appendix-old-pr-names)
 
 ## Positioning
 
-Today odu is "live CI for `just` pipelines": a per-user loopback service, a web
-board, CLI/MCP faces, SSH lane hosts, GitHub commit statuses.
+Odu began as "live CI for `just` pipelines": a per-user loopback service with a
+web board, CLI and MCP faces, SSH lane hosts and GitHub statuses.
 
-The product: **the Nix binary cache and CI that teams run on their own
-hardware, and that we can host for them.** Three pillars, one service, one board:
+**The product:** the Nix binary cache and CI that teams run on their own
+hardware, and that we can host for them. It is one service with one board:
 
-1. **Cache.** Per-team buckets with revocable tokens, server-side signing,
-   bounded storage (GC with pins and reference tracking). Plain Nix HTTP
-   binary cache protocol, so every Nix client works unchanged.
-2. **CI.** The existing `just` DAG runner, triggered by GitHub (later
-   Bitbucket/Jenkins) webhooks, running on the team's lanes or our VMs, and
-   **pushing every built path to the team's bucket automatically** through a
-   post-build-hook. No `cachix push` step in any workflow.
-3. **One board.** Runs and cache in the same UI: which run produced a path,
-   hit rates per repo, storage per team, agent access over MCP.
+| Pillar | What it means |
+| --- | --- |
+| **Cache** | Per-team buckets, revocable tokens, server-side signing, and GC that never deletes a live closure. It speaks the plain Nix HTTP protocol. |
+| **CI** | The `just` DAG runner, triggered by forge webhooks, that pushes every built path to the team's bucket. No push step appears in any workflow. |
+| **Board** | Runs and cache in one UI: which run built a path, hit rates, storage per team, and agent access over MCP. |
 
-AGPL, self-hostable as one NixOS module on one machine (small teams) or as a
-cache node with object storage plus a lane pool (large teams). Hosted later at
-a monthly price.
-
-### Why this wins
+Odu is AGPL. It runs as one NixOS module on one machine, or as cache nodes on
+object storage plus a lane pool. Hosting comes later, at a monthly price.
 
 | Against | They are | We are |
 | --- | --- | --- |
-| cachix | Closed protocol, "contact sales" pricing, push step in every workflow, cannot self-host without enterprise sales | AGPL, self-hosted or hosted, CI pushes for you, own macOS builders |
-| Attic / celler | Unrevocable JWTs, no pinning (chutney: 669 GB S3 and 46 GB Postgres, growth unbounded, GC off), no UI, no login, no listing | Revocable tokens, GC that cannot delete a live closure, GitHub login, team UI, built-in hook queue |
-| niks3 | Single cache, S3 only, no CI | Multi-tenant, local disk or S3, CI included |
-| FlakeHub Cache | Not self-hostable, GitHub Actions only | Self-hostable, any CI, your own hardware |
-| garnix / Hercules | Hosted-only or hosted coordinator | Fully on-prem possible |
+| Cachix | Closed, "contact sales", a push step per workflow | AGPL, self-hosted or hosted, CI pushes for you |
+| Attic | Unrevocable JWTs, no pins, no UI or login[^chutney] | Revocable tokens, pins, GitHub login, team UI |
+| niks3 | Single cache, S3 only, no CI | Multi-tenant, disk or S3, CI included |
+| FlakeHub Cache | Not self-hostable, Actions only | Self-hostable, any CI |
+| garnix / Hercules | Hosted, or a hosted coordinator | Fully on-prem possible |
 
-## Decisions taken
+## Decisions
 
-- **Cache engine:** own data plane inside odu, TypeScript/Bun in the monorepo.
-  Not wrapping Attic, celler or niks3.
-- **Push model:** post-build-hook on lane hosts (primary); explicit push as a
+- **Own data plane**, in TypeScript/Bun in this monorepo. Odu does not wrap
+  Attic, celler or niks3.
+- **Pushes come from a post-build hook** on lane hosts. Explicit push is the
   fallback.
-- **Identity:** a **GitHub App** installed on the org, through GitHub's
-  authorisation-code flow (the user flow now; installation tokens later —
-  PR 4 and PR 8). Admin-issued personal tokens for anything that is not a
-  person, for the OSS stage; generic OIDC (Google Workspace) for internal
-  teams later.
-- **CI trigger:** GitHub App webhooks, pipelines remain the CI-tagged
-  justfile. Bitbucket/Jenkins as later webhook adapters.
-- **v1 hosting:** one process, local disk. Two shapes exist: the
-  `services.odu` NixOS module (PR 1) for anyone, and our own deployment, a
-  K3s pod on `pureintent` behind a Tailscale ingress (nixos-config
-  `k8s/apps/odu`, F12). The pod is where every PR is dogfooded before merge.
-  S3 and runner pools later.
-- **Order of identity and public cache:** server mode (PR 2) lands before the
-  public cache (PR 3). A public cache is administered over the network, and
-  the pod has no nginx to hide the board behind, so the moment the ingress is
-  public, odu itself must know who is asking.
-- **The web face and the web API are the product.** `/mcp` and the surface are
-  how anything drives odu; the board is how a person does. Every verb a row
-  exposes has a web control, and **a verb that exists only in the CLI is a
-  defect of that row's face, not a roadmap item** — the CLI is a thin client
-  kept only where a shell is the natural place (a push from CI or the
-  post-build hook, `odu run` in a checkout). Parity is checked by the row's own
-  e2e: one scenario per verb, through the face.
-- **First users:** OSS projects (single public bucket), then internal teams.
-  Migration tooling from Attic is out of scope.
-
-## What the code is today (facts the PRs are built on)
-
-Each item names where it is checked.
-
-- **F1. HTTP server.** `odu web` serves through kolu's `serveSurfaceApp`
-  (`packages/host/src/web.ts`). App routes are one Effect `HttpRouter` layer
-  merged beside the shell (`routes: Layer.merge(mcpRoute, mcpGetRoute)`),
-  and the framework exposes an HTTP `middleware` seam, a `tls` option, an
-  `upgradeHeaders` allowlist, and a `services(connection)` seam that provides
-  a per-websocket Effect layer to that connection's handlers (kolu master,
-  `packages/surface-app/src/serve.ts`). kolu-server already uses exactly this
-  to provide a per-connection `CurrentViewer` service from `x-forwarded-for`
-  (`packages/server/src/index.ts`, `router.ts`). Nothing in kolu does cookies,
-  OAuth or Bearer tokens. Cache routes are one more layer; a principal is one
-  more per-connection service, in odu.
-- **F2. No identity anywhere but the cache's tokens.** The service is a
-  per-user singleton: gate and home under the state directory (mode 0700), one
-  fixed origin, an Origin allowlist for the websocket and `/mcp`, and a root
-  token in `ODU_ROOT_TOKEN` that authorises the cache's admin verbs. Anyone who
-  reaches the listener controls CI and reads every bucket's facts
-  (`packages/host/src/web.ts`, docs "Access through Tailscale"). **PR 2 removes
-  this fact for a configured daemon**: with `ODU_GITHUB_*` set, the listener
-  asks who is on a connection and every verb runs as a principal; without it,
-  everything above is still true, which is what makes loopback mode's tests the
-  regression guard.
-- **F3. One database, the cache's.** The run catalog is per-user append-only
-  files under the state directory (`packages/run-history/src/paths.ts`,
-  `store.ts`). PR 1 added `cache/cache.sqlite` behind `packages/cache`'s
-  repository layer; it holds buckets, tokens, objects, pins and the signing
-  keys, and nothing outside the cache row opens it.
-- **F4. The authority wall.** Every public command is a client of the service;
-  `packages/cli/src/authority.test.ts` derives the policed set from `src/main.ts`
-  and forbids importing the coordinator, catalog writes, or the checkout dial.
-  A cache push client talks HTTP to a cache server with a token and imports
-  none of those, so it is admissible; a push cannot go *through* the service
-  anyway, because the paths live on the builder.
-- **F5. Lanes.** A lane is an SSH session via kolu `surface-remote`; the host
-  pulls the `odu-runner` closure resolved from odu's baked agent source
-  (`packages/execution/src/coordinator/runnerFlake.ts`, `lane.ts`). Nothing in
-  provisioning edits the host's `nix.conf`, and `post-build-hook` is a daemon
-  setting. So the hook is **host configuration**, installed by the host's
-  owner (NixOS module or by hand), never by a run.
-- **F6. Lane hosts never see credentials.** GitHub posting happens on the
-  coordinator by spawning `gh api` with the user's credential
-  (`coordinator/statuses.ts`), through an injectable send seam. A GitHub App
-  installation-token sender is one binding of that seam. `odu protect` uses
-  the same `gh`.
-- **F7. A run needs a checkout on the service's machine.** `run.start` refuses
-  a non-absolute path (`packages/service/src/start.ts`) and the coordinator pins
-  HEAD with `git worktree`; remote lanes fetch from origin plus a bundle. There
-  is no "repository" concept and no server-managed clone, so a webhook has
-  nothing to start a run in today.
-- **F8. Hosts are per user.** `~/.config/odu/hosts.json` or `$ODU_HOSTS`,
-  SSH `ci@host`, leases held by the service's child. No org scoping.
-- **F9. Packaging.** The flake exports `odu`, `odu-runner`, `web-ui` and the
-  `services.odu` NixOS module (service user; nginx with ACME proxying only the
-  cache paths, unless a door is configured; a VM test). Its `nixConfig` names
-  odu's OWN cache — the `kolu` bucket on the pod, `cache.kolu.dev` — and macOS
-  lanes need that key trusted to pull the runner (docs "Choose hosts"), so
-  odu's own flake is the first consumer of the bucket.
-- **F10. Remote dialling exists, unauthenticated.** Every client takes
-  `--origin URL`; a named origin is dialled and never auto-started.
-- **F11. How odu warms its own cache.** `.github/workflows/nix-cache.yml`
-  builds `.#odu .#odu-runner .#web-ui` on ubuntu and macos runners and pushes
-  the closures with `odu cache push kolu` through `cache.kolu.dev`, using an
-  `ODU_CACHE_TOKEN` secret; a second job runs kolu's `publish-closure` action,
-  which rewrites the runner content-addressed and writes the `ca-index` branch
-  a lane dial reads. That publish job still pushes through the action's
-  attic-shaped path; moving it to this cache is kolu's generic push target,
-  landing in parallel. The flake's `nixConfig`, the workflow's `nix_conf`, and
-  the docs all name the `kolu` bucket.
-- **F12. Our deployment is a pod, not the module.** nixos-config
-  `k8s/apps/odu` runs `odu web` from the host's Nix store in `pureintent`'s
-  K3s, one replica, a `local-path` PVC for the catalog and the cache objects.
-  `ODU_CACHE_STORE=local?root=/data/cache-store` remains ONLY so the one-time
-  migration can dump rows that predate the object store; once
-  `cache.migration.complete` is logged, that 166 GB directory is deleted. It binds the pod address (`ODU_WEB_ORIGIN=
-  http://0.0.0.0:18440`), publishes `https://odu-k3s.rooster-blues.ts.net`
-  (`ODU_PUBLIC_ORIGIN`), and the Tailscale Ingress is the only way in, today
-  as `tailscale serve` (tailnet only). There is no nginx: every path odu
-  serves is reachable alike, and the root token arrives from a 1Password item
-  through External Secrets. `kolu` is created `--no-upstream`: the runner's
-  published closure must import with no trusted key, so every upstream-signed
-  member is stored as an object too — that costs disk by design.
-- **F13. Two rows behind one fence.** After PR 1.5 the daemon is a host
-  (`@odu/host`) composing two Cordis rows, `ci` and `cache`, each owning its
-  surface, server, CLI and face; `@odu/cordis` holds the contract both read,
-  and `packages/host/src/fence.test.ts` proves, with `@olai/effect-cordis/fence`,
-  that only roots name rows. Who is on a connection is therefore a fact the
-  HOST supplies through the contract package, and the feature that decides it
-  (sign-in, sessions, tokens) is a row of its own that registers with the
-  host; neither `ci` nor `cache` imports it.
-
-Consequences for the split:
-
-- The web board cannot go on the public internet before identity exists
-  (F2), and our deployment has no nginx to expose the cache without the
-  board (F12). So identity comes first: PR 2 is server mode, and PR 3 then
-  makes the pod's ingress a public cache and odu its own first customer.
-- "CI pushes for you" has two halves with different owners: the hook is host
-  config (F5), and run-scoped push needs a token on the lane, which relaxes
-  F6 and must be a scoped, short-lived, write-only token.
-- Hosted CI needs server-managed clones (F7) and org-scoped hosts (F8) before
-  a webhook can do anything. That is its own PR (PR 7), before the App.
+- **Identity is a GitHub App.** Personal tokens cover non-humans; OIDC
+  (Google) comes later for internal teams.[^identity]
+- **CI is triggered by forge webhooks**, and the CI-tagged justfile stays the
+  pipeline.
+- **Hosting v1 is one process on one machine.** It ships as the
+  `services.odu` NixOS module, and our own deployment is a K3s pod where every
+  PR is dogfooded.[^pod]
+- **Identity before public exposure.** The board cannot face the internet
+  before odu knows who is asking.
+- **The web face and web API are the product.** A verb that exists only in the
+  CLI is a defect. The CLI stays only where a shell is natural: a push from CI,
+  the hook, and `odu run`.[^parity]
+- **First users:** OSS projects, then internal teams. Migration from Attic is
+  out of scope.
+- **Buckets are free-form names under an org**, any number per org. A bucket
+  may link to a repo, for provenance.
+- **Retention defaults to 90 days** from the last push that named a path. Pins
+  are exempt, and each bucket can override the default.
+- **`kolu` moves to R2** once reads leave odu (2.8), so `cache.kolu.dev` stays
+  up when the pod is down.
+- **The hosted offering is in scope** (Phase 6).
 
 ## Architecture
 
-### Protocol (per bucket, standard Nix)
-
 ```
-GET  /cache/<bucket>/nix-cache-info        StoreDir, WantMassQuery: 1, Priority: 40
-HEAD /cache/<bucket>/<hash>.narinfo
-GET  /cache/<bucket>/<hash>.narinfo
-GET  /cache/<bucket>/nar/<narHash>.<ext>      stream (PR 3d: public buckets read static objects from the store)
-PUT  /cache/<bucket>/nar/<narHash>.<ext>       Bearer or Basic; any ext Nix sends (xz by default, zst with ?compression=zstd)
-PUT  /cache/<bucket>/<hash>.narinfo        server re-signs with the bucket key; URL field kept as sent
-POST /_odu/v1/buckets/<bucket>/missing    batch "which of these are you missing" (odu push client)
+            ┌──────────── odu host (one process) ────────────┐
+ browser ──►│ auth row │ ci row │ cache row │ cloudflare row │
+ MCP/CLI ──►│   sign-in, sessions, tokens → Principal         │
+            └──────┬──────────┬───────────┬──────────────────┘
+                   │          │           │
+              lanes (SSH)  catalog    ObjectStore: local disk | any S3 (R2 …)
 ```
 
-Public buckets read without a token. Writes, and reads of private buckets,
-accept `Authorization: Bearer <token>` or HTTP Basic with any username and
-the token as password. Nix speaks the second through curl on every request,
-uploads included, so `nix copy --to` works with no odu code on the client.
-`odu cache push` exists for the batched missing-paths query, retries and the
-login flow, not because Nix cannot authenticate.
+- **Rows behind one host.** `auth`, `ci`, `cache` and `cloudflare` are Cordis
+  rows. Each owns its surface, server, CLI and face, and versions its own
+  contract. Only the host names rows.[^rows]
+- **The cache is a standard Nix binary cache**, per bucket.[^protocol]
+  - Narinfos are signed on ingest with the bucket's own key, so pushers never
+    hold a key.
+  - Public buckets read anonymously; writes and private reads take a token,
+    over Bearer or netrc.[^creds]
+- **The bytes are objects, not a Nix store.** Each pushed `.nar.zst` is
+  stored once.
+  - `@odu/objects` keeps it on local disk or any S3-compatible store; a bucket
+    names its store when it is created.
+  - SQLite holds the metadata.[^storage]
+- **Server mode.** The host owns "who is on this connection" and the `auth`
+  row supplies it. Sessions are leases, so revoking one cuts its sockets. Roles
+  are each row's own rule.[^server]
+- **Push paths, in order of preference:**
+  1. the hook (Phase 4.1);
+  2. `odu cache push` or the GitHub Action, from anywhere (landed);
+  3. run-scoped push (Phase 4.2).
+- **Deployment shapes:**
 
-### Credentials on the client
+  | Shape | What it is |
+  | --- | --- |
+  | Small team | One NixOS machine as cache, board and lane |
+  | Ours | The pod, plus tailnet lanes |
+  | Large team | Cache nodes on S3 and Postgres, plus a lane pool |
+  | Hosted | The large shape, multi-org and metered |
 
-- **`odu cache push`** resolves the token in this order: `--token-file
-  <path>`, `$ODU_CACHE_TOKEN`, then the entry for the bucket's origin in
-  `~/.config/odu/cache/credentials` (mode 0600, written by `odu cache login
-  <origin>`, one entry per origin). The bucket argument is a name resolved
-  against the logged-in origin, or a full `https://host/bucket` URL. CI sets
-  the secret into `ODU_CACHE_TOKEN` and never logs in.
-- **`nix copy --to`** and private reads use netrc. Nix reads only the file
-  named by its `netrc-file` setting (default `/etc/nix/netrc`), never
-  `~/.netrc`, so `odu cache use <bucket>` prints the `netrc-file` line and the
-  `machine <host> password <token>` line together. For CI the token can ride
-  in the URL instead: `nix copy --to "https://x:$ODU_CACHE_TOKEN@host/bucket"`.
-- The token is never on the lane host in PR 1; that is PR 5's hook, with the
-  host's own token under `services.odu.lane`.
+## Roadmap
 
-### Signing
+**Rules for every step:**
+- It is substantial, and it merges green with evidence.
+- It leaves master runnable.
+- A capability reaches the public surface only in the step that completes it.
 
-One ed25519 keypair per bucket, generated and held by the server. Narinfos are
-signed on ingest; pushers never hold a key. Client signatures are kept. The
-bucket's `extra-substituters` and `extra-trusted-public-keys` lines and a
-`nixConfig` flake snippet are printed by `odu cache use <bucket>` and shown
-on the bucket page (both landed).
+### Phase 1: foundations
 
-### Storage
+✅ All landed. Odu became a multi-row host with GitHub sign-in and full
+web-face parity.
 
-- **Blobs: an object store, not a Nix store.** The object IS the compressed
-  NAR a pusher sent, kept once at `<bucket>/nar/<narHash>.<ext>` and served
-  with `Content-Length`/`Range`. The server does not import paths, fetch
-  upstream closures, or keep gcroots; references are names in the narinfo.
-  That is the Cachix/Attic model, and it is why the pod's 166 GB store of
-  upstream closures goes away. `ObjectStore` is the interface
-  (`put`/`get`/`head`/`facts`/`delete`/`list`/`sweepTemp`, and disk's optional
-  `link`), in its own package, `@odu/objects` — keys are opaque, facts are a
-  size and a hex sha256, and it imports nothing of odu; the cache owns the key
-  layout and the one hex ↔ `FileHash` conversion. A store is a VALUE
-  the cache row holds by name: `local` (disk under the state directory, always
-  there) and each S3-compatible store the operator declares
-  (`services.odu.cache.stores`, read from `$ODU_OBJECT_STORES`, credentials from
-  a file). A bucket names its store at creation (`bucket.store`). A put is
-  put-if-absent (disk `link`, S3 `If-None-Match: *`, plus a per-key queue in
-  the S3 store because versitygw's check is not atomic; R2 documents the
-  precondition on `PutObject` only, so across daemons it covers one-part
-  objects there, and a `409` is retried rather than read as lost); a read takes a range
-  (S3 in 1 MiB windows, one prefetched, and no HEAD — the row knows the size
-  and the first GET answers absence: Bun's S3 body applies no backpressure;
-  parts upload four at a time); `FileHash` and
-  `FileSize` are written at put (a disk sidecar, S3 object metadata) and read
-  back; the boot sweep also aborts multipart uploads a killed put left. One
-  contract suite (in `@odu/objects`) runs against disk and a versitygw fixture.
-- **CA is proved from the path.** `contentAddressOf` recomputes Nix's
-  `fixed:r:sha256` store path from the name, references and bytes — the
-  NarHash for an ordinary row, Nix's hash-modulo-self-references for a
-  self-referencing one — and serves `CA:` only when the formula reproduces the
-  row's path.
-- **Migration of a store-backed deployment:** at boot, two at a time, each
-  row without an object is dumped from `ODU_CACHE_STORE` into the object
-  store (`nix store dump-path | zstd`), pausing below 10 GB free. Until it
-  lands, the old store serves that row. `cache.migration.complete` says the
-  store is no longer read and can be deleted.
-- **Metadata:** SQLite in WAL mode behind a narrow repository layer (first
-  database in the tree, F3). Tables: `org`, `bucket`, `token`, `object`
-  (bucket, store path, narinfo fields, references, nar hash and size, CA,
-  file hash and size, created, last-accessed), `pin`, `audit`.
-- **On disk:** under odu's state directory (`$ODU_STATE_DIR`, else
-  `$XDG_STATE_HOME/odu`, else the platform default `run-history/paths.ts`
-  already resolves): `cache/cache.sqlite`, `cache/objects/` (the `local`
-  store), and `cache/staging/`. An S3 store's objects are
-  `<s3-bucket>/<bucket>/nar/…`; uploads still stage on the server's disk
-  until PR 3g. Signing keys live in the database; the database and every
-  store's objects are the backup.
-- **GC:** per-bucket retention on last access (PR 3c2 moves the clock to the
-  last push that named the path); an object is evicted only when
-  nothing retained in the bucket references it and it is not under a pin;
-  the object is deleted with the row, from the bucket's store, and an object
-  with no row is swept at boot under each bucket's own prefix. Pins are named and hold a closure from the bucket's own rows.
+| | Step | PR | What master gained |
+| --- | --- | --- | --- |
+| 1.1 | The caller and the forge | #130 | `Caller` built once per call; the forge as a port |
+| 1.2 | A Nix binary cache | #132 | Buckets, signing, scoped tokens, GC with pins, `services.odu` |
+| 1.3 | A host and its rows | #133 | `@odu/host` and Cordis rows; the cache got its own faces |
+| 1.4 | Server mode | #134, #137 | The `auth` row: GitHub App sign-in, sessions as leases, roles |
+| 1.5 | The web face has every verb | #136 | Every verb has a control on the board |
+| 1.6 | Each row versions its own surface | #141 | Per-row contract versions; kolu admits on `ci` alone |
 
-### Tokens and identity
+### Phase 2: the cache as a product
 
-Opaque random tokens stored hashed, with scope (bucket glob, read/write/admin),
-expiry, last-used, and single-token revocation. Today a root token (from the
-environment) mints them over the surface; from PR 2 signed-in admins mint and
-revoke in the UI or CLI, and the root token is only the bootstrap. Roles:
-owner, admin, member.
+**Goal:** a cache that is fast, cheap and correct on any store, with odu off
+the read path wherever it can be, behind a board people want to use.
 
-### Where the cache lives in the process
-
-The `cache` row: `@odu/cache` with four doors, `./surface` (the contract),
-`./server` (protocol routes, blob store, SQLite, signing, tokens, GC),
-`./cli` (`odu cache …`) and `./face` (the Cache view), composed by the host
-beside the `ci` row (F13). Its admin operations are verbs on the composed
-surface under the row's word (`cache_bucket_create`, `cache_token_mint`,
-`cache_pin_create`, `cache_gc_run`, `cache_stats_read`, …), so `odu cache …`,
-the browser and MCP all reach them through the service (F4). `odu cache push`
-is the one command that is a client of a *different* authority: the cache's
-HTTP API, with a token, from the machine that holds the paths.
-
-### Push paths
-
-1. **Hook (primary, PR 5).** `odu cache hook` is a Nix `post-build-hook`
-   that appends `OUT_PATHS` to a crash-safe local queue and returns;
-   `odu cache hookd` drains it with batching, missing-path queries and retries.
-   The credential is the host's own, configured by its owner
-   (`services.odu.lane.pushTo`), which keeps F6 intact.
-2. **Explicit (PR 1).** `odu cache push <bucket> <paths…>` from any machine
-   or any CI, including a documented GitHub Actions step. It streams
-   `nix store dump-path` through zstd into the PUT, uploads several paths at
-   a time, retries per path, and asks `missing` first. `missing` drops paths
-   signed by an upstream key (`cache.nixos.org-1` by default, per bucket), so
-   nixpkgs never lands in a bucket; this is attic's upstream filter and the
-   main thing `nix copy` cannot do. `nix copy --to https://…/cache/<bucket>` with
-   netrc or a token in the URL stays for people who want nothing odu-specific
-   (see "Credentials on the client"); it buffers each NAR in memory and
-   probes paths one at a time. Known gaps against cachix and attic, kept
-   deliberately: uploads go through the server until PR 3g adds presigned
-   PUT; dedup is per NarHash per bucket, not per chunk; no watch mode until PR 5.
-3. **Run-scoped (PR 6).** `odu run --push <bucket>`: the runner pushes each
-   recipe's `result*` closures after the recipe, using a write-only token
-   scoped to that bucket with a lifetime of the run. This is a deliberate,
-   bounded relaxation of F6 and is documented as such.
-
-### Server mode (PR 2)
-
-Built on the seams F1 names, and decided: **the principal is odu's, and kolu
-needs no change.** The TLS terminator owns the public name: nginx under the
-module, the Tailscale ingress on the pod. odu names `cookie` in
-`upgradeHeaders`, resolves the session in `services(connection)` and
-provides a `CurrentPrincipal` service, the exact shape of kolu-server's
-`CurrentViewer`; verbs read it from the `Caller` PR 0 gave them. The HTTP
-`middleware` resolves `Authorization: Bearer` for `/mcp`; the cache protocol
-routes keep checking their own per-bucket token per request, and public
-bucket reads stay anonymous. One design point the seam forces: the session is
-checked at upgrade only, so logout and expiry must close that principal's
-open sockets, which odu owns through its session table. If a second kolu app
-later needs a cookie principal, the helper moves into `@kolu/surface-app`;
-not before.
-
-Ownership, by the Cordis rules (olai `docs/architecture/cordis.md`):
-
-- **The connection is the host's.** The host owns the listener, so it owns
-  "who is on this connection": a `Principal` broker in `@odu/cordis`, always
-  present, whose absence behaviour is stated — with no resolver registered,
-  every connection is the local owner, which is loopback mode today. Rows
-  read `CurrentPrincipal` (a service key, a safe import) and never ask who
-  supplies it.
-- **Sign-in is a row.** `auth` (`@odu/auth`, four doors like `cache`) owns
-  the GitHub App's authorisation-code flow, the sessions and personal-token
-  tables in its own
-  `auth.sqlite`, the sign-in and profile faces, and `odu auth …`. It is
-  optional in the doc's second sense: a provider that adds itself to its
-  consumer. In its `apply` it registers its resolver on the host's
-  single-owner key (a second claimant is refused) and its finalizer withdraws
-  it, so the row can stop without the host, `ci` or `cache` noticing.
-- **A session is acquired, not looked up.** At upgrade the host takes a lease
-  on the session from the resolver and arranges the release in the same step;
-  logout, expiry and revocation end the lease. **This is the one place the
-  implementation had to differ from the plan**: kolu's `serveSurfaceApp` has no
-  accept/reject hook and no public seam hands odu the socket, so the host
-  cannot close a connection. What it does instead, and it is enough for the
-  promise: an ended lease refuses EVERY member — the framework's reserved
-  `system/live` heartbeat included — so the client's watchdog severs the
-  socket, redials with the dead cookie, is refused at the upgrade, and comes
-  back anonymous. Every later call on the old connection is refused and every
-  open subscription is interrupted at the instant it ends. No revocation list
-  is polled. The socket is closed by `SurfaceAppConnection.close(code?,
-  reason?)`, kolu #2330's addition, which the lease watch calls; the pin carries
-  it, so an ended session cuts the connection rather than waiting for the
-  client's next load.
-- **Roles are each row's rule.** `ci` decides what a `member` may start,
-  `cache` what an `admin` may mint; `@odu/cordis` carries only the `Role`
-  type. The root token stays what it is, the operator's bootstrap, and gains
-  one job: granting the first `owner`.
-
-Every surface verb receives a principal through `Caller`; the org arrives in
-PR 4. Loopback mode stays as it is: no `auth` row mounted means every caller
-is the local owner, same verbs, same board, and its tests are the guard.
-
-### Deployment shapes
-
-- **Small team, one NixOS machine:** `services.odu.enable`, local disk, the
-  same box is cache, board and lane runner (localhost lane, hook configured by
-  the same module).
-- **Ours:** the K3s pod (F12): objects on a PVC (the old chroot store only as a
-  migration source), `cache.kolu.dev` as the public door, lanes on the tailnet
-  (`croissant`, `petit`).
-- **Large team:** cache node(s) with S3 and Postgres; lane pool of the team's
-  own machines or our in-house VMs; nginx `proxy_cache` and/or CDN in front of
-  reads.
-- **Hosted:** the large shape, multi-org, metered per org.
-
-## Roadmap: one phase is one PR
-
-There is no schedule. Each PR is substantial, merges green on both platforms
-with evidence, and leaves master in a state someone can run and rely on. A
-capability reaches the public surface only in the PR that completes it, and
-nothing merges that a later PR has to finish. The order is a dependency order.
-
-### Landed
-
-| PR | merged | what master gained |
+| | Step | State |
 | --- | --- | --- |
-| 0 — the caller and the forge | #130 `ba42ac2` | `Caller` assembled once per call; the forge as a port bound to the user's `gh`. No behaviour change. |
-| 1 — a Nix binary cache | #132 `712eafe` | `packages/cache`: buckets, per-bucket signing, scoped tokens, GC with pins, `odu cache …`, the `services.odu` module and its VM test. |
-| 1.5 — a host and two rows | #133 `4e0d621` | `@odu/host`, `@odu/launch`, `@odu/ci`, `@odu/cordis`; the cache as a row with its own faces; contract 2.0. |
-| 2 — server mode | #134 `558115e` | The `auth` row: GitHub App sign-in locked to an allow-list, sessions as leases, personal access tokens, roles owner/admin/member via the `Principal` broker; rows own their e2e. |
-| 2 hotfix — rows claim their paths | #137 `56f7d22` | The door gate lets each row's own paths through, so the push API is not swallowed by sign-in. |
-| 2.5 — the web face has every verb | #136 `66462dd` | Every cache, auth and ci verb has a control on the board; contract 2.2. |
-| 3a — the cache serves itself | #138 `150ad5e` | Chunked push under a proxy's body cap; a bucket domain answered by `Host`; `@odu/cloudflare` (tunnel, routes, records) so `cache.kolu.dev` is live with no open port; odu's own CI pushes and pulls it; contract 2.3. |
-| 3b — the object cache | #139 `c81115a` | The pushed `.nar.zst` is kept and served with `Content-Length`/`Range`; `ObjectStore` with a contract suite; per-row compression; `CA:` proved from name, references and bytes; no Nix-store import, held rows or upstream fetch (3a's hold machinery is gone; `held`/`--wait` are deprecated no-ops); mount-first migration; constant memory per NAR. |
-| 3b fix — concurrent pushes | #140 `3d66833` | A staged NAR is claimed by atomic rename, so two pushers of one path never verify each other's bytes; chunked parts are owned by an `x-odu-upload` session; GC re-checks live rows under the bucket lock; contract 2.4. |
-| 3e — each row versions its own surface | #141 `08f0b2a` | Host contract 2.5 plus a version per row (`ci` 2.4, `cache` 3.0, `auth` 2.4, `cloudflare` 2.4) on the identity cell; `admitService` admits on the rows a client declares (`CI_NEEDS` for runs-only readers like kolu); each row's version is held to an append-only fingerprint ledger by `just test`; cache 3.0 removed `held` and `--wait`. |
+| 2.1 | The cache serves itself | ✅ #138 |
+| 2.2 | The object cache | ✅ #139, #140 |
+| 2.3 | Push from GitHub Actions | ✅ #142 |
+| 2.4 | Object storage | ✅ #143 |
+| 2.5 | Staging never refuses a valid NAR | next |
+| 2.6 | The board, redesigned | |
+| 2.7 | GC and pins on every store | |
+| 2.8 | Reads leave odu | |
+| 2.9 | Uploads go straight to the store | |
 
-For users: `odu web` serves runs and buckets on one page behind GitHub sign-in;
-`cache.kolu.dev` is the `kolu` bucket, pushed by odu, kolu, olai and
-agent-distro CI through the domain. The pod (F12) runs master `3d66833` (#140; #141 not yet deployed),
-tailnet-only (Serve), with the cache public through Cloudflare.
+What each step delivers:
+- **2.1 ✅** `cache.kolu.dev` is live through a Cloudflare tunnel, with no open
+  port, and odu's CI pushes to it.
+- **2.2 ✅** The pushed NAR is kept and served as is, with ranges. `CA:` is
+  proved, and memory per NAR is constant.
+- **2.3 ✅** One workflow step pushes a closure and goes red if a path doesn't
+  answer.[^action]
+- **2.4 ✅** A bucket lives on local disk or any S3 store (R2, AWS, Garage),
+  and one contract suite proves both.[^objects] It's measured on the pod.[^bench]
+- **2.5 Staging never refuses a valid NAR.** Staging refuses some valid NARs
+  with `zstd exited 1`: under concurrent pushes, and every time for one small
+  fixed-output path.[^zstd] Find the root cause and fix it, and add a
+  regression test for both cases. A cache that refuses valid paths comes
+  before every feature.
+- **2.6 The board, redesigned.** One PR that ships the "Night shift" design
+  system and moves every existing screen onto it.[^board]
+  - **Theme:** dark by default and light from the same tokens. It follows the
+    OS setting, with a toggle.
+  - **Screens with an approved design:** runs, a run, the cache, a bucket, and
+    sign-in.
+  - **Screens the implementor designs in the same language:** machines and
+    holds, tunnel status, people and roles, and the profile with personal
+    tokens. They are reviewed in the PR.
+  - Screens for later features (GC and pins, starting a new run) land inside
+    the steps that add those features, built in this design.
+- **2.7 GC and pins on every store.** Liveness comes from pushes, not reads,
+  because reads are about to leave odu. GC is written only against
+  `ObjectStore`, and deletions purge the CDN.[^gc] The bucket page dry-runs the
+  next collection.
+- **2.8 Reads leave odu.** Today every byte crosses the odu machine's uplink,
+  and on the pod that caps reads at ~2.5 MiB/s.[^bench]
+  - **Public bucket:** plain static files (narinfos, NARs, `nix-cache-info`)
+    on the store's public URL or CDN, so the cache stays up when odu is down.
+  - **Private bucket on S3:** odu authorises, then redirects the NAR to a
+    presigned URL that expires in 10 minutes.
+  - **Local disk:** odu serves the same layout.
+  - `odu cache migrate` moves buckets between stores, and `kolu` moves to R2.
+  - **Proof:** the pod at zero replicas still substitutes kolu.[^reads]
+- **2.9 Uploads go straight to the store.** The client uploads to the store
+  through presigned parts. Odu then reads the object back and verifies it
+  before signing. That is Cachix's upload, but without Cachix's trust in the
+  client's hashes.[^uploads]
 
-### PR 3f: push from GitHub Actions
+### Phase 3: teams
 
-> **Docs:** `uses: juspay/odu/.github/actions/push@<sha>` in a workflow pushes
-> a closure to your bucket in one step — no `attic login`, no binary to install
-> — and the step goes red if a pushed path does not answer from the bucket.
+- **3.1 Orgs.** Teams self-serve without the operator:
+  - membership synced from GitHub, roles, many buckets per org;
+  - private buckets;
+  - quotas, token revocation and an audit log.[^teams]
 
-What lands:
-- **`.github/actions/push`**, a composite action taking `origin`, `bucket`,
-  `token` and `paths` (store paths, `result` links, or flake installables,
-  built first). Its PUSHER is built from the action's own checkout — the repo
-  root derived from `github.action_path` — so a pinned sha pins the pusher and
-  `uses: ./.github/actions/push` in odu's own repository pushes with the
-  checkout's odu. Where odu itself is substitutable from is the flake's
-  `nixConfig`, accepted and not overruled; the caller's own installables build
-  with the caller's configuration and nothing the action chose. It never
-  installs Nix: Nix on PATH is the documented requirement, and its absence is
-  the sentence the step fails with.
-- **The token rule the workflow kept in shell, unchanged**: no token on a pull
-  request builds and pushes nothing (saying so); no token on a `push` event
-  fails, naming the secret; the token is never echoed and never used in an
-  `if`.
-- **A verification pass, at the address Nix asks**: for every path the bucket
-  serves, its narinfo must answer at the bucket's own SUBSTITUTER URL (its
-  domain when it has one), and the NAR that narinfo names must answer `200`
-  with a `Content-Length` equal to `FileSize:` — the truncated object a proxy's
-  body cap produces is exactly what a narinfo alone cannot see. Plain HTTP, so
-  no local narinfo cache answers for the bucket; a failing path reddens the
-  step and is named. The readout is a `$GITHUB_STEP_SUMMARY` table read from
-  `odu cache push --output json`, which gains `served` (the paths the bucket
-  serves, minus the upstream-signed ones it refuses by design) and
-  `substituter` for exactly this.
-- odu's own `nix-cache.yml` dogfoods the action in place of its shell; a bucket
-  page prints the block filled in with its origin and name; the cache docs and
-  the skill carry the migration from `attic push`.
+### Phase 4: CI pushes for you
 
-State of master after merge: a project pushes to its bucket with one workflow
-step, and its CI is red when the cache did not take the push.
+- **4.1 The hook.** Every build on a configured lane lands in the bucket, with
+  no step in any recipe. A cache outage only queues paths. The host owner
+  installs the hook, so lanes still hold no credentials.[^hook]
+- **4.2 Run-scoped push and provenance.** `odu run --push` pushes with a token
+  that lives as long as the run. A cached path links back to the run and
+  commit that built it, and a recipe can pin its closure.[^runpush]
 
-### PR 3c: object storage
+### Phase 5: hosted CI
 
-> **Docs:** Point a bucket's objects at any S3-compatible store — Cloudflare
-> R2, Garage or versitygw on the same machine, AWS S3 — or keep them on local
-> disk. The same cache serves from either, and adding another store is one
-> `ObjectStore` implementation.
+- **5.1 Repositories and org-scoped venues.** Odu keeps its own clones and
+  runs any SHA without a developer checkout. Lanes belong to the org.[^repos]
+- **5.2 Webhooks and check runs.** Installing the App gives checks on every
+  push and PR with no workflow file. Actions jobs push with an OIDC-exchanged
+  token instead of a stored secret.[^webhooks]
+- **5.3 Bitbucket** and **5.4 Jenkins**, each one adapter over 5.2's port: a
+  source event in, a status out.
 
-What lands:
-- An S3 implementation of `ObjectStore` on Bun's built-in S3 client, beside
-  the disk one, selected per bucket by the module (`services.odu.cache`) and
-  the bucket page; credentials from a file, never the database.
-- The SAME store contract suite run against every implementation: disk, and
-  an S3 fixture (versitygw or Garage) started in CI, so the local fixture
-  exercises real S3 semantics (atomic put, list, delete, ranges, head).
-- The cache row only chooses the implementation; no route learns a second
-  dialect. Local disk stays a first-class store, not a fallback.
+### Phase 6: scale and hosting
 
-State of master after merge: a bucket's objects live on local disk or on any
-S3-compatible store, with one contract proving both.
+- **6.1 Postgres.** Several odu servers share one database behind one domain.
+  SQLite stays the default.
+- **6.2 Metrics.** `/metrics` exposes hit rates, storage, run durations and
+  lane use.
+- **6.3 Metering.** Per-org storage, transfer and build minutes, with limits
+  and an export for billing.
 
-### PR 3c2: GC and pins in every store
+## Risks
 
-> **Docs:** Every bucket keeps what is still wanted and nothing else, on any
-> store: local disk, any S3-compatible service (R2, Garage, versitygw, AWS), or
-> one added later. A path is wanted while a push names it within the bucket's
-> retention, while a pin holds it, or while a wanted path references it. The
-> bucket page shows what the next collection would delete before it runs.
+| Risk | Mitigation |
+| --- | --- |
+| Credentialed `nix copy` varies by Nix version | `odu cache push` is the supported path; Basic auth for Lix and newer Nix |
+| The first database in the tree | A small repository layer, so Postgres (6.1) is a swap |
+| Server mode touches every verb | Loopback mode's unchanged tests are the regression guard |
+| One box serving many developers | Reads leave odu in 2.8 |
+| Run-scoped push relaxes "lanes hold no credentials" | Scoped, write-only, run-lifetime tokens; the hook stays recommended |
+| No chunking | Deliberate[^chutney]; revisit only if storage cost dominates |
+| Bun streaming backpressure | Measured, not assumed[^bun]; 2.8 takes odu off the read path anyway |
 
-**Decision: liveness comes from pushes, not reads.** Once public reads leave
-odu (PR 3d), odu sees no downloads, so `lastAccessed` cannot be the signal. A
-push already names every member of its closure in the `missing` query; each
-named row is RENEWED (`lastWanted`), whether it was missing or present. CI
-pushes constantly, so a path in use is renewed constantly; a path nothing has
-pushed for a whole retention window, and no pin holds, expires. No read logs,
-nothing on the read path.
+## Appendix: facts the plan rests on
 
-What lands:
-- `lastWanted` replaces `lastAccessed` as GC's clock, renewed by the
-  `missing` query and by a stored push; pins (named closures, from the
-  bucket's own rows) and the reference closure unchanged.
-- GC written ONLY against the `ObjectStore` interface (`list`/`delete`, and
-  the live-rows re-check under the bucket write lock from #140), so every
-  store collects the same way. The store contract suite from PR 3c gains GC
-  and pin cases, run against every implementation (disk and the S3 fixture).
-- Deletion announces the URLs it removed through a cordis port; the
-  cloudflare row provides it and purges them at the CDN; with no CDN the port
-  does nothing. The cache row never names Cloudflare.
-- The bucket page: retention, pins (create, delete, see what each holds), and
-  a dry-run of the next collection (paths, bytes); the run itself as a verb
-  and on a schedule.
+Each fact was checked in the source when it was written.
 
-State of master after merge: GC and pinning behave identically on local disk
-and on S3-compatible stores, and stay correct when reads no longer reach odu.
+| | Fact | Consequence |
+| --- | --- | --- |
+| F1 | `odu web` serves through kolu's `serveSurfaceApp`, which has route, middleware and per-connection service seams[^f1] | Cache routes and the principal are layers, so kolu needs no change |
+| F2 | Without `auth`, whoever reaches the listener is the owner | Loopback mode is the regression guard |
+| F3 | The cache's SQLite is the only database; runs live in per-user files | Postgres is the cache's swap alone |
+| F4 | Every public command is a client of the service (`authority.test.ts`) | `odu cache push` is admissible: it is an HTTP client of the cache |
+| F5 | `post-build-hook` is a Nix daemon setting; lane provisioning never edits `nix.conf` | The hook is host configuration (4.1) |
+| F6 | Lane hosts never see credentials; GitHub posting happens on the coordinator | 4.2 relaxes this, bounded |
+| F7 | A run needs an absolute checkout on the service's machine | Hosted CI needs managed clones (5.1) |
+| F8 | Hosts are per user (`hosts.json`) | Org-scoped venues (5.1) |
+| F9 | The flake exports odu, the runner, the web UI and `services.odu`; its `nixConfig` names `cache.kolu.dev` | Odu is its own cache's first consumer |
+| F10 | Every client takes `--origin`; remote dialling exists | Remote clients need only authentication |
+| F11 | odu's CI builds on Linux and macOS and pushes with the 2.3 action | The cache is dogfooded on every push to master |
+| F12 | Our deployment is a pod with no nginx, behind Tailscale and a Cloudflare tunnel[^pod] | Identity had to come before a public cache |
+| F13 | Rows sit behind one fence: only roots name rows (`fence.test.ts`) | Identity is the host's fact plus the `auth` row |
 
-### PR 3d: public reads are static
+## Appendix: old PR names
 
-> **Docs:** A public bucket is a set of plain files: every narinfo (already
-> signed), every NAR, and `nix-cache-info`, written once at push time. On an
-> S3-compatible store with a public URL (R2 behind your domain, or any CDN) Nix
-> reads them straight from there and odu is not on the read path at all: the
-> cache stays up when the odu machine is down. On local disk, odu serves the
-> same files.
+Commits and PR bodies use the earlier names.
 
-**Decision.** odu is the WRITE path and the control plane (auth, verify,
-sign, write, tokens, GC, UI); reads of a public bucket are static objects.
-This is cache.nixos.org's shape (static files behind a CDN). It replaces the
-earlier "edge caching" and presigned-GET ideas: there is nothing to cache at
-the edge that is not already a static object.
+| Old | New | | Old | New |
+| --- | --- | --- | --- | --- |
+| PR 0 | 1.1 | | PR 3c2 | 2.7 |
+| PR 1 | 1.2 | | PR 3d | 2.8 |
+| PR 1.5 | 1.3 | | PR 3g | 2.9 |
+| PR 2 (+hotfix) | 1.4 | | PR 4 | 3.1 |
+| PR 2.5 | 1.5 | | PR 5, 6 | 4.1, 4.2 |
+| PR 3e | 1.6 | | PR 7, 8 | 5.1, 5.2 |
+| PR 3a | 2.1 | | PR 9, 10 | 5.3, 5.4 |
+| PR 3b (+fix) | 2.2 | | PR 11 | folded into 2.4–2.9 |
+| PR 3f | 2.3 | | PR 12 | 6.1 |
+| PR 3c | 2.4 | | PR 13, 14 | 6.2, 6.3 |
 
-What lands:
-- At push time the cache row writes the signed narinfo and the NAR as
-  objects (`<hash>.narinfo`, `nar/<file>`) and `nix-cache-info` per bucket,
-  with `Cache-Control` set on each object: NARs `immutable`, narinfos long
-  with a purge on change (re-push, delete, key rotation), and the store or
-  CDN's 404 short. A key rotation re-signs and rewrites every narinfo.
-- A bucket's substituter URL is its store's public URL when it has one. The
-  cloudflare row binds the bucket domain to the R2 bucket (custom domain)
-  instead of the tunnel, and keeps the purge port from PR 3c2.
-- On a store with no public URL (local disk, a private S3), odu serves the
-  same layout byte for byte; switching store changes where reads come from,
-  not what they read. Private buckets stay behind odu's auth.
-- `odu cache migrate` (verb and UI) moves a bucket's objects between stores
-  with no downtime; the pod moves `kolu` to R2.
-- Proof: with the odu pod scaled to zero, a cold `nix build` of kolu
-  substitutes everything from `cache.kolu.dev`.
+[^chutney]: chutney's Attic: 669 GB on S3 and 46 GB of Postgres, growing
+    without bound with GC off. Its chunking cost more than it saved on S3.
 
-State of master after merge: a public bucket's reads never touch odu.
+[^identity]: Sign-in uses the App's authorisation-code flow (1.4). Installation
+    tokens arrive in 3.1 (membership sync) and 5.2 (checks). Expiring user
+    tokens are refused until 3.1 stores refresh tokens.
 
-### PR 3g: uploads go straight to the store
+[^pod]: nixos-config `k8s/apps/odu` runs `odu web` in `pureintent`'s K3s: one
+    replica, with a `local-path` PVC for the catalog and objects. It publishes
+    `https://odu-k3s.rooster-blues.ts.net` over Tailscale Serve, and the cache
+    is public through the cloudflare row's tunnel. The root token, the GitHub
+    App and the R2 keys come from 1Password through External Secrets.
+    `ODU_CACHE_STORE` remains only so 2.2's migration can dump the old 166 GB
+    store; it is deleted after `cache.migration.complete`. The bucket `kolu` is
+    `--no-upstream`, so the runner's published closure imports with no trusted
+    key. The pod currently runs #143's head `6df8c8e`, with test buckets
+    `r2test` (R2, bucket `odu-test`) and `localtest` (disk).
 
-> **Docs:** Large pushes no longer pass through the odu process or a proxy's
-> body cap: the push client uploads each NAR to the store with a presigned
-> PUT, and odu verifies and signs.
+[^parity]: Parity is checked by each row's own e2e: one scenario per verb,
+    driven through the face.
 
-Presigned PUT from S3-compatible stores; odu verifies the uploaded object
-(NarHash, size, `CA:`) by reading it from the store before it writes the
-narinfo, so verification is exactly as strict as today; chunked upload stays
-for stores without presigning (local disk). The push action (PR 3f) gets it
-for free.
+[^rows]: Cordis per olai `docs/architecture/cordis.md`. `@odu/cordis` holds the
+    shared contract. `packages/host/src/fence.test.ts` proves, with
+    `@olai/effect-cordis/fence`, that only roots name rows. Versions: host 2.5,
+    `ci` 2.4, `cache` 3.1, `auth` 2.4, `cloudflare` 2.4. Each row is held to an
+    append-only fingerprint ledger by `just test`, and `admitService` admits a
+    client on the rows it declares.
 
-### PR 4: teams
+[^protocol]: Routes per bucket:
+    ```
+    GET  /cache/<bucket>/nix-cache-info
+    HEAD /cache/<bucket>/<hash>.narinfo
+    GET  /cache/<bucket>/<hash>.narinfo
+    GET  /cache/<bucket>/nar/<narHash>.<ext>     Content-Length, Range
+    PUT  /cache/<bucket>/nar/<narHash>.<ext>     chunked under a proxy's body cap
+    PUT  /cache/<bucket>/<hash>.narinfo          re-signed with the bucket key
+    POST /_odu/v1/buckets/<bucket>/missing       batch query; drops upstream-signed paths
+    ```
+    A bucket domain is answered by `Host`.
 
-> **Docs:** Teams are organisations. An org owner creates it, adds members
-> from a GitHub org or team or by invite, and assigns owner, admin or member
-> roles. Each org owns any number of buckets, public or private; a private
-> bucket is read with a token in your `netrc`. The bucket page shows usage
-> against the org's quota and the tokens that can write to it, with one-click
-> revocation. Every admin action is in the org's audit log.
+[^creds]: `odu cache push` takes its token from `--token-file`, then
+    `$ODU_CACHE_TOKEN`, then `odu cache login`'s credentials file. Nix reads
+    only its `netrc-file` setting, never `~/.netrc`, so `odu cache use` prints
+    both lines. CI can put the token in the URL instead.
 
-What lands:
-- Orgs, membership from GitHub org or team or by invite, roles (owner,
-  admin, member); many buckets per org; private buckets with netrc reads;
-  org field on runs and buckets so the catalog filters per org (F3).
-- Membership synced server-side from the App's installation token, so a
-  removal in GitHub is a removal in odu; user-token expiry turned on with
-  refresh tokens stored. PR 2 refuses an expiring user token rather than
-  holding one that dies in eight hours, which is this PR's to fix.
-- Token management with revocation in the UI, per-org usage and quotas, audit
-  log. The bucket page itself is NOT here: PR 1.5 built it (a bucket's key,
-  substituter URL, use block and paged paths), so this PR adds the org's facts
-  to a page that exists rather than shipping one.
+[^storage]: `ObjectStore` offers `put`, `get(range)`, `head`, `facts`, `delete`,
+    `list` and `sweepTemp`, plus disk's optional `link`. Keys are opaque, and
+    facts are a size and a hex sha256. The cache owns the key layout and the
+    one hex ↔ `FileHash` conversion (`packages/cache/src/fileHash.ts`).
+    - Put-if-absent: disk uses `link`; S3 uses `If-None-Match: *` plus a
+      per-key queue. `412` means lost; `409` is retried.
+    - Stores are declared in `services.odu.cache.stores` (env
+      `$ODU_OBJECT_STORES`, credentials from a file).
+    - The boot sweep removes orphans, `.tmp-*` objects and incomplete multipart
+      uploads.
+    - `CA:` is served only when `contentAddressOf` reproduces the row's path.
+    - On disk under the state directory: `cache/cache.sqlite`,
+      `cache/objects/` and `cache/staging/`. The database and the stores are the
+      backup.
 
-State of master after merge: an internal team self-serves a private bucket,
-mints and revokes tokens, and sees its usage, without the operator.
+[^server]: The `Principal` broker lives in `@odu/cordis`; with no resolver, every
+    connection is the local owner. The `auth` row registers its resolver on a
+    single-owner key. Each session is a lease taken at upgrade. An ended lease
+    refuses every member, including the `system/live` heartbeat, and
+    `SurfaceAppConnection.close` (kolu #2330) cuts the socket. The root token
+    is the operator's bootstrap; it only grants the first `owner`.
 
-### PR 5: the hook
+[^action]: `uses: juspay/odu/.github/actions/push@<sha>` builds its pusher from
+    the action's own checkout. With no token on a PR it pushes nothing; with no
+    token on a push it fails. Each path is verified at the bucket's
+    substituter URL: the narinfo, and the NAR's `Content-Length` against
+    `FileSize:`. The results come from `odu cache push --output json`
+    (`served`, `substituter`) and appear as a step-summary table.
 
-> **Docs:** Builds on a lane host are pushed to the bucket automatically.
-> On NixOS set `services.odu.lane.bucket` and a token file; on other hosts
-> install `odu cache hook` as the Nix `post-build-hook` and run
-> `odu cache hookd`. Nothing changes in your recipes or workflows, and a
-> cache outage never fails a build: paths queue locally and are pushed when
-> the cache is back.
+[^objects]: S3 reads have no HEAD: the row knows the size, and the first ranged
+    GET answers absence. Reads come in 1 MiB windows with one prefetched into
+    a buffer, because Bun's fetch body applies no backpressure. Every window
+    is held to its range length. Parts upload four at a time from reused
+    buffers. R2 honours `If-None-Match` on `PutObject` (412, measured) but
+    doesn't document it on `CompleteMultipartUpload`, so objects over 8 MiB
+    are put-if-absent within one daemon only.
 
-What lands:
-- `odu cache hook`, a Nix `post-build-hook` that appends `OUT_PATHS` to a
-  crash-safe local queue and returns, and `odu cache hookd`, which drains it
-  with batching, missing-path queries and retries.
-- `services.odu.lane` module option that installs both and holds the host's
-  own write token (F5, F6 intact), used by a module machine's localhost lane
-  and by our tailnet lanes; documentation for non-NixOS hosts.
+[^bench]: Pod at #143 (`6df8c8e`). The same client and tailnet path for both:
 
-State of master after merge: every build on a configured lane lands in the
-bucket with no step in any recipe or workflow.
+    | | local disk | R2 |
+    | --- | --- | --- |
+    | push 33 MiB fresh (median of 3) | 13.8 s (was 22.0) | 17.6 s (was 27.9) |
+    | first byte, 20 MiB NAR | 0.09 s | 0.19 s (was 0.45) |
+    | throughput, 20 MiB NAR | 2.5 MiB/s | 2.3 MiB/s |
+    | read 46 kolu paths, 641 MiB (median of 3) | 267 s (was 333) | 266 s |
 
-### PR 6: run-scoped push and provenance
+    Both stores read at the same rate (267 s against 266 s), so the home uplink
+    bounds reads, not the store. Every R2 byte crosses that uplink twice: R2 → pod → client.
 
-> **Docs:** `odu run --push <bucket>` pushes each recipe's `result` closure
-> as the recipe finishes, on any lane, with a token that lives only as long
-> as the run. The run page lists what it pushed, and a path on the bucket
-> page links back to the run and commit that built it. Mark a recipe
-> `[metadata("odu:pin")]` to keep its closure out of garbage collection.
+[^board]: The design is a private claude.ai Design canvas:
+    https://claude.ai/artifact/7WM9HNSjiX3Uku55ZrMMZc (five artboards).
+    - **Direction:** a near-black ground (`#0A0D0C`), Geist for text and Geist
+      Mono for anything a person copies or compares (hashes, store paths,
+      keys, durations).
+    - **Colour carries status only:** green ok, amber running, red failed,
+      cyan links.
+    - **Signature element:** a lane strip, one cell per lane, on the board and
+      on each run.
+    - **Fonts are bundled with the web UI**, not loaded from Google Fonts. A
+      tailnet-only or air-gapped deployment must render the same.
+    - **Where it lives:** the tokens and shared primitives go in `@odu/face`
+      (beside `./control` and `./refusal`), so every row's face uses them, and
+      each row still draws its own screens (Cordis). It is Solid, reviewed
+      against /solidjs.
+    - **Layout:** the canvas is drawn at 1440 px. Every screen must work down
+      to phone width with no horizontal scroll, and each row's e2e covers
+      every verb through the new face.
 
-What lands:
-- `odu run --push <bucket>`: `LaunchRequest` gains `push`, the service mints
-  a write-only, single-bucket, run-lifetime token, the runner pushes each
-  recipe's `result*` closure after the recipe and reports pushed paths on the
-  lane surface; the catalog records them. The bounded relaxation of F6 is
-  documented where the token is minted.
-- Board and `run_read` show per-run pushes; a path on a bucket page links to
-  the run that produced it; `[metadata("odu:pin")]` pins a recipe's closure.
+[^gc]: `lastWanted` replaces `lastAccessed`. It is renewed by the `missing`
+    query and by a stored push. GC uses `list`/`delete`, with #140's
+    live-rows re-check under the bucket lock. Deletions announce their URLs
+    through a cordis port, which the cloudflare row purges; the cache row never
+    names Cloudflare. The contract suite gains GC and pin cases, run on disk and
+    on S3.
 
-State of master after merge: a lane without the hook still pushes, and every
-cached path can be traced to the run that built it.
+[^zstd]: `narinfo upload answered 400: nar/<hash>.nar.zst: zstd exited 1`. It
+    happens under concurrent pushes, and deterministically for the 2 KB
+    fixed-output path `exec-path.c`: `localtest` refused it twice, `r2test`
+    accepted it. The evidence is on #142 and #143.
 
-### PR 7: repositories and org-scoped venues
+[^reads]: How 2.8 works:
+    - At push, odu writes `<hash>.narinfo` and `nar/<file>` as objects with
+      `Cache-Control`. NARs are immutable. Narinfos have a long TTL and are
+      purged on a re-push, delete or key rotation. A key rotation rewrites
+      every narinfo.
+    - A bucket's substituter URL is its store's public URL, and the cloudflare
+      row binds the domain to the R2 bucket instead of the tunnel.
+    - Private-bucket redirects rely on Nix following them
+      (`CURLOPT_FOLLOWLOCATION`) and on curl dropping `Authorization` when the
+      host changes. The e2e must prove both.
+    - What odu gives up: `cache.nar.served` logs a redirect, not bytes.
+    - Precedent: Attic answers `307` to a 10-minute presigned URL for
+      single-chunk NARs only, and stitches multi-chunk ones through the server
+      (`server/src/api/binary_cache.rs`). Cachix serves NARs from a CDN. Odu
+      doesn't chunk, so every S3 object can redirect.
 
-> **Docs:** Register a repository with your org and odu keeps its own clone.
-> Start a run on any commit from the board or with `odu run --origin
-> <server> --repo <name> --sha <sha>`, with no checkout on your machine. Lane
-> hosts and leases now belong to the org and are managed from its settings
-> page; `~/.config/odu/hosts.json` still drives a local `odu web`.
+[^uploads]: The client uploads to `<bucket>/nar/.tmp-<uuid>`. Odu streams the
+    object back, verifies NarHash, size and `CA:`, then server-side copies it
+    into place and writes the signed narinfo, so a path is visible only once
+    verified. The readback costs one store → odu transfer on the downlink.
+    - Measure first whether R2 honours `If-None-Match` on a copy; that decides
+      cross-daemon put-if-absent for large objects.
+    - Disk keeps chunked upload, and the 2.3 action gets the new path for free.
+    - The trust rule is decided: odu reads the object back and verifies it.
+      It never signs hashes the client claims.
+    - Precedent: Cachix's client opens a multipart upload, PUTs each part to
+      a presigned URL concurrently, then completes it. The server trusts the
+      client's hashes (`cachix/src/Cachix/Client/Push/S3.hs`).
 
-What lands:
-- Repositories as a concept: an org registers a repo, the service keeps a
-  managed clone under its state dir and fetches on demand; `run.start`
-  accepts a repository and SHA as well as an absolute checkout (F7).
-- Hosts and leases belong to an org (F8); the in-house VM pool is one org's
-  inventory; `hosts.json` remains the loopback mode's source.
+[^teams]: Membership is synced server-side from the App's installation token, so
+    a removal in GitHub is a removal in odu. Private buckets are read through
+    netrc. Runs and buckets gain an org field. The bucket page already exists
+    (1.3), so 3.1 adds the org's facts to it.
 
-State of master after merge: a member starts a run on a registered repo at a
-SHA from the board or `odu run --origin`, on the org's own lanes, with no
-developer checkout involved.
+[^hook]: `odu cache hook` appends `OUT_PATHS` to a crash-safe queue and returns.
+    `odu cache hookd` drains it with batching, missing-path queries and
+    retries. `services.odu.lane` installs both with the host's own write token,
+    and non-NixOS hosts get documentation.
 
-### PR 8: webhooks and check runs
+[^runpush]: `LaunchRequest` gains `push`. The service mints a write-only,
+    single-bucket token for the run. The runner pushes each recipe's `result*`
+    closure, and the catalog records it. `[metadata("odu:pin")]` pins a
+    recipe's closure.
 
-> **Docs:** Install the odu GitHub App on a repository and every push and
-> pull request gets odu's checks, with no workflow file. Checks are posted
-> by the App, so no personal `gh` login is involved, and `odu protect` uses
-> the same identity. GitHub Actions jobs that still need to push can
-> exchange their OIDC token for a short-lived bucket token instead of
-> storing a secret.
+[^repos]: `run.start` accepts a repository plus a SHA as well as an absolute
+    checkout. The in-house VM pool is one org's inventory, and `hosts.json`
+    stays the source for loopback mode.
 
-The App already exists — PR 2 created it, because sign-in is its user flow.
-What this PR adds is the installation half.
+[^webhooks]: Push, pull_request and check re-run each start a run on the managed
+    clone. Checks are posted through an installation token bound to the
+    statuses send seam, and `odu protect` moves to that token.
 
-What lands:
-- Webhook receiver for push, pull_request and check re-run; each starts a
-  run on the managed clone at the delivered SHA.
-- Checks posted through an installation token bound to the statuses send
-  seam (F6); `odu protect` moves to the same token.
-- OIDC token exchange so GitHub Actions jobs push with a short-lived token
-  and no stored secret.
+[^f1]: kolu `packages/surface-app/src/serve.ts`: an HTTP `middleware` seam,
+    `tls`, the `upgradeHeaders` allowlist, and `services(connection)` for a
+    per-websocket layer. kolu-server uses that last seam for `CurrentViewer`.
 
-State of master after merge: a repo with the App installed and no workflow
-file gets checks and cache pushes on every PR.
-
-### PR 9: Bitbucket, and PR 10: Jenkins
-
-> **Docs:** Connect a Bitbucket workspace, or point a Jenkins job at odu's
-> webhook, and runs start and report back the same way they do for GitHub.
-
-Each is one adapter over the port PR 8 defines: a source event in, a status
-out. Nothing else changes.
-
-### PR 11: (moved earlier)
-
-Object storage is PR 3c; GC and pins on every store are PR 3c2; static public
-reads and store-to-store migration are PR 3d; presigned uploads are PR 3g.
-
-### PR 12: Postgres
-
-> **Docs:** Set `services.odu.database = "postgres"` with a connection
-> string to run several odu servers against one database, behind one
-> domain. SQLite remains the default for a single machine.
-
-The repository layer's second implementation, selected by the module, with
-the multi-node service it allows.
-
-### PR 13: metrics, and PR 14: metering
-
-> **Docs:** Scrape `/metrics` for cache hit rates, storage, run durations
-> and lane utilisation. Each org's page shows its monthly storage, transfer
-> and build minutes, and an operator can set limits and export the figures
-> for billing.
-
-Prometheus metrics for cache and runs; per-org metering and the billing hooks
-a hosted offering needs.
-
-## Risks and mitigations
-
-- **Credentialed `nix copy` uploads** vary by Nix version. `odu cache push`
-  is the supported path; the server also accepts Basic auth for Lix and newer
-  Nix.
-- **The first database in the tree** (F3). Keep the repository layer small so
-  Postgres is a swap, and keep run evidence in the file catalog as it is.
-- **Server mode touches every verb.** Thread the principal in PR 2 as one
-  change, with the loopback mode's tests unchanged as the regression guard.
-- **Funnel exposes everything the pod serves.** PR 2 ships no public door
-  before the sign-in gate, Bearer on `/mcp` and role checks on every verb are
-  in; the switch from `serve` to Funnel happens with PR 2's evidence, not
-  before it.
-- **One box serving a thousand developers.** nginx `proxy_cache` from PR 3 on
-  the module, static public reads from the store in PR 3d.
-- **Run-scoped push relaxes F6.** Bounded by scope, bucket and run lifetime,
-  and the hook is the recommended path.
-- **No chunking.** Deliberate; chutney showed chunking cost more than it saved
-  on S3. Revisit only if storage cost dominates.
-- **Streaming a NAR through Bun's HTTP server.** PR 1 hands the socket the
-  store's `dump-path | zstd` stream and the request's own body stream, so no
-  code path holds a NAR. That is only worth anything if the runtime honours
-  backpressure on both, and Bun's `Bun.serve` is younger than Node's. The exit
-  criterion (flat RSS over concurrent multi-gigabyte reads and pushes, recorded)
-  is the measurement, not the assurance. Escape hatch if it does not hold:
-  nginx `X-Accel-Redirect`, or a sidecar that serves NAR bytes while odu keeps
-  narinfo, auth and signing.
-
-## Open questions
-
-- Should buckets map to GitHub repos, GitHub orgs, or be free-form under an
-  org? Proposal: free-form under an org, with an optional repo link for
-  provenance.
-- Retention default for OSS buckets on the single server (proposal: 90 days,
-  pins exempt).
+[^bun]: Exit criterion: flat RSS over concurrent multi-gigabyte reads and pushes.
+    #143's contract suite holds a 300 MB slow-reader S3 read under 64 MiB. The
+    escape hatch is nginx `X-Accel-Redirect`, or a sidecar for NAR bytes.
