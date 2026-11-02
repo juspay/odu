@@ -176,11 +176,24 @@ On a client, trust the bucket — the key `create` printed:
 }
 ```
 
+A bucket can keep its objects **on S3 instead of the server's disk** — Cloudflare R2, AWS, Garage or versitygw. Declare the store and name it at creation:
+
+```nix
+services.odu.cache.stores.r2 = {
+  endpoint = "https://<account>.r2.cloudflarestorage.com";
+  bucket = "odu-cache";
+  region = "auto";
+  credentialsFile = config.age.secrets.odu-r2.path; # AWS_ACCESS_KEY_ID=… / AWS_SECRET_ACCESS_KEY=…
+};
+```
+
+then `odu cache create main --store r2`. The credentials are a systemd credential, like the root token; [Keep a bucket on S3](cache/#keep-a-bucket-on-s3) has the rest.
+
 A bucket can also have **a name of its own** — `https://cache.kolu.dev` — served at the root of that name through a Cloudflare Tunnel, with no port opened. That needs a Cloudflare API token (`services.odu.cloudflare.apiTokenFile`) and the name set on the bucket (`cache.bucketDomains` gives it a vhost and a certificate on a module host); [A domain for a bucket](cache/#a-domain-for-a-bucket) has the whole walk. The same tunnel carries `ODU_PUBLIC_ORIGIN`'s host when the token can edit its zone, which is what lets a Funnel retire — and the App's callback then moves with `publicOrigin`.
 
 `ODU_PUBLIC_ORIGIN` is the setting behind that URL: it names the address a bucket is published under when a proxy stands in front, and defaults to what `cache.domain` and `cache.enableACME` imply. The module requires a loopback `listen`, because the daemon has to sit behind a proxy: without `services.odu.github` nothing authenticates a request at all, and with it the session cookie wants TLS. Those are the two shapes — the second is [Server mode](#server-mode).
 
-**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret. The cache stores the compressed NARs under `<state>/cache/objects`; disk is those objects plus staging for the largest in-flight NAR, memory is constant per NAR, and a `--no-upstream` bucket also stores the upstream closures it is pushed.
+**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret; `ODU_CACHE_STORES` names a JSON file of declared S3 stores, the shape the module writes. The cache stores the compressed NARs under `<state>/cache/objects`; disk is those objects plus staging for the largest in-flight NAR, memory is constant per NAR, and a `--no-upstream` bucket also stores the upstream closures it is pushed.
 
 
 ### Upgrading from a store-backed cache
@@ -201,11 +214,11 @@ Each row versions its own surface. The daemon publishes the host's version and e
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
 | `ci` (runs) | 2.4 | `odu run`/`wait`/`logs`, MCP, the board, kolu |
-| `cache` | **3.0** | `odu cache`, the board |
+| `cache` | **3.1** | `odu cache`, the board |
 | `auth` | 2.4 | `odu auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu cloudflare`, the board when there is a tunnel |
 
-Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
+Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
 
 
 ## Server mode

@@ -78,8 +78,25 @@ export const CacheBucketSchema = Schema.Struct({
   lastPush: Schema.NullOr(Schema.Number),
   /** narinfo reads, summed over the bucket's objects. */
   hits: Schema.Int,
+  /** The store its objects live in, by declared name — `local`, or one of
+   *  the `stores` cell's names. Fixed at creation (3.1). */
+  store: Schema.String,
 });
 export type CacheBucket = typeof CacheBucketSchema.Type;
+
+/**
+ * ONE STORE A BUCKET CAN LIVE IN, as the board offers it: its declared name and
+ * what kind it is. Never its endpoint or credentials — those are the operator's
+ * configuration, and nothing on the wire needs them.
+ */
+export const CacheStoreSchema = Schema.Struct({
+  name: Schema.String,
+  kind: Schema.Literals(["local", "s3"]),
+});
+export type CacheStore = typeof CacheStoreSchema.Type;
+
+/** The store every daemon has: the disk under its state directory. */
+export const LOCAL_STORE = "local";
 
 /**
  * One bucket's PUBLIC identity, and NO root token.
@@ -147,6 +164,8 @@ export const CacheRefusalCodeSchema = Schema.Literals([
   "unknown_bucket",
   "bucket_exists",
   "bad_input",
+  /** `bucket.create` named a store this daemon does not declare (3.1). */
+  "unknown_store",
   /** The caller is not allowed to administer buckets. Reached when an identity
    *  provider is mounted and a signed-in MEMBER asked an admin verb: the root
    *  token is not the rule on such a daemon, the caller's role is. */
@@ -182,6 +201,9 @@ const CreateInputSchema = Schema.Struct({
   /** Defaults to `["cache.nixos.org-1"]` — the filter that keeps nixpkgs out
    *  of a bucket. An empty list takes everything. */
   upstreamKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Which declared store keeps the bucket's objects; absent means `local`.
+   *  A name the daemon did not declare is refused (3.1). */
+  store: Schema.optionalKey(Schema.String),
 });
 const ListInputSchema = Schema.Struct({ rootToken: Schema.String });
 const ListOutputSchema = Schema.Struct({ buckets: Schema.Array(CacheBucketSchema) });
@@ -446,8 +468,9 @@ odu cache push ${input.bucket} <paths> --origin ${input.origin.replace(/\/$/, ""
  * that had to re-read every bucket to notice one moved would be the two-RPCs-
  * per-second problem the runs board already solved this way.
  *
- * No cells: a bucket is not a singleton fact, and nothing else about the cache
- * is a value on the wire.
+ * ONE cell, `stores`: the stores this daemon declared, fixed for its tenure —
+ * what the create form offers, read from the row rather than re-spelled by the
+ * face (3.1).
  *
  * **AND A VERSION OF ITS OWN** — {@link CACHE_CONTRACT_VERSION}, which any
  * change to this surface bumps: adding a verb is a minor bump, changing a shape
@@ -456,6 +479,13 @@ odu cache push ${input.bucket} <paths> --origin ${input.origin.replace(/\/$/, ""
  * host publishes it so a client is admitted against the rows it reads.
  */
 export const oduCacheSurface = defineSurface({
+  cells: {
+    stores: {
+      schema: Schema.Array(CacheStoreSchema),
+      default: [{ name: LOCAL_STORE, kind: "local" }],
+      verbs: ["get"],
+    },
+  },
   collections: {
     buckets: {
       keySchema: Schema.String,
@@ -527,6 +557,7 @@ export type OduCacheSurface = typeof oduCacheSurface;
  */
 export const ODU_CACHE_EXPOSE = {
   buckets: "resource",
+  stores: "resource",
   "bucket.create": { tool: { mutates: true } },
   "bucket.list": { tool: { mutates: false } },
   "bucket.describe": { tool: { mutates: false } },
@@ -560,7 +591,9 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "substring `filter` and the `after` cursor it returned. `cache_bucket_domain`",
   "gives a bucket a DNS name of its own (clear it with no `domain`); the",
   "advertised `url` becomes that name while `pushUrl` keeps the path the push",
-  "API needs.",
+  "API needs. A bucket lives in one STORE, named at `cache_bucket_create`",
+  "(`store`, default `local`, the daemon's disk); the `stores` resource lists",
+  "the stores this daemon declared (local disk and any S3-compatible ones).",
 ].join("\n");
 
 // ── the row ─────────────────────────────────────────────────────────────────
@@ -590,8 +623,12 @@ export const CACHE_KEY = "cache";
  * it was pushed), its `/held` route and `odu cache push --wait` are gone. A
  * MAJOR, because a 2.x reader could subscribe to `held`; the host and the other
  * rows stay where they were, so a runs-only client never notices.
+ *
+ * 3.1: a bucket lives in a STORE — the row's `store`, `bucket.create`'s
+ * optional `store`, and the `stores` cell naming what this daemon declared.
+ * Additive: a 3.0 reader ignores the field and never asks for the cell.
  */
-export const CACHE_CONTRACT_VERSION = "3.0";
+export const CACHE_CONTRACT_VERSION = "3.1";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

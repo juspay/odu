@@ -314,13 +314,14 @@ terminal.
 | import old runs | `odu surface catalog_import --input '{…}' --json` | `catalog_import` | `checkout`, `dryRun?`, `requestId` | `imported[]`, `skipped[]`, `catalog` |
 | expire old runs | `odu surface catalog_prune --input '{…}' --json` | `catalog_prune` | `retentionDays?`, `dryRun?`, `requestId` | `expired[]`, `kept[]`, `retentionDays`, `dryRun`, `replayed` |
 | require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `hostsFile?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail`, `replayed` |
-| create a cache bucket | `odu surface cache bucket_create --input '{…}' --json` | `cache_bucket_create` | `rootToken`, `name`, `public`, `retentionDays`, `upstreamKeys?` | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl` |
+| create a cache bucket | `odu surface cache bucket_create --input '{…}' --json` | `cache_bucket_create` | `rootToken`, `name`, `public`, `retentionDays`, `upstreamKeys?`, `store?` (a declared store; default `local`, `unknown_store` otherwise) | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `store` |
 | list buckets | `odu surface cache bucket_list --input '{…}' --json` | `cache_bucket_list` | `rootToken` | `buckets[]` (the shape above) |
 | one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `domain`, `url` only — the substituter's identity, not the operator's counts |
 | give a bucket a DNS name | `odu surface cache bucket_domain --input '{…}' --json` | `cache_bucket_domain` | `rootToken`, `bucket`, `domain` (omit to clear) | the bucket row; `url` becomes the name and `pushUrl` stays the path |
 | one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastAccessed`), `next?` — newest first, 100 a page |
 | the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
-| the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits` — one row per bucket, published as it moves |
+| the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits`, `store` — one row per bucket, published as it moves |
+| the stores a bucket can live in | `odu surface get cache stores` | the `stores` resource | *(none)* | `[{ name, kind }]` — `local` (the server's disk) first, then each declared S3 store; never an endpoint or a credential |
 | mint a cache token | `odu surface cache token_mint --input '{…}' --json` | `cache_token_mint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
 | list cache tokens | `odu surface cache token_list --input '{…}' --json` | `cache_token_list` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
 | revoke a cache token | `odu surface cache token_revoke --input '{…}' --json` | `cache_token_revoke` | `rootToken`, `id` | `id`, `revoked` |
@@ -342,7 +343,11 @@ terminal.
 **A cache bucket keeps the compressed NAR a push uploaded** (`FileHash`/`FileSize`
 are real, `CA:` is proved from name, references and bytes) and keeps no Nix
 store: references are names, so a push records a path even when they are not in
-the bucket. The cache row is at contract 3.0, which removed `held` and `--wait`.
+the bucket. A bucket's objects live in its **store** — `local` disk, or an
+S3-compatible bucket the operator declared (`services.odu.cache.stores`) — chosen
+at `cache_bucket_create` and kept; every store serves through the same routes.
+The cache row is at contract 3.1 (3.0 removed `held` and `--wait`; 3.1 added
+`store` and the `stores` resource).
 
 - **`requestId` is an idempotency key on these three too.** A repeat with the
   same id replays the recorded answer and performs nothing — which is what
@@ -534,10 +539,12 @@ declares.
 
 ## What changed (state it honestly if asked)
 
-- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 3.0,
+- **A bucket can live on S3** (cache 3.1): R2, AWS, Garage, versitygw — declared by the
+  operator, chosen per bucket with `store`, served exactly like local disk.
+- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 3.1,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
   major of a row **it reads** differs. The refusal names that row
-  (`serves the cache row at 3.0; this build reads cache 2.4`): run `odu web --upgrade`.
+  (`serves the cache row at 3.1; this build reads cache 2.4`): run `odu web --upgrade`.
   A runs-only reader is never refused because the cache moved.
 - The cache's `held` resource and `odu cache push --wait` are gone (cache 3.0).
 

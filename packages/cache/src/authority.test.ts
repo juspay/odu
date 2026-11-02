@@ -55,6 +55,7 @@ function face(rootToken: string | null) {
     cache,
     publicOrigin: "http://cache.test",
     mount: "/cache",
+    stores: [{ name: "local", kind: "local" }],
   });
   const runtime = implementSurface(oduCacheSurface, server.deps);
   return {

@@ -389,11 +389,50 @@ function decompressorOf(compression: string | null): string[] | null | { error: 
  *
  * Streamed: one chunk at a time, never the whole NAR.
  */
-export async function verifyNarFile(
+export function verifyNarFile(
   path: string,
   compression: string | null,
   /** The row's own hash part when its references include itself. */
   selfHashPart: string | null = null,
+): Promise<NarCheck> {
+  return verifyNar(
+    { name: path, open: () => createReadStream(path), size: () => statSync(path).size },
+    compression,
+    selfHashPart,
+  );
+}
+
+/**
+ * THE SAME CHECK over a KEPT OBJECT, from whichever store holds it — the
+ * self-CA pass reads a row's bytes this way, so it needs no file of its own.
+ */
+export function verifyNarStream(
+  object: { stream: ReadableStream<Uint8Array>; size: number },
+  compression: string | null,
+  selfHashPart: string | null = null,
+): Promise<NarCheck> {
+  return verifyNar(
+    {
+      name: "the stored object",
+      open: () => Readable.fromWeb(object.stream as unknown as import("node:stream/web").ReadableStream<Uint8Array>),
+      size: () => object.size,
+    },
+    compression,
+    selfHashPart,
+  );
+}
+
+/** The bytes a verify reads: opened ONCE, and the length they should have. */
+interface NarBytes {
+  name: string;
+  open(): Readable;
+  size(): number;
+}
+
+async function verifyNar(
+  bytes: NarBytes,
+  compression: string | null,
+  selfHashPart: string | null,
 ): Promise<NarCheck> {
   const decompressor = decompressorOf(compression);
   if (decompressor !== null && !Array.isArray(decompressor)) {
@@ -423,7 +462,7 @@ export async function verifyNarFile(
     // hashed must be the file a client will receive.
     let actual: number;
     try {
-      actual = statSync(path).size;
+      actual = bytes.size();
     } catch (err) {
       const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
       resolve({ ok: false, absent: missing, message: String(err) });
@@ -433,7 +472,7 @@ export async function verifyNarFile(
       resolve({
         ok: false,
         absent: false,
-        message: `${path} is ${actual} bytes but ${fileSize} were read`,
+        message: `${bytes.name} is ${actual} bytes but ${fileSize} were read`,
       });
       return;
     }
@@ -449,7 +488,7 @@ export async function verifyNarFile(
 
   let source: Readable;
   if (decompressor === null) {
-    source = createReadStream(path);
+    source = bytes.open();
   } else {
     const child = spawn(decompressor[0] as string, decompressor.slice(1), {
       // The FILE goes in on stdin: a decompressor spawned with stdin closed
@@ -471,7 +510,7 @@ export async function verifyNarFile(
     }
     // EPIPE once the child has had enough is the ordinary end of a pipe.
     child.stdin?.on("error", () => {});
-    const file = createReadStream(path);
+    const file = bytes.open();
     file.on("data", (chunk: string | Buffer) => {
       const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
       fileHash.update(bytes);

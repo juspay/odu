@@ -29,7 +29,7 @@ import { HttpRouter } from "effect/http";
 import { Effect } from "effect";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import type { Logger } from "@kolu/surface-daemon";
-import { closeHost, definePlugin, mountPlugin, openHost, provide, standing } from "@olai/effect-cordis";
+import { closeHost, definePlugin, mountPlugin, openHost, provide, rowReport, settled, standing } from "@olai/effect-cordis";
 import {
   BoundOrigin,
   Bundle,
@@ -42,7 +42,9 @@ import {
   Routes,
   StateDir,
 } from "@odu/cordis/services";
+import { CACHE_KEY } from "./surface";
 import { cacheRow } from "./server";
+import { diskObjectStore } from "./objectStore";
 import { createCache } from "./cache";
 import { openCacheRepo } from "./db";
 import { asRoot } from "./testlib";
@@ -188,7 +190,7 @@ describe("the cache row's teardown", () => {
         }),
       }) as unknown as RootedSurfacesRuntime<never>),
     );
-    await run(mountPlugin(host, cacheRow));
+    await run(mountPlugin(host, cacheRow(new Map())));
 
     // NO REQUEST: the row's scoped fiber must put the object.
     const deadline = Date.now() + 10_000;
@@ -201,6 +203,38 @@ describe("the cache row's teardown", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     expect(row?.fileHash ?? null).not.toBeNull();
+    await run(closeHost(host));
+  });
+
+  it("refuses to mount a bucket whose store is no longer declared, saying which", async () => {
+    // A BUCKET ON A STORE the operator has since removed from the config.
+    const before = createCache({
+      stateRoot: scratch,
+      rootToken: "root-token",
+      stores: new Map([["nas", diskObjectStore({ dir: join(scratch, "nas") })]]),
+    });
+    await before.admin.create({ ...asRoot("root-token"), name: "main", public: true, retentionDays: 30, upstreamKeys: [], store: "nas" });
+    await before.close();
+
+    const run = standing();
+    const host = await run(openHost);
+    await run(provide(host, StateDir, () => scratch));
+    await run(provide(host, RootToken, () => "root-token"));
+    await run(provide(host, NixStore, () => null));
+    await run(provide(host, BoundOrigin, () => "http://127.0.0.1:18440"));
+    await run(provide(host, PublicOrigin, () => null));
+    await run(provide(host, Log, () => silentLog));
+    await run(provide(host, Routes, () => routesStub));
+    await run(provide(host, Bundle, () => ({}) as unknown as RootedSurfacesRuntime<never>));
+    await run(mountPlugin(host, cacheRow(new Map())));
+    await run(settled(host, [CACHE_KEY]));
+    const report = await run(rowReport(host, [CACHE_KEY]));
+    // THE SENTENCE THE HOST PRINTS: "the cache row failed to start: …".
+    expect(report.get(CACHE_KEY)).toMatchObject({
+      state: "failed",
+      fault: expect.stringContaining('the bucket "main" keeps its objects in the store "nas"'),
+    });
+    expect(layers).toEqual([]);
     await run(closeHost(host));
   });
 
@@ -243,7 +277,7 @@ describe("the cache row's teardown", () => {
       );
 
       await run(mountPlugin(host, siblingRow));
-      await run(mountPlugin(host, cacheRow));
+      await run(mountPlugin(host, cacheRow(new Map())));
 
       // ONE attach, so the publish half is wired before anything moves.
       expect(layers.length).toBe(1);

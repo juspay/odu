@@ -36,14 +36,18 @@
  *
  * The facts arrive as Cordis services (`@odu/cordis/services`): the state root,
  * the root token, the store URI, the bound and public origins, the logger, the
- * bundle to mount on, and the router mount for the protocol routes.
+ * bundle to mount on, and the router mount for the protocol routes. The one
+ * fact that is this row's own configuration — the stores the operator declared
+ * — arrives as the factory's argument, read by {@link readCacheStores} at the
+ * host's boot.
  */
 
+import { join } from "node:path";
 import type { Row } from "@odu/cordis/services";
 import { CACHE_ROW } from "./surface";
-import { Effect, Fiber } from "effect";
+import { Data, Effect } from "effect";
 import { definePlugin, offer } from "@olai/effect-cordis";
-import type { ImplementSurfaceDeps } from "@kolu/surface/server";
+import { type ImplementSurfaceDeps, inMemoryStore } from "@kolu/surface/server";
 import {
   BoundOrigin,
   Bundle,
@@ -56,7 +60,17 @@ import {
   Routes,
   StateDir,
 } from "@odu/cordis/services";
-import { createCache, roleAuthority, type Authority, type BucketFacts, type Cache, type CacheOutcome } from "./cache";
+import {
+  createCache,
+  type CacheMountRefusal,
+  mountRefusalMessage,
+  roleAuthority,
+  type Authority,
+  type BucketFacts,
+  type Cache,
+  type CacheOutcome,
+} from "./cache";
+import { objectStores, type StoreDeclarations, storeFacts } from "./stores";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
@@ -65,6 +79,7 @@ import {
   type CacheBucket,
   CACHE_KEY,
   CacheRefused,
+  type CacheStore,
   oduCacheSurface,
 } from "./surface";
 
@@ -91,6 +106,8 @@ export interface CacheServerOptions {
   readonly publicOrigin: string;
   /** Where the protocol is mounted under that origin, `/cache` by default. */
   readonly mount: string;
+  /** The stores a bucket may live in, for the `stores` cell. */
+  readonly stores: readonly CacheStore[];
 }
 
 export interface CacheServer {
@@ -249,6 +266,10 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     );
 
   const deps: CacheSurfaceDeps = {
+    cells: {
+      // FIXED FOR THE TENURE: the declarations were read at boot.
+      stores: { store: inMemoryStore<readonly CacheStore[]>(opts.stores) },
+    },
     collections: {
       buckets: {
         readAll: () => rows,
@@ -277,6 +298,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 // contract's own doc: an absent list means nixpkgs' key, the
                 // filter that keeps an upstream closure out of a bucket.
                 upstreamKeys: input.upstreamKeys ?? [DEFAULT_UPSTREAM_KEY],
+                ...(input.store === undefined ? {} : { store: input.store }),
               }),
             (facts) => rowOf(facts),
           ),
@@ -420,7 +442,16 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
  * the surface that serves it, the mount happens before anything can address it,
  * and every one of those is undone in reverse when the scope closes.
  */
-export const cacheRow = definePlugin({
+/** THE ROW REFUSED ITS MOUNT — the refusal value, carried to the host's report. */
+export class CacheMountRefused extends Data.TaggedError("CacheMountRefused")<{
+  readonly refusal: CacheMountRefusal;
+}> {
+  override get message(): string {
+    return mountRefusalMessage(this.refusal);
+  }
+}
+
+export const cacheRow = (declared: StoreDeclarations) => definePlugin({
   name: CACHE_KEY,
   needs: [Bundle, Routes, StateDir, RootToken, NixStore, BoundOrigin, PublicOrigin, Log],
   apply: Effect.gen(function* () {
@@ -436,6 +467,9 @@ export const cacheRow = definePlugin({
     const cache = createCache({
       stateRoot: stateDir,
       rootToken,
+      // THE STORES AS VALUES, built once from what the operator declared: the
+      // cache holds them by name and never asks what kind they are.
+      stores: objectStores(declared, join(stateDir, "cache")),
       // THE OLD NIX STORE is read ONLY by the one-time object migration. A
       // fresh deployment leaves this null and the cache never shells out.
       // `NixStore` NULL IS THE HOST'S OWN /nix/store (the contract): a module
@@ -450,7 +484,15 @@ export const cacheRow = definePlugin({
     });
     // BEFORE THE MOUNT: CA proof and the orphan/temp sweep. Nothing is
     // writing yet, so this cannot race a push.
-    const boot = yield* Effect.promise(() => cache.boot());
+    const booted = yield* Effect.promise(() => cache.boot());
+    if (!booted.ok) {
+      yield* Effect.promise(() => cache.close());
+      // A PLUGIN'S APPLY HAS NO ERROR CHANNEL: the refusal ends the row as a
+      // defect that still carries the value, and the host's row report prints
+      // its sentence ("the cache row failed to start: …").
+      return yield* Effect.die(new CacheMountRefused({ refusal: booted.refusal }));
+    }
+    const boot = booted.report;
     if (boot.caProved > 0) {
       log.info({ proved: boot.caProved }, "odu cache: boot proved CA");
     }
@@ -485,6 +527,7 @@ export const cacheRow = definePlugin({
       // substituter that works for nobody.
       publicOrigin: publicOrigin ?? boundOrigin,
       mount: CACHE_MOUNT,
+      stores: storeFacts(declared),
     });
 
     // THE MOUNT, in the activation. The framework walks the arriving surface,
@@ -558,7 +601,10 @@ export { cacheRoutes } from "./routes";
  * Its own facts (`CACHE_ROW`, beside its surface) and its plugin, in one
  * value. The host composes these records and names none of their parts.
  */
-export const cacheRowRecord: Row = {
+export const cacheRowRecord = (declared: StoreDeclarations): Row => ({
   ...CACHE_ROW,
-  plugin: cacheRow,
-};
+  plugin: cacheRow(declared),
+});
+
+/** Re-exported for the host: the row's ONE environment read. */
+export { readCacheStores, storeConfigMessage } from "./stores";
