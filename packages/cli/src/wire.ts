@@ -24,18 +24,32 @@
  */
 
 import { composedWire } from "@odu/cordis/compose";
+import type { RowFacts } from "@odu/cordis/services";
 import {
   CI_NEEDS,
   ifMounted,
   oduServiceSurface,
   type RowNeeds,
 } from "@odu/service-client/surface";
-import { CACHE_KEY, CACHE_NEEDS, oduCacheSurface } from "@odu/cache/surface";
-import { AUTH_KEY, AUTH_NEEDS, oduAuthSurface } from "@odu/auth/surface";
-import { CLOUDFLARE_KEY, CLOUDFLARE_NEEDS, oduCloudflareSurface } from "@odu/cloudflare/surface";
+import { CACHE_ROW } from "@odu/cache/surface";
+import { AUTH_ROW } from "@odu/auth/surface";
+import { CLOUDFLARE_ROW } from "@odu/cloudflare/surface";
 import { authorizationHeaders } from "@odu/auth/cli";
 import { connectOrStart } from "@odu/launch/webLauncher";
 import type { ServiceConnection } from "@odu/service-client/dial";
+
+/**
+ * THE ROWS SERVED BESIDE THE RUNS, named ONCE — each row's own facts, read off
+ * its surface module. Everything below is derived from this list: the sibling
+ * surfaces, the group a link encodes against, and what the composed faces need.
+ * A second list was a row that could be added to one and forgotten in another.
+ */
+const SIBLING_ROWS: ReadonlyArray<RowFacts> = [CACHE_ROW, AUTH_ROW, CLOUDFLARE_ROW];
+
+/** Each sibling's surface, under the key it is served at. */
+export const SERVICE_SIBLINGS = Object.fromEntries(
+  SIBLING_ROWS.map((row) => [row.key as string, row.agent.surface]),
+);
 
 /**
  * ONE FLAT GROUP: the runs' bare tags plus each sibling's prefixed ones,
@@ -43,16 +57,6 @@ import type { ServiceConnection } from "@odu/service-client/dial";
  * is a boot-time error naming both, rather than a last-writer-wins map that
  * drops one in silence.
  */
-export const SERVICE_SIBLINGS = {
-  [CACHE_KEY]: oduCacheSurface,
-  [AUTH_KEY]: oduAuthSurface,
-  [CLOUDFLARE_KEY]: oduCloudflareSurface,
-} as const;
-
-/** The same map, as the group a link encodes against. Derived from
- *  {@link SERVICE_SIBLINGS} rather than beside it: two spellings of one row set,
- *  four lines apart, is a row that can be added to one and forgotten in the
- *  other. */
 export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLINGS);
 
 /**
@@ -67,12 +71,7 @@ export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLIN
  */
 export const EVERY_ROW_NEEDS: RowNeeds = {
   ...CI_NEEDS,
-  ...Object.fromEntries(
-    Object.entries({ ...CACHE_NEEDS, ...AUTH_NEEDS, ...CLOUDFLARE_NEEDS }).map(([row, need]) => [
-      row,
-      ifMounted(need.requires),
-    ]),
-  ),
+  ...Object.fromEntries(SIBLING_ROWS.map((row) => [row.name, ifMounted(row.contract)])),
 };
 
 /**

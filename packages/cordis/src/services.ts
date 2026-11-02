@@ -303,27 +303,31 @@ export interface RowAgent {
   readonly instructions: string;
 }
 
-/** ONE ROW, fixed at boot.
+/** WHAT A ROW IS, LESS ITS SERVER — browser-safe, so it lives beside the
+ *  row's surface and every face that composes rows reads it there.
  *
  *  `key` is the word its surface is served under — the sibling segment on the
  *  wire, the subcommand in argv, and the word a browser folds its health under.
  *  `null` for the ROOT row, whose members keep the bare tags.
- *
- *  `plugin` is the `definePlugin` this row is mounted as — EVERY row is one,
- *  including the runs': a plugin can build a rooted bundle inside its own
- *  `apply` and `offer` it, so the runs' row owns its runtime and closes it.
- *  `key` null means "the wire's ROOT": the row that offers `Bundle`, which the
- *  siblings mount on.
  *
  *  `contract` is the row's OWN version, `major.minor` — the constant its surface
  *  module declares beside the surface it versions. A row's surface changing is
  *  that row's bump and no other's: a client that reads only the runs is never
  *  refused because the cache moved. The host gathers these into
  *  {@link RowContracts} and knows nothing of what they mean. */
-export interface Row {
+export interface RowFacts {
   readonly name: string;
   readonly key: string | null;
-  readonly plugin: Plugin;
   readonly agent: RowAgent;
   readonly contract: string;
+}
+
+/** ONE ROW, fixed at boot: its facts and the `definePlugin` it is mounted as.
+ *
+ *  EVERY row is a plugin, including the runs': a plugin can build a rooted
+ *  bundle inside its own `apply` and `offer` it, so the runs' row owns its
+ *  runtime and closes it. `key` null means "the wire's ROOT": the row that
+ *  offers `Bundle`, which the siblings mount on. */
+export interface Row extends RowFacts {
+  readonly plugin: Plugin;
 }

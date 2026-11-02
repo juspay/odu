@@ -86,9 +86,9 @@ const declaration = {
     cache: {
       "packages/cli/src/serviceCli.ts": 4,
       "packages/cli/src/serviceMcp.ts": 4,
-      // The composed wire, and the composed faces' needs: the row's key and
-      // surface, and its `CACHE_NEEDS` read only when mounted.
-      "packages/cli/src/wire.ts": 4,
+      // The composed wire: the row's own facts, from which its surface, its
+      // key and the composed faces' need are all derived.
+      "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
       // `nix-cache-info` — Nix's protocol path, not odu's cache row. The probe
@@ -121,7 +121,7 @@ const declaration = {
       "packages/cache/src/cli.ts": 2,
       "packages/ci/src/protect.ts": 2,
       "packages/cli/src/serviceMcp.ts": 4,
-      "packages/cli/src/wire.ts": 4,
+      "packages/cli/src/wire.ts": 2,
       "packages/service/src/service.ts": 1,
       // The 401's sentence names the command a person runs to fix it.
       "packages/host/src/principal.ts": 1,
@@ -139,9 +139,8 @@ const declaration = {
       "packages/web-acceptance/support/cloudflareStub.ts": 2,
       "packages/web-acceptance/support/hooks.ts": 15,
       // The composed wires that speak the sibling's key — the tunnel's argv
-      // face and the MCP bridge beside the cache's and the door's — and the
-      // row's own needs, read when mounted.
-      "packages/cli/src/wire.ts": 4,
+      // face and the MCP bridge beside the cache's and the door's.
+      "packages/cli/src/wire.ts": 2,
       "packages/cli/src/serviceMcp.ts": 5,
     },
   },
@@ -316,7 +315,10 @@ describe("the row's word", () => {
 
   it("is the word every face spells", () => {
     for (const file of FACES) {
-      expect(source(file), `${file} does not name CACHE_KEY`).toContain("CACHE_KEY");
+      // The constant, or the row's own record that carries it (`CACHE_ROW`).
+      expect(source(file), `${file} names neither CACHE_KEY nor CACHE_ROW`).toMatch(
+        /\bCACHE_(KEY|ROW)\b/,
+      );
       // …and none of them spells the word itself as a sibling key.
       expect(source(file), `${file} spells the row's word`).not.toMatch(
         new RegExp(`\\b${value as string}:`),
@@ -328,9 +330,10 @@ describe("the row's word", () => {
     // The record is the ROW's: the host names it whole and spells none of its
     // parts, so the key is asserted where the row declares it.
     expect(source("packages/ci/src/row.ts")).toMatch(/\{\s*name:\s*CI_ROW,\s*key:\s*null,/);
-    expect(source("packages/cache/src/server.ts")).toMatch(
-      /\{\s*name:\s*CACHE_KEY,\s*key:\s*CACHE_KEY,/,
+    expect(source("packages/cache/src/surface.ts")).toMatch(
+      /CACHE_ROW: RowFacts = \{\s*name:\s*CACHE_KEY,\s*key:\s*CACHE_KEY,/,
     );
+    expect(source("packages/cache/src/server.ts")).toMatch(/\.\.\.CACHE_ROW,/);
     const roster = source("packages/host/src/web.ts");
     expect(roster).toMatch(/ROWS: ReadonlyArray<Row> = \[\s*ciRowRecord,\s*cacheRowRecord,/);
     expect(roster).not.toMatch(/_CONTRACT_VERSION/);

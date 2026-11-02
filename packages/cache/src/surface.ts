@@ -30,7 +30,7 @@
  * without holding a database.
  */
 
-import type { RowAgent } from "@odu/cordis/services";
+import type { RowAgent, RowFacts } from "@odu/cordis/services";
 import { Schema } from "effect";
 import { defineSurface } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
@@ -610,4 +610,14 @@ export const CACHE_AGENT: RowAgent = {
   surface: oduCacheSurface,
   expose: ODU_CACHE_EXPOSE,
   instructions: ODU_CACHE_MCP_INSTRUCTIONS,
+};
+
+/** THIS ROW'S FACTS — its word on the wire, what an agent is told and its own
+ *  contract version, in one value beside the surface. The server's record adds
+ *  the plugin; a face that composes rows reads these. */
+export const CACHE_ROW: RowFacts = {
+  name: CACHE_KEY,
+  key: CACHE_KEY,
+  agent: CACHE_AGENT,
+  contract: CACHE_CONTRACT_VERSION,
 };

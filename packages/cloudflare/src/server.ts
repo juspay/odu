@@ -34,7 +34,7 @@
  */
 
 import type { Row } from "@odu/cordis/services";
-import { CLOUDFLARE_AGENT, CLOUDFLARE_CONTRACT_VERSION } from "./surface";
+import { CLOUDFLARE_ROW } from "./surface";
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { Effect } from "effect";
@@ -800,15 +800,11 @@ function hostOnly(origin: string): string {
 export { readCloudflareConfig };
 
 /**
- * THIS ROW, AS THE HOST LISTS IT — the tunnel, when the host read a token file. One value the row owns: its word on
- * the wire, its plugin, what an agent is told and its own contract version,
- * read off its own modules. The host composes these records and names none of
- * their parts.
+ * THIS ROW, AS THE HOST LISTS IT — the tunnel, when the host read a token file.
+ * Its own facts (`CLOUDFLARE_ROW`, beside its surface) and its plugin, in one
+ * value. The host composes these records and names none of their parts.
  */
 export const cloudflareRowRecord = (config: CloudflareRowConfig): Row => ({
-  name: CLOUDFLARE_KEY,
-  key: CLOUDFLARE_KEY,
+  ...CLOUDFLARE_ROW,
   plugin: cloudflareRow(config),
-  agent: CLOUDFLARE_AGENT,
-  contract: CLOUDFLARE_CONTRACT_VERSION,
 });

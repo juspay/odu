@@ -27,7 +27,7 @@
  */
 
 import { type Principal, PrincipalSchema, RoleSchema } from "@odu/cordis/principal";
-import type { RowAgent } from "@odu/cordis/services";
+import type { RowAgent, RowFacts } from "@odu/cordis/services";
 import { defineSurface } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
 import { Schema } from "effect";
@@ -318,3 +318,13 @@ export const AUTH_AGENT: RowAgent = {
 /** The role this daemon gives somebody who is allowed in but has never been
  *  granted anything. */
 export const DEFAULT_ROLE = "member";
+
+/** THIS ROW'S FACTS — its word on the wire, what an agent is told and its own
+ *  contract version, in one value beside the surface. The server's record adds
+ *  the plugin; a face that composes rows reads these. */
+export const AUTH_ROW: RowFacts = {
+  name: AUTH_KEY,
+  key: AUTH_KEY,
+  agent: AUTH_AGENT,
+  contract: AUTH_CONTRACT_VERSION,
+};

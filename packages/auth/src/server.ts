@@ -36,7 +36,7 @@
  */
 
 import type { Row } from "@odu/cordis/services";
-import { AUTH_AGENT, AUTH_CONTRACT_VERSION } from "./surface";
+import { AUTH_ROW } from "./surface";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { Effect } from "effect";
@@ -643,15 +643,11 @@ export { signInPageHtml } from "./routes";
 export { authRoutes } from "./routes";
 
 /**
- * THIS ROW, AS THE HOST LISTS IT — the door, when the host read a GitHub App's config. One value the row owns: its word on
- * the wire, its plugin, what an agent is told and its own contract version,
- * read off its own modules. The host composes these records and names none of
- * their parts.
+ * THIS ROW, AS THE HOST LISTS IT — the door, when the host read a GitHub App's config.
+ * Its own facts (`AUTH_ROW`, beside its surface) and its plugin, in one
+ * value. The host composes these records and names none of their parts.
  */
 export const authRowRecord = (config: GithubConfig): Row => ({
-  name: AUTH_KEY,
-  key: AUTH_KEY,
+  ...AUTH_ROW,
   plugin: authRow(config),
-  agent: AUTH_AGENT,
-  contract: AUTH_CONTRACT_VERSION,
 });

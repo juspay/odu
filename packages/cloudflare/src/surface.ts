@@ -11,7 +11,7 @@
  * client, the connector and the database are behind `./server`.
  */
 
-import type { RowAgent } from "@odu/cordis/services";
+import type { RowAgent, RowFacts } from "@odu/cordis/services";
 import { Schema } from "effect";
 import { defineSurface } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
@@ -166,4 +166,14 @@ export const CLOUDFLARE_AGENT: RowAgent = {
   surface: oduCloudflareSurface,
   expose: ODU_CLOUDFLARE_EXPOSE,
   instructions: ODU_CLOUDFLARE_MCP_INSTRUCTIONS,
+};
+
+/** THIS ROW'S FACTS — its word on the wire, what an agent is told and its own
+ *  contract version, in one value beside the surface. The server's record adds
+ *  the plugin; a face that composes rows reads these. */
+export const CLOUDFLARE_ROW: RowFacts = {
+  name: CLOUDFLARE_KEY,
+  key: CLOUDFLARE_KEY,
+  agent: CLOUDFLARE_AGENT,
+  contract: CLOUDFLARE_CONTRACT_VERSION,
 };
