@@ -10,8 +10,10 @@ import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { objectStoreContract } from "../test/objectStore.contract";
 import { type Gateway, startGateway } from "../test/versitygw";
-import { diskObjectStore, s3ObjectStore } from "./objectStore";
-import { s3Fetch } from "./s3sign";
+import { createHash } from "node:crypto";
+import { base32 } from "./narinfo";
+import { ConditionalConflict, diskObjectStore, s3ObjectStore, UnrecordedObject } from "./objectStore";
+import { s3Fetch, type S3Target } from "./s3sign";
 
 let scratch: string;
 beforeEach(() => {
@@ -93,5 +95,105 @@ describe("disk object store details", () => {
     expect(facts?.size).toBe(7);
     expect(existsSync(join(scratch, "objects", ".facts", "main", "nar", "old.nar.zst"))).toBe(true);
     expect(await store.list("main")).toEqual([{ key: "main/nar/old.nar.zst", size: 7 }]);
+  });
+});
+
+/** `bytes`' facts, spelled as a store records them. */
+const factsOf = (bytes: Uint8Array) => ({
+  size: bytes.length,
+  sha256: `sha256:${base32(createHash("sha256").update(bytes).digest())}`,
+});
+
+const once = (stream: Uint8Array) => new Response(stream as Uint8Array<ArrayBuffer>).body as ReadableStream<Uint8Array>;
+
+/**
+ * A `send` that answers the first `times` CONDITIONAL writes with `409
+ * ConditionalRequestConflict` and forwards everything else to the gateway —
+ * the answer versitygw never gives and AWS gives when a delete is in flight.
+ * `meanwhile` runs at each 409: whatever the other party did while it stood.
+ */
+function conflicting(times: number, meanwhile: () => Promise<void> = async () => {}) {
+  const seen = { conflicts: 0 };
+  const send = (async (url: string | URL | Request, init?: RequestInit) => {
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    if (headers["if-none-match"] === "*" && seen.conflicts < times) {
+      seen.conflicts += 1;
+      await meanwhile();
+      return new Response("<Error><Code>ConditionalRequestConflict</Code></Error>", { status: 409 });
+    }
+    return fetch(url, init);
+  }) as typeof fetch;
+  return { send, seen };
+}
+
+describe("s3 object store: a 409 decides nothing", () => {
+  let target: S3Target;
+  beforeEach(async () => {
+    target = await gateway.bucket();
+  });
+  const small = new TextEncoder().encode("one part");
+  const large = new Uint8Array(PART + 1).map((_, at) => at % 251);
+
+  it("sends a one-part put again, and keeps it", async () => {
+    const { send, seen } = conflicting(2);
+    const store = s3ObjectStore({ target, partSize: PART, send });
+    expect(await store.put("main/nar/a.nar.zst", once(small))).toEqual({ ok: true, facts: factsOf(small) });
+    expect(seen.conflicts).toBe(2);
+    expect(await store.facts("main/nar/a.nar.zst")).toEqual(factsOf(small));
+  });
+
+  it("is refused with the winner's facts when the other writer landed meanwhile", async () => {
+    const theirs = new TextEncoder().encode("the other writer's");
+    const { send } = conflicting(1, async () => {
+      const other = s3ObjectStore({ target, partSize: PART });
+      expect((await other.put("main/nar/a.nar.zst", once(theirs))).ok).toBe(true);
+    });
+    const store = s3ObjectStore({ target, partSize: PART, send });
+    expect(await store.put("main/nar/a.nar.zst", once(small))).toEqual({
+      ok: false,
+      refusal: { kind: "exists", key: "main/nar/a.nar.zst", facts: factsOf(theirs) },
+    });
+  });
+
+  it("starts a conflicted multipart upload again — from the kept file, or from the temp copy", async () => {
+    const file = join(scratch, "staged.nar.zst");
+    writeFileSync(file, large);
+    const kept = conflicting(1);
+    const keeping = s3ObjectStore({ target, partSize: PART, send: kept.send });
+    expect(await keeping.keep("main/nar/k.nar.zst", file, factsOf(large))).toEqual({ ok: true, facts: factsOf(large) });
+    expect(kept.seen.conflicts).toBe(1);
+
+    const copied = conflicting(1);
+    const putting = s3ObjectStore({ target, partSize: PART, send: copied.send });
+    expect(await putting.put("main/nar/p.nar.zst", once(large))).toEqual({ ok: true, facts: factsOf(large) });
+    expect(copied.seen.conflicts).toBe(1);
+    expect(await putting.list("main")).toEqual([
+      { key: "main/nar/k.nar.zst", size: large.length },
+      { key: "main/nar/p.nar.zst", size: large.length },
+    ]);
+  });
+
+  it("gives up with a ConditionalConflict naming the key, and keeps nothing", async () => {
+    const store = s3ObjectStore({ target, partSize: PART, send: conflicting(Number.POSITIVE_INFINITY).send });
+    const put = store.put("main/nar/a.nar.zst", once(small));
+    await expect(put).rejects.toBeInstanceOf(ConditionalConflict);
+    await put.catch((err: ConditionalConflict) => expect(err.key).toBe("main/nar/a.nar.zst"));
+    expect(await store.head("main/nar/a.nar.zst")).toBeNull();
+  });
+});
+
+describe("s3 object store: an object odu did not write", () => {
+  it("is an UnrecordedObject naming the key, never a re-read of its bytes", async () => {
+    const target = await gateway.bucket();
+    const bytes = new TextEncoder().encode("dropped in by hand");
+    const response = await s3Fetch(target, "PUT", "main/nar/x.nar.zst", {
+      headers: { "content-length": String(bytes.length) },
+      body: bytes as Uint8Array<ArrayBuffer>,
+    });
+    expect(response.ok).toBe(true);
+    const store = s3ObjectStore({ target, partSize: PART });
+    const facts = store.facts("main/nar/x.nar.zst");
+    await expect(facts).rejects.toBeInstanceOf(UnrecordedObject);
+    await facts.catch((err: UnrecordedObject) => expect(err.key).toBe("main/nar/x.nar.zst"));
   });
 });

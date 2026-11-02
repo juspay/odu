@@ -47,7 +47,7 @@ import { open, link, mkdir, readdir, readFile, rename, stat, unlink, writeFile }
 import { dirname, join, normalize, sep } from "node:path";
 import { S3Client } from "bun";
 import { base32 } from "./narinfo";
-import { s3Fetch, type S3Target } from "./s3sign";
+import { s3Fetch, type S3Request, type S3Target } from "./s3sign";
 import { newChain, type Chain, serial } from "./serial";
 import { writeAll } from "./sink";
 
@@ -94,7 +94,8 @@ export interface ObjectStore {
   get(key: string, range?: ByteRange): Promise<StoredObject | null>;
   head(key: string): Promise<number | null>;
   /** The STORED object's facts — what `put` recorded — or null when the key is
-   *  absent. A read of what was written, never a re-hash of the bytes. */
+   *  absent. A read of what was written, never a re-hash of the bytes; an S3
+   *  object that carries none fails with {@link UnrecordedObject}. */
   facts(key: string): Promise<ObjectFacts | null>;
   /** Idempotent: deleting an absent key is not an error. */
   delete(key: string): Promise<void>;
@@ -105,6 +106,28 @@ export interface ObjectStore {
    *  before a mount can be writing. A younger temp is a live put. Scoped like
    *  `list`, because a store may be shared and only a bucket's prefix is ours. */
   sweepTemp(prefix: string, current: number): Promise<number>;
+}
+
+/** A KEY HOLDING BYTES ODU DID NOT RECORD. Nothing but odu writes under a
+ *  bucket's prefix, so on S3 this is somebody else's write into it, and the
+ *  store names the key rather than guessing the facts by reading the bytes. */
+export class UnrecordedObject extends Error {
+  readonly _tag = "UnrecordedObject";
+  constructor(readonly key: string) {
+    super(`${key} holds an object with no odu-size/odu-sha256 metadata — odu did not write it`);
+  }
+}
+
+/** A CONDITIONAL WRITE THAT STAYED UNDECIDED: S3 answered `409` to every try
+ *  (see `CONFLICT_BACKOFF_MS`), so nobody is known to have won `key`. */
+export class ConditionalConflict extends Error {
+  readonly _tag = "ConditionalConflict";
+  constructor(
+    readonly key: string,
+    readonly tries: number,
+  ) {
+    super(`${key}: the conditional write was answered 409 Conflict ${tries} times, and nothing was kept`);
+  }
 }
 
 /** A key is a relative path of plain segments: no `..`, no leading slash. */
@@ -224,8 +247,8 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
       .then((text) => JSON.parse(text) as ObjectFacts)
       .catch(() => null);
     if (kept !== null && kept.size === size) return kept;
-    // AN OBJECT FROM BEFORE FACTS WERE KEPT (3b), or one whose writer died
-    // between the link and the sidecar: hash it once, and keep the answer.
+    // A PRE-3b OBJECT on the pod really has no sidecar (nor one whose writer
+    // died between link and sidecar): hash it once, and keep the answer.
     const computed = await hashStream(fileBody(pathOf(key), 0, size));
     await writeFacts(key, computed).catch(() => {});
     return computed;
@@ -386,6 +409,9 @@ export interface S3ObjectStoreOptions {
   partSize?: number;
   /** Keys per LIST request; `list` pages through all of them. */
   listPageSize?: number;
+  /** How the signed requests are sent — `fetch`, unless a suite stages an
+   *  answer no gateway gives (a `409`). */
+  send?: typeof fetch;
 }
 
 /** The metadata names `put` writes and `facts` reads. */
@@ -426,9 +452,29 @@ const xmlValue = (xml: string, element: string): string | null => {
   return found === null ? null : (found[1] as string).replaceAll("&#34;", '"').replaceAll("&quot;", '"');
 };
 
-/** A conditional write lost: the key was written by somebody else first.
- *  `409` is S3's answer when another conditional write is in flight on it. */
-const lostRace = (response: Response): boolean => response.status === 412 || response.status === 409;
+/**
+ * HOW A CONDITIONAL WRITE IS DECIDED. `412 Precondition Failed` is the only
+ * "lost": another writer's object is at the key. `409 Conflict` decides
+ * NOTHING — AWS answers it when a concurrent delete (or, on versitygw and R2,
+ * another conditional write: `ConditionalRequestConflict`) was in flight, and
+ * either may yet fail — so the write is sent again after each of these pauses,
+ * and a write still conflicted after the last is a {@link ConditionalConflict}.
+ */
+const CONFLICT_BACKOFF_MS = [50, 100, 200, 400, 800] as const;
+type Decided = "won" | "lost" | "conflict";
+const decidedBy = (response: Response): Decided =>
+  response.status === 412 ? "lost" : response.status === 409 ? "conflict" : "won";
+
+/** Run `attempt` until it is not a conflict, pausing between tries. */
+async function untilDecided<T>(key: string, attempt: () => Promise<T | "conflict">): Promise<T> {
+  for (let tries = 1; ; tries += 1) {
+    const outcome = await attempt();
+    if (outcome !== "conflict") return outcome;
+    const pause = CONFLICT_BACKOFF_MS[tries - 1];
+    if (pause === undefined) throw new ConditionalConflict(key, tries);
+    await Bun.sleep(pause);
+  }
+}
 
 /**
  * AN S3-COMPATIBLE STORE: R2, AWS, Garage, versitygw.
@@ -439,16 +485,32 @@ const lostRace = (response: Response): boolean => response.status === 412 || res
  * promises. Multipart is this store's business: a put buffers one part at a
  * time, so its memory is `partSize` whatever the object's length.
  *
- * **Exactly one writer per key, twice over.** In this process, puts of one key
- * queue behind each other, so the second sees the first's object and is
- * refused. Across processes, the write that makes an object visible carries
- * `If-None-Match: *`. Both are needed: versitygw's posix backend checks that
- * precondition and THEN writes, so two truly concurrent conditional PUTs can
- * both succeed there (the contract's race case failed on that before the
- * queue), while R2 and AWS evaluate it atomically.
+ * **Exactly one writer per key — what holds, and where.** In this process,
+ * writes of one key queue behind each other (`oneWriter`) after a HEAD, so the
+ * second sees the first's object and is refused. Across processes, the write
+ * that makes an object visible carries `If-None-Match: *`, and how much that
+ * buys is the service's:
+ *
+ * - AWS honours it on `PutObject` and `CompleteMultipartUpload`, first to
+ *   finish wins and the rest get `412`
+ *   (docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html).
+ * - R2 evaluates it atomically on `PutObject`, at most one of several writes
+ *   succeeding (developers.cloudflare.com/r2/api/s3/api/), and documents NO
+ *   conditional header on `CompleteMultipartUpload`. So on R2 an object of one
+ *   part (`partSize`, 8 MiB) is put-if-absent across processes, and a larger
+ *   one is put-if-absent only within this process: two daemons completing one
+ *   key at once could leave the later one's object, its metadata with it.
+ *   Keys are prefixed by bucket and a bucket is one daemon's, so that takes two
+ *   daemons sharing a bucket's prefix.
+ * - versitygw (the suite's gateway) checks the precondition and THEN writes,
+ *   so two truly concurrent conditional PUTs can both succeed — the
+ *   contract's race case failed on that before `oneWriter`.
  */
 export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   const { target } = options;
+  const send = options.send ?? fetch;
+  const call = (method: string, key: string, request?: S3Request): Promise<Response> =>
+    s3Fetch(target, method, key, request, send);
   const partSize = Math.max(options.partSize ?? 8 * 1024 * 1024, 5 * 1024 * 1024);
   const pageSize = options.listPageSize ?? 1000;
   const client = new S3Client({
@@ -480,7 +542,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
 
   /** One HEAD: the object's length and the facts its put wrote, or null. */
   async function headOf(key: string): Promise<{ size: number; facts: ObjectFacts | null } | null> {
-    const response = await s3Fetch(target, "HEAD", safeKey(key));
+    const response = await call("HEAD", safeKey(key));
     if (response.status === 404) return null;
     if (!response.ok) throw new S3Failure(`HEAD ${key}`, response, "");
     const size = Number(response.headers.get("content-length"));
@@ -490,7 +552,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   }
 
   async function deleteKey(key: string): Promise<void> {
-    const response = await s3Fetch(target, "DELETE", key);
+    const response = await call("DELETE", key);
     const body = await response.text();
     if (!response.ok && response.status !== 404) throw new S3Failure(`DELETE ${key}`, response, body);
   }
@@ -498,9 +560,8 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   async function factsOf(key: string): Promise<ObjectFacts | null> {
     const found = await headOf(key);
     if (found === null) return null;
-    // AN OBJECT SOMETHING ELSE WROTE carries no odu metadata; reading it is
-    // the only honest answer, and an object odu wrote never takes this branch.
-    return found.facts ?? hashStream(client.file(key).stream());
+    if (found.facts === null) throw new UnrecordedObject(key);
+    return found.facts;
   }
 
   async function exists(key: string): Promise<PutOutcome> {
@@ -542,7 +603,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   }
 
   async function createUpload(key: string, headers: Record<string, string>): Promise<string> {
-    const response = await s3Fetch(target, "POST", key, { query: { uploads: "" }, headers });
+    const response = await call("POST", key, { query: { uploads: "" }, headers });
     const body = await response.text();
     const id = response.ok ? xmlValue(body, "UploadId") : null;
     if (id === null) throw new S3Failure(`CreateMultipartUpload ${key}`, response, body);
@@ -550,35 +611,37 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   }
 
   const abort = (key: string, uploadId: string): Promise<void> =>
-    s3Fetch(target, "DELETE", key, { query: { uploadId } }).then(
+    call("DELETE", key, { query: { uploadId } }).then(
       (response) => void response.body?.cancel(),
       () => {},
     );
 
-  /** Complete an upload; `false` when the precondition lost the race. */
+  /** Complete an upload: `lost` on `412`, and `conflict` on `409` — after
+   *  which AWS wants the upload STARTED AGAIN, never completed again. */
   async function complete(
     key: string,
     uploadId: string,
     etags: readonly string[],
     conditional: boolean,
-  ): Promise<boolean> {
+  ): Promise<Decided> {
     const body =
       "<CompleteMultipartUpload>" +
       etags.map((etag, at) => `<Part><PartNumber>${at + 1}</PartNumber><ETag>${etag}</ETag></Part>`).join("") +
       "</CompleteMultipartUpload>";
-    const response = await s3Fetch(target, "POST", key, {
+    const response = await call("POST", key, {
       query: { uploadId },
       headers: conditional ? { "if-none-match": "*" } : {},
       body,
     });
     const text = await response.text();
-    if (conditional && lostRace(response)) return false;
+    const decided = conditional ? decidedBy(response) : "won";
+    if (decided !== "won") return decided;
     // A COMPLETE CAN FAIL WITH 200: S3 sends the status before it knows, and
     // reports the failure as an `<Error>` body.
     if (!response.ok || text.includes("<Error>")) {
       throw new S3Failure(`CompleteMultipartUpload ${key}`, response, text);
     }
-    return true;
+    return "won";
   }
 
   /**
@@ -588,13 +651,13 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * metadata is fixed when an upload is created, and the hash is known only at
    * the end.
    */
-  async function copyInto(key: string, tempKey: string, facts: ObjectFacts): Promise<boolean> {
+  async function copyInto(key: string, tempKey: string, facts: ObjectFacts): Promise<Decided> {
     const uploadId = await createUpload(key, metaOf(facts));
     try {
       const etags: string[] = [];
       for (let start = 0, part = 1; start < facts.size; start += COPY_PART, part += 1) {
         const end = Math.min(start + COPY_PART, facts.size) - 1;
-        const response = await s3Fetch(target, "PUT", key, {
+        const response = await call("PUT", key, {
           query: { partNumber: String(part), uploadId },
           headers: {
             "x-amz-copy-source": `/${target.bucket}/${tempKey}`,
@@ -606,9 +669,9 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         if (etag === null) throw new S3Failure(`UploadPartCopy ${key}`, response, body);
         etags.push(etag);
       }
-      const won = await complete(key, uploadId, etags, true);
-      if (!won) await abort(key, uploadId);
-      return won;
+      const decided = await complete(key, uploadId, etags, true);
+      if (decided !== "won") await abort(key, uploadId);
+      return decided;
     } catch (err) {
       await abort(key, uploadId);
       throw err;
@@ -649,14 +712,18 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       const facts = counter.facts();
       const refused = mismatch(facts);
       if (refused !== null) return refused;
-      const response = await s3Fetch(target, "PUT", key, {
-        headers: { "if-none-match": "*", "content-length": String(filled), ...metaOf(facts) },
-        body: first as Uint8Array<ArrayBuffer>,
+      // The bytes are in hand, so a `409` is answered by sending them again.
+      const decided = await untilDecided(key, async () => {
+        const response = await call("PUT", key, {
+          headers: { "if-none-match": "*", "content-length": String(filled), ...metaOf(facts) },
+          body: first as Uint8Array<ArrayBuffer>,
+        });
+        const text = await response.text();
+        const decided = decidedBy(response);
+        if (decided === "won" && !response.ok) throw new S3Failure(`PUT ${key}`, response, text);
+        return decided;
       });
-      const text = await response.text();
-      if (lostRace(response)) return exists(key);
-      if (!response.ok) throw new S3Failure(`PUT ${key}`, response, text);
-      return { ok: true, facts };
+      return decided === "won" ? { ok: true, facts } : exists(key);
     }
 
     // MULTIPART. With the facts promised up front the upload goes straight to
@@ -669,7 +736,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     try {
       let part: Uint8Array = first;
       for (;;) {
-        const response = await s3Fetch(target, "PUT", uploadKey, {
+        const response = await call("PUT", uploadKey, {
           query: { partNumber: String(etags.length + 1), uploadId },
           headers: { "content-length": String(part.length) },
           body: part as Uint8Array<ArrayBuffer>,
@@ -696,14 +763,19 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       return refused;
     }
     if (direct) {
-      const won = await complete(key, uploadId, etags, true);
-      if (won) return { ok: true, facts };
+      const decided = await complete(key, uploadId, etags, true);
+      if (decided === "won") return { ok: true, facts };
       await abort(key, uploadId);
+      // A CONFLICTED UPLOAD must be started again, and these bytes were a
+      // stream: `keep` re-reads its file, a stream's caller is told.
+      if (decided === "conflict") throw new ConditionalConflict(key, 1);
       return exists(key);
     }
     await complete(uploadKey, uploadId, etags, false);
     try {
-      return (await copyInto(key, uploadKey, facts)) ? { ok: true, facts } : await exists(key);
+      // The temp object stays put, so a conflicted copy is simply started again.
+      const decided = await untilDecided(key, () => copyInto(key, uploadKey, facts));
+      return decided === "won" ? { ok: true, facts } : await exists(key);
     } finally {
       await deleteKey(uploadKey).catch(() => {});
     }
@@ -768,7 +840,17 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   return {
     put: (key, stream, expected) => oneWriter(key, () => put(key, stream, expected)),
 
-    keep: (key, file, facts) => oneWriter(key, () => put(key, Bun.file(file).stream(), facts)),
+    // A file can be read again, so a conflicted multipart upload is retried
+    // whole — what AWS asks of a `409` on `CompleteMultipartUpload`.
+    keep: (key, file, facts) =>
+      oneWriter(key, () =>
+        untilDecided(key, () =>
+          put(key, Bun.file(file).stream(), facts).catch((err: unknown) => {
+            if (err instanceof ConditionalConflict) return "conflict" as const;
+            throw err;
+          }),
+        ),
+      ),
 
     async get(key, range) {
       const found = await headOf(key);

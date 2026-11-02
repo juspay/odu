@@ -101,20 +101,24 @@ export function signedHeaders(
   };
 }
 
-/** One signed request. `body` is a stream or bytes; a stream is sent with
- *  `duplex: "half"` and never buffered here. */
+/** What one request carries beyond its method and key. */
+export interface S3Request {
+  query?: Record<string, string>;
+  headers?: Record<string, string>;
+  body?: BodyInit;
+}
+
+/** One signed request, sent by `send`. `body` is a stream or bytes; a stream
+ *  is sent with `duplex: "half"` and never buffered here. */
 export function s3Fetch(
   target: S3Target,
   method: string,
   key: string,
-  init: {
-    query?: Record<string, string>;
-    headers?: Record<string, string>;
-    body?: BodyInit;
-  } = {},
+  init: S3Request = {},
+  send: typeof fetch = fetch,
 ): Promise<Response> {
   const url = objectUrl(target, key, init.query);
-  return fetch(url, {
+  return send(url, {
     method,
     headers: signedHeaders(target, method, url, init.headers ?? {}),
     ...(init.body === undefined ? {} : { body: init.body, duplex: "half" }),
