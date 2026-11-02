@@ -858,28 +858,42 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   /**
    * The bytes after the first window up to `end`, as a pull stream: ONE window
    * being read and ONE prefetched, never more (see READ_WINDOW). The first
-   * window's response is `get`'s, already in hand; `control` aborts every GET
-   * in flight when the reader cancels.
+   * window's response is `get`'s, already in hand, holding bytes `start`
+   * through `from - 1`; `control` aborts every GET in flight when the reader
+   * cancels.
+   *
+   * EVERY WINDOW MUST BE AS LONG AS ITS RANGE. The caller has already promised
+   * the length (a `content-length` from the row), so a window that answers 206
+   * with fewer bytes would truncate the object WITHOUT an error, and the client
+   * would see only a hash mismatch. It fails the stream with an `S3Failure`
+   * naming the key and the counts instead.
    */
   function windowed(
     key: string,
     first: Response,
+    start: number,
     from: number,
     end: number,
     control: AbortController,
   ): ReadableStream<Uint8Array> {
+    const short = (response: Response, span: number, got: number): S3Failure =>
+      new S3Failure(`GET ${key} (a window)`, response, `answered ${got} of the ${span} bytes asked for`);
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = (first.body as ReadableStream<Uint8Array>).getReader();
+    let firstRead = 0;
     let position = from;
     let pieces: Uint8Array[] = [];
     const open = (): Promise<ArrayBuffer> | null => {
       if (position > end) return null;
       const to = Math.min(position + READ_WINDOW, end + 1) - 1;
+      const span = to - position + 1;
       const next = fetchWindow(key, position, to, control.signal).then(async (response) => {
         if (response.status !== 206) {
           const body = await response.text().catch(() => "");
           throw new S3Failure(`GET ${key} (a window)`, response, body);
         }
-        return response.arrayBuffer();
+        const window = await response.arrayBuffer();
+        if (window.byteLength !== span) throw short(response, span, window.byteLength);
+        return window;
       });
       position = to + 1;
       // A REJECTED PREFETCH is read when its turn comes, not reported twice.
@@ -898,16 +912,24 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
           if (reader !== null) {
             const next = await reader.read();
             if (!next.done) {
+              firstRead += next.value.length;
               controller.enqueue(next.value);
               return;
             }
             reader = null;
+            if (firstRead !== from - start) {
+              control.abort();
+              throw short(first, from - start, firstRead);
+            }
           }
           if (prefetched === null) {
             controller.close();
             return;
           }
-          const window = await prefetched;
+          const window = await prefetched.catch((err: unknown) => {
+            control.abort();
+            throw err;
+          });
           prefetched = open();
           // Views of the one buffer, in the chunk size a stream reader expects.
           pieces = [];
@@ -1014,7 +1036,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         throw new S3Failure(`GET ${key}`, first, body);
       }
       const end = Math.min(range?.end ?? spans.size - 1, spans.size - 1);
-      return { stream: windowed(safeKey(key), first, spans.last + 1, end, control), size: spans.size };
+      return { stream: windowed(safeKey(key), first, start, spans.last + 1, end, control), size: spans.size };
     },
 
     head: async (key) => (await headOf(key))?.size ?? null,

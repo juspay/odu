@@ -294,6 +294,33 @@ describe("s3 object store: round trips", () => {
     expect(seen.every((one) => one.signal?.aborted === true)).toBe(true);
   });
 
+  /** A `send` whose GETs from byte `from` answer 206 with their last ten bytes
+   *  dropped — a window shorter than the range it promised. */
+  const lyingFrom = (from: number) =>
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await fetch(url, init);
+      const range = new Headers(init?.headers).get("range");
+      if (response.status !== 206 || range?.startsWith(`bytes=${from}-`) !== true) return response;
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      return new Response(bytes.subarray(0, bytes.length - 10), { status: 206, headers });
+    }) as typeof fetch;
+
+  it("fails the read, naming the counts, when a window answers fewer bytes than its range", async () => {
+    const target = await gateway.bucket();
+    const bytes = new Uint8Array(3 * 1024 * 1024).map((_, at) => at % 251);
+    expect((await s3ObjectStore({ target, partSize: PART }).put("main/nar/s", once(bytes))).ok).toBe(true);
+    // A later window, and the first one — each is held to its own range.
+    for (const from of [1024 * 1024, 0]) {
+      const got = await s3ObjectStore({ target, partSize: PART, send: lyingFrom(from) }).get("main/nar/s");
+      expect(got?.size).toBe(bytes.length);
+      await expect(new Response(got?.stream).arrayBuffer()).rejects.toThrow(
+        `GET main/nar/s (a window): 206 answered ${1024 * 1024 - 10} of the ${1024 * 1024} bytes asked for`,
+      );
+    }
+  });
+
   it("uploads parts in parallel, and one failing part aborts the rest and the upload", async () => {
     const target = await gateway.bucket();
     const bytes = new Uint8Array(4 * PART + 1).map((_, at) => at % 251);
