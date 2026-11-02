@@ -5,14 +5,16 @@
  * The host's surface is what no row owns: the frozen control fragment it mounts
  * as `control`, the identity cell every client is admitted on (served on the
  * runs' root, versioned here), and the two host routes a face reads before it
- * draws. `PIN` holds `HOST_CONTRACT_VERSION` to a fingerprint of exactly that;
+ * draws. `LEDGER` holds `HOST_CONTRACT_VERSION` to a fingerprint of exactly that
+ * (append-only, as every row's is);
  * the rows hold their own beside their surfaces.
  */
 
 import { describe, expect, it } from "bun:test";
 import { controlCoreSurface } from "@kolu/surface-daemon/control-core";
 import {
-  contractPinMismatch,
+  type ContractLedger,
+  contractLedgerMismatch,
   rowShape,
   surfaceFingerprint,
   surfaceTags,
@@ -31,7 +33,9 @@ import {
 } from "@odu/service-client/surface";
 import { CACHE_CONTRACT_VERSION, CACHE_KEY } from "@odu/cache/surface";
 
-const PIN = { version: "2.5", fingerprint: "f1d5f6253fd77c08" };
+const LEDGER: ContractLedger = {
+  "2.5": "f1d5f6253fd77c08",
+};
 
 /** The identity cell, as the runs' root serves it: its spec entry, its tags
  *  and its exposure — everything `rowShape` omits from the ci row's print. */
@@ -46,7 +50,7 @@ function identityCell() {
 }
 
 describe("the host's contract", () => {
-  it("is pinned to the surface its version describes", () => {
+  it("is the last line of its ledger, and the surface is that line's", () => {
     const cell = identityCell();
     const current = {
       version: HOST_CONTRACT_VERSION,
@@ -60,7 +64,7 @@ describe("the host's contract", () => {
         expose: { service: cell.expose },
       }),
     };
-    const mismatch = contractPinMismatch("the host", "HOST_CONTRACT_VERSION", current, PIN);
+    const mismatch = contractLedgerMismatch("the host", "HOST_CONTRACT_VERSION", current, LEDGER);
     expect(mismatch, mismatch ?? "").toBeNull();
   });
 

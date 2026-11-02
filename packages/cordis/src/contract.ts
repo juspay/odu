@@ -4,9 +4,14 @@
  * Every row versions its own surface (`Row.contract`), and the host versions its
  * own verbs and the admission cell. A version is only worth what enforces it: a
  * number nobody has to move when the surface moves is a promise that drifts. So
- * each row commits, beside its version, a hash of the surface that version
- * describes — and a test that recomputes it fails the moment the two disagree,
- * naming the row and the rule for the bump.
+ * each row commits an append-only LEDGER — every version it published, each
+ * with a hash of the surface it described — and a test that recomputes the hash
+ * fails the moment the current version's line disagrees, naming the row and the
+ * rule for the bump.
+ *
+ * A dependency bump that changes the JSON Schema Effect derives moves every
+ * fingerprint with no surface change: that case re-pins the CURRENT line and
+ * says why in its commit.
  *
  * **What is hashed.** The surface's SPEC, walked with sorted keys: every cell,
  * collection, stream and procedure, its verbs and defaults, and every schema as
@@ -115,49 +120,84 @@ export function rowShape(
   };
 }
 
-/** A row's committed pin: the version it publishes and the fingerprint of the
- *  surface that version describes. */
-export interface ContractPin {
-  readonly version: string;
-  readonly fingerprint: string;
+/**
+ * A ROW'S LEDGER — every version it has published, in order, each with the
+ * fingerprint of the surface that version described. APPEND-ONLY: a bump adds a
+ * last line, and no existing line is ever edited. That is what makes the lie
+ * visible: "fixing" a red test by rewriting the current fingerprint while
+ * leaving the version alone shows in the diff as an edited historical line,
+ * which a reviewer reads as a surface change shipped under an old number.
+ *
+ * Keys are `major.minor`, never integers, so the object keeps insertion order.
+ */
+export type ContractLedger = Readonly<Record<string, string>>;
+
+function versionOrder(a: string, b: string): number {
+  const [aMajor = 0, aMinor = 0] = a.split(".").map(Number);
+  const [bMajor = 0, bMinor = 0] = b.split(".").map(Number);
+  return aMajor - bMajor || aMinor - bMinor;
 }
 
 /**
- * HOLD A VERSION TO ITS SURFACE — `null` when the pin agrees, or the sentence
- * that says what to do.
+ * HOLD A VERSION TO ITS LEDGER — `null` when the current version is the
+ * ledger's last line and its fingerprint is the surface's, or the sentence that
+ * says what to do.
  *
- * Three disagreements, three sentences: the surface moved and the version did
- * not (bump it, by the rule); the version moved and the pin did not (re-pin);
- * both moved (re-pin to the new pair). The rule is the one every row keeps: the
- * MINOR moves when the surface only GROWS, the MAJOR when something a reader
- * already uses CHANGES.
+ * The rule every row keeps: the MINOR moves when the surface only GROWS, the
+ * MAJOR when something a reader already uses CHANGES.
+ *
+ * ONE HONEST REWRITE: a dependency bump that changes the JSON Schema Effect
+ * derives moves every fingerprint with no surface change. Then re-pin the
+ * CURRENT line — the only line that may ever be edited — and say why in the
+ * commit.
  */
-export function contractPinMismatch(
+export function contractLedgerMismatch(
   /** Who the version belongs to, as a sentence names it: "the cache row",
    *  "the host". */
   subject: string,
   constant: string,
-  current: ContractPin,
-  pinned: ContractPin,
+  current: { readonly version: string; readonly fingerprint: string },
+  ledger: ContractLedger,
 ): string | null {
-  if (current.version === pinned.version && current.fingerprint === pinned.fingerprint) {
-    return null;
+  const versions = Object.keys(ledger);
+  for (let i = 1; i < versions.length; i++) {
+    if (versionOrder(versions[i - 1] as string, versions[i] as string) >= 0) {
+      return (
+        `${subject}'s ledger is out of order at ${versions[i]}: it is append-only, ` +
+        "each line a later version than the one before."
+      );
+    }
   }
-  const rule =
-    "bump the MINOR if the surface only grew (a new verb, member, optional input " +
-    "or ignorable output field), the MAJOR if it changes what a reader already " +
-    "uses (a member removed or renamed, a required input added, an output field " +
-    "removed or retyped)";
-  const repin = `then pin { version: "${current.version}", fingerprint: "${current.fingerprint}" }`;
-  if (current.version === pinned.version) {
+  const last = versions[versions.length - 1];
+  const line = `"${current.version}": "${current.fingerprint}"`;
+  if (last === undefined) {
+    return `${subject}'s ledger is empty: add its first line, ${line}.`;
+  }
+  if (current.version !== last) {
+    if (current.version in ledger) {
+      return (
+        `${subject}'s ${constant} is ${current.version}, an OLDER line of its ledger ` +
+        `(the last is ${last}) — a version never moves backwards.`
+      );
+    }
     return (
-      `${subject}'s surface changed but ${constant} is still ${current.version}: ` +
-      `${rule}, then re-pin with the new version and fingerprint ${current.fingerprint}.`
+      `${subject}'s ${constant} is ${current.version} but its ledger ends at ${last}: ` +
+      `APPEND ${line} as its last line` +
+      (ledger[last] === current.fingerprint
+        ? " — though the surface did not change, so a bump with nothing to version is a lie; revert it."
+        : ".")
     );
   }
+  if (ledger[last] === current.fingerprint) return null;
   return (
-    `${subject}'s ${constant} is ${current.version} but its pin says ${pinned.version} — ` +
-    `${current.fingerprint === pinned.fingerprint ? "the surface did not change; a bump with nothing to version is a lie, so revert it or " : ""}` +
-    `${repin}.`
+    `${subject}'s surface changed but ${constant} is still ${current.version}. ` +
+    "Bump the MINOR if the surface only grew (a new verb, member, optional input or " +
+    "ignorable output field), the MAJOR if it changes what a reader already uses (a " +
+    "member removed or renamed, a required input added, an output field removed or " +
+    "retyped), and APPEND the new version's line with fingerprint " +
+    `${current.fingerprint}. Never rewrite the ${current.version} line — an edited ` +
+    "historical line is a surface change shipped under an old number — unless a " +
+    "dependency bump moved Effect's JSON Schema output with no surface change; then " +
+    "re-pin this line and say so in the commit."
   );
 }
