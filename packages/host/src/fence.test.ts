@@ -85,7 +85,8 @@ const declaration = {
   collisions: {
     cache: {
       "packages/cli/src/serviceCli.ts": 4,
-      "packages/cli/src/serviceMcp.ts": 4,
+      // The bridge's one row word: what an UNANSWERED roster offers.
+      "packages/cli/src/serviceMcp.ts": 2,
       // The composed wire: the row's own facts, from which its surface, its
       // key and the composed faces' need are all derived.
       "packages/cli/src/wire.ts": 2,
@@ -120,7 +121,6 @@ const declaration = {
       // The refusal a private bucket gets names the command that fixes it.
       "packages/cache/src/cli.ts": 2,
       "packages/ci/src/protect.ts": 2,
-      "packages/cli/src/serviceMcp.ts": 4,
       "packages/cli/src/wire.ts": 2,
       "packages/service/src/service.ts": 1,
       // The 401's sentence names the command a person runs to fix it.
@@ -138,10 +138,9 @@ const declaration = {
       // the door's world names the auth stub.
       "packages/web-acceptance/support/cloudflareStub.ts": 2,
       "packages/web-acceptance/support/hooks.ts": 15,
-      // The composed wires that speak the sibling's key — the tunnel's argv
-      // face and the MCP bridge beside the cache's and the door's.
+      // The composed wire: the row's own facts, from which every composed
+      // face (the argv face, the MCP bridge) reads the sibling.
       "packages/cli/src/wire.ts": 2,
-      "packages/cli/src/serviceMcp.ts": 5,
     },
   },
   // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's

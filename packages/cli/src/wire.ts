@@ -41,10 +41,11 @@ import type { ServiceConnection } from "@odu/service-client/dial";
 /**
  * THE ROWS SERVED BESIDE THE RUNS, named ONCE — each row's own facts, read off
  * its surface module. Everything below is derived from this list: the sibling
- * surfaces, the group a link encodes against, and what the composed faces need.
+ * surfaces, the group a link encodes against, what the composed faces need, and
+ * which of them the `odu mcp` bridge advertises.
  * A second list was a row that could be added to one and forgotten in another.
  */
-const SIBLING_ROWS: ReadonlyArray<RowFacts> = [CACHE_ROW, AUTH_ROW, CLOUDFLARE_ROW];
+export const SIBLING_ROWS: ReadonlyArray<RowFacts> = [CACHE_ROW, AUTH_ROW, CLOUDFLARE_ROW];
 
 /** Each sibling's surface, under the key it is served at. */
 export const SERVICE_SIBLINGS = Object.fromEntries(
