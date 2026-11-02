@@ -436,9 +436,10 @@ in
                 Account API token, **Object Read & Write** on that bucket. It
                 shows the Access Key ID and the Secret Access Key.
               - `cf` CLI (developers.cloudflare.com/cf/): `cf r2 buckets
-                create`, then `cf accounts tokens create` with the
+                create`, then `cf user tokens create` with the
                 `Workers R2 Storage Bucket Item Write` and `… Item Read`
-                groups on that bucket. The Access Key ID is the token's `id`
+                groups on that bucket (`cf accounts tokens create` is refused
+                under `cf auth login`). The Access Key ID is the token's `id`
                 and the Secret Access Key is the SHA-256 hex of its `value`
                 (developers.cloudflare.com/r2/api/tokens/).
             '';

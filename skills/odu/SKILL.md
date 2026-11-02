@@ -353,11 +353,13 @@ docs, "Set up an R2 bucket"):
   Account API token, **Object Read & Write** scoped to that bucket → Access Key
   ID and Secret Access Key, plus the Account ID for the endpoint.
 - **`cf` CLI:** `cf auth login`; `cf r2 buckets create --name <bucket>`;
-  `cf accounts tokens create --name … --policies @policy.json` with the
-  `Workers R2 Storage Bucket Item Write`/`Read` groups on
+  `cf user tokens create --name … --policies @policy.json` with the
+  `Workers R2 Storage Bucket Item Write`/`Read` groups (ids from
+  `cf user tokens permission-groups list`) on
   `com.cloudflare.edge.r2.bucket.<ACCOUNT_ID>_default_<bucket>`. Access Key ID =
   the token's `id`; Secret Access Key = SHA-256 hex of its `value`
-  (developers.cloudflare.com/r2/api/tokens/).
+  (developers.cloudflare.com/r2/api/tokens/). Not `cf accounts tokens create`:
+  an OAuth login is refused it (`9109 Unauthorized`, 403).
 - **Then:** a credentials file of `AWS_ACCESS_KEY_ID=` and
   `AWS_SECRET_ACCESS_KEY=` lines, and `services.odu.cache.stores.<name> = {
   endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"; bucket; region =

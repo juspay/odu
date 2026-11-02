@@ -288,10 +288,12 @@ cf auth login                                   # approve in the browser
 export CLOUDFLARE_ACCOUNT_ID=<ACCOUNT_ID>       # the account cf acts on
 cf r2 buckets create --name odu-cache
 # the ids of the two bucket-scoped permission groups (the name is URL-encoded):
-cf accounts tokens permission-groups list --name 'Workers%20R2%20Storage%20Bucket%20Item%20Write'
-cf accounts tokens permission-groups list --name 'Workers%20R2%20Storage%20Bucket%20Item%20Read'
-cf accounts tokens create --name odu-cache --policies @policy.json
+cf user tokens permission-groups list --name 'Workers%20R2%20Storage%20Bucket%20Item%20Write'
+cf user tokens permission-groups list --name 'Workers%20R2%20Storage%20Bucket%20Item%20Read'
+cf user tokens create --name odu-cache --policies @policy.json
 ```
+
+A **user** token, because that is what an OAuth login may create: `cf accounts tokens create` is refused under `cf auth login` (`9109 Unauthorized`, 403). A user token stops working if that user leaves the account; an account token from the dashboard does not.
 
 with `policy.json` naming the one bucket (`default` is the jurisdiction of a bucket created without one):
 
@@ -308,6 +310,8 @@ The new token's answer carries its `id` and its `value` (shown once). R2's S3 cr
 ```sh
 printf %s '<token value>' | sha256sum | cut -d' ' -f1
 ```
+
+Measured on R2 with keys derived this way: a list answers 200, a put 200, a second put of the same key with `If-None-Match: *` **412**, and a delete 204 — the put-if-absent odu relies on.
 
 **Then, either way**, write the credentials file on the server, readable by root only (an agenix or sops secret is the usual home):
 
