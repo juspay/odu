@@ -1,15 +1,16 @@
 /**
- * The tunnel row's steps — the page's two facts and the CLI's parity read.
+ * The tunnel row's steps — the page's two facts and the API's parity read.
  *
  * The arrange half is the CACHE row's vocabulary (`I open the cache`, the root
  * token, the bucket form): a tunnel carries a bucket's name, so a scenario
  * starts by making one. Everything asserted here is this row's: the route's
- * state, the connector's state, the reason, and `odu cloudflare status`.
+ * state, the connector's state, the reason, and `odu surface cloudflare
+ * status_read`.
  */
 
 import * as assert from "node:assert";
 import { Then, When } from "@cucumber/cucumber";
-import { oduCli, ROOT_TOKEN, until } from "../../../web-acceptance/support/service.ts";
+import { ROOT_TOKEN, surfaceCall, until } from "../../../web-acceptance/support/service.ts";
 import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 When("I open the tunnel", async function (this: OduWorld) {
@@ -96,9 +97,10 @@ When("I clear the bucket's domain", async function (this: OduWorld) {
 });
 
 Then(
-  "odu cloudflare status reports {string} as {string}",
+  "odu surface cloudflare status_read reports {string} as {string}",
   async function (this: OduWorld, domain: string, state: string) {
-    const answer = oduCli(this.service, ["cloudflare", "status", "-o", "json"]);
+    // `status.read` takes NO input, and answers the whole status object.
+    const answer = surfaceCall(this.service, ["cloudflare", "status_read", "--json"]);
     assert.strictEqual(answer.status, 0, `status failed: ${answer.stderr}`);
     const status = JSON.parse(answer.stdout) as {
       tunnel?: { state?: string };

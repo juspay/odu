@@ -1,11 +1,13 @@
 /**
- * The cache's steps — a bucket pushed from a CLI, read from the page.
+ * The cache's steps — a bucket pushed from a terminal, read from the page.
  *
- * The ARRANGE half is the CLI, deliberately: a path gets into a bucket by
+ * The ARRANGE half is the terminal, deliberately: a path gets into a bucket by
  * somebody running `odu cache push` (or a hook on a lane host), and no control
- * on this page creates one. `nix store add-file` is the cheapest real path
- * there is — one small file, no references, no build — so the scenario is about
- * the page rather than about nix.
+ * on this page creates one. The bucket and its token come from the API face
+ * (`odu surface cache …`), which is where administration lives.
+ * `nix store add-file` is the cheapest real path there is — one small file, no
+ * references, no build — so the scenario is about the page rather than about
+ * nix.
  *
  * The ASSERT half is the page: the row, the bucket, the filter. Every locator
  * is a role and an accessible name where one exists, and the app's own class
@@ -23,6 +25,39 @@ import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 function unique(what: string): string {
   return `wa-${what}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * One cache verb through `odu surface cache …` — the face that administers.
+ *
+ * The root token is a FIELD of the input: a call with no session names the
+ * operator's token, and a call carrying one (`ODU_TOKEN`) names the empty
+ * string, because the row reads a signed-in person's ROLE instead
+ * (`packages/cache/src/server.ts`'s `authorityOf`).
+ */
+function cacheVerb(
+  world: OduWorld,
+  verb: string,
+  input: unknown,
+  env: NodeJS.ProcessEnv = {},
+) {
+  return oduCli(
+    world.service,
+    ["surface", "cache", verb, "--input", JSON.stringify(input), "--json"],
+    env,
+  );
+}
+
+/** The plaintext a `token_mint` answered — shown once, by the verb that minted
+ *  it. `--json` prints the member's own payload, so this is `{ token, facts }`
+ *  and nothing wrapping it. */
+function mintedToken(answer: { stdout: string }): string {
+  const payload = JSON.parse(answer.stdout) as { token?: unknown };
+  assert.ok(
+    typeof payload.token === "string" && payload.token !== "",
+    `token_mint answered no plaintext token: ${answer.stdout}`,
+  );
+  return payload.token;
 }
 
 /** THE ARRANGE, registered under two texts: a scenario that pushes BEFORE it
@@ -49,23 +84,31 @@ function arrangePush(world: OduWorld, howMany = 1): void {
   }
   const path = paths[0] as string;
 
-  const created = oduCli(world.service, ["cache", "create", bucket, "-o", "json"]);
+  const created = cacheVerb(world, "bucket_create", {
+    rootToken: ROOT_TOKEN,
+    name: bucket,
+    public: true,
+    retentionDays: 90,
+  });
   assert.strictEqual(
     created.status,
     0,
-    `odu cache create failed: ${created.stderr}`,
+    `cache bucket_create failed: ${created.stderr}`,
   );
 
   // A WRITE TOKEN, not the root token: pushing is the cache's HTTP API with a
-  // scoped credential — the arrangement is a person's `odu cache token mint`
+  // scoped credential — the arrangement is a person's `cache token_mint`
   // followed by `ODU_CACHE_TOKEN=… odu cache push`, which is the documented CI
   // shape and the one an operator actually uses.
-  const minted = oduCli(world.service, ["cache", "token", "mint", bucket, "--write", "-o", "json"]);
-  assert.strictEqual(minted.status, 0, `odu cache token mint failed: ${minted.stderr}`);
-  const token = (JSON.parse(minted.stdout) as { token: string }).token;
+  const minted = cacheVerb(world, "token_mint", {
+    rootToken: ROOT_TOKEN,
+    bucket,
+    scope: "write",
+  });
+  assert.strictEqual(minted.status, 0, `cache token_mint failed: ${minted.stderr}`);
 
   const pushed = oduCli(world.service, ["cache", "push", bucket, ...paths, "-o", "json"], {
-    ODU_CACHE_TOKEN: token,
+    ODU_CACHE_TOKEN: mintedToken(minted),
   });
   assert.strictEqual(pushed.status, 0, `odu cache push failed: ${pushed.stderr}`);
 
@@ -102,14 +145,15 @@ When(
     // The person mints the bucket's write token through `/mcp` (their own
     // credential); the PUSH then speaks only the cache's HTTP protocol, with
     // that bucket token and no cookie — the shape a CI job on a door has.
-    const mint = oduCli(
-      this.service,
-      ["cache", "token", "mint", bucket, "--write", "-o", "json"],
+    const mint = cacheVerb(
+      this,
+      "token_mint",
+      { rootToken: "", bucket, scope: "write" },
       { ODU_TOKEN: this.mintedToken },
     );
-    assert.strictEqual(mint.status, 0, `odu cache token mint failed: ${mint.stderr}`);
-    const token = (JSON.parse(mint.stdout) as { token: string }).token;
+    assert.strictEqual(mint.status, 0, `cache token_mint failed: ${mint.stderr}`);
     const path = addLeafPath(this);
+    const token = mintedToken(mint);
     const pushed = oduCli(this.service, ["cache", "push", bucket, path, "-o", "json"], {
       ODU_CACHE_TOKEN: token,
     });
@@ -422,13 +466,16 @@ Then("the push block still names the bucket's path", async function (this: OduWo
   );
 });
 
-When("the CLI creates a private bucket as this person", function (this: OduWorld) {
+When("the API creates a private bucket as this person", function (this: OduWorld) {
   assert.ok(this.mintedToken !== undefined, "no token was minted for this scenario");
   const name = unique("private");
   this.cacheBucket = name;
-  this.cliAnswer = oduCli(this.service, ["cache", "create", name, "--private", "-o", "json"], {
-    ODU_TOKEN: this.mintedToken,
-  });
+  this.cliAnswer = cacheVerb(
+    this,
+    "bucket_create",
+    { rootToken: "", name, public: false, retentionDays: 90 },
+    { ODU_TOKEN: this.mintedToken },
+  );
   assert.strictEqual(this.cliAnswer.status, 0, `create failed: ${this.cliAnswer.stderr}`);
 });
 
@@ -535,12 +582,21 @@ Then("the page credits odu at {string}", function (this: OduWorld, site: string)
   );
 });
 
-When("the CLI makes a private bucket and mints a read token", function (this: OduWorld) {
+When("the API makes a private bucket and mints a read token", function (this: OduWorld) {
   const name = unique("private");
   this.cacheBucket = name;
-  const created = oduCli(this.service, ["cache", "create", name, "--private", "-o", "json"]);
+  const created = cacheVerb(this, "bucket_create", {
+    rootToken: ROOT_TOKEN,
+    name,
+    public: false,
+    retentionDays: 90,
+  });
   assert.strictEqual(created.status, 0, `create failed: ${created.stderr}`);
-  const minted = oduCli(this.service, ["cache", "token", "mint", name, "--read", "-o", "json"]);
+  const minted = cacheVerb(this, "token_mint", {
+    rootToken: ROOT_TOKEN,
+    bucket: name,
+    scope: "read",
+  });
   assert.strictEqual(minted.status, 0, `token mint failed: ${minted.stderr}`);
   this.rowState.set("cache.readToken", (JSON.parse(minted.stdout) as { token: string }).token);
 });

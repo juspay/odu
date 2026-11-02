@@ -156,9 +156,17 @@ async function operator(odu: string, world: Service): Promise<string> {
   if (browser === undefined || github === undefined) {
     throw new Error("web-acceptance: no browser or stub to mint the operator");
   }
-  const bootstrapped = oduCli(world, ["auth", "grant", OPERATOR_LOGIN, "owner"], {
-    ODU_ROOT_TOKEN: ROOT_TOKEN,
-  });
+  // THE FIRST OWNER, through the API face: `user_grant` takes the operator's
+  // root token as a FIELD, and the row compares it only because this caller
+  // has no session yet (`packages/auth/src/server.ts`).
+  const bootstrapped = oduCli(world, [
+    "surface",
+    "auth",
+    "user_grant",
+    "--input",
+    JSON.stringify({ rootToken: ROOT_TOKEN, login: OPERATOR_LOGIN, role: "owner" }),
+    "--json",
+  ]);
   if (bootstrapped.status !== 0) {
     throw new Error(
       `web-acceptance: could not bootstrap ${OPERATOR_LOGIN} as the first owner\n` +
@@ -282,9 +290,20 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
     // THE ROLE IS GRANTED BY AN OWNER, not by the root token: that token's one
     // job was bootstrapping `OPERATOR_LOGIN`, above.
     const token = await operator(odu, world);
-    const granted = oduCli(world, ["auth", "grant", STUB_LOGIN, identity.role], {
-      ODU_TOKEN: token,
-    });
+    const granted = oduCli(
+      world,
+      [
+        "surface",
+        "auth",
+        "user_grant",
+        "--input",
+        // A signed-in owner carries authority; the root token field is ignored
+        // for them, so it goes empty.
+        JSON.stringify({ rootToken: "", login: STUB_LOGIN, role: identity.role }),
+        "--json",
+      ],
+      { ODU_TOKEN: token },
+    );
     if (granted.status !== 0) {
       throw new Error(
         `web-acceptance: could not grant ${STUB_LOGIN} ${identity.role}\n` +

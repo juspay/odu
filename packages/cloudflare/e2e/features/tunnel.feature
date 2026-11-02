@@ -1,7 +1,7 @@
 Feature: A bucket's own name, through a tunnel
   # THE TUNNEL WORLD mounts the cloudflare row against a stub API and a
   # `cloudflared` that says it registered. Every step below is the PAGE a person
-  # uses (the Domain field, the Tunnel panel) or the CLI's parity read; the
+  # uses (the Domain field, the Tunnel panel) or the API's parity read; the
   # route's state is the row's own fact, not a log line.
 
   @tunnel
@@ -53,7 +53,7 @@ Feature: A bucket's own name, through a tunnel
     And there should be no page errors
 
   @tunnel
-  Scenario: odu cloudflare status reads the tunnel
+  Scenario: odu surface cloudflare status_read reads the tunnel
     Given I open the cache
     When I type the root token
     And I name a new bucket
@@ -61,5 +61,5 @@ Feature: A bucket's own name, through a tunnel
     And I name the bucket "cache.tunnel.test"
     When I open the tunnel
     Then the tunnel panel shows "cache.tunnel.test" as "live"
-    And odu cloudflare status reports "cache.tunnel.test" as "live"
+    And odu surface cloudflare status_read reports "cache.tunnel.test" as "live"
     And there should be no page errors

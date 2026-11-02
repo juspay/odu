@@ -72,7 +72,7 @@ Feature: The cache is a row of the board
   # page — carries the netrc block.
   Scenario: A private bucket's page carries the netrc block
     Given a bucket with one path pushed from the CLI
-    When the CLI makes a private bucket and mints a read token
+    When the API makes a private bucket and mints a read token
     And I open that bucket's page as its reader
     Then the page has the netrc block
     And there should be no page errors
@@ -97,6 +97,6 @@ Feature: The cache is a row of the board
   # credential: the CLI carries no session cookie, and must not need one.
   @signed-in:admin
   Scenario: A bucket token pushes through the door with no session
-    When the CLI creates a bucket as this person
+    When the API creates a bucket as this person
     And one path is pushed to it with a bucket token and no session
     Then the bucket serves that path's narinfo to the token

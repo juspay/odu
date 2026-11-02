@@ -3,11 +3,11 @@
 # `noisy` exists to prove a big log arrives whole; this one exists so a big log
 # can be ADDRESSED. A log key is `<runId>/<encoded node>/<attempt>` and odu
 # hands one out in exactly two places — a failure's `logKey`, and a live node's
-# `log_key` — so a test that wants to read a large log back through `odu logs`
+# `log_key` — so a test that wants to read a large log back through `odu ci logs`
 # has to have been given the key rather than build one.
 #
 # Reading it off a LIVE node is a race the test cannot win: the fixture takes
-# tens of seconds, `odu status` reports only a run that has not finished, and
+# tens of seconds, `odu ci status` reports only a run that has not finished, and
 # the poll then runs out against a run that settled underneath it. A red node's
 # key is available afterwards, for as long as the catalog holds the run.
 #

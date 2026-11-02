@@ -93,7 +93,7 @@ function isRunner(args: string): boolean {
   );
 }
 
-/** The run id `odu run` printed on stderr — the only handle a black-box caller
+/** The run id `odu ci run` printed on stderr — the only handle a black-box caller
  *  gets on the process tree, now that the tree is not its own. */
 function runIdOf(stderr: string): string {
   const said = /odu · started (\S+)/.exec(stderr);
@@ -104,9 +104,9 @@ function runIdOf(stderr: string): string {
 }
 
 /**
- * The lane runner, found under the COORDINATOR rather than under `odu run`.
+ * The lane runner, found under the COORDINATOR rather than under `odu ci run`.
  *
- * `odu run` is a client: the coordinator it asks for is a detached process
+ * `odu ci run` is a client: the coordinator it asks for is a detached process
  * group belonging to the service, so the runner is not a descendant of the
  * process this test spawned and walking that tree finds nothing at all. The
  * coordinator is still findable — it carries `--run-id` in its argv, which is
@@ -196,7 +196,7 @@ describe("odu lane transport death (black-box)", () => {
       const dir = makeFixture("fast-slow");
       created.push(dir);
 
-      const child = spawn(oduBin, ["run", "--no-strict", "--progress", "json"], {
+      const child = spawn(oduBin, ["ci", "run", "--no-strict", "--progress", "json"], {
         cwd: dir,
         stdio: ["ignore", "pipe", "pipe"],
         env,
@@ -289,7 +289,7 @@ describe("odu lane transport death (black-box)", () => {
 
       const child = spawn(
         oduBin,
-        ["run", "--no-strict", "--linger", "--progress", "json"],
+        ["ci", "run", "--no-strict", "--linger", "--progress", "json"],
         {
           cwd: dir,
           stdio: ["ignore", "pipe", "pipe"],
@@ -340,7 +340,7 @@ describe("odu lane transport death (black-box)", () => {
       // `_ci-setup` via `onSetupLine`.
       //
       // WAITED FOR, because the client's exit stopped being the signal that the
-      // coordinator has caught up. `odu run` is a client: `--progress json`
+      // coordinator has caught up. `odu ci run` is a client: `--progress json`
       // returns the moment the run settles, which is BEFORE this test kills the
       // runner, so `await exited` no longer bounds anything. The coordinator is
       // a separate, lingering process and it notices the death on its own clock.

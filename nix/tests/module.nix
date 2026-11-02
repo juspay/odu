@@ -6,9 +6,10 @@
 #
 #   * the unit starts as the `odu` user, with the state directory at 0700 and
 #     the database at 0600 — the modes that make the signing keys a secret;
-#   * `odu cache create` prints the PUBLIC url (`http://cache.test/cache/main`),
-#     which is `$ODU_PUBLIC_ORIGIN` doing its job: the bound origin is loopback,
-#     so without it the URL is one no client can reach;
+#   * `odu surface cache bucket_create` answers the PUBLIC url
+#     (`http://cache.test/cache/main`), which is `$ODU_PUBLIC_ORIGIN` doing its
+#     job: the bound origin is loopback, so without it the URL is one no client
+#     can reach;
 #   * a token pushed over HTTP and a path built on the server lands in the
 #     bucket, and the client substitutes it back through the proxy with the
 #     bucket's own key;
@@ -128,6 +129,7 @@
   # domain there so the URL the module prints is the one the client uses.
   testScript = ''
     import json
+    import shlex
 
     start_all()
 
@@ -159,22 +161,43 @@
     # ── the URL a bucket publishes is the PUBLIC one ────────────────────────
     # `ODU_PUBLIC_ORIGIN` is the module's doing; without it this URL is the
     # loopback address the daemon is bound to, which no client can reach.
-    # The CLI reaches the daemon by ORIGIN, not by state directory — that is
-    # what `$ODU_WEB_ORIGIN` is for, and it is how a person with a forward runs
-    # these commands. `HOME` is set to the unit's so this is the same
-    # environment the daemon has, rather than root's inherited through `runuser`.
+    # The API face reaches the daemon by ORIGIN, not by state directory — that
+    # is what `$ODU_WEB_ORIGIN` is for, and it is how a person with a forward
+    # runs these commands. `HOME` is set to the unit's so this is the same
+    # environment the daemon has, rather than root's inherited through
+    # `runuser`.
     admin = (
-        "runuser -u odu -- env ODU_ROOT_TOKEN=test-root-token"
+        "runuser -u odu -- env"
         " ODU_WEB_ORIGIN=http://127.0.0.1:18440 HOME=/var/lib/odu"
     )
     odu = "${self.packages.x86_64-linux.odu}/bin/odu"
-    created = json.loads(server.succeed(f"{admin} {odu} cache create main -o json"))
+    ROOT_TOKEN = "test-root-token"
+
+    def surface(machine, env, row, verb, payload):
+        """One administrative verb through `odu surface <row> <verb>`.
+
+        The root token is a FIELD of the input, never an environment side
+        channel; `--json` asks for the verb's whole answer. Exit 0 is an
+        answer, 1 a refusal, 2 usage, 3 nothing serving — so `succeed` is the
+        assertion that the verb answered."""
+        body = shlex.quote(json.dumps(dict(payload, rootToken=ROOT_TOKEN)))
+        return machine.succeed(f"{env} {odu} surface {row} {verb} --input {body} --json")
+
+    created = json.loads(
+        surface(
+            server,
+            admin,
+            "cache",
+            "bucket_create",
+            {"name": "main", "public": True, "retentionDays": 90},
+        )
+    )
     assert created["url"] == "http://cache.test/cache/main", created["url"]
     key = created["publicKey"]
     assert key.startswith("main-1:"), key
 
     token = json.loads(
-        server.succeed(f"{admin} {odu} cache token mint main --write -o json")
+        surface(server, admin, "cache", "token_mint", {"bucket": "main", "scope": "write"})
     )["token"]
 
     # ── a path on the server, pushed through the proxy ──────────────────────
@@ -207,9 +230,15 @@
     # stored (`proxy_cache_bypass`/`proxy_no_cache`), and the daemon says
     # `Cache-Control: private, no-store` besides. An anonymous fetch of the
     # same NAR must be refused, and must not be a HIT.
-    server.succeed(f"{admin} {odu} cache create secret --private")
+    surface(
+        server,
+        admin,
+        "cache",
+        "bucket_create",
+        {"name": "secret", "public": False, "retentionDays": 90},
+    )
     secret_token = json.loads(
-        server.succeed(f"{admin} {odu} cache token mint secret --write -o json")
+        surface(server, admin, "cache", "token_mint", {"bucket": "secret", "scope": "write"})
     )["token"]
     server.succeed(
         f"runuser -u odu -- env ODU_WEB_ORIGIN=http://127.0.0.1:18440"
@@ -239,7 +268,7 @@
     # ── A BUCKET'S OWN NAME ─────────────────────────────────────────────────
     # The name is a fact of the bucket; nginx needs a vhost for it (eval time),
     # and the daemon answers by `Host` — no rewrite, no bucket in the path.
-    server.succeed(f"{admin} {odu} cache domain main main.test")
+    surface(server, admin, "cache", "bucket_domain", {"bucket": "main", "domain": "main.test"})
     info = client.succeed("curl -sS http://main.test/nix-cache-info")
     assert "WantMassQuery: 1" in info, info
 
@@ -295,11 +324,19 @@
     server.wait_until_succeeds("curl -sS -o /dev/null http://127.0.0.1:7070/")
     s3 = "--aws-sigv4 aws:amz:us-east-1:s3 --user odu:odu-s3-secret"
     server.succeed(f"curl -sSf {s3} -X PUT http://127.0.0.1:7070/odu-objects")
-    far = json.loads(server.succeed(f"{admin} {odu} cache create far --store s3 -o json"))
+    far = json.loads(
+        surface(
+            server,
+            admin,
+            "cache",
+            "bucket_create",
+            {"name": "far", "public": True, "retentionDays": 90, "store": "s3"},
+        )
+    )
     assert far["store"] == "s3", far
     far_key = far["publicKey"]
     far_token = json.loads(
-        server.succeed(f"{admin} {odu} cache token mint far --write -o json")
+        surface(server, admin, "cache", "token_mint", {"bucket": "far", "scope": "write"})
     )["token"]
     server.succeed(
         f"runuser -u odu -- env ODU_WEB_ORIGIN=http://127.0.0.1:18440"
@@ -333,16 +370,18 @@
     )
 
     # ── administration works, and collection does not eat the bucket ────────
-    server.succeed(f"{admin} {odu} cache stats")
-    server.succeed(f"{admin} {odu} cache gc main")
+    surface(server, admin, "cache", "stats_read", {})
+    surface(server, admin, "cache", "gc_run", {"bucket": "main"})
 
     # ── the OTHER shape: a daemon with a door ───────────────────────────────
     zdoor.wait_for_unit("odu-web.service")
     zdoor.wait_for_unit("nginx.service")
-    zdoor.succeed(
-        "runuser -u odu -- env ODU_ROOT_TOKEN=test-root-token"
-        " ODU_WEB_ORIGIN=http://127.0.0.1:18440 HOME=/var/lib/odu"
-        f" {odu} auth grant srid owner"
+    surface(
+        zdoor,
+        "runuser -u odu -- env ODU_WEB_ORIGIN=http://127.0.0.1:18440 HOME=/var/lib/odu",
+        "auth",
+        "user_grant",
+        {"login": "srid", "role": "owner"},
     )
 
     # ANONYMOUS `GET /` IS THE SIGN-IN PAGE, not the board and not nginx — and

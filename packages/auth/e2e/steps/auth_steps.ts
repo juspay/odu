@@ -4,11 +4,13 @@
  * The arrange half is a person's route wherever one exists: the sign-in is the
  * link on the page, a token is the profile's form, a grant is the people page —
  * and only the FIRST owner (the operator's bootstrap, which has no session to
- * draw a page for) goes through the CLI with the root token. The assert half is the page, by role and accessible name.
+ * draw a page for) goes through `odu surface auth user_grant` with the root
+ * token. The assert half is the page, by role and accessible name.
  *
  * `mintToken` is the one helper several scenarios share: a member's and an
- * admin's CLI credential is minted on the profile page exactly as a person would
- * mint it, because that is the only way a token comes into existence at all.
+ * admin's API credential is minted on the profile page exactly as a person
+ * would mint it, because that is the only way a token comes into existence at
+ * all.
  */
 
 import * as assert from "node:assert";
@@ -22,6 +24,25 @@ import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 function asPerson(world: OduWorld, argv: string[]) {
   assert.ok(world.mintedToken !== undefined, "no token was minted for this scenario");
   return oduCli(world.service, argv, { ODU_TOKEN: world.mintedToken });
+}
+
+/**
+ * One API verb as the signed-in person — `odu surface <row> <verb>`, the face
+ * that administers now.
+ *
+ * The input's `rootToken` is empty on purpose: a call carrying a session is a
+ * ROLE authority, and the row ignores the operator's secret for it
+ * (`packages/cache/src/server.ts`'s `authorityOf`). A refusal arrives as JSON
+ * on STDERR with exit 1.
+ */
+function verbAsPerson(world: OduWorld, row: string, verb: string, input?: unknown) {
+  return asPerson(world, [
+    "surface",
+    row,
+    verb,
+    ...(input === undefined ? [] : ["--input", JSON.stringify(input)]),
+    "--json",
+  ]);
 }
 
 /** Mint a token on the profile page, and keep its ONE showing. */
@@ -89,24 +110,30 @@ Then("the page refuses the sign-in naming the allow-list", async function (this:
   await this.saysThat(this.page.locator("main"), "the refusal page", "org:juspay");
 });
 
-// ── the CLI ─────────────────────────────────────────────────────────────────
+// ── the API ─────────────────────────────────────────────────────────────────
 
-When("the CLI creates a bucket as this person", async function (this: OduWorld) {
+When("the API creates a bucket as this person", async function (this: OduWorld) {
   await mintToken(this, "cli");
   const name = `auth-${Math.random().toString(36).slice(2, 8)}`;
   this.cacheBucket = name;
-  this.cliAnswer = asPerson(this, ["cache", "create", name, "-o", "json"]);
+  this.cliAnswer = verbAsPerson(this, "cache", "bucket_create", {
+    rootToken: "",
+    name,
+    public: true,
+    retentionDays: 90,
+  });
 });
 
-Then("the CLI refuses it as not permitted", function (this: OduWorld) {
-  assert.ok(this.cliAnswer !== undefined, "no CLI call was made");
+Then("the API refuses it as not permitted", function (this: OduWorld) {
+  assert.ok(this.cliAnswer !== undefined, "no API call was made");
   assert.strictEqual(this.cliAnswer.status, 1, `expected a refusal, got ${this.cliAnswer.stdout}`);
-  const answer = JSON.parse(this.cliAnswer.stdout) as { code?: string; message?: string };
+  // A refusal is JSON on STDERR — exit 1, the verb's own declared error.
+  const answer = JSON.parse(this.cliAnswer.stderr) as { code?: string; message?: string };
   assert.strictEqual(answer.code, "not_permitted");
 });
 
-Then("the CLI reports the bucket", function (this: OduWorld) {
-  assert.ok(this.cliAnswer !== undefined, "no CLI call was made");
+Then("the API reports the bucket", function (this: OduWorld) {
+  assert.ok(this.cliAnswer !== undefined, "no API call was made");
   assert.strictEqual(this.cliAnswer.status, 0, `the create failed: ${this.cliAnswer.stderr}`);
   const created = JSON.parse(this.cliAnswer.stdout) as { name?: string };
   assert.strictEqual(created.name, this.cacheBucket);
@@ -134,11 +161,11 @@ Then("the page offers no Create bucket control", async function (this: OduWorld)
   assert.strictEqual(controls, 0, "a member was drawn a Create bucket control");
 });
 
-Then("the CLI lists buckets as this person", function (this: OduWorld) {
-  // A member READS the cache: buckets are rows of the board, and `odu cache
-  // list` is the terminal's view of the same rows.
-  const answer = asPerson(this, ["cache", "list", "-o", "json"]);
-  assert.strictEqual(answer.status, 0, `a member's cache list failed: ${answer.stderr}`);
+Then("the API lists buckets as this person", function (this: OduWorld) {
+  // A member READS the cache: buckets are rows of the board, and
+  // `odu surface cache bucket_list` is the terminal's view of the same rows.
+  const answer = verbAsPerson(this, "cache", "bucket_list", { rootToken: "" });
+  assert.strictEqual(answer.status, 0, `a member's bucket_list failed: ${answer.stderr}`);
 });
 
 // ── the profile ─────────────────────────────────────────────────────────────
@@ -167,17 +194,18 @@ Then("the profile shows an expiry for {string}", async function (this: OduWorld,
   assert.match(text, /expires \d{4}-\d{2}-\d{2}/, `the token's row names no expiry: ${text}`);
 });
 
-Then("a CLI with that token answers whoami as this person", function (this: OduWorld) {
-  const answer = asPerson(this, ["auth", "whoami", "-o", "json"]);
+Then("the API with that token answers whoami as this person", function (this: OduWorld) {
+  // `user_whoami` takes NO input, and answers the principal under `who`.
+  const answer = verbAsPerson(this, "auth", "user_whoami");
   assert.strictEqual(answer.status, 0, `whoami failed: ${answer.stderr}`);
-  const who = JSON.parse(answer.stdout) as { kind?: string; login?: string };
+  const { who } = JSON.parse(answer.stdout) as { who: { kind?: string; login?: string } };
   assert.strictEqual(who.kind, "user");
   assert.strictEqual(who.login, this.signInLogin);
 });
 
-Then("the CLI lists buckets with that token", function (this: OduWorld) {
-  const answer = asPerson(this, ["cache", "list", "-o", "json"]);
-  assert.strictEqual(answer.status, 0, `cache list failed: ${answer.stderr}`);
+Then("the API lists buckets with that token", function (this: OduWorld) {
+  const answer = verbAsPerson(this, "cache", "bucket_list", { rootToken: "" });
+  assert.strictEqual(answer.status, 0, `bucket_list failed: ${answer.stderr}`);
 });
 
 // ── sign-out, and the tab that is not the one that clicked ──────────────────
@@ -286,10 +314,11 @@ Then("the header offers no People control", async function (this: OduWorld) {
   assert.strictEqual(controls, 0, "a non-owner was drawn the People control");
 });
 
-Then("the CLI refuses the people list as not permitted", async function (this: OduWorld) {
+Then("the API refuses the people list as not permitted", async function (this: OduWorld) {
   await mintToken(this, "people");
-  const answer = asPerson(this, ["auth", "people", "-o", "json"]);
+  // `grant_list` takes NO input; the refusal is JSON on stderr, exit 1.
+  const answer = verbAsPerson(this, "auth", "grant_list");
   assert.strictEqual(answer.status, 1, `expected a refusal, got ${answer.stdout}`);
-  const refused = JSON.parse(answer.stdout) as { code?: string };
+  const refused = JSON.parse(answer.stderr) as { code?: string };
   assert.strictEqual(refused.code, "not_permitted");
 });

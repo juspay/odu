@@ -32,7 +32,7 @@
  * key is `<runId>/<encoded node>/<attempt>` and the encoding is odu's, so the
  * only supported way to hold one is to have been given it. This suite takes
  * every key from a FAILURE's `logKey`, which is the route that still works
- * once the run is over — `odu status` hands out keys too, but only for a run
+ * once the run is over — `odu ci status` hands out keys too, but only for a run
  * that has not finished, so reading one from there is a race against a fixture
  * that settles in seconds. That is why the big-log fixture is red. A test that
  * built a key by hand would pass against an encoding the product does not
@@ -88,7 +88,7 @@ interface Failure {
   excerptSource: "attempt_log" | "none";
 }
 
-/** The attention payload `odu wait -o json` and `odu history show -o json`
+/** The attention payload `odu ci wait -o json` and `odu ci history show -o json`
  *  both answer with. */
 interface Attention {
   runId: string;
@@ -104,7 +104,7 @@ interface Attention {
   hasMore: boolean;
 }
 
-/** One `odu logs <key> -o json` read, parsed. */
+/** One `odu ci logs <key> -o json` read, parsed. */
 interface LogPage {
   key: string;
   text: string;
@@ -120,7 +120,7 @@ function waitJson(
   dir: string,
   argv: string[],
 ): { status: number | null; attention: Attention } {
-  const res = oduCli(oduBin, dir, ["wait", "-o", "json", ...argv]);
+  const res = oduCli(oduBin, dir, ["ci", "wait", "-o", "json", ...argv]);
   const line = res.stdout.trim();
   expect(
     line,
@@ -130,7 +130,7 @@ function waitJson(
 }
 
 function logJson(dir: string, key: string, extra: string[] = []): LogPage {
-  const res = oduCli(oduBin, dir, ["logs", ...extra, "-o", "json", key]);
+  const res = oduCli(oduBin, dir, ["ci", "logs", ...extra, "-o", "json", key]);
   expect(res.status, `stderr was:\n${res.stderr}`).toBe(0);
   return JSON.parse(res.stdout.trim()) as LogPage;
 }
@@ -232,6 +232,7 @@ describe("the wait's exits are a contract", () => {
     // A run that does not exist is not a failure of the run — it is a failure
     // of the question.
     const unknown = oduCli(oduBin, dir, [
+      "ci",
       "wait",
       "--run",
       "0zzzzzzzz-zzzzzzzz",
@@ -243,6 +244,7 @@ describe("the wait's exits are a contract", () => {
     // A cursor for another run is refused WITH a resync route, never silently
     // restarted from zero.
     const refused = oduCli(oduBin, dir, [
+      "ci",
       "wait",
       "--run",
       pending.attention.runId,
@@ -374,7 +376,7 @@ describe("evidence is addressed, complete, and outlives its checkout", () => {
     // malformed key and gets a different exit.
     const never = key.replace(/\/\d+$/, "/7");
 
-    const res = oduCli(oduBin, dir, ["logs", never]);
+    const res = oduCli(oduBin, dir, ["ci", "logs", never]);
     expect(res.status).toBe(4);
     expect(res.stderr).toContain("attempt 7");
   }, 300_000);

@@ -667,11 +667,11 @@ describe("cancelling, and outliving the caller", () => {
     });
   }, 900_000);
 
-  it("discovers a native run started with `odu run`, from the catalog alone", async () => {
-    // No filesystem scan and nothing told the service: `odu run` registers in
+  it("discovers a native run started with `odu ci run`, from the catalog alone", async () => {
+    // No filesystem scan and nothing told the service: `odu ci run` registers in
     // the per-user catalog, and the board is a projection of that.
     const dir = fixture(FAILING);
-    Bun.spawnSync([odu, "run", "--no-post"], { cwd: dir, env: world.env });
+    Bun.spawnSync([odu, "ci", "run", "--no-post"], { cwd: dir, env: world.env });
     const found = await until(
       "the native run to appear on the board",
       () => {

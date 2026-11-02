@@ -128,9 +128,9 @@ export const PORT_SLOT = {
   disconnect: 9,
   /** `install.e2e.test.ts` — the daemon an installed plugin's MCP server starts. */
   freshInstall: 10,
-  /** {@link hermeticEnv} — the service every black-box `odu run` in this
+  /** {@link hermeticEnv} — the service every black-box `odu ci run` in this
    *  directory reaches. It is a SLOT and not the default 18440 because
-   *  `odu run` became a client of a per-user singleton: without this, a
+   *  `odu ci run` became a client of a per-user singleton: without this, a
    *  fixture run would be executed by whatever daemon the machine already
    *  had, write into the developer's real catalog, and — on a persistent CI
    *  runner with two jobs in flight — be served by the OTHER job's build. */
@@ -215,8 +215,8 @@ export function privateWorld(port: number): {
  * A fixture run's env: a PRIVATE WORLD, not the ambient one plus a hosts file.
  *
  * It used to be exactly that — `{...process.env, ODU_HOSTS}` — and it was
- * enough while `odu run` did the work in its own process. It stopped being
- * enough the moment `odu run` became a client: the run is executed by a child
+ * enough while `odu ci run` did the work in its own process. It stopped being
+ * enough the moment `odu ci run` became a client: the run is executed by a child
  * of a per-user singleton, so what the fixture reached was whichever daemon the
  * machine already had, with that daemon's catalog and that daemon's build. On a
  * persistent CI runner with two jobs in flight, one suite's runs were served by
@@ -235,7 +235,7 @@ export const hermeticEnv: NodeJS.ProcessEnv = blackBox.env;
  *
  * `$ODU_GH_BIN` has the same shape of problem `$ODU_HOSTS` had, and for the
  * same reason: `protect` is a client now, and the `gh` it means is spawned by
- * the SERVICE. A variable set on the `odu protect` process therefore never
+ * the SERVICE. A variable set on the `odu ci protect` process therefore never
  * reaches the program that runs `gh` — and a test that wrote its stand-in to a
  * fresh temp directory per case could not put that path into a daemon which
  * had already started. Eleven `protect` assertions were being graded against
@@ -289,8 +289,8 @@ let driven: string | null = null;
  * There are four things and they are easy to miss, because none of them fails
  * a test:
  *
- *   1. **the service** — spawned lazily by whichever `odu run` came first, and
- *      detached ON PURPOSE, which is the property `odu run` exists to have. A
+ *   1. **the service** — spawned lazily by whichever `odu ci run` came first, and
+ *      detached ON PURPOSE, which is the property `odu ci run` exists to have. A
  *      suite that walks away leaves one serving on its port forever. Asked for
  *      its own pid rather than tracked: the process this suite forked is not
  *      necessarily the one serving, and the identity cell is the only thing
@@ -372,7 +372,7 @@ function claimOrigin(odu: string): void {
  *  go. Silent when the port is free, which is the ordinary case. */
 function claimPort(odu: string, port: number): void {
   // ASKED OF THE KERNEL, NOT OF ODU. Every odu command bootstraps its own
-  // origin when nothing is serving it — that is the property `odu run` exists
+  // origin when nothing is serving it — that is the property `odu ci run` exists
   // to have — so using one to check whether a port is free STARTS a daemon,
   // and using one in a loop starts a daemon per iteration. This is what that
   // mistake looks like from outside: the eviction below killed the incumbent,
@@ -495,7 +495,7 @@ export const repoRoot = execFileSync(
 ).trim();
 
 /**
- * One line of `odu run --progress json` output. Deliberately mirrors — and is
+ * One line of `odu ci run --progress json` output. Deliberately mirrors — and is
  * NOT imported from — `ProgressEvent` in packages/execution/src/coordinator/display.ts: this is
  * the wire schema the test deserializes, so the assertions verify the binary's
  * real output (black-box). Sharing the type would make the test white-box and
@@ -579,7 +579,7 @@ export function makeFixture(name: string): string {
   return dir;
 }
 
-/** Run `odu run --no-strict --progress json` in `dir` and parse the stream. */
+/** Run `odu ci run --no-strict --progress json` in `dir` and parse the stream. */
 export function oduRun(
   oduBin: string,
   dir: string,
@@ -587,7 +587,7 @@ export function oduRun(
 ): RunResult {
   const res = spawnSync(
     oduBin,
-    ["run", "--no-strict", "--progress", "json", ...selectors],
+    ["ci", "run", "--no-strict", "--progress", "json", ...selectors],
     { cwd: dir, encoding: "utf-8", maxBuffer: BIG, env: hermeticEnv },
   );
   const events: ProgressEvent[] = [];
@@ -630,7 +630,7 @@ export function cleanup(dir: string): void {
  *  the introspection commands (`wait`, `cancel`) a background run is driven
  *  through. Separate from `oduRun` because those return a verdict on stdout
  *  rather than an NDJSON progress stream, and their exit code is a verdict too
- *  (`odu wait` exits non-zero on a red run), so callers read the JSON. */
+ *  (`odu ci wait` exits non-zero on a red run), so callers read the JSON. */
 export function oduCli(
   oduBin: string,
   dir: string,
@@ -645,7 +645,7 @@ export function oduCli(
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-/** Start `odu run …` in `dir` as a background child, the way an agent's `run`
+/** Start `odu ci run …` in `dir` as a background child, the way an agent's `run`
  *  tool does: the coordinator outlives the call and is observed over its socket
  *  instead of by waiting on the process. Returns the child and a promise that
  *  resolves when it exits, so a test can tear the run down deterministically. */
@@ -654,7 +654,7 @@ export function oduRunBackground(
   dir: string,
   argv: string[],
 ): { child: ChildProcess; exited: Promise<void> } {
-  const child = spawn(oduBin, ["run", ...argv], {
+  const child = spawn(oduBin, ["ci", "run", ...argv], {
     cwd: dir,
     env: hermeticEnv,
     stdio: "ignore",
@@ -666,7 +666,7 @@ export function oduRunBackground(
 }
 
 /** Block until the background coordinator has published its socket, so the
- *  first `odu wait` doesn't race the spawn and get the loud no-run refusal.
+ *  first `odu ci wait` doesn't race the spawn and get the loud no-run refusal.
  *  Polls rather than watches: the file appears once, early, and a watcher on a
  *  directory that does not exist yet is its own race. */
 export async function awaitRunSocket(
