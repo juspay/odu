@@ -82,22 +82,26 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | `odu cache use <bucket>` | a bucket's page |
 | Scoped, expiring, revocable tokens; the plaintext is shown once | `odu surface cache token_mint\|token_list\|token_revoke` | a bucket's **Tokens** |
 | Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — |
-| Upload only the paths the bucket is missing; long NARs are chunked | `odu cache push <bucket> <path>…` | — |
+| Upload only the paths the bucket is missing; long NARs are chunked. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…` | — |
 | Give a bucket a DNS name of its own through a Cloudflare tunnel | `odu surface cache bucket_domain` | bucket → **Domain** |
-| Keep a closure out of garbage collection | `odu surface cache pin_create` | a bucket's **Pin closure** |
-| Evict what retention expired and nothing references or pins | `odu surface cache gc_run` | a bucket's **Run GC** |
+| How long a path outlives the last time anything wanted it, in days | `odu surface cache bucket_retention` | a bucket's **Retention** |
+| Keep a closure out of garbage collection, see what each pin holds, let one go | `odu surface cache pin_create\|pin_list\|pin_delete` | a bucket's **Pins** |
+| Evict what retention expired and nothing references or pins — the daily pass, asked for now | `odu surface cache gc_run` | a bucket's **Run GC** |
+| What the next collection would take, without taking it | `odu surface cache gc_plan` | a bucket's **Dry run** |
 | Storage and reads | `odu surface cache stats_read` | a bucket's **Stats** |
 | The tunnel and the names it carries | `odu surface cloudflare status_read` | **Tunnel** |
 
 **Keep a bucket on R2, any S3, or local disk.** Declare a store (`services.odu.cache.stores.r2 = { endpoint; bucket; region; credentialsFile; }`), create the bucket on it, and it serves exactly like disk — the [cache page](https://odu.kolu.dev/docs/cache/#keep-a-bucket-on-s3) has the details.
 
-**Each row versions its own surface.** A client is admitted on the host's major and the majors of the rows it reads, so a cache change never refuses a client that reads only runs. Cache **3.0** removed the deprecated `held` list and `odu cache push --wait`; **3.1** adds a bucket's `store`. A chunked push names its parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
+**A bucket keeps what nobody wants for 90 days.** Retention counts from `lastWanted` — renewed by a push and by the `missing` query a push asks first, never by a read, because reads are leaving odu and a clock a read wound would make the busiest paths look idle first. A pin holds a closure past that, re-pointed by name (`odu cache push --pin odu-master` in CI), and the reference closure of anything kept is kept. The row collects every bucket once a day on its own; the bucket page's **Run GC** (`cache gc_run`) is that same collection asked for sooner, and its **Dry run** (`cache gc_plan`) says what it would take before you press it. Retention, pins and collection are the board and the API; the CLI's only word in this is `--pin` on a push.
+
+**Each row versions its own surface.** A client is admitted on the host's major and the majors of the rows it reads, so a cache change never refuses a client that reads only runs. Cache **3.0** removed the deprecated `held` list and `odu cache push --wait`; **3.1** adds a bucket's `store`; **4.0** moves retention onto `lastWanted` and drops the old last-access field a path and `stats.read` used to carry, and adds `bucket.retention`, `pin.list`, `pin.delete` and `gc.plan`. A chunked push names its parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
 
 | Row | Contract | Who reads it |
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
 | `ci` (runs) | 2.4 | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
-| `cache` | **3.1** | `odu cache`, `odu surface cache`, the board |
+| `cache` | **4.0** | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
 

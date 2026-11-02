@@ -71,6 +71,53 @@ on the wire and `cache_bucket_create` to an agent.
   This is the direct answer to the failure chutney shipped: 669 GB of S3 and
   46 GB of Postgres with growth unbounded and GC off.
 
+## What a bucket keeps, and when it stops
+
+- **Retention counts from `lastWanted`, not from the last read.** A path's clock
+  is renewed by a stored push, and by a `missing` query that named it — whether
+  it was missing or already there. A read never moves it; a read moves `hits`
+  and nothing else. Reads are leaving odu, so a clock a read wound would make
+  the busiest paths in the cache the first to look idle. The default is ninety
+  days (`DEFAULT_RETENTION_DAYS`), `bucket.create`'s `retentionDays` is
+  optional, and a bucket changes its mind with `bucket.retention`; zero means
+  "keep only what something references or a pin holds".
+- **A pin is a name over a closure.** `pin.create` resolves the closure at pin
+  time and re-points a pin of the same name, so yesterday's roots let go in the
+  same statement. GC then walks the bucket's own references from those roots,
+  which is how a path pushed later under a pinned root is held too. `pin.list`
+  says what each pin holds and `pin.delete` lets one go.
+- **The dry run is what a person reads before the button.** `gc.plan` answers
+  the same decision without doing it: the whole count and the whole byte total,
+  plus the first `GC_PREVIEW_PATHS` paths oldest want first, so the top line is
+  the first to go. It is a READ — an agent may ask it without a confirmation.
+- **The row collects itself, daily.** `schedule()` runs a collection of every
+  bucket every `GC_EVERY_MS` as a CHAIN OF TIMEOUTS rather than an interval: a
+  bucket whose collection outlasts its own period never gets a second one
+  started on top of it, because each pass schedules the next when it ends. A
+  scheduled pass has nobody to refuse, so whatever it hit is one
+  `cache.gc.failed` line and the next pass is still scheduled. `gc.run` is that
+  same collection asked for sooner.
+- **The report names orphans.** A pass lists the bucket's own prefix in its
+  store and deletes object keys no row named — a put whose record never landed.
+  They are bytes nothing else can enumerate, so the pass that sweeps them is
+  the one moment they are visible (`orphans` on the report).
+- **Collecting is `list` and `delete` and nothing else.** GC speaks only
+  `ObjectStore`, so a bucket on R2 collects exactly as one on local disk —
+  `@odu/objects`' contract suite and `src/gcStores.test.ts` run the same cases
+  against disk AND a real S3 service.
+- **What left is announced, not purged here.** The deleted URLs go out through
+  `CachePurge` (`@odu/cordis`): the cloudflare row purges them at the CDN, and
+  with nobody registered `announce` is a no-op — no CDN, no purge, no refusal.
+  This package never names Cloudflare.
+- **A write token may pin.** `POST /_odu/v1/buckets/<bucket>/pin` with
+  `{"name": "…", "paths": ["/nix/store/…"]}` — what `odu cache push --pin NAME`
+  and the repository's push action use. The scope rule is a capability argument
+  rather than a convenience: a write token can already keep a closure alive
+  forever by pushing it again, since a stored push renews `lastWanted`, so a
+  pin it creates or re-points grants it no retention it lacked — it makes the
+  same promise once instead of nightly. DELETING a pin stays the admin
+  surface's: that is giving up retention somebody else asked for.
+
 ## The row a board follows
 
 `buckets` is a collection with `deltas`: one row per bucket, carrying the

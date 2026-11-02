@@ -19,9 +19,10 @@ run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_
 catalog_import · catalog_prune · pipeline_read
 venue_probe · venue_hold · venue_release · protect_apply
 cache_bucket_create · cache_bucket_list · cache_bucket_describe · cache_bucket_paths
-cache_bucket_domain
+cache_bucket_domain · cache_bucket_retention
 cache_token_mint · cache_token_list · cache_token_revoke
-cache_pin_create · cache_gc_run · cache_stats_read
+cache_pin_create · cache_pin_list · cache_pin_delete
+cache_gc_plan · cache_gc_run · cache_stats_read
 cloudflare_status_read
 auth_user_whoami · auth_user_grant · auth_grant_list
 auth_token_create · auth_token_list · auth_token_revoke
@@ -314,20 +315,24 @@ terminal.
 | import old runs | `odu surface catalog_import --input '{…}' --json` | `catalog_import` | `checkout`, `dryRun?`, `requestId` | `imported[]`, `skipped[]`, `catalog` |
 | expire old runs | `odu surface catalog_prune --input '{…}' --json` | `catalog_prune` | `retentionDays?`, `dryRun?`, `requestId` | `expired[]`, `kept[]`, `retentionDays`, `dryRun`, `replayed` |
 | require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `hostsFile?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail`, `replayed` |
-| create a cache bucket | `odu surface cache bucket_create --input '{…}' --json` | `cache_bucket_create` | `rootToken`, `name`, `public`, `retentionDays`, `upstreamKeys?`, `store?` (a declared store; default `local`, `unknown_store` otherwise) | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `store` |
+| create a cache bucket | `odu surface cache bucket_create --input '{…}' --json` | `cache_bucket_create` | `rootToken`, `name`, `public`, `retentionDays?` (absent is 90 days), `upstreamKeys?`, `store?` (a declared store; default `local`, `unknown_store` otherwise) | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `store` |
 | list buckets | `odu surface cache bucket_list --input '{…}' --json` | `cache_bucket_list` | `rootToken` | `buckets[]` (the shape above) |
 | one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `domain`, `url` only — the substituter's identity, not the operator's counts |
 | give a bucket a DNS name | `odu surface cache bucket_domain --input '{…}' --json` | `cache_bucket_domain` | `rootToken`, `bucket`, `domain` (omit to clear) | the bucket row; `url` becomes the name and `pushUrl` stays the path |
-| one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastAccessed`), `next?` — newest first, 100 a page |
+| change a bucket's retention | `odu surface cache bucket_retention --input '{…}' --json` | `cache_bucket_retention` | `rootToken`, `bucket`, `retentionDays` (days from `lastWanted`; `0` keeps only what is referenced or pinned) | the bucket row |
+| one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastWanted`), `next?` — newest first, 100 a page |
 | the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
 | the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits`, `store` — one row per bucket, published as it moves |
 | the stores a bucket can live in | `odu surface get cache stores` | the `stores` resource | *(none)* | `[{ name, kind, default }]` — `local` (the server's disk, `default: true`) first, then each declared S3 store; never an endpoint or a credential |
 | mint a cache token | `odu surface cache token_mint --input '{…}' --json` | `cache_token_mint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
 | list cache tokens | `odu surface cache token_list --input '{…}' --json` | `cache_token_list` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
 | revoke a cache token | `odu surface cache token_revoke --input '{…}' --json` | `cache_token_revoke` | `rootToken`, `id` | `id`, `revoked` |
-| pin a closure | `odu surface cache pin_create --input '{…}' --json` | `cache_pin_create` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created` |
-| reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `kept`, `bytes`), `evicted`, `kept`, `bytes` |
-| cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastAccessed` |
+| pin a closure | `odu surface cache pin_create --input '{…}' --json` | `cache_pin_create` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created`, `createdBy` — a name that exists is RE-POINTED |
+| what the pins hold | `odu surface cache pin_list --input '{…}' --json` | `cache_pin_list` | `rootToken`, `bucket` | `pins[]` (`bucket`, `name`, `rootPaths[]`, `created`, `createdBy`: `write` a push made it, `admin` a person did) |
+| drop a pin | `odu surface cache pin_delete --input '{…}' --json` | `cache_pin_delete` | `rootToken`, `bucket`, `name` | `bucket`, `name` — admin only, even where a write token may pin |
+| what a collection WOULD take | `odu surface cache gc_plan --input '{…}' --json` | `cache_gc_plan` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `bytes`, `remaining`, `paths[]` — a readable head, oldest want first), `evicted`, `bytes`. THE DRY RUN: read it before `gc_run` |
+| reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` (absent collects every bucket, and only then sweeps orphans) | `buckets[]` (`evicted`, `kept`, `bytes`, `orphans`), `evicted`, `kept`, `bytes`, `orphans` |
+| cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastWanted` (the newest renewal anywhere, or null) |
 | the tunnel and its names | `odu surface cloudflare status_read --json` | `cloudflare_status_read` | *(none)* | `tunnel` (`state`, `name`, `id`, `reason`) and `routes[]` (`domain`, `bucket`, `state` `wiring`/`live`/`failed`, `reason`, `updated`) — a route with `bucket: null` is the server's own public origin |
 | who am I | `odu surface auth user_whoami --json` | `auth_user_whoami` | *(none)* | `who` — a `user` with a `login` and `role`, or `anonymous` |
 | mint a personal token | `odu surface auth token_create --input '{…}' --json` | `auth_token_create` | `name`, `expiresDays?` (absent = never; the profile form defaults to 90) | `token` (plaintext, ONCE), `facts` |
@@ -364,8 +369,30 @@ docs, "Set up an R2 bucket"):
   `AWS_SECRET_ACCESS_KEY=` lines, and `services.odu.cache.stores.<name> = {
   endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"; bucket; region =
   "auto"; credentialsFile; }`.
-The cache row is at contract 3.1 (3.0 removed `held` and `--wait`; 3.1 added
-`store` and the `stores` resource).
+The cache row is at contract 4.0 (3.0 removed `held` and `--wait`; 3.1 added
+`store` and the `stores` resource; 4.0 moved retention onto `lastWanted` — the
+old last-access field is gone from a path and from `stats_read` — and added
+`bucket_retention`, `pin_list`, `pin_delete`, `gc_plan` and `orphans`).
+
+- **RETENTION COUNTS FROM `lastWanted`, which a read does not move.** A path's
+  clock is renewed by a stored push and by the `missing` query that named it
+  (missing or not); a read moves `hits` and nothing else, because reads are
+  leaving odu and a clock a read wound would make the busiest paths the first
+  to look idle. 90 days by default, per bucket with `cache_bucket_retention`.
+- **Nothing is evicted while retention holds, something retained references it,
+  or a pin holds it**, and the reference closure of anything kept is kept. The
+  row collects every bucket **once a day on its own**; `cache_gc_run` is that
+  same collection asked for sooner, and `cache_gc_plan` is it with nothing
+  done. Ask the plan first and read the count and the bytes.
+- **A pin is a name over a closure**, re-pointed by pinning the same name
+  again. A WRITE token may create or re-point one over HTTP
+  (`POST /_odu/v1/buckets/<bucket>/pin`, and `odu cache push --pin NAME`),
+  because a token that may push can already keep a closure alive forever by
+  pushing it again; deleting a pin stays admin-only.
+- **No CLI verb administers a cache at all** (2.10), and this step added none:
+  retention, the pins, the dry run and the collection are the board's controls
+  and these verbs. `--pin` on `odu cache push` is the one word a shell has in
+  it. Do not invent `odu cache retention` or `odu cache gc --dry-run`.
 
 - **`requestId` is an idempotency key on these three too.** A repeat with the
   same id replays the recorded answer and performs nothing — which is what
@@ -402,6 +429,19 @@ The cache row is at contract 3.1 (3.0 removed `held` and `--wait`; 3.1 added
   When asked to add a cache push to a repository's CI, this is the step — not
   `attic login` + `attic push`, and not a hand-rolled `nix run … odu cache
   push` with a token in `env`.
+- **One more line keeps a repository's default branch out of GC.** The action's
+  optional `pin:` input names a pin in the bucket:
+
+  ```yaml
+      # one more line in the step's `with:`, beside origin/bucket/token/paths
+      pin: kolu-master
+  ```
+
+  A push to the repository's **default branch** re-points that pin at the
+  closure it just pushed; every other ref and every other event leaves the pin
+  exactly where it is, and empty (the default) never pins. odu's own
+  `nix-cache.yml` sets `pin: odu-master`. When a repository asks "how do we
+  stop our master closure being collected", that line is the whole answer.
 
 ### Signing in
 
@@ -572,10 +612,17 @@ declares.
 
 - **A bucket can live on S3** (cache 3.1): R2, AWS, Garage, versitygw — declared by the
   operator, chosen per bucket with `store`, served exactly like local disk.
-- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 3.1,
+- **GC and pins reach every bucket** (cache 4.0): retention counts from `lastWanted` —
+  renewed by a push and by the `missing` query, never by a read, since reads are leaving
+  odu — 90 days by default and per bucket with `cache_bucket_retention`; `cache_gc_plan`
+  is the dry run; `cache_pin_list`/`cache_pin_delete` read and drop pins; the row collects
+  every bucket daily on its own; and a collection speaks only the object store's `list`
+  and `delete`, so an R2 bucket collects exactly as one on disk. The old
+  last-access field is gone from a path and from `cache_stats_read`.
+- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 4.0,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
   major of a row **it reads** differs. The refusal names that row
-  (`serves the cache row at 3.1; this build reads cache 2.4`): run `odu web --upgrade`.
+  (`serves the cache row at 4.0; this build reads cache 3.1`): run `odu web --upgrade`.
   A runs-only reader is never refused because the cache moved.
 - The cache's `held` resource and `odu cache push --wait` are gone (cache 3.0).
 - `odu cache push --output json` also answers `served` — the paths the bucket
@@ -585,6 +632,9 @@ declares.
   refuses by design.
 - The repository ships a GitHub Actions push step
   (`juspay/odu/.github/actions/push@<sha>`), which verifies its own push.
+- `odu cache push --pin NAME` re-points a pin at the closure the push landed
+  (nothing is pinned if a path was refused), and the push action takes the same
+  thing as a `pin:` input, applied only on the default branch.
 
 - **The admin CLI is retired.** The CLI is `odu ci <verb>` (every run command
   now carries the `ci` word: `odu ci run`, `odu ci wait`, `odu ci logs`,
