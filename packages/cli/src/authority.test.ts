@@ -44,7 +44,9 @@
  *
  * Every public capability is a member on the shared surface now. The set this
  * walks is DERIVED from `src/main.ts`'s own imports, so a command cannot be
- * exempted by forgetting to list it.
+ * exempted by forgetting to list it — and it is the CLOSURE of those imports,
+ * which is what keeps `odu ci`'s fifteen verbs policed now that the root
+ * names rows and the row's door (`./ciCli`) is the hop to them.
  *
  * **AND THE WALK LEAVES THIS PACKAGE.** `main.ts` imports `@odu/cache/cli` and
  * `@odu/launch/webLauncher`, and a wall that stopped at this package's
@@ -60,7 +62,7 @@
  * service, and it is admissible here for a reason this wall can check: it
  * imports none of the three authorities above, and it has to be this way
  * because the paths live on the machine that built them — a push cannot go
- * THROUGH the service, which is not where the bytes are. `cacheCmd.ts` is
+ * THROUGH the service, which is not where the bytes are. `@odu/cache/cli` is
  * therefore policed like every other public client, and passes on the same
  * terms.
  *
@@ -75,7 +77,6 @@ import { describe, expect, it } from "bun:test";
 import ts from "typescript";
 
 const packageRoot = join(import.meta.dirname, "..");
-const srcRoot = join(packageRoot, "src");
 
 /**
  * Every `@odu/cli/*` module `src/main.ts` imports — DERIVED, not listed.

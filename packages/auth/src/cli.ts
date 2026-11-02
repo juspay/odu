@@ -27,14 +27,6 @@ import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { saveAuthToken } from "./credentials";
 
-/** The credential store, for the root that dials on this machine's behalf. */
-export {
-  authCredentialsPath,
-  authorizationHeaders,
-
-  TOKEN_ENV,
-} from "./credentials";
-
 export const AUTH_USAGE = `usage: odu auth login <origin> [--token T]
 
 login <origin> [--token T]    save this machine's personal access token for an

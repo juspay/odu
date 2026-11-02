@@ -87,11 +87,6 @@ import {
   withService,
 } from "./serviceFace";
 
-// Re-exported because they were this module's before the plumbing was shared,
-// and a caller that already names them here should not have to learn which of
-// four sibling faces they moved to.
-export { formatAgo, here, type Here, WAIT_EXITS, waitExitFor } from "./serviceFace";
-
 // ── odu ci run ──────────────────────────────────────────────────────────────
 
 export interface RunOpts {

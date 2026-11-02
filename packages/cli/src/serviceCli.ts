@@ -56,7 +56,6 @@ import {
   connectToService,
   EVERY_ROW_NEEDS,
   SERVICE_SIBLINGS,
-  SERVICE_WIRE_GROUP,
   SIBLING_ROWS,
 } from "./wire";
 import { oduServiceSurface } from "@odu/service-client/surface";

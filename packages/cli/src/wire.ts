@@ -34,7 +34,7 @@ import {
 import { CACHE_ROW } from "@odu/cache/surface";
 import { AUTH_ROW } from "@odu/auth/surface";
 import { CLOUDFLARE_ROW } from "@odu/cloudflare/surface";
-import { authorizationHeaders } from "@odu/auth/cli";
+import { authorizationHeaders } from "@odu/auth/credentials";
 import { connectOrStart } from "@odu/launch/webLauncher";
 import type { ServiceConnection } from "@odu/service-client/dial";
 

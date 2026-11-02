@@ -34,7 +34,6 @@
  */
 
 import { parseArgs } from "node:util";
-import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceClientOf } from "@kolu/surface/project";
 import { composedClients } from "@odu/cordis/compose";
 import { readDoor } from "@odu/cordis/services";
