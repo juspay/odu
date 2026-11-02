@@ -1859,6 +1859,13 @@
       flex-direction: column;
     }
 
+    /* AND THE CARD GROWS INSIDE THAT COLUMN. `.log` is the grid item and
+       stretches on its own; `.log-body` is a flex CHILD of it, and a flex
+       child's default is `0 1 auto` — so without this the console sat at its
+       content height in the middle of a full-height column, and the frame
+       looked like it had never applied. */
+    .app-frame .log-body { flex: 1 1 auto; }
+
     .app-frame .log-text {
       flex: 1 1 auto;
       max-height: none;

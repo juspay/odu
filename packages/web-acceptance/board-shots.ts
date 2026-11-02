@@ -97,6 +97,15 @@ interface Shot {
   readonly act?: (page: Page) => Promise<void>;
 }
 
+/** PUT THE PAGE DOWN before the shutter: drop the focus ring and take the
+ *  pointer off whatever was last pressed, so no tooltip is standing open over
+ *  the screen being photographed. */
+async function rest(page: Page): Promise<void> {
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(150);
+}
+
 async function shoot(browser: Browser, shots: ReadonlyArray<Shot>): Promise<void> {
   for (const theme of THEMES) {
     for (const viewport of VIEWPORTS) {
@@ -136,6 +145,12 @@ async function shoot(browser: Browser, shots: ReadonlyArray<Shot>): Promise<void
             });
         }
         await shot.act?.(page);
+        // THE PAGE AT REST. A control the script pressed keeps the pointer and
+        // the focus ring, and this design draws a real tooltip on both — so an
+        // un-rested shot is a picture of a hint floating over the thing it was
+        // meant to show. The hint is correct behaviour; it is just not what
+        // this evidence is of.
+        await rest(page);
         // One beat for the fonts: a shot taken before Geist arrives is a shot
         // of the fallback face, which is the one thing this evidence must not
         // show.
@@ -287,6 +302,7 @@ try {
       ] as const) {
         await page.goto(new URL(hash, door.origin).href, { waitUntil: "domcontentloaded" });
         await page.locator("h1").first().waitFor({ timeout: 30_000 }).catch(() => undefined);
+        await rest(page);
         await page.evaluate(() => document.fonts.ready).catch(() => undefined);
         const file = join(outDir, `${label}-${name}-${theme}-${viewport.name}.png`);
         await page.screenshot({ path: file, fullPage: true });
