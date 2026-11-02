@@ -145,11 +145,18 @@ export function readCacheStores(
     for (const field of ["endpoint", "bucket", "region", "credentialsFile"] as const) {
       if (!nonEmpty(entry[field])) return bad(`${field} is missing`);
     }
-    const endpoint = entry["endpoint"] as string;
+    const spelled = entry["endpoint"] as string;
+    let endpoint: URL;
     try {
-      new URL(endpoint);
+      endpoint = new URL(spelled);
     } catch {
-      return bad(`endpoint ${endpoint} is not a URL`);
+      return bad(`endpoint ${spelled} is not a URL`);
+    }
+    if (endpoint.protocol !== "https:" && endpoint.protocol !== "http:") {
+      return bad(`endpoint ${spelled} is not an http(s) URL`);
+    }
+    if (endpoint.search !== "" || endpoint.hash !== "") {
+      return bad(`endpoint ${spelled} has a query or fragment, and an S3 endpoint has neither`);
     }
     const credentialsFile = entry["credentialsFile"] as string;
     let credentials: ReturnType<typeof parseCredentials>;

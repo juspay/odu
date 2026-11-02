@@ -47,7 +47,7 @@ describe("reading the declarations", () => {
     expect(reading.stores.get("r2")).toEqual({
       kind: "s3",
       target: {
-        endpoint: R2.endpoint,
+        endpoint: new URL(R2.endpoint),
         bucket: "odu",
         region: "auto",
         accessKeyId: "abc",
@@ -68,6 +68,7 @@ describe("reading the declarations", () => {
       [{ r2: { ...R2, kind: "gcs" } }, { kind: "bad_store", store: "r2" }],
       [{ r2: { ...R2, endpoint: "" } }, { kind: "bad_store", store: "r2", reason: "endpoint is missing" }],
       [{ r2: { ...R2, endpoint: "not a url" } }, { kind: "bad_store", store: "r2" }],
+      [{ r2: { ...R2, endpoint: "ftp://acct.example" } }, { kind: "bad_store", store: "r2" }],
       [[], { kind: "malformed" }],
     ] as const;
     for (const [declared, refusal] of cases) {

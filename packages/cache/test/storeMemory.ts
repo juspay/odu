@@ -37,7 +37,11 @@ async function growth(work: () => Promise<void>): Promise<number> {
 }
 
 if (import.meta.main) {
-  const store = storeOf(JSON.parse(process.argv[2] as string) as StoreSpec);
+  const spec = JSON.parse(process.argv[2] as string) as StoreSpec;
+  // A URL CROSSES THE ARGUMENT as its href; the target holds it parsed.
+  const store = storeOf(
+    spec.kind === "s3" ? { ...spec, target: { ...spec.target, endpoint: new URL(spec.target.endpoint) } } : spec,
+  );
   const key = "main/nar/big.nar.zst";
   const MIB = 1024 * 1024;
   const chunk = new Uint8Array(MIB).fill(0x5a);

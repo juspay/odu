@@ -20,8 +20,9 @@ import { createHash, createHmac } from "node:crypto";
 /** Where a store's bucket is and who may write it. The secret never leaves
  *  this value: not logged, not stored, not printed in a refusal. */
 export interface S3Target {
-  /** `https://<account>.r2.cloudflarestorage.com`, `http://127.0.0.1:7070`. */
-  readonly endpoint: string;
+  /** `https://<account>.r2.cloudflarestorage.com`, `http://127.0.0.1:7070` —
+   *  parsed once, where the declaration is read. */
+  readonly endpoint: URL;
   readonly bucket: string;
   readonly region: string;
   readonly accessKeyId: string;
@@ -43,9 +44,11 @@ const encode = (text: string): string =>
  *  local gateway (versitygw, Garage) has no wildcard DNS for virtual hosts, and
  *  R2 and AWS accept it. */
 export function objectUrl(target: S3Target, key: string, query: Record<string, string> = {}): URL {
-  const base = target.endpoint.replace(/\/+$/, "");
-  const path = `/${encode(target.bucket)}/${key.split("/").map(encode).join("/")}`;
-  const url = new URL(`${base}${path}`);
+  const url = new URL(target.endpoint);
+  // JOINED BY SEGMENT under whatever path the endpoint has: the bucket, then
+  // the key's own segments, each encoded once.
+  const base = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+  url.pathname = `${base}${[target.bucket, ...key.split("/")].map(encode).join("/")}`;
   for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
   return url;
 }

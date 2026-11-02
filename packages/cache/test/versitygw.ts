@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { s3Fetch, type S3Target } from "../src/s3sign";
 
 export interface Gateway {
-  endpoint: string;
+  endpoint: URL;
   /** A new, empty bucket on this gateway, and the target that writes it. */
   bucket(): Promise<S3Target>;
   stop(): Promise<void>;
@@ -37,7 +37,7 @@ async function freePort(): Promise<number> {
 export async function startGateway(): Promise<Gateway> {
   const dir = mkdtempSync(join(tmpdir(), "odu-versitygw-"));
   const port = await freePort();
-  const endpoint = `http://127.0.0.1:${port}`;
+  const endpoint = new URL(`http://127.0.0.1:${port}`);
   const child: ChildProcess = spawn(
     "versitygw",
     ["--access", ACCESS, "--secret", SECRET, "--port", `127.0.0.1:${port}`, "--quiet", "posix", dir],

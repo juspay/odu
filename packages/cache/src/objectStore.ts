@@ -452,7 +452,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   const partSize = Math.max(options.partSize ?? 8 * 1024 * 1024, 5 * 1024 * 1024);
   const pageSize = options.listPageSize ?? 1000;
   const client = new S3Client({
-    endpoint: target.endpoint,
+    endpoint: target.endpoint.href,
     bucket: target.bucket,
     region: target.region,
     accessKeyId: target.accessKeyId,
