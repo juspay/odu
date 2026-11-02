@@ -44,6 +44,26 @@
 #   - no token on a `push` event  → fail, naming the missing secret
 #   - the token is never echoed, and never appears in a command line
 #
+# **`pin:` holds the default branch's closure.** One optional line, naming a
+# pin in the bucket — the line another repository pastes beside the four
+# above:
+#
+#       pin: kolu-master
+#
+# A push to the repository's DEFAULT BRANCH re-points that pin at the closure
+# it just pushed, so garbage collection never takes the tree everything else
+# substitutes from. Any other ref or event — a pull request, a tag, a topic
+# branch — leaves the pin exactly where it is, and the step summary says so.
+# The default branch is read from the event (`repository.default_branch`), not
+# spelled here, so renaming a branch costs no edit to a cache step. Empty, the
+# default, never pins.
+#
+# A WRITE TOKEN IS ALLOWED TO PIN, and nothing stronger is asked for: a write
+# token can already keep a closure alive by pushing it again every night, so a
+# pin is the same promise made once instead of nightly. The push itself pins
+# (`odu cache push --pin`) — one command, one token — and only when every path
+# landed. Deleting a pin stays an administrator's.
+#
 # **It proves what it pushed, where Nix will ask.** For every path the bucket
 # serves (`check.sh`): the narinfo must answer at the SUBSTITUTER URL the bucket
 # publishes — its own domain when it has one — and the NAR that narinfo names
@@ -82,17 +102,26 @@ inputs:
       Space- or newline-separated store paths, `result` links, or flake
       installables (`.#your-package`). Installables are built first.
     required: true
+  pin:
+    description: >-
+      A pin name, e.g. kolu-master. A push to the repository's default branch
+      re-points it at the closure that push landed, so garbage collection
+      keeps that closure; every other ref and event leaves the pin untouched.
+      Empty never pins.
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
     - name: Push the closure, and prove it landed
       shell: bash
-      # The four inputs ride as ENVIRONMENT, not interpolated into the script:
-      # a `paths:` value cannot become shell, and a token cannot become shell.
+      # Every input rides as ENVIRONMENT, not interpolated into the script: a
+      # `paths:` value cannot become shell, and a token cannot become shell.
       env:
         ODU_PUSH_ORIGIN: ${{ inputs.origin }}
         ODU_PUSH_BUCKET: ${{ inputs.bucket }}
         ODU_PUSH_TOKEN: ${{ inputs.token }}
         ODU_PUSH_PATHS: ${{ inputs.paths }}
+        ODU_PUSH_PIN: ${{ inputs.pin }}
       run: bash "$GITHUB_ACTION_PATH/push.sh"

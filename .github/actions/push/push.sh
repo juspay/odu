@@ -51,6 +51,26 @@
 #     read from the environment, handed to `odu` through the environment, and
 #     handed to curl through a 0600 config file that is removed on exit
 #
+# ## The pin, and the one ref that may move it
+#
+# `pin:` names a pin in the bucket that the DEFAULT BRANCH's push re-points at
+# the closure it just pushed — the one closure garbage collection must not
+# take, because it is the tree every other build substitutes from. Every other
+# ref and event — a pull request, a tag, a topic branch — pushes exactly as it
+# did before and leaves the pin where it is: a pin moved by a branch would hold
+# a closure nobody substitutes and release the one everybody does.
+#
+# THE DEFAULT BRANCH IS THE EVENT'S OWN (`repository.default_branch` in
+# `$GITHUB_EVENT_PATH`), never a name spelled here, so a repository that
+# renames its branch does not also have to edit its cache step.
+#
+# IT IS THE PUSH THAT PINS — `odu cache push --pin <name>`: one command, the
+# push's own write token, and a pin only when every path landed (a pin over a
+# half-pushed closure would promise paths the bucket does not have). A write
+# token is authority enough because a write token can already keep a closure
+# alive by pushing it again every night; a pin is that same promise made once.
+# Deleting a pin stays an administrator's.
+#
 # ## It proves what it pushed, where Nix will ask
 #
 # `odu cache push` answers which paths the bucket SERVES (what it already had,
@@ -90,6 +110,7 @@ origin=$(trim "${ODU_PUSH_ORIGIN:-}")
 origin=${origin%/}
 bucket=$(trim "${ODU_PUSH_BUCKET:-}")
 token=$(trim "${ODU_PUSH_TOKEN:-}")
+pin=$(trim "${ODU_PUSH_PIN:-}")
 requested=$(printf '%s' "${ODU_PUSH_PATHS:-}" | tr -s '[:space:]' '\n' | sed '/^$/d')
 event=${GITHUB_EVENT_NAME:-local}
 
@@ -156,6 +177,33 @@ summary() {
   fi
 }
 
+# ── the pin, and the one ref that may move it ───────────────────────────────
+
+# ONLY A PUSH TO THE DEFAULT BRANCH MOVES A PIN, and the default branch is the
+# event's own rather than a name this script knows. When this ref is not that
+# one the pin is not touched at all — and the readout says so, because a step
+# that was asked to pin and silently did not would be read as having pinned.
+pin_args=()
+pin_requested=""
+pin_skipped=""
+if [ -n "$pin" ]; then
+  default_branch=""
+  if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH:-}" ]; then
+    default_branch=$(jq -r '.repository.default_branch // empty' "$GITHUB_EVENT_PATH")
+  fi
+  ref=${GITHUB_REF:-}
+  if [ "$event" = "push" ] && [ -n "$default_branch" ] && [ "$ref" = "refs/heads/$default_branch" ]; then
+    pin_args=(--pin "$pin")
+    pin_requested=$pin
+  elif [ "$event" != "push" ]; then
+    pin_skipped="a \`$event\` event never moves a pin — only a push to the default branch does."
+  elif [ -z "$default_branch" ]; then
+    pin_skipped="the event payload names no \`repository.default_branch\`, and a pin is moved by the default branch or by nothing."
+  else
+    pin_skipped="\`$ref\` is not the default branch (\`refs/heads/$default_branch\`)."
+  fi
+fi
+
 # ── the token, before anything expensive ────────────────────────────────────
 
 if [ -z "$token" ]; then
@@ -166,6 +214,9 @@ if [ -z "$token" ]; then
   summary "### Cache push — \`$bucket\` on \`$origin\`
 
 **Built, pushed nothing.** No token: a \`$event\` event is not required to publish, so this step built $count store path(s) and stopped."
+  if [ -n "$pin" ]; then
+    summary "**Pin:** \`$pin\` was not re-pointed — nothing was pushed."
+  fi
   exit 0
 fi
 
@@ -193,7 +244,11 @@ set +e
 # The token rides in the environment, which is how `odu cache push` resolves it
 # by design ($ODU_CACHE_TOKEN, second in its order) — not in argv, where `ps`
 # would read it.
+# `${pin_args[@]+…}` and not `"${pin_args[@]}"`: a macOS runner's bash is 3.2,
+# where an empty array expanded under `set -u` is an unbound variable. The pin
+# NAME is argv's business — it is not a secret; the token is still never there.
 ODU_CACHE_TOKEN="$token" "$odu" cache push "$bucket" --origin "$origin" --output json \
+  ${pin_args[@]+"${pin_args[@]}"} \
   "${targets[@]}" > "$result"
 status=$?
 set -e
@@ -210,6 +265,11 @@ upstream=$(jq -r '.skippedUpstream' "$result")
 failed=$(jq -r '.failed' "$result")
 page=$(jq -r '.pageUrl' "$result")
 substituter=$(jq -r '.substituter' "$result")
+
+# THE PIN FROM THE PUSH'S OWN ANSWER, never from its human text: `pinned` is
+# null when no pin was asked for, and `{name, rootPaths}` when one was moved.
+pinned_name=$(jq -r '.pinned.name // empty' "$result")
+pinned_paths=$(jq -r '.pinned.rootPaths // empty' "$result")
 
 summary "### Cache push — \`$bucket\` on \`$origin\`
 
@@ -228,6 +288,19 @@ fi
 # counts say.
 if [ "$status" -ne 0 ] || [ "$failed" != "0" ]; then
   fail "odu push: \`odu cache push\` exited $status with $failed refused path(s) — the push did not land."
+fi
+
+# WHAT HAPPENED TO THE PIN, said where the step says what it did. A pin that
+# was asked for and did not come back is red: `odu cache push` pins whenever
+# every path landed, and nothing lands past the check above without having.
+if [ -n "$pinned_name" ]; then
+  say "odu push: the pin \"$pinned_name\" now holds $pinned_paths path(s)"
+  summary "**Pinned:** \`$pinned_name\` now holds $pinned_paths path(s) — this closure stays out of garbage collection until the next default-branch push moves the pin."
+elif [ -n "$pin_requested" ]; then
+  fail "odu push: \`--pin $pin_requested\` was asked for and \`odu cache push\` answered no pin — the closure is pushed but nothing holds it."
+elif [ -n "$pin" ]; then
+  say "odu push: the pin \"$pin\" was not re-pointed — $pin_skipped"
+  summary "**Pin:** \`$pin\` was not re-pointed — $pin_skipped"
 fi
 
 # ── proof: every path the bucket serves answers where Nix will ask ─────────

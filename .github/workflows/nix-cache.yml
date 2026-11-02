@@ -97,6 +97,13 @@ jobs:
           origin: https://cache.kolu.dev
           bucket: kolu
           token: ${{ secrets.ODU_CACHE_TOKEN }}
+          # ODU'S MASTER CLOSURE, HELD. A push to master re-points this pin at
+          # what it just pushed, so collection takes yesterday's build and
+          # never the one every lane and every developer substitutes from; a
+          # pull request pushes and moves nothing. odu is the first repository
+          # to run this, which makes `pin:` a feature this cache tests on
+          # itself.
+          pin: odu-master
           paths: |
             .#odu
             .#odu-runner
