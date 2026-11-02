@@ -111,9 +111,18 @@ export type CompleteUpload =
   | { ok: true; parts: number }
   | { ok: false; missing: readonly number[] };
 
-/** What a staged `file://` cache contains, and the first thing a client reads
- *  from a real one. */
-export const NIX_CACHE_INFO = "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n";
+/**
+ * What a client reads first from a bucket.
+ *
+ * **Priority 41, one worse than cache.nixos.org's 40**, deliberately. A
+ * bucket holds upstream-signed paths whenever one was created to take
+ * everything, and at an equal 40 the client's own substituter ORDER decides
+ * who serves them — which means this daemon's uplink serving bytes nixos.org's
+ * CDN would have served from nearer, for free. A number that loses the tie
+ * takes that decision away from whoever wrote the `nix.conf`. It is Attic's
+ * convention for the same reason.
+ */
+export const NIX_CACHE_INFO = "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n";
 
 /** An upload session as a client names it (`x-odu-upload`): a plain token,
  *  because it becomes part of a staged file name. */

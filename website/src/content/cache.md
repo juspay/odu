@@ -470,7 +470,7 @@ Watch these lines on a foreground `odu web` (it prints a row's operational `info
 One bucket is one substituter. Point any Nix-compatible tool at these routes:
 
 ```text
-GET  /cache/<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
+GET  /cache/<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 41
 HEAD /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/nar/<narHash>.<ext>       the object, from its store; Content-Length + Range
@@ -481,6 +481,8 @@ POST /_odu/v1/buckets/<bucket>/pin              name a closure a WRITE token kee
 GET  /cache/<bucket>/                           a public bucket's facts: the use block,
                                                 or JSON on Accept: application/json
 ```
+
+**Priority 41 is one worse than `cache.nixos.org`'s 40, on purpose.** A bucket created to take everything also holds upstream-signed paths, and at an equal priority the client's own substituter order decides who serves them — this machine's uplink, or the CDN that would have served them from nearer and for free. Losing the tie takes that decision away from whoever wrote the `nix.conf`.
 
 On a bucket's own domain the same four Nix paths sit at `/`: `/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>` and their uploads. `Host` names the bucket.
 

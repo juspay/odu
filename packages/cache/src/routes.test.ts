@@ -340,11 +340,18 @@ describe("a bucket's consumer facts", () => {
 });
 
 describe("nix-cache-info", () => {
-  it("answers the three lines a client reads first", async () => {
+  it("answers the three lines a client reads first, and loses the tie to nixos.org", async () => {
     const h = await harness(true);
     const response = await h.fetch("/main/nix-cache-info");
     expect(response.status).toBe(200);
-    expect(await response.text()).toBe(NIX_CACHE_INFO);
+    const text = await response.text();
+    expect(text).toBe(NIX_CACHE_INFO);
+    // THE NUMBER, not just the constant: 41 is one WORSE than
+    // cache.nixos.org's 40, so an upstream-signed path this bucket also
+    // holds is fetched from the CDN whatever order a client's
+    // `substituters` are in. At 40 the two are equal, and equal means
+    // whoever wrote the `nix.conf` decides which uplink pays.
+    expect(text).toContain("Priority: 41\n");
     await h.dispose();
   });
 
