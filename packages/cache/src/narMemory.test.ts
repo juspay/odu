@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "bun:test";
 import { createCache } from "./cache";
 import { openCacheRepo } from "./db";
-import { asRoot } from "./testlib";
+import { asRoot, localStores } from "./testlib";
 
 const LINUX = process.platform === "linux";
 const LIMIT = 64 * 1024 * 1024;
@@ -114,7 +114,7 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
     const stateRoot = join(dir, "state");
     const hash = "a".repeat(52);
     const storePath = `/nix/store/${"a".repeat(32)}-big`;
-    const cache = createCache({ stateRoot, rootToken: "root" });
+    const cache = createCache({ stateRoot, stores: localStores(stateRoot), rootToken: "root" });
     await cache.admin.create({
       ...asRoot("root"),
       name: "main",

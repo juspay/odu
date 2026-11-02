@@ -19,7 +19,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { asRoot } from "./testlib";
+import { asRoot, localStores } from "./testlib";
 import { HttpRouter } from "effect/http";
 import { base32, storePathHash } from "./narinfo";
 import { base32Bytes, storePathHashOf } from "./storePath";
@@ -133,7 +133,10 @@ async function harness(
     legacyStore: { dump: (path) => store.dump(path) },
     now: () => NOW,
     log,
-    ...(where.store === undefined ? {} : { stores: new Map([[where.name, await where.store()]]) }),
+    stores: new Map([
+      ...localStores(scratch),
+      ...(where.store === undefined ? [] : [[where.name, await where.store()] as const]),
+    ]),
   });
   const created = await cache.admin.create({
     ...asRoot(ROOT),
@@ -476,6 +479,7 @@ describe("the auth matrix", () => {
     if (!expired.ok) throw new Error(expired.message);
     const later = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       legacyStore: { dump: (path) => h.store.dump(path) },
       now: () => NOW + 10 * 24 * 60 * 60 * 1000,

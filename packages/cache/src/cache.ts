@@ -49,7 +49,7 @@ import {
   type NarinfoOutcome,
   type Upload,
 } from "./staging";
-import { type ByteRange, diskObjectStore, type ObjectFacts, type ObjectStore } from "./objectStore";
+import { type ByteRange, type ObjectFacts, type ObjectStore } from "./objectStore";
 import { contentAddressOf } from "./storePath";
 import { verifyNarStream } from "./store";
 import { createSlots } from "./slots";
@@ -402,10 +402,10 @@ export interface CacheOptions {
   migrationRetryMs?: number;
   /** Injected by the suite for the disk-floor test. */
   freeBytes?: () => Promise<number | null>;
-  /** THE STORES, by declared name — the row builds them from the operator's
-   *  declarations (`./stores`). `local` is the disk under the cache's dir when
-   *  the map does not name it; a suite injects its own. */
-  stores?: ReadonlyMap<string, ObjectStore>;
+  /** THE STORES, by declared name, `local` among them — the row builds them
+   *  from the operator's declarations (`./stores` `objectStores`), and a suite
+   *  passes its own. The cache never builds a store. */
+  stores: ReadonlyMap<string, ObjectStore>;
   now?: () => number;
   /** ONE structured line per operational fact (serve, import, boot, refusal).
    *  The row hands the daemon's logger here; a suite that does not care omits
@@ -432,8 +432,7 @@ export function createCache(options: CacheOptions): Cache {
   const now = options.now ?? (() => Date.now());
   const dir = join(options.stateRoot, "cache");
   const repo = openCacheRepo(join(dir, "cache.sqlite"));
-  const stores = new Map(options.stores ?? []);
-  if (!stores.has(LOCAL_STORE)) stores.set(LOCAL_STORE, diskObjectStore({ dir }));
+  const { stores } = options;
   /**
    * THE ONE PLACE A BUCKET BECOMES ITS STORE. Every bucket's store was proved
    * declared at boot and at create, so a missing one here is a broken

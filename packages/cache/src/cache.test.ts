@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
-import { asRoot } from "./testlib";
+import { asRoot, localStores } from "./testlib";
 import { base32, canonicalNarHash } from "./narinfo";
 import { base32Bytes, storePathHashOf } from "./storePath";
 import { type Cache, createCache } from "./cache";
@@ -50,6 +50,7 @@ afterEach(() => {
 function cacheWith(rootToken: string | null): Cache {
   return createCache({
     stateRoot: scratch,
+    stores: localStores(scratch),
     rootToken,
     now: () => NOW,
   });
@@ -724,6 +725,7 @@ describe("CA is proved from the path", () => {
       const logs: string[] = [];
       const cache = createCache({
         stateRoot: scratch,
+        stores: localStores(scratch),
         rootToken: ROOT,
         now: () => NOW,
         log: (event, fields) => logs.push(`${event} ${JSON.stringify(fields)}`),
@@ -796,6 +798,7 @@ describe("CA is proved from the path", () => {
     writeFileSync(join(orphanDir, "dead.nar.zst"), "no row");
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
@@ -834,6 +837,7 @@ describe("CA is proved from the path", () => {
     const gate = Promise.withResolvers<void>();
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
@@ -893,6 +897,7 @@ describe("CA is proved from the path", () => {
     const payload = new Uint8Array(1024);
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
@@ -930,6 +935,7 @@ describe("CA is proved from the path", () => {
     let dumped = false;
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
@@ -965,6 +971,7 @@ describe("CA is proved from the path", () => {
 
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
@@ -1004,6 +1011,7 @@ describe("CA is proved from the path", () => {
     let reads = 0;
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 1024,

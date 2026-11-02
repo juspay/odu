@@ -16,6 +16,7 @@ import { nixDump } from "../src/store";
 import { createCache } from "../src/cache";
 import { cacheRoutes } from "../src/routes";
 import { diskObjectStore, type ObjectStore } from "../src/objectStore";
+import { LOCAL_STORE } from "../src/surface";
 import { join } from "node:path";
 
 const path = process.argv[2];
@@ -65,7 +66,7 @@ if (path === "routes") {
         },
       }
     : disk;
-  const cache = createCache({ stateRoot, rootToken: null, log, stores: new Map([["local", objects]]) });
+  const cache = createCache({ stateRoot, rootToken: null, log, stores: new Map([[LOCAL_STORE, objects]]) });
   // THE PRODUCTION ADAPTER: a Node request handler made by
   // `NodeHttpServer.makeHandler` over the same Effect layer `odu web` uses.
   // A handler called directly (or Bun's fetch) is not a test of serving: a

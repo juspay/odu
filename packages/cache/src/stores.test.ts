@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createCache, mountRefusalMessage } from "./cache";
 import { readCacheStores, storeConfigMessage, storeFacts } from "./stores";
-import { asRoot } from "./testlib";
+import { asRoot, localStores } from "./testlib";
 
 const R2 = {
   kind: "s3",
@@ -101,7 +101,7 @@ describe("a bucket's store", () => {
   const create = { name: "main", public: true, retentionDays: 30, upstreamKeys: [] };
 
   it("is local unless named, and a name nobody declared is refused", async () => {
-    const cache = createCache({ stateRoot: scratch, rootToken: "root" });
+    const cache = createCache({ stateRoot: scratch, stores: localStores(scratch), rootToken: "root" });
     expect(await cache.admin.create({ ...asRoot("root"), ...create })).toMatchObject({
       ok: true,
       value: { store: "local" },
@@ -118,13 +118,13 @@ describe("a bucket's store", () => {
     const declared = createCache({
       stateRoot: scratch,
       rootToken: "root",
-      stores: new Map([["nas", diskObjectStore({ dir: join(scratch, "nas") })]]),
+      stores: new Map([...localStores(scratch), ["nas", diskObjectStore({ dir: join(scratch, "nas") })]]),
     });
     expect(await declared.admin.create({ ...asRoot("root"), ...create, store: "nas" })).toMatchObject({ ok: true });
     expect(await declared.boot()).toMatchObject({ ok: true });
     await declared.close();
 
-    const forgotten = createCache({ stateRoot: scratch, rootToken: "root" });
+    const forgotten = createCache({ stateRoot: scratch, stores: localStores(scratch), rootToken: "root" });
     const booted = await forgotten.boot();
     expect(booted).toEqual({
       ok: false,
