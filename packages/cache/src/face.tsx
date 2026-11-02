@@ -977,6 +977,9 @@ function BucketPage(
                             <span>{bytes(path.narSize)}</span>
                             <span>{ago(path.created, props.now)}</span>
                             <span>{path.hits} reads</span>
+                            {/* WANTED, not read: retention counts from here,
+                                and the reads beside it never move it. */}
+                            <span>wanted {ago(path.lastWanted, props.now)}</span>
                           </span>
                         </li>
                       )}
@@ -1006,7 +1009,7 @@ function BucketPage(
               {(name) => (
                 <div class="split-side">
                   <Show when={props.local}>
-                    <Panel title="Root token" label="root token">
+                    <Panel title="Root token">
                       <div class="panel-body">
                         <RootTokenField
                           typedToken={props.typedToken}
