@@ -160,10 +160,11 @@ describe("odu mcp — the shared-service bridge", () => {
       const names = listed.tools.map((t) => t.name).sort();
       // Equality, not containment. A face that could do one more thing than the
       // browser can is the second vocabulary growing back, and containment would
-      // not see it. The list has GROWN twice — five, then thirteen, now
-      // seventeen — and equality is what made each growth a reviewed change
-      // rather than a drift: every new verb had to be added here, in the
-      // shared list, at the same time as it reached the contract.
+      // not see it. The list has grown more than once — five verbs, then
+      // thirteen, then every verb the retired admin CLI used to own — and
+      // equality is what made each growth a reviewed change rather than a
+      // drift: a new verb has to be added here, in the shared list, at the
+      // same time as it reaches the contract.
       expect(names).toEqual([...SHARED_TOOLS]);
       // And none of the deleted per-checkout tools, named explicitly so a
       // reintroduction fails here with the name rather than as a count.
