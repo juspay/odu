@@ -126,7 +126,7 @@ export function TunnelFace(props: CloudflareFaceProps): JSX.Element {
   });
 
   return (
-    <section class="tunnel" aria-label="tunnel">
+    <section class="screen tunnel" aria-label="tunnel">
       <PageHead
         title="Tunnel"
         sub="One Cloudflare tunnel for this server, carrying the names its buckets answer on."
@@ -211,7 +211,7 @@ export function TunnelFace(props: CloudflareFaceProps): JSX.Element {
                 {(route) => (
                   <li>
                     <code class="path">{route.domain}</code>
-                    <span class="bucket-facts">
+                    <span class="fact-line bucket-facts">
                       <Pill hue={routeHue(route.state)}>{routeText(route)}</Pill>
                       {/* THE BUCKET IS A PROPERTY, not a verdict, so it is a
                           square grey tag and never a hue. The server's own
@@ -265,7 +265,7 @@ export function BucketRoute(props: {
     <Show when={route()}>
       {(row) => (
         <div class="stack">
-          <p class="bucket-facts" aria-label="domain route">
+          <p class="fact-line bucket-facts" aria-label="domain route">
             <Tag hue={row().state === "live" ? "green" : undefined}>{row().state}</Tag>
             <code>{row().domain}</code>
             <span>{ago(row().updated, props.now)}</span>

@@ -181,7 +181,7 @@ export function Machines(props: {
   };
 
   return (
-    <section class="ops" aria-label="machines">
+    <section class="screen ops" aria-label="machines">
       {/* The probe is the page's one whole-screen action, so it rides the head
           beside the sentence it refreshes. The field it narrows sits under
           them, because a platform list is a thing you type rather than a thing
@@ -305,7 +305,7 @@ export function Maintain(props: {
   onBack: () => void;
 }): JSX.Element {
   return (
-    <section class="ops" aria-label="maintenance">
+    <section class="screen ops" aria-label="maintenance">
       {/* "All runs" rather than "Runs": the shell's rail already offers a
           control by that name, and one accessible name on two buttons is
           ambiguous to a person and unaddressable to anything that finds a

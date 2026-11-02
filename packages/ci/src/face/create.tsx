@@ -127,7 +127,7 @@ export function Create(props: {
   };
 
   return (
-    <section class="create">
+    <section class="screen create">
       {/* The way out, then the title — "All runs" rather than "Runs" because
           the shell's rail already offers a control by that name, and one
           accessible name on two buttons is ambiguous to a person and

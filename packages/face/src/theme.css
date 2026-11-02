@@ -195,38 +195,6 @@
      second palette. */
   :root[data-theme="dark"] { color-scheme: dark; }
   :root[data-theme="light"] { color-scheme: light; }
-
-  /* THE SIXTEEN ANSI COLOURS — the CLI's own table, verbatim from
-     `packages/cli/src/logView.ts`. A recipe that prints a red FAIL prints the
-     same red whether a person reads it through `odu attach` or through this
-     page; two palettes for one byte stream would make the terminal and the
-     browser disagree about a colour the recipe chose.
-
-     CHECKED, not promised: `logView.test.ts` reads this file and pins every
-     token below to that table, in both directions. The CLI is node-side so it
-     may read the stylesheet, which is why the assertion lives over there.
-
-     Scoped to the console rather than declared on `:root`: these only ever
-     paint on `.log-text`, which is pinned dark in both themes, so a
-     light-theme variant would be a token nothing could use. */
-  .log-text {
-    --ansi-0: #3b4650;
-    --ansi-1: #e8695b;
-    --ansi-2: #6fcf8e;
-    --ansi-3: #e6b24d;
-    --ansi-4: #6a9fdc;
-    --ansi-5: #bb8ce2;
-    --ansi-6: #5ec8c4;
-    --ansi-7: #c6d2d3;
-    --ansi-8: #5d6d70;
-    --ansi-9: #ef8578;
-    --ansi-10: #8ddba6;
-    --ansi-11: #f0c46e;
-    --ansi-12: #8bb8e8;
-    --ansi-13: #cda6ec;
-    --ansi-14: #7fd8d4;
-    --ansi-15: #e8f0f0;
-  }
 }
 
 @layer base {
@@ -654,11 +622,6 @@
     color: var(--hue-ink);
   }
 
-  /* A glyph in a line of RUNNING TEXT drops that fixed column, where it would
-     be a hole rather than an alignment. `:where()` adds no specificity, so
-     this is the same weight as `.glyph` and wins on order alone. */
-  :where(.lane-counts, .log-follow) .glyph { width: auto; font-size: 0.85rem; }
-
   /* ── panels ───────────────────────────────────────────────────────────────
    *
    * One card, three optional parts: a head that names it, a body, and a foot
@@ -1042,368 +1005,17 @@
   .confirm p { margin: 0 0 1rem; color: var(--muted); }
   .confirm-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
 
-  /* ── the board's rows ─────────────────────────────────────────────────────
-   *
-   * What a row LOOKS like lives here with the node rows it mirrors; where its
-   * columns GO is in `layout`.
-   */
-
-  /* Below the font floor deliberately: caps and letter-spacing carry the size
-     back, and these are furniture rather than facts. */
-  .row-head {
-    color: var(--quiet);
-    font: 500 0.72rem/1.4 var(--mono);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .row {
-    font: inherit;
-    color: inherit;
-    background: none;
-    border: 0;
-    border-top: 1px solid var(--line);
-    cursor: pointer;
-  }
-
-  .row:hover { background: var(--panel-2); }
-
-  .row-project {
-    font: 600 0.95rem/1.3 var(--sans);
-    overflow-wrap: anywhere;
-  }
-
-  .row-sha { font: 0.8rem var(--mono); color: var(--ink-2); }
-  .row-scope,
-  .row-took { color: var(--ink-2); font: 0.8rem/1.4 var(--mono); }
-  .row-age { color: var(--quiet); font: 0.8rem/1.4 var(--mono); }
-  /* "4 earlier" — how many runs of this checkout the board folded away. It
-     rides the age cell because that is what it is about. */
-  .row-earlier { display: block; color: var(--quiet); font: 0.78rem/1.4 var(--mono); }
-  .row-lanes { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
-
-  /* ── one run's nodes ────────────────────────────────────────────────────── */
-
-  .node-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    background: var(--panel);
-    overflow: hidden;
-  }
-
-  /* A run that has published no work yet gets a sentence above this list, not
-     a hairline card with nothing in it. */
-  .node-list:empty { display: none; }
-
-  .node {
-    display: flex;
-    /* WRAPS so the timeline track can take a line of its own below the row's
-       cells — which is why the track is a child of THIS box and not of the
-       button inside it. */
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-    padding-right: 0.5rem;
-  }
-
-  /* Between rows rather than on top of each one, and the list has two kinds of
-     row: a node follows another node, or it follows the lane head above it. */
-  .node + .node,
-  .lane + .node { border-top: 1px solid var(--line); }
-  .node:hover { background: var(--panel-2); }
-
-  .node-open {
-    display: flex;
-    align-items: center;
-    /* WRAPPING, because the nodes panel is a column and not a page. A node id
-       is a namepath and a platform — `packages/web-acceptance/e2e@aarch64-darwin`
-       — and beside it sit an attempt, a host, a duration and an exit code.
-       Held on one line in a 26 rem column that text SHATTERS. */
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    flex: 1;
-    min-width: 0;
-    text-align: left;
-    font: inherit;
-    color: inherit;
-    background: none;
-    border: 0;
-    padding: 0.5rem;
-    cursor: pointer;
-  }
-
-  .node-open:disabled { cursor: default; opacity: 0.55; }
-
-  /* WHICH node's log is open. The selection colour, so being selected can
-     never be mistaken for being a status. */
-  .node-current {
-    background: var(--panel-2);
-    box-shadow: inset 2px 0 0 var(--select);
-  }
-
-  /* A basis rather than `auto`, and it is what keeps the glyph and the id on
-     ONE line. Flex breaks a line on an item's HYPOTHETICAL size, before any
-     shrinking — so an id wider than the column starts a line of its own and
-     leaves the status glyph sitting alone above it. */
-  .node-id {
-    flex: 1 1 8rem;
-    font-family: var(--mono);
-    font-size: 0.8rem;
-    overflow-wrap: anywhere;
-  }
-
-  .node-attempt,
-  .node-host,
-  .node-duration,
-  .node-exit { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
-  .node-exit { color: var(--red-ink); }
-  .node-controls { display: flex; gap: 0.3rem; flex: none; }
-
-  /* ── the lane timeline ────────────────────────────────────────────────────
-   *
-   * A GANTT across the run: a bar sits WHERE its node ran, so two lanes that
-   * overlap are drawn overlapping and the critical path is the bar nothing is
-   * beside. The geometry is `@odu/service-client/board`'s `laneSpan`; this
-   * file only paints what it is told.
-   *
-   * ONE BOX, and that is the whole rule. The track is a child of `.node` — the
-   * ROW — and takes a line of its own (`flex-basis: 100%`, a late `order`).
-   * The row's own box does not vary, and the axis gets the IDENTICAL inset so
-   * its last tick lands exactly where a full-length bar ends.
-   */
-  .node-track,
-  .node-axis-track {
-    position: relative;
-    flex-basis: 100%;
-    order: 9;
-    min-width: 0;
-    /* A bar clamped to the track's end still carries `min-width`, and without
-       this it would paint past the edge the axis marks as the run's total. */
-    overflow: hidden;
-  }
-
-  .node-track {
-    height: 0.4rem;
-    margin: 0 0 0.4rem 0.5rem;
-    border-radius: 3px;
-    /* NOT `--panel-2`: that is what `.node:hover` and `.node-current` paint the
-       row with, so an empty track — the signal that a lane never started —
-       would disappear under a pointer and under the selected row. */
-    background: var(--line);
-  }
-
-  /* The hue is the `hue-*` class's own — the SAME pair the glyph beside it
-     wears, so a bar and its glyph can never disagree. A floor on the width
-     keeps a one-second lane in a ten-minute run visible: a bar rounded away to
-     nothing says the node never ran. */
-  .node-bar {
-    position: absolute;
-    inset-block: 0;
-    min-width: 2px;
-    border-radius: 3px;
-    background: var(--hue-ink, var(--muted));
-    opacity: 0.75;
-  }
-
-  /* A node still going has not finished where its bar currently reaches, and a
-     solid fill would claim it had. The whole bar is hatched — not just a tail
-     — because every millisecond of it is provisional. */
-  .node-bar-running {
-    background: repeating-linear-gradient(
-      135deg,
-      var(--hue-ink, var(--muted)) 0 4px,
-      transparent 4px 8px
-    );
-    opacity: 0.85;
-  }
-
-  /* The scale, once per list rather than once per row. `aria-hidden` in the
-     markup: it is furniture a sighted reader measures bars against, and four
-     bare durations announced before a DAG would be noise. The padding is the
-     row's inset, spelled as padding because this li has no button to hold it. */
-  .node-axis {
-    display: flex;
-    padding: 0.2rem 0.5rem 0;
-  }
-
-  .node-axis-track { height: 0.9rem; }
-
-  .node-axis-tick {
-    position: absolute;
-    top: 0;
-    color: var(--quiet);
-    font: 0.65rem var(--mono);
-    white-space: nowrap;
-    /* Each label hangs from its own mark, and the two at the ends would
-       otherwise overflow the panel. */
-    transform: translateX(-50%);
-  }
-
-  .node-axis-tick:first-child { transform: none; }
-  .node-axis-tick:last-child { transform: translateX(-100%); }
-
-  /* A LANE — one platform's worth of the DAG, headed by the machine it is
-     running on, the strip of what it has done, and the button that drops the
-     whole lane. It is a row in the same list as the nodes it heads, so a
-     person reads "this platform, on this host, and here is its work"
-     downwards. */
-  .lane {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    padding: 0.55rem 0.6rem;
-    background: var(--panel-2);
-    border-top: 1px solid var(--line);
-    font: 600 0.8rem var(--mono);
-  }
-
-  .lane-platform { color: var(--ink); white-space: nowrap; }
-  .lane-host { color: var(--muted); font-weight: 400; }
-
-  /* The counts push everything after them to the right edge, so the lane's
-     cancel button lands in one column down the list however wide the names. */
-  .lane-counts {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    margin-right: auto;
-    color: var(--muted);
-    font-weight: 400;
-  }
-
-  .lane-counts > span { display: inline-flex; align-items: center; gap: 0.2rem; }
-
-  /* ── the console ──────────────────────────────────────────────────────────
-   *
-   * The output panel is one card: a bar of controls over a console, and a bar
-   * of paging under it. The frame is what says "this text is a machine's".
-   */
-  .log-body {
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    background: var(--panel);
-    overflow: hidden;
-  }
-
-  /* The head over the pane and its MIRROR under it, one bar written once.
-     Paging belongs at the END of a log for the same reason a book's page
-     number does: it is what you reach for once you have run out of text. */
-  .log-head,
-  .log-foot {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    padding: 0.6rem 0.8rem;
-    background: var(--panel-2);
-  }
-
-  .log-head { border-bottom: 1px solid var(--line); }
-  .log-foot { border-top: 1px solid var(--line); }
-
-  /* Whether this pane is still following the tail — and, when it is not, the
-     way back. A log that stopped moving because the reader scrolled up looks
-     exactly like a log that stopped because the recipe did. */
-  .log-follow {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    margin-left: auto;
-    color: var(--muted);
-    font: 0.78rem var(--mono);
-  }
-
-  .log-head h3 {
-    margin: 0;
-    font: 600 0.85rem/1.4 var(--mono);
-    overflow-wrap: anywhere;
-  }
-
-  .log-meta { color: var(--muted); font: 0.78rem var(--mono); margin-right: auto; }
-
-  /* The attempt picker and the page-window readout. Both are FACTS rather than
-     decoration — the window offsets are the same byte offsets `odu logs
-     --offset` takes, and a person copying one needs the digits to line up. */
-  .attempts { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-  .log-page { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
-
-  /* Inside the card the panel IS the frame, so the empty state drops its own:
-     a dashed box within a bordered box reads as two panels. */
-  .log-body .empty,
-  .log-body .fault {
-    margin: 0;
-    padding: 0.6rem 0.75rem;
-    border: 0;
-    border-radius: 0;
-    background: none;
-    font-size: 0.8rem;
-  }
-
-  /* A CONSOLE, in both themes — a log is a machine's output and reads as one.
-     `color-scheme` is pinned with it so the scrollbar belongs to the box
-     rather than to the page around it. */
-  .log-text {
-    color-scheme: dark;
-    margin: 0;
-    padding: 0.9rem 1rem;
-    background: #070908;
-    color: #b9c7c0;
-    font: 0.78rem/1.65 var(--mono);
-    /* The one place sideways scrolling is right: a log line is a log line, and
-       wrapping one changes what it says. Scoped to this box. */
-    overflow: auto;
-    max-height: 60vh;
-    white-space: pre;
-    scrollbar-width: thin;
-
-    /* What a recipe's own colours become. The classes are the 16 ANSI slots
-       and nothing else — the meaning of "red" in a log belongs to the program
-       that printed it. */
-    .ansi-0 { color: var(--ansi-0); }
-    .ansi-1 { color: var(--ansi-1); }
-    .ansi-2 { color: var(--ansi-2); }
-    .ansi-3 { color: var(--ansi-3); }
-    .ansi-4 { color: var(--ansi-4); }
-    .ansi-5 { color: var(--ansi-5); }
-    .ansi-6 { color: var(--ansi-6); }
-    .ansi-7 { color: var(--ansi-7); }
-    .ansi-8 { color: var(--ansi-8); }
-    .ansi-9 { color: var(--ansi-9); }
-    .ansi-10 { color: var(--ansi-10); }
-    .ansi-11 { color: var(--ansi-11); }
-    .ansi-12 { color: var(--ansi-12); }
-    .ansi-13 { color: var(--ansi-13); }
-    .ansi-14 { color: var(--ansi-14); }
-    .ansi-15 { color: var(--ansi-15); }
-    .ansi-b { font-weight: 700; }
-    .ansi-d { opacity: 0.6; }
-  }
-
-  /* WRAPPED, when the reader asks. The default above is right, but a stack
-     trace in a narrow pane is unreadable behind a horizontal scrollbar, and
-     `anywhere` is what breaks the unbroken 400-character token a build tool
-     prints. */
-  .log-text.log-wrap {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
   /* ── lists of facts ───────────────────────────────────────────────────────
    *
-   * Tokens, people, paths, venues, routes: five lists with one grammar — a
-   * line per thing, a hairline between, the identifying string in mono on the
-   * left and its controls on the right.
+   * Tokens, paths, sessions, routes: three lists with one grammar — a
+   * line per thing, a hairline between, the identifying string in mono on
+   * the left and its controls on the right. A row's own list wears one of
+   * these class names as well as its own; the name a row addresses it by
+   * is a hook, and the grammar is here.
    */
   .facts,
   .tokens,
-  .people,
-  .venues,
-  .paths,
-  .buckets {
+  .paths {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -1411,8 +1023,6 @@
   }
 
   .tokens li,
-  .people li,
-  .venues li,
   .facts li {
     display: flex;
     flex-wrap: wrap;
@@ -1423,7 +1033,6 @@
     border-top: 1px solid var(--line);
   }
 
-  .buckets li + li,
   .paths li + li { border-top: 1px solid var(--line); }
 
   .paths li {
@@ -1446,7 +1055,10 @@
      the eye lands on. */
   .path-hash { color: var(--quiet); }
 
-  .bucket-facts,
+  /* A LINE OF SMALL FACTS under a name — when a path was pushed and how often
+     it was read, how long a session has left, which bucket a route carries.
+     Every row draws one, which is why it is here, and it is named for what it
+     is rather than for the first screen that happened to need it. */
   .fact-line {
     display: flex;
     flex-wrap: wrap;
@@ -1458,16 +1070,6 @@
   .stats { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 0.9rem; margin: 0; }
   .stats dt { font: 500 0.78rem var(--mono); color: var(--muted); }
   .stats dd { margin: 0; font: 0.78rem var(--mono); color: var(--ink); }
-
-  /* ── the commit a run tested, and the branch it was on ────────────────────
-   *
-   * ONE spelling for both views: the board row and the run header name the
-   * same fact. `+dirty` is amber and not muted because it is a caveat on the
-   * ref beside it — the ref alone would claim this run tested that commit, and
-   * it did not.
-   */
-  .branch { color: var(--muted); font-weight: 400; margin-left: 0.4rem; }
-  .dirty { color: var(--amber-ink); margin-left: 0.3rem; }
 
   /* ── STATE MOTION, and nothing else ───────────────────────────────────────
    *
@@ -1493,10 +1095,7 @@
        row's status cell. Every amber pill used to breathe, which put a
        heartbeat on a row's "3 unposted" — a debt sitting perfectly still. */
     .glyph.hue-amber,
-    .cell.hue-amber,
-    .row-status .pill.hue-amber::before,
-    .row-running::before,
-    .row-provisioning::before {
+    .cell.hue-amber {
       animation: odu-pulse 1.8s ease-in-out infinite;
     }
   }
@@ -1714,101 +1313,6 @@
   .toolbar .search { flex: 1 1 16rem; }
   .filters { display: flex; flex-wrap: wrap; gap: 0.35rem; }
 
-  /* ── the board ────────────────────────────────────────────────────────────
-   *
-   * One geometry, two users: the column heads and the rows beneath them,
-   * written once so a column cannot drift out from under its own label.
-   *
-   * SEVEN columns — checkout, commit, pipeline, status, attention, took, age.
-   * `took` is the run's own DURATION and `age` is how long ago it started, two
-   * different questions, which is why neither cell can answer for the other.
-   * The PIPELINE column is the lane strip, and it is the widest one: it is the
-   * column that answers "what is this run doing" without a click.
-   */
-  .board-rows {
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    background: var(--panel);
-    overflow: hidden;
-  }
-
-  .row,
-  .row-head {
-    display: grid;
-    grid-template-columns:
-      minmax(8rem, 1.3fr) minmax(5.5rem, 0.6fr) minmax(8rem, 1.6fr)
-      8rem minmax(5rem, 0.7fr) 4.5rem 5rem;
-    gap: 0.6rem;
-    align-items: center;
-  }
-
-  /* `aria-hidden` in the markup says the heads are a visual guide and nothing
-     else — the rows are buttons rather than a table, so a handful of stray
-     nouns announced ahead of them would be noise to a screen reader. */
-  .row-head { padding: 0.75rem 1rem; }
-
-  .row {
-    /* `relative` is here rather than beside the rail it positions, because it
-       is this element's own box that is being established. */
-    position: relative;
-    width: 100%;
-    text-align: left;
-    padding: 0.8rem 1rem;
-  }
-
-  .row:first-of-type { border-top: 0; }
-
-  /* THE ROW'S LEFT RAIL: a run that is MOVING and a run that is BROKEN are the
-     two a person scanning is looking for, and both are visible from the edge
-     of the row before any word is read. Red is written after amber
-     deliberately — a live run with a failure in it is a failure. */
-  .row-running::before,
-  .row-provisioning::before,
-  .row-red::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 3px;
-    background: var(--amber);
-  }
-
-  .row-red::before { background: var(--red); }
-
-  .row-checkout { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
-  .row-attention { display: flex; gap: 0.3rem; flex-wrap: wrap; }
-
-  /* ── one run ──────────────────────────────────────────────────────────────
-   *
-   * The nodes and the console, side by side — and the switch to stacked is a
-   * CONTAINER query rather than a viewport one, because what decides it is how
-   * much room this body has, not how wide the window is.
-   */
-  .detail {
-    container-type: inline-size;
-    display: flex;
-    flex-direction: column;
-    gap: 1.25rem;
-  }
-
-  .detail-sub { font-family: var(--mono); font-size: 0.8rem; overflow-wrap: anywhere; }
-  .detail-ref { color: var(--ink); font: 0.85rem var(--mono); }
-  .detail-scope { color: var(--muted); font: 0.8rem var(--mono); }
-  .detail-parent { color: var(--violet-ink); font: 0.8rem var(--mono); }
-  .detail-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-
-  .detail-body {
-    display: grid;
-    grid-template-columns: minmax(18rem, 26rem) minmax(0, 1fr);
-    gap: 1.25rem;
-    align-items: start;
-  }
-
-  .nodes,
-  .log { min-width: 0; }
-  .nodes { display: flex; flex-direction: column; gap: 0.75rem; }
-
   /* ── THE APP FRAME, for the detail route only ─────────────────────────────
    *
    * Two pages, two ways of using a screen. The BOARD is scanned: it is a list
@@ -1837,39 +1341,6 @@
       padding-bottom: 1.5rem;
     }
 
-    .app-frame .detail { flex: 1 1 auto; min-height: 0; }
-
-    /* `min-height: 0` on every link of the chain, because a flex or grid
-       item's default minimum is its CONTENT — one un-zeroed link and a long
-       log makes the whole frame taller than the viewport instead of scrolling
-       inside it. */
-    .app-frame .detail-body {
-      flex: 1 1 auto;
-      min-height: 0;
-      grid-template-rows: minmax(0, 1fr);
-      align-items: stretch;
-    }
-
-    .app-frame .nodes { min-height: 0; overflow: auto; }
-
-    .app-frame .log,
-    .app-frame .log-body {
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-    }
-
-    /* AND THE CARD GROWS INSIDE THAT COLUMN. `.log` is the grid item and
-       stretches on its own; `.log-body` is a flex CHILD of it, and a flex
-       child's default is `0 1 auto` — so without this the console sat at its
-       content height in the middle of a full-height column, and the frame
-       looked like it had never applied. */
-    .app-frame .log-body { flex: 1 1 auto; }
-
-    .app-frame .log-text {
-      flex: 1 1 auto;
-      max-height: none;
-    }
   }
 
   /* ── cards in a grid ──────────────────────────────────────────────────────
@@ -1881,6 +1352,12 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr));
     gap: 1rem;
+    /* A `<ul>` laid out as cards is still a list to a screen reader and must
+       stop being one to the eye. Here rather than on each row's own list
+       class, so a grid of cards is a grid of cards whatever a row calls it. */
+    list-style: none;
+    margin: 0;
+    padding: 0;
   }
 
   /* ── a bucket ─────────────────────────────────────────────────────────────
@@ -1981,132 +1458,27 @@
 
   /* ── a screen is a column ────────────────────────────────────────────────
    *
-   * Every face's outermost element. Named per screen rather than shared,
-   * because the acceptance suite addresses them by name and because a reader
-   * opening a row's face should find its own word in the stylesheet — but
-   * they are ONE rule, because a screen is a column of panels and nothing on
-   * this board is an exception to that.
+   * Every face's outermost element wears it, beside the row's own word.
+   * A screen is a column of panels, and nothing on this board is an
+   * exception to that — so the rule is ONE class rather than a list of
+   * row names that this package would have to learn every time a row
+   * grew a screen.
    */
-  .board,
-  .create,
-  .ops,
-  .cache,
-  .tunnel,
-  .profile,
-  .people-page {
+  .screen {
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
     min-width: 0;
   }
 
-  .board-body { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
-
-  /* The board row's verdict cell. Named because it is the one place an amber
-     pill is allowed to breathe — see the motion block. */
-  .row-status { min-width: 0; }
-
   /* The way back from a run or a bucket, when the face draws it as a line of
      text rather than as the frame's own control. */
   .crumbs { margin: 0; }
-
-  /* A run's header is a page head that also carries the outcome. */
-  .detail-head { align-items: flex-start; }
-
-  /* The pipeline a form is about to start, and the machines a venue offers:
-     two lists of short strings that read as a paragraph of chips. */
-  .pipeline-preview .tokens,
-  .pipeline-preview ul {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem;
-  }
-
-  .venue-age { color: var(--quiet); font: 0.78rem var(--mono); }
-
-  /* A TOKEN, SHOWN ONCE. The only secret this board ever prints, so it is a
-     console rather than a field: it is read, copied and never seen again. */
-  .minted-token { border: 1px solid var(--line); border-radius: 12px; }
 
   /* A control's own two answers, where a face draws them beside the control
      rather than through a `Receipt`. */
   .done { color: var(--green-ink); }
   .refused { color: var(--red-ink); }
-
-  /* ── the sign-in screen ───────────────────────────────────────────────────
-   *
-   * Two panes: a field of lane cells that says what this server is for without
-   * a word, and the one control. The field is decorative and `aria-hidden`;
-   * it is the only decoration in this design, and it earns its place by being
-   * the product's own data structure rather than an illustration.
-   */
-  .signin {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: stretch;
-    min-height: 100vh;
-    min-height: 100dvh;
-  }
-
-  .signin-art {
-    flex: 1 1 22rem;
-    min-height: 14rem;
-    display: grid;
-    place-items: center;
-    padding: 3rem;
-    border-right: 1px solid var(--line);
-    overflow: hidden;
-  }
-
-  .signin-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, 14px);
-    gap: 5px;
-    max-width: 19rem;
-    opacity: 0.85;
-  }
-
-  .signin-grid .cell { width: 14px; height: 14px; border-radius: 3px; }
-
-  .signin-main {
-    flex: 1 1 24rem;
-    display: grid;
-    place-items: center;
-    padding: 3rem 1.5rem;
-  }
-
-  .signin-card {
-    width: 100%;
-    max-width: 24rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-  }
-
-  .signin-title {
-    margin: 0;
-    font: 600 1.7rem/1.2 var(--sans);
-    letter-spacing: -0.025em;
-    text-wrap: balance;
-  }
-
-  .signin-action {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.6rem;
-    min-height: 3rem;
-    border-radius: 11px;
-    border: 1px solid var(--brand);
-    background: var(--brand);
-    color: var(--brand-ink);
-    font: 600 0.95rem var(--sans);
-    text-decoration: none;
-    cursor: pointer;
-  }
-
-  .signin-action:hover { color: var(--brand-ink); background: color-mix(in srgb, var(--brand) 88%, var(--select)); }
-  .signin-foot { margin: 0; color: var(--quiet); font: 0.75rem var(--mono); }
 
   /* ── odds ─────────────────────────────────────────────────────────────── */
 
@@ -2125,21 +1497,6 @@
    *
    * Three reflows, and not one of them hides a fact.
    */
-
-  @container (max-width: 60rem) {
-    .detail-body { grid-template-columns: minmax(0, 1fr); }
-
-    /* Stacked AND inside the frame: the node list must not eat the height the
-       log came for. Two rows, the first capped at 40% of the frame — a short
-       DAG still takes only the room it needs, a hundred-node one stops at four
-       tenths and scrolls, and the console always starts at or below the bottom
-       of the list. */
-    @media (min-width: 64rem) {
-      .app-frame .detail-body {
-        grid-template-rows: minmax(0, 40%) minmax(0, 1fr);
-      }
-    }
-  }
 
   @media (max-width: 52rem) {
     /* The rail becomes a band. It already wrapped (see `.app`); what changes
@@ -2162,23 +1519,8 @@
   }
 
   @media (max-width: 46rem) {
-    /* Two columns instead of seven. Everything stays on screen; nothing is
-       hidden and nothing scrolls sideways — and the heads go, because a label
-       strip over a reflowed row labels the wrong cells. */
-    .row-head { display: none; }
-
-    .row {
-      grid-template-columns: minmax(0, 1fr) auto;
-      row-gap: 0.4rem;
-    }
-
-    .row-lanes,
-    .row-scope,
-    .row-attention { grid-column: 1 / -1; }
-
     .kv { grid-template-columns: minmax(0, 1fr) auto; }
     .kv-key { grid-column: 1 / -1; }
 
-    .signin-art { display: none; }
   }
 }

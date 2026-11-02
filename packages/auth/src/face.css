@@ -1,0 +1,99 @@
+/*
+ * THE DOOR'S OWN SCREENS, in Night shift.
+ *
+ * `@odu/face`'s `theme.css` carries the tokens, the primitives `./ui` renders
+ * and the page shell. THIS file carries what only the door has: the sign-in
+ * screen — the one page of this application that is not inside the frame — and
+ * the console a freshly minted token is shown in once.
+ *
+ * It is here, beside the view that emits these class names, because a row owns
+ * everything about itself. Loaded by `scripts/build-web-ui.ts`, which finds
+ * every `face.css` under `packages/<row>/src/` and appends it to the design
+ * system's sheet; every rule names its LAYER, because `theme.css` declares the
+ * four and an unlayered rule would beat all of them.
+ */
+
+@layer layout {
+  /* ── the sign-in screen ───────────────────────────────────────────────────
+   *
+   * Two panes: a field of lane cells that says what this server is for without
+   * a word, and the one control. The field is decorative and `aria-hidden`;
+   * it is the only decoration in this design, and it earns its place by being
+   * the product's own data structure rather than an illustration.
+   */
+  .signin {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  .signin-art {
+    flex: 1 1 22rem;
+    min-height: 14rem;
+    display: grid;
+    place-items: center;
+    padding: 3rem;
+    border-right: 1px solid var(--line);
+    overflow: hidden;
+  }
+
+  .signin-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, 14px);
+    gap: 5px;
+    max-width: 19rem;
+    opacity: 0.85;
+  }
+
+  .signin-grid .cell { width: 14px; height: 14px; border-radius: 3px; }
+
+  .signin-main {
+    flex: 1 1 24rem;
+    display: grid;
+    place-items: center;
+    padding: 3rem 1.5rem;
+  }
+
+  .signin-card {
+    width: 100%;
+    max-width: 24rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .signin-title {
+    margin: 0;
+    font: 600 1.7rem/1.2 var(--sans);
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+
+  .signin-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    min-height: 3rem;
+    border-radius: 11px;
+    border: 1px solid var(--brand);
+    background: var(--brand);
+    color: var(--brand-ink);
+    font: 600 0.95rem var(--sans);
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .signin-action:hover { color: var(--brand-ink); background: color-mix(in srgb, var(--brand) 88%, var(--select)); }
+  .signin-foot { margin: 0; color: var(--quiet); font: 0.75rem var(--mono); }
+
+  /* A TOKEN, SHOWN ONCE. The only secret this board ever prints, so it is a
+     console rather than a field: it is read, copied and never seen again. */
+  .minted-token { border: 1px solid var(--line); border-radius: 12px; }
+
+  @media (max-width: 46rem) {
+    .signin-art { display: none; }
+  }
+}

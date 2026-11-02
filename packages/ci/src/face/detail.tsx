@@ -729,7 +729,7 @@ export function Detail(props: {
   /** The whole-run cancel, held behind a question — see the `Confirm` below. */
   const [confirmingCancel, setConfirmingCancel] = createSignal(false);
   return (
-    <section class="detail">
+    <section class="screen detail">
       {/* THE WAY BACK. The rail beside this page lists the ROWS — Runs,
           Cache, Machines — and one run is not a row: it is a page inside the
           runs, so it keeps its own way out. "All runs" rather than "Runs"

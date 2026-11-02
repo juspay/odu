@@ -34,8 +34,13 @@ The host that mounts it neither constructs a row nor closes one.
 ## The face is the row's
 
 `board.tsx`, `detail.tsx`, `create.tsx`, `ops.tsx`, `commit.tsx`, `format.ts`,
-`ansi.ts` and `types.ts` are this row's views, and they hold the runs' client
-and nothing else. What a CONTROL is — a button, a field, a pill, a panel, the
+`ansi.ts`, `types.ts` and `face.css` are this row's views, and they hold the
+runs' client and nothing else. `face.css` is what only the runs' screens look
+like — the board's seven columns, the node list's Gantt, the lane head, the
+console, and the app frame a run turns the page into; the build appends it to
+`@odu/face`'s stylesheet, which carries the tokens and the primitives.
+
+What a CONTROL is — a button, a field, a pill, a panel, the
 lane strip — is not this row's to decide: those live in `@odu/face/ui`, the
 package of no row, so the shell and every face draw the same ones. `commit.tsx`
 is what was left of this package's own primitives when they went: the

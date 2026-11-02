@@ -445,7 +445,7 @@ function BucketList(
     return out.sort((left, right) => left.name.localeCompare(right.name));
   });
   return (
-    <section class="cache" aria-label="buckets">
+    <section class="screen cache" aria-label="buckets">
       <PageHead title="Cache" sub={CACHE_SUB} />
 
       <Show
@@ -488,7 +488,7 @@ function BucketList(
                     <Stat value={bytes(bucket.bytes)} label="stored" />
                     <Stat value={bucket.hits} label="reads" />
                   </span>
-                  <span class="bucket-facts">
+                  <span class="fact-line bucket-facts">
                     <span>
                       {bucket.lastPush === null
                         ? "nothing pushed"
@@ -759,7 +759,7 @@ function BucketPage(
   const bucket = createMemo<CacheBucket | undefined>(() => buckets.byKey(props.name)?.());
 
   return (
-    <section class="cache" aria-label={`bucket ${props.name}`}>
+    <section class="screen cache" aria-label={`bucket ${props.name}`}>
       <p class="crumbs">
         <BackLink onClick={() => props.onOpen(null)}>Cache</BackLink>
       </p>
@@ -973,7 +973,7 @@ function BucketPage(
                             <span class="path-hash">{splitStorePath(path.storePath).hash}</span>
                             {splitStorePath(path.storePath).name}
                           </code>
-                          <span class="bucket-facts">
+                          <span class="fact-line bucket-facts">
                             <span>{bytes(path.narSize)}</span>
                             <span>{ago(path.created, props.now)}</span>
                             <span>{path.hits} reads</span>
@@ -1604,13 +1604,13 @@ function BucketStats(props: AdminProps & { name: string; now: number }): JSX.Ele
           {(all) => (
             <dl class="stats">
               <dt>this bucket</dt>
-              <dd class="bucket-facts">
+              <dd class="fact-line bucket-facts">
                 <span>{mine()?.objects ?? 0} paths</span>
                 <span>{bytes(mine()?.bytes ?? 0)}</span>
                 <span>{mine()?.hits ?? 0} reads</span>
               </dd>
               <dt>whole cache</dt>
-              <dd class="bucket-facts">
+              <dd class="fact-line bucket-facts">
                 <span>{all().buckets.length} buckets</span>
                 <span>{all().objects} paths</span>
                 <span>{bytes(all().bytes)}</span>

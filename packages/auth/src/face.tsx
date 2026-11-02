@@ -328,7 +328,7 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
   };
 
   return (
-    <section class="profile" aria-label="profile">
+    <section class="screen profile" aria-label="profile">
       <p class="crumbs">
         <BackLink onClick={() => props.onClose()}>runs</BackLink>
       </p>
@@ -363,7 +363,7 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
                   <li>
                     <span>
                       <strong>{session.agent ?? "unknown browser"}</strong>
-                      <span class="bucket-facts">{sessionLife(session, props.now)}</span>
+                      <span class="fact-line bucket-facts">{sessionLife(session, props.now)}</span>
                     </span>
                     <button
                       type="button"
@@ -448,7 +448,7 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
                     <li>
                       <span>
                         <strong>{token.name}</strong>
-                        <span class="bucket-facts">{tokenLife(token, props.now)}</span>
+                        <span class="fact-line bucket-facts">{tokenLife(token, props.now)}</span>
                       </span>
                       <span class="control-row">
                         <Show when={token.id === mintedId()}>
@@ -571,7 +571,7 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
   };
 
   return (
-    <section class="people-page" aria-label="people">
+    <section class="screen people-page" aria-label="people">
       <p class="crumbs">
         <BackLink onClick={() => props.onClose()}>runs</BackLink>
       </p>
@@ -637,7 +637,7 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
               </Show>
             }
           >
-            <ul class="people">
+            <ul class="people facts">
               <For each={listed()}>
                 {(person) => (
                   <li>
@@ -647,7 +647,7 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
                       </span>
                       <span>
                         <code class="path">{person.login}</code>
-                        <span class="bucket-facts">{personLife(person, props.now)}</span>
+                        <span class="fact-line bucket-facts">{personLife(person, props.now)}</span>
                       </span>
                       {/* A ROLE IS A PROPERTY, not a verdict: a square grey tag
                           and not a hued pill, because every colour this page

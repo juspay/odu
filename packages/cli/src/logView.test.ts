@@ -263,7 +263,7 @@ describe("LogView — search", () => {
  */
 describe("the browser draws this view's sixteen colours", () => {
   const css = readFileSync(
-    join(import.meta.dirname, "..", "..", "face", "src", "theme.css"),
+    join(import.meta.dirname, "..", "..", "ci", "src", "face", "face.css"),
     "utf-8",
   );
 

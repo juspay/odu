@@ -131,11 +131,12 @@ one box — the row's, which does not vary — measured against the axis by
 
 **The design system is `@odu/face`, not this package.** "Night shift" —
 [`packages/face/src/theme.css`](../face/README.md) — is one raw stylesheet in
-four cascade layers with a single `light-dark()` palette, and every row's face
-draws with it. There is no utility framework and no component library: the
-page has a few dozen class names, and every rule carries the reason it exists
-beside it. The shell adds nothing of its own; it names the rail, the wire and
-the frame, all of which are rules over there.
+four cascade layers with a single `light-dark()` palette: the tokens, the
+primitives and the page shell. A row's OWN screens are dressed by that row's
+`face.css`, beside its views, and `scripts/build-web-ui.ts` concatenates them
+into one hashed asset. There is no utility framework and no component library.
+The shell adds no stylesheet of its own; the rail, the wire and the frame are
+all rules over there.
 
 **The typefaces ship with the bundle.** Geist and Geist Mono come from
 nixpkgs' `geist-font` through `$ODU_GEIST_FONTS`, are content-hashed beside

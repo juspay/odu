@@ -6,16 +6,25 @@ rows import it and none owns it.
 
 | door | what | consumers |
 | --- | --- | --- |
-| `./theme.css` | **Night shift** — the tokens, the base, every primitive's look, and the layout of every screen | the bundle, through `scripts/build-web-ui.ts` |
+| `./theme.css` | **Night shift** — the tokens, the base, every primitive's look, and the page shell every screen sits in | the bundle, through `scripts/build-web-ui.ts` |
 | `./theme` | `ThemeToggle`, `THEME_KEY`, `readTheme`, `applyTheme` — which of the two schemes is showing, and remembering it | `@odu/web-ui` (the shell) |
 | `./ui` | the primitives: `Button` `Field` `TextInput` `SearchInput` `Toggle` `Choice` `Pill` `Tag` `Stat` `Panel` `KeyValue` `CopyButton` `LaneStrip` `BackLink` `PageHead` `Confirm` `Receipt`, and `StatusHue` | every row's face, and the shell |
 | `./control` | `createControl(call)` — one control's story: idle, busy, then an answer or a refusal | `@odu/cache/face`, `@odu/auth/face`, `@odu/ci/face` |
 | `./refusal` | `refusalText(err)` — a refusal as the sentence a person reads, with the recovery when it carries one | the same three |
 
-**One stylesheet, one vocabulary.** A component here is markup and semantics
-only — not one of them names a colour, a size or a layout. The agreement
-between `./ui` and `./theme.css` is a class name, so a row that needs a new
-look needs a rule in the stylesheet rather than a style attribute in a view.
+**One vocabulary, and only the shared half of it.** A component here is markup
+and semantics only — not one of them names a colour, a size or a layout. The
+agreement between `./ui` and `./theme.css` is a class name.
+
+**A row's own screens are NOT here.** `theme.css` carries the tokens, the
+primitives and the page shell; what only one row has — the board's seven
+columns, the node list's Gantt, the console, the sign-in field — lives in that
+row's own `face.css`, beside the view that emits the class names. Otherwise
+this package would change every time any row's screens did.
+`scripts/build-web-ui.ts` finds every `packages/<row>/src/**/face.css`, appends
+it here in path order and ships one hashed asset; the four `@layer` names this
+file declares are what keeps the order of that concatenation from deciding
+which rule wins.
 
 **Colour carries status, and nothing else.** Green passed, amber running, red
 failed, violet errored, cyan link or selection. `Pill` is a verdict and takes

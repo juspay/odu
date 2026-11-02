@@ -357,7 +357,7 @@ export function Board(props: {
     return `${failing} failing · ${running} running · ${checkouts} checkout${checkouts === 1 ? "" : "s"}`;
   });
   return (
-    <section class="board">
+    <section class="screen board">
       <PageHead
         title="Runs"
         sub={facts()}

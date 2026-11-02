@@ -53,7 +53,7 @@ const SCROLLBACK = 5000;
  *  node's output sits in the same family as the frame around it.
  *
  *  EXPORTED for one reason: the browser's log pane draws the same sixteen
- *  colours as `--ansi-0..15` in `packages/face/src/theme.css`, in a language
+ *  colours as `--ansi-0..15` in `packages/ci/src/face/face.css`, in a language
  *  that cannot import this one, and the agreement was asserted only by a
  *  comment at each end. `logView.test.ts` now reads that stylesheet and pins
  *  the two together — a recipe's red is the same red in the terminal pane and

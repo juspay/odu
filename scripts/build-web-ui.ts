@@ -30,8 +30,9 @@ import { transformAsync } from "@babel/core";
 import solid from "babel-preset-solid";
 import typescript from "@babel/preset-typescript";
 import type { BunPlugin } from "bun";
-import { readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -99,6 +100,53 @@ const font = (name: string, file: string): SurfaceClientExtraAsset => ({
 });
 
 /**
+ * EVERY ROW'S OWN STYLESHEET, found rather than listed.
+ *
+ * A row's screens are drawn by the row's face and dressed by the row's
+ * `face.css`, beside it. This walks `packages/*​/src` for files with that name
+ * and answers them in path order, so the assembled sheet is byte-identical on
+ * every machine and a row that grows a stylesheet is shipped by adding one
+ * file — no list here, no row named in a script that is not a root.
+ */
+async function rowSheets(): Promise<string[]> {
+  const packagesDir = join(repoRoot, "packages");
+  const found: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules") continue;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.name === "face.css") found.push(path);
+    }
+  };
+  for (const pkg of await readdir(packagesDir, { withFileTypes: true })) {
+    if (!pkg.isDirectory()) continue;
+    const src = join(packagesDir, pkg.name, "src");
+    if (!existsSync(src)) continue;
+    await walk(src);
+  }
+  return found.sort();
+}
+
+/**
+ * A SHEET WHOSE COMMENTS END WHERE THEY SAY THEY DO.
+ *
+ * CSS comments do not nest and have no escape, so one asterisk followed by a
+ * slash inside a paragraph of prose — a glob written out, say — closes the
+ * comment early and leaves the rest of it as garbage declarations. The parser
+ * recovers by eating the NEXT rule, which in a stylesheet this size is one
+ * whole `@layer` block silently gone: every rule in it missing, nothing
+ * logged, and a page that still looks like a page.
+ *
+ * That is exactly what happened once here, so it is checked rather than
+ * remembered. Strip every well-formed comment; anything still carrying a
+ * close marker was a comment that closed early.
+ */
+function commentsClose(css: string): boolean {
+  return !css.replace(/\/\*[\s\S]*?\*\//g, "").includes("*" + "/");
+}
+
+/**
  * Solid's JSX compiler, as a `Bun.build` loader.
  *
  * `@babel/preset-typescript` first and `babel-preset-solid` second: the TS
@@ -158,18 +206,47 @@ const report = await buildSurfaceClient({
     {
       name: "styles",
       ext: "css",
-      // `@odu/face`'s design system — the tokens and every primitive's look,
-      // in the package of no row, so each row's face draws its own screens
-      // with one vocabulary. Plain CSS: no preprocessor, because cascade
-      // layers and custom properties are the whole of what it needs.
+      // ONE STYLESHEET, ASSEMBLED FROM THE PACKAGES THAT OWN ITS PARTS.
       //
-      // The two font `url()`s in it are BUILD PLACEHOLDERS, rewritten here to
-      // the hashed hrefs. A miss is a hard stop: a stylesheet shipped still
+      // `@odu/face`'s `theme.css` first — the tokens, the base, the
+      // primitives `./ui` renders and the page shell every screen sits in —
+      // then every row's own `face.css`, which carries what only that row's
+      // screens have. A shared sheet that knew `.node-track` would change
+      // every time the runs' views did; a row's look belongs in the row,
+      // beside the view that emits the class names.
+      //
+      // FOUND, not listed. This globs `packages/*/src/**/face.css` in path
+      // order rather than naming the rows: a build script is not one of the
+      // four roots the fence lets name them, and a list here would be a fifth
+      // place to remember a row exists. A row ships a sheet by adding a file.
+      //
+      // ORDER is why every row's sheet names its `@layer`: `theme.css`
+      // declares the four up front, so a later `@layer layout { … }` appends
+      // to that layer instead of out-shouting it, and the order rows are
+      // concatenated in cannot decide which rule wins.
+      //
+      // The two font `url()`s are BUILD PLACEHOLDERS, rewritten here to the
+      // hashed hrefs. A miss is a hard stop: a stylesheet shipped still
       // naming `./geist-sans.woff2` would quietly render the whole board in a
       // fallback face, which is the kind of failure a screenshot does not
       // catch because it still looks like a page.
       build: async (): Promise<Uint8Array> => {
-        let css = await readFile(join(faceDir, "theme.css"), "utf-8");
+        const sheets = [join(faceDir, "theme.css"), ...(await rowSheets())];
+        let css = (
+          await Promise.all(
+            sheets.map(async (file) => {
+              const text = await readFile(file, "utf-8");
+              if (!commentsClose(text)) {
+                throw new Error(
+                  `build-web-ui: ${relative(repoRoot, file)} has a comment that ` +
+                    "closes early — the rule after it would be eaten by the " +
+                    "parser and the whole block would go missing silently.",
+                );
+              }
+              return `/* ── ${relative(repoRoot, file)} ── */\n${text}`;
+            }),
+          )
+        ).join("\n");
         for (const [name, href] of fontHrefs) {
           const placeholder = `url("./${name}.woff2")`;
           if (!css.includes(placeholder)) {
@@ -181,6 +258,9 @@ const report = await buildSurfaceClient({
           }
           css = css.replaceAll(placeholder, `url("${href}")`);
         }
+        process.stdout.write(
+          `  stylesheet: ${sheets.map((file) => relative(repoRoot, file)).join(", ")}\n`,
+        );
         return new TextEncoder().encode(css);
       },
       htmlPlaceholder: 'href="./styles.css"',
