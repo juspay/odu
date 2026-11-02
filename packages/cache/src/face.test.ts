@@ -80,3 +80,62 @@ describe("the empty state names what this person can do", () => {
     );
   });
 });
+
+/**
+ * A PIN'S NAME IS THREE FACTS, and the page reads them out of it.
+ *
+ * CI never types a pin name: the push action derives
+ * `<owner>/<repo>@<ref>/<system>`, so a busy bucket's list is forty of them
+ * and the only way to scan it is grouped. The parse is the whole of that
+ * grouping, and it is pure, so it is pinned here rather than in a browser.
+ *
+ * The cases that matter are the ones a regex gets wrong: a ref with a slash
+ * in it (`release/2.0`), which is legal and common, and a name that is NOT a
+ * derived one at all — inventing a repository for `release-1.2` would be a
+ * guess printed as a fact.
+ */
+describe("pins are grouped by the repository their name derives from", () => {
+  const pin = (name: string) => ({
+    bucket: "kolu",
+    name,
+    rootPaths: ["/nix/store/aaa-x"],
+    created: 0,
+    createdBy: "write" as const,
+  });
+
+  it("splits a derived name into repository, ref and system", async () => {
+    const { pinGroups } = await import("./face");
+    const [group] = pinGroups([pin("juspay/odu@master/x86_64-linux")]);
+    expect(group?.repo).toBe("juspay/odu");
+    expect(group?.pins[0]?.parsed).toEqual({
+      repo: "juspay/odu",
+      ref: "master",
+      system: "x86_64-linux",
+    });
+  });
+
+  it("keeps a slash inside the ref, where it belongs", async () => {
+    const { pinGroups } = await import("./face");
+    const [group] = pinGroups([pin("juspay/odu@release/2.0/aarch64-darwin")]);
+    expect(group?.pins[0]?.parsed.ref).toBe("release/2.0");
+    expect(group?.pins[0]?.parsed.system).toBe("aarch64-darwin");
+  });
+
+  it("gathers one repository's refs under one heading, newest first", async () => {
+    const { pinGroups } = await import("./face");
+    const groups = pinGroups([
+      pin("juspay/odu@master/x86_64-linux"),
+      pin("juspay/kolu@main/x86_64-linux"),
+      pin("juspay/odu@topic/x86_64-linux"),
+    ]);
+    expect(groups.map((one) => one.repo)).toEqual(["juspay/odu", "juspay/kolu"]);
+    expect(groups[0]?.pins.map((one) => one.parsed.ref)).toEqual(["master", "topic"]);
+  });
+
+  it("invents no repository for a pin somebody named by hand, and lists it last", async () => {
+    const { pinGroups } = await import("./face");
+    const groups = pinGroups([pin("release-1.2"), pin("juspay/odu@master/x86_64-linux")]);
+    expect(groups.map((one) => one.repo)).toEqual(["juspay/odu", "Pinned by hand"]);
+    expect(groups[1]?.pins[0]?.parsed).toEqual({ repo: null, ref: "release-1.2", system: null });
+  });
+});

@@ -818,7 +818,7 @@ When("I set the retention to {string} days", async function (this: OduWorld, day
  *  the cache republished — so a number read here is the bucket's, never the
  *  field that was typed into. */
 Then("the bucket's facts say {string}", async function (this: OduWorld, text: string) {
-  await this.saysThat(this.page.locator("p.bucket-facts"), "the bucket's facts", text);
+  await this.saysThat(this.page.locator("p.page-sub"), "the bucket's facts", text);
 });
 
 /** The collection's section — the dry run, the button, and the report the
