@@ -97,10 +97,21 @@ export interface ObjectRow {
   fileHash: string | null;
   fileSize: number | null;
   sigs: readonly string[];
-  /** narinfo reads. What `odu surface cache stats_read` reports. */
+  /** narinfo reads. What `odu surface cache stats_read` reports — a counter,
+   *  never GC's clock. */
   hits: number;
   created: number;
-  lastAccessed: number;
+  /**
+   * WHEN SOMEBODY LAST WANTED THIS PATH — GC's clock, and the only one.
+   *
+   * Renewed by the `missing` query (whether the path was missing or already
+   * here: a pusher asking about it is a pusher that wants it) and by a stored
+   * push. NOT by a read: reads are leaving odu (PLAN 2.8), so a cache that
+   * expired by read time would start evicting live paths the moment its bytes
+   * are served from a CDN. A fact that will stop arriving cannot be the fact
+   * retention rests on.
+   */
+  lastWanted: number;
 }
 
 /** What one bucket's SQL totals say: the row a subscriber sees, minus the
@@ -152,8 +163,13 @@ export interface CacheRepo {
   ): ObjectRow | null;
   objectsByNarHash(bucket: string, narHash: string): ObjectRow[];
   objects(bucket?: string): ObjectRow[];
-  /** Bump last access and the hit count together — one row write per read. */
-  touchObject(bucket: string, storePath: string, at: number): void;
+  /** ONE READ, counted. The hit count moves; `last_wanted` does not — see
+   *  {@link ObjectRow.lastWanted}. */
+  countRead(bucket: string, storePath: string): void;
+  /** SOMEBODY WANTS THESE PATHS: renew their retention clock. One statement
+   *  for the batch, because the `missing` query asks about a whole closure and
+   *  a row write per path would be a thousand of them per push. */
+  want(bucket: string, storePaths: readonly string[], at: number): void;
   deleteObject(bucket: string, storePath: string): void;
 
   putPin(row: PinRow): void;
@@ -185,12 +201,12 @@ export interface CacheRepo {
     bucket: string,
     page: { limit: number; after: string | null; filter: string | null },
   ): { rows: ObjectRow[]; more: boolean };
-  /** The same, over every bucket, plus reads and the newest access. */
+  /** The same, over every bucket, plus reads and the newest renewal. */
   objectTotals(): {
     objects: number;
     bytes: number;
     hits: number;
-    lastAccessed: number | null;
+    lastWanted: number | null;
   };
 
   close(): void;
@@ -333,6 +349,18 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE bucket ADD COLUMN store TEXT NOT NULL DEFAULT 'local';
   `,
+  // Migration 13 — RETENTION'S CLOCK IS "WANTED", NOT "READ". Reads are about
+  // to leave odu (PLAN 2.8): once a CDN or a presigned URL serves the bytes,
+  // `last_accessed` stops moving for exactly the paths that are busiest, and a
+  // collector reading it would evict them. The column is RENAMED rather than
+  // added beside: an existing row's last access is the best thing known about
+  // when it was last wanted, and two columns would be two answers to one
+  // question. The index follows the column.
+  `
+  ALTER TABLE object RENAME COLUMN last_accessed TO last_wanted;
+  DROP INDEX IF EXISTS object_accessed;
+  CREATE INDEX object_wanted ON object (bucket, last_wanted);
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -420,7 +448,7 @@ const objectOf = (row: Row): ObjectRow => ({
   sigs: list(row, "sigs"),
   hits: integer(row, "hits"),
   created: integer(row, "created"),
-  lastAccessed: integer(row, "last_accessed"),
+  lastWanted: integer(row, "last_wanted"),
 });
 
 const pinOf = (row: Row): PinRow => ({
@@ -568,7 +596,7 @@ export function openCacheRepo(path: string): CacheRepo {
     putObject(row) {
       db.run(
         `INSERT INTO object (bucket, store_path, hash, nar_hash, nar_size, refs,
-           deriver, ca, ca_proof, compression, file_hash, file_size, sigs, hits, created, last_accessed)
+           deriver, ca, ca_proof, compression, file_hash, file_size, sigs, hits, created, last_wanted)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket, store_path) DO UPDATE SET hash = excluded.hash,
            nar_hash = excluded.nar_hash, nar_size = excluded.nar_size,
@@ -593,7 +621,7 @@ export function openCacheRepo(path: string): CacheRepo {
           JSON.stringify(row.sigs),
           row.hits,
           row.created,
-          row.lastAccessed,
+          row.lastWanted,
         ],
       );
     },
@@ -627,10 +655,20 @@ export function openCacheRepo(path: string): CacheRepo {
       bucket === undefined
         ? all("SELECT * FROM object", [], objectOf)
         : all("SELECT * FROM object WHERE bucket = ?", [bucket], objectOf),
-    touchObject(bucket, storePath, at) {
+    countRead(bucket, storePath) {
+      db.run("UPDATE object SET hits = hits + 1 WHERE bucket = ? AND store_path = ?", [
+        bucket,
+        storePath,
+      ]);
+    },
+    want(bucket, storePaths, at) {
+      if (storePaths.length === 0) return;
+      // ONE statement for the batch: a push asks about its whole closure, and
+      // a thousand-path closure must not be a thousand writes.
+      const holes = storePaths.map(() => "?").join(", ");
       db.run(
-        "UPDATE object SET last_accessed = ?, hits = hits + 1 WHERE bucket = ? AND store_path = ?",
-        [at, bucket, storePath],
+        `UPDATE object SET last_wanted = ? WHERE bucket = ? AND store_path IN (${holes})`,
+        [at, bucket, ...storePaths],
       );
     },
     deleteObject(bucket, storePath) {
@@ -701,7 +739,7 @@ export function openCacheRepo(path: string): CacheRepo {
       const row = db
         .query(
           "SELECT COUNT(*) AS objects, COALESCE(SUM(COALESCE(file_size, nar_size)), 0) AS bytes, " +
-            "COALESCE(SUM(hits), 0) AS hits, MAX(last_accessed) AS last " +
+            "COALESCE(SUM(hits), 0) AS hits, MAX(last_wanted) AS last " +
             "FROM object",
         )
         .get() as Row;
@@ -710,7 +748,7 @@ export function openCacheRepo(path: string): CacheRepo {
         objects: integer(row, "objects"),
         bytes: integer(row, "bytes"),
         hits: integer(row, "hits"),
-        lastAccessed: last === null || last === undefined ? null : Number(last),
+        lastWanted: last === null || last === undefined ? null : Number(last),
       };
     },
 

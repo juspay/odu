@@ -65,7 +65,7 @@ const object: ObjectRow = {
   sigs: ["main-1:c2ln"],
   hits: 3,
   created: NOW,
-  lastAccessed: NOW,
+  lastWanted: NOW,
 };
 
 describe("migrations", () => {
@@ -181,13 +181,31 @@ describe("objects", () => {
     expect(row?.created).toBe(object.created);
   });
 
-  it("counts a read as one write: last access and hits together", () => {
+  it("counts a read without renewing it: hits move, lastWanted does not", () => {
+    // Reads are leaving odu (PLAN 2.8), so a clock that is about to stop
+    // ticking cannot be the one retention reads. The counter is still the
+    // cache's own statistic.
     const repo = openCacheRepo(":memory:");
     repo.putObject(object);
-    repo.touchObject("main", object.storePath, NOW + 1_000);
+    repo.countRead("main", object.storePath);
     const row = repo.object("main", object.storePath);
-    expect(row?.lastAccessed).toBe(NOW + 1_000);
     expect(row?.hits).toBe(object.hits + 1);
+    expect(row?.lastWanted).toBe(object.lastWanted);
+  });
+
+  it("renews exactly the paths a want names, in one statement", () => {
+    // The `missing` query asks about a whole closure at once, so the renewal
+    // is one write for the batch — and a path nobody asked about keeps its
+    // own clock.
+    const repo = openCacheRepo(":memory:");
+    const other = { ...object, storePath: `${object.storePath}-two`, hash: "b".repeat(32) };
+    const untouched = { ...object, storePath: `${object.storePath}-three`, hash: "c".repeat(32) };
+    for (const row of [object, other, untouched]) repo.putObject(row);
+    repo.want("main", [object.storePath, other.storePath], NOW + 1_000);
+    expect(repo.object("main", object.storePath)?.lastWanted).toBe(NOW + 1_000);
+    expect(repo.object("main", other.storePath)?.lastWanted).toBe(NOW + 1_000);
+    expect(repo.object("main", untouched.storePath)?.lastWanted).toBe(NOW);
+    expect(repo.object("main", object.storePath)?.hits).toBe(object.hits);
   });
 
   it("deletes one row", () => {
@@ -224,14 +242,14 @@ describe("counting", () => {
 
   it("totals reads and the newest access across every bucket", () => {
     const repo = openCacheRepo(":memory:");
-    expect(repo.objectTotals()).toEqual({ objects: 0, bytes: 0, hits: 0, lastAccessed: null });
+    expect(repo.objectTotals()).toEqual({ objects: 0, bytes: 0, hits: 0, lastWanted: null });
     repo.putObject(object);
-    repo.putObject({ ...object, bucket: "other", lastAccessed: NOW + 5 });
+    repo.putObject({ ...object, bucket: "other", lastWanted: NOW + 5 });
     expect(repo.objectTotals()).toEqual({
       objects: 2,
       bytes: 559184,
       hits: object.hits * 2,
-      lastAccessed: NOW + 5,
+      lastWanted: NOW + 5,
     });
   });
 });
