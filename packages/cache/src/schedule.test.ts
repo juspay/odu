@@ -17,10 +17,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { Effect, Exit, Scope } from "effect";
 import { purgeBroker } from "@odu/cordis/services";
 import { type Cache, createCache } from "./cache";
 import { base32, storePathHash } from "./narinfo";
-import { cacheServer } from "./server";
+import { cacheServer, collectEvery } from "./server";
 import { asRoot, localStores } from "./testlib";
 
 const ROOT = "root-token";
@@ -76,32 +77,44 @@ async function push(cache: Cache, storePath: string): Promise<void> {
   if (!outcome.ok) throw new Error(`push ${storePath}: ${outcome.message}`);
 }
 
-const serverOver = (cache: Cache, purge: ReturnType<typeof purgeBroker>, everyMs?: number) =>
+const serverOver = (cache: Cache, purge: ReturnType<typeof purgeBroker>) =>
   cacheServer({
     cache,
     publicOrigin: "https://odu.example.org",
     mount: "/cache",
     stores: [{ name: "local", kind: "local", default: true }],
     purge,
-    ...(everyMs === undefined ? {} : { collectEveryMs: everyMs }),
   });
 
 const EXPIRED = "/nix/store/dddddddddddddddddddddddddddddddd-expired";
 
+/** A bucket that keeps nothing nobody wants, with one expired path in it. */
+async function withExpiredPath(cache: Cache): Promise<void> {
+  await cache.admin.create({
+    ...asRoot(ROOT),
+    name: "main",
+    public: true,
+    retentionDays: 0,
+    upstreamKeys: [],
+  });
+  await push(cache, EXPIRED);
+  // Retention is zero and nothing references or pins it, so the next
+  // collection takes it — whoever runs that collection.
+  clock += 1;
+}
+
+/** The schedule as the ROW runs it: a fibre forked into a scope, which is the
+ *  only thing that ends it. */
+const forkInto = async (scope: Scope.Scope, every: number, collect: () => Promise<void>): Promise<void> => {
+  await Effect.runPromise(
+    Effect.provideService(Effect.forkScoped(collectEvery(every, collect)), Scope.Scope, scope),
+  );
+};
+
 describe("the row's own collection", () => {
   it("collects on its schedule, with nobody asking", async () => {
     const cache = cacheWith();
-    await cache.admin.create({
-      ...asRoot(ROOT),
-      name: "main",
-      public: true,
-      retentionDays: 0,
-      upstreamKeys: [],
-    });
-    await push(cache, EXPIRED);
-    // Retention is zero and nothing references or pins it, so the next
-    // collection takes it — whoever runs that collection.
-    clock += 1;
+    await withExpiredPath(cache);
 
     // THE SIGNAL IS THE ANNOUNCEMENT, not a sleep: a collection that removed
     // something tells the purge port, so the test waits for the fact it is
@@ -109,35 +122,63 @@ describe("the row's own collection", () => {
     const collected = Promise.withResolvers<void>();
     const purge = purgeBroker();
     purge.register(() => collected.resolve());
-    const server = serverOver(cache, purge, 1);
-    const stop = server.schedule();
+    const server = serverOver(cache, purge);
+    const scope = Scope.makeUnsafe();
+    await forkInto(scope, 1, server.collect);
     await collected.promise;
     expect(cache.narinfoText(cache.bucket("main") as never, storePathHash(EXPIRED))).toBeNull();
-    await stop();
+    await Effect.runPromise(Scope.close(scope, Exit.void));
     server.detach();
     await cache.close();
   });
 
-  it("stops with the row, and joins the collection in flight", async () => {
-    // A timer that outlived its row would collect into a closed database:
-    // the stop waits for the run in flight, and the database closes next.
+  it("ends with its scope, and the close waits for the collection in flight", async () => {
+    // A collection interrupted between a row's deletion and its object's
+    // would leave the two disagreeing, so each one is uninterruptible and
+    // closing the scope JOINS it — which is what lets the row close its
+    // database on the next line.
     const cache = cacheWith();
-    await cache.admin.create({
-      ...asRoot(ROOT),
-      name: "main",
-      public: true,
-      retentionDays: 0,
-      upstreamKeys: [],
-    });
-    await push(cache, EXPIRED);
-    clock += 1;
+    await withExpiredPath(cache);
+    const server = serverOver(cache, purgeBroker());
+    let entered = 0;
+    let left = 0;
     const started = Promise.withResolvers<void>();
-    const purge = purgeBroker();
-    purge.register(() => started.resolve());
-    const server = serverOver(cache, purge, 1);
-    const stop = server.schedule();
+    const slow = async (): Promise<void> => {
+      entered += 1;
+      started.resolve();
+      await server.collect();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      left += 1;
+    };
+    const scope = Scope.makeUnsafe();
+    await forkInto(scope, 1, slow);
     await started.promise;
-    await stop();
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    // Non-vacuous: the collection HAD started (the await above), and the
+    // close did not return until it had finished.
+    expect({ entered, left }).toEqual({ entered, left: entered });
+    expect(left).toBeGreaterThan(0);
+    server.detach();
+    await cache.close();
+  });
+
+  it("keeps collecting after one collection failed", async () => {
+    // A store that was unreachable at midnight may answer the next one; a
+    // cache that stopped collecting over one outage would grow in silence.
+    const cache = cacheWith();
+    const server = serverOver(cache, purgeBroker());
+    let attempts = 0;
+    const twice = Promise.withResolvers<void>();
+    const flaky = async (): Promise<void> => {
+      attempts += 1;
+      if (attempts >= 2) twice.resolve();
+      throw new Error("the store is unreachable");
+    };
+    const scope = Scope.makeUnsafe();
+    await forkInto(scope, 1, flaky);
+    await twice.promise;
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    await Effect.runPromise(Scope.close(scope, Exit.void));
     server.detach();
     await cache.close();
   });

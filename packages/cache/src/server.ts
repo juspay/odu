@@ -45,7 +45,7 @@
 import { join } from "node:path";
 import type { Row } from "@odu/cordis/services";
 import { CACHE_ROW } from "./surface";
-import { Data, Effect } from "effect";
+import { Cause, Data, Duration, Effect } from "effect";
 import { definePlugin, offer } from "@olai/effect-cordis";
 import { type ImplementSurfaceDeps, inMemoryStore } from "@kolu/surface/server";
 import {
@@ -122,9 +122,6 @@ export interface CacheServerOptions {
    * business — see `@odu/cordis`'s `CachePurge`.
    */
   readonly purge?: CachePurge;
-  /** How often the row collects by itself. Absent is {@link GC_EVERY_MS};
-   *  the suite turns it down. */
-  readonly collectEveryMs?: number;
   /** One operational line. The row hands the daemon's logger over. */
   readonly log?: (event: string, fields: Record<string, unknown>) => void;
 }
@@ -139,14 +136,9 @@ export interface CacheServer {
    *  change notification — never by a verb, because a verb cannot know whether
    *  the row it touched is the one that moved. */
   readonly publish: () => void;
-  /** COLLECT EVERY BUCKET NOW, announcing what left — what the schedule does,
-   *  and what a test drives instead of waiting for a timer. */
+  /** COLLECT EVERY BUCKET NOW, announcing what left — what the schedule
+   *  repeats, and what a test drives instead of waiting for a timer. */
   readonly collect: () => Promise<void>;
-  /** Start collecting on the schedule. Returns the stop, which the row's
-   *  finalizer awaits: a timer that outlived its row would collect into a
-   *  closed database, and a collection in flight is joined rather than
-   *  abandoned between a row's deletion and its object's. */
-  readonly schedule: () => () => Promise<void>;
   /** Stop listening. The activation's cleanup, alongside the cache's own. */
   readonly detach: () => void;
   /** The substituter URL for one bucket, as the cache row publishes it — the
@@ -164,6 +156,45 @@ export interface CacheServer {
  * crash loop must not spend each boot walking every bucket's object list.
  */
 export const GC_EVERY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * THE DAILY COLLECTION, AS AN EFFECT THE ROW'S SCOPE OWNS.
+ *
+ * One lifetime idiom in this row, not two: the migration is a `forkScoped`
+ * fibre and so is this, so a scope that closes is the whole answer to "when
+ * does it stop" — no stop function, no timer handle, nothing to forget to
+ * call.
+ *
+ * The collection itself is UNINTERRUPTIBLE, which is the guarantee that
+ * matters: interruption arrives between deletes otherwise, and a row deleted
+ * with its object still in the store (or the reverse) is exactly what the
+ * write lock exists to prevent. Interrupting a scope therefore WAITS for the
+ * collection in flight — and only then does the row's finalizer close the
+ * database.
+ *
+ * A failed collection does not end the schedule. A store that was unreachable
+ * this midnight may answer the next one, and a cache that stopped collecting
+ * because of one outage would grow silently until somebody noticed.
+ */
+export function collectEvery(
+  everyMs: number,
+  collect: () => Promise<void>,
+  log?: (event: string, fields: Record<string, unknown>) => void,
+): Effect.Effect<never> {
+  const once = Effect.uninterruptible(
+    Effect.tryPromise({
+      try: collect,
+      catch: (err) => err,
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.sync(() => log?.("cache.gc.failed", { reason: Cause.pretty(cause) })),
+      ),
+    ),
+  );
+  // SLEEP FIRST: the first collection is one interval after the row mounts,
+  // so a daemon in a crash loop never spends its boot walking every bucket.
+  return Effect.forever(Effect.flatMap(Effect.sleep(Duration.millis(everyMs)), () => once));
+}
 
 export function cacheServer(opts: CacheServerOptions): CacheServer {
   const { cache } = opts;
@@ -554,42 +585,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     },
     publish,
     collect,
-    schedule: () => {
-      // A CHAIN OF TIMEOUTS, not an interval: a collection of a large bucket
-      // can outlast its own period, and an interval would start a second one
-      // on top of it — two collections racing for the write lock, the second
-      // sleeping until the first finishes and then finding nothing to do.
-      // Each run schedules the next when it ENDS.
-      const every = opts.collectEveryMs ?? GC_EVERY_MS;
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      let running: Promise<void> | null = null;
-      let stopped = false;
-      const again = (): void => {
-        if (stopped) return;
-        timer = setTimeout(() => {
-          running = collect()
-            // A SCHEDULED COLLECTION HAS NOBODY TO REFUSE. Whatever it hit —
-            // a store that is unreachable, a database that is closing — is
-            // one line, and the next one is still scheduled.
-            .catch((err: unknown) => {
-              opts.log?.("cache.gc.failed", { reason: String((err as Error)?.message ?? err) });
-            })
-            .finally(again);
-        }, every);
-        // The daemon must be able to exit with a collection pending.
-        timer.unref?.();
-      };
-      again();
-      return async () => {
-        stopped = true;
-        clearTimeout(timer ?? undefined);
-        timer = null;
-        // THE ONE IN FLIGHT IS JOINED, not abandoned: it holds the write lock
-        // and may be between a row's deletion and its object's, and the
-        // database closes as soon as this resolves.
-        await running;
-      };
-    },
     detach,
     substituterUrl: (name) => {
       const bucket = cache.bucket(name);
@@ -752,10 +747,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       }),
     );
 
-    // THE SCHEDULE, ROW-OWNED LIKE THE MIGRATION: a cache nobody administers
-    // must still stop growing, so the row collects itself daily, and the
-    // operator's button is the same collection asked for sooner.
-    const unschedule = server.schedule();
+    // (The schedule is forked below, after the finalizers — see why there.)
 
     // FINALIZERS RUN IN REVERSE, so the one registered SECOND runs FIRST, and
     // the safe order is: the mount goes, THEN the database. A publish that
@@ -771,11 +763,21 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       }),
     );
     yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
-    // THE SCHEDULE GOES FIRST, which by that rule means registered LAST: a
+    // THE SCHEDULE, ROW-OWNED LIKE THE MIGRATION AND IN THE SAME IDIOM: a
+    // cache nobody administers must still stop growing, so the row collects
+    // itself daily and the operator's button is that collection asked for
+    // sooner.
+    //
+    // FORKED LAST, which by the rule above means INTERRUPTED FIRST: the
+    // fibre's interruption is a finalizer of this scope like any other, and a
     // collection still walking a bucket when the database closed would be an
-    // error logged on the way out, and `unschedule` waits for the one in
-    // flight rather than abandoning it mid-delete.
-    yield* Effect.addFinalizer(() => Effect.promise(unschedule));
+    // error logged on the way out. Interrupting it waits for the collection
+    // in flight, because `collectEvery` runs each one uninterruptibly.
+    yield* Effect.forkScoped(
+      collectEvery(GC_EVERY_MS, server.collect, (event, fields) =>
+        log.info(fields, `odu cache: ${event}`),
+      ),
+    );
 
     log.info(
       { mount: CACHE_MOUNT, buckets: cache.snapshot().length },
