@@ -104,7 +104,7 @@ describe("this daemon, after the cache row's own major", () => {
     const verdict = admitService(THIS_DAEMON, "here", { [CACHE_KEY]: "2.4" });
     expect(verdict).toMatchObject({
       kind: "refuse",
-      reason: "row",
+      on: "row",
       row: CACHE_KEY,
       speaks: CACHE_CONTRACT_VERSION,
       expected: "2.4",

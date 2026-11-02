@@ -49,6 +49,7 @@ import {
   oduServiceSurface,
   SERVICE_HANDSHAKE_MS,
   type ServiceAdmission,
+  type ServiceRefusal,
 } from "./surface";
 
 /**
@@ -161,10 +162,7 @@ export interface ServiceSocketConnection {
  */
 export type ServiceSocketDial =
   | { kind: "absent"; socketPath: string }
-  | ({ kind: "refused"; socketPath: string } & Omit<
-      Extract<ServiceAdmission, { kind: "refuse" }>,
-      "kind"
-    >)
+  | ({ kind: "refused"; socketPath: string } & ServiceRefusal)
   | ({ kind: "connected" } & ServiceSocketConnection);
 
 /**

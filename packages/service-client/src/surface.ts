@@ -407,24 +407,28 @@ export const CI_NEEDS: RowNeeds = { [CI_ROW]: CI_CONTRACT_VERSION };
  *  direction of the comparison wrong, because "older client, newer daemon" is
  *  fine and its mirror is not.
  *
- *  A refusal NAMES WHAT IT IS ABOUT: `row` is `null` for the host's own
- *  contract and the row's name otherwise; `reason` says whether the host's
- *  major differs, a row's does, or a needed row is not mounted at all (then
- *  `speaks` is empty). */
+ *  A refusal is {@link ServiceRefusal}: which contract it is ON, and only the
+ *  facts that arm has. */
 export type ServiceAdmission =
   | { kind: "adopt"; identity: ServiceIdentity }
-  | {
-      kind: "refuse";
-      reason: "host" | "row" | "absent";
-      /** The row refused on, or `null` for the host's own contract. */
-      row: string | null;
-      /** The version the daemon publishes for it — `""` when not mounted. */
-      speaks: string;
-      /** The version this build reads. */
-      expected: string;
-      /** The whole sentence, for a face that only has somewhere to print. */
-      message: string;
-    };
+  | ({ kind: "refuse" } & ServiceRefusal);
+
+/**
+ * WHY A DAEMON WAS REFUSED — three different facts, so three arms, each
+ * carrying only its own:
+ *
+ *   - `host` — the host's major differs;
+ *   - `row` — a row this build reads is mounted at another major;
+ *   - `absent` — a row this build requires is not mounted at all (so there is
+ *     nothing it `speaks`).
+ *
+ * `expected` is always the version this build reads; `message` is the whole
+ * sentence, for a face that only has somewhere to print.
+ */
+export type ServiceRefusal =
+  | { on: "host"; speaks: string; expected: string; message: string }
+  | { on: "row"; row: string; speaks: string; expected: string; message: string }
+  | { on: "absent"; row: string; expected: string; message: string };
 
 /** `major.minor` (an optional patch or prerelease suffix allowed), or null —
  *  the framework's grammar, so `2.1garbage` is not read as 2.1. */
@@ -479,8 +483,7 @@ export function admitService(
   if (hostMajor === null || hostMajor !== contractMajor(host)) {
     return {
       kind: "refuse",
-      reason: "host",
-      row: null,
+      on: "host",
       speaks: hostSpeaks,
       expected: host,
       message:
@@ -496,9 +499,8 @@ export function admitService(
       if (needOptional(need)) continue;
       return {
         kind: "refuse",
-        reason: "absent",
+        on: "absent",
         row,
-        speaks: "",
         expected: reads,
         message:
           `the odu service at ${where} does not mount the ${row} row, ` +
@@ -509,7 +511,7 @@ export function admitService(
     if (major === null || major !== contractMajor(reads)) {
       return {
         kind: "refuse",
-        reason: "row",
+        on: "row",
         row,
         speaks,
         expected: reads,

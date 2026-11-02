@@ -43,7 +43,7 @@ describe("admitService, per row", () => {
     const verdict = admitService(MOVED, WHERE, { ...CI_NEEDS, other: "2.4" });
     expect(verdict).toMatchObject({
       kind: "refuse",
-      reason: "row",
+      on: "row",
       row: "other",
       speaks: "3.0",
       expected: "2.4",
@@ -53,7 +53,8 @@ describe("admitService, per row", () => {
 
   it("refuses a needed row the daemon does not mount, with that fact", () => {
     const verdict = admitService(MOVED, WHERE, { absent: "1.0" });
-    expect(verdict).toMatchObject({ kind: "refuse", reason: "absent", row: "absent", speaks: "" });
+    expect(verdict).toMatchObject({ kind: "refuse", on: "absent", row: "absent" });
+    expect(verdict).not.toHaveProperty("speaks");
     if (verdict.kind === "refuse") expect(verdict.message).toContain("does not mount the absent row");
   });
 
@@ -67,7 +68,8 @@ describe("admitService, per row", () => {
 
   it("refuses on the host's major before it looks at a row", () => {
     const verdict = admitService(daemon("3.0", { [CI_ROW]: CI_CONTRACT_VERSION }), WHERE, CI_NEEDS);
-    expect(verdict).toMatchObject({ kind: "refuse", reason: "host", row: null, speaks: "3.0" });
+    expect(verdict).toMatchObject({ kind: "refuse", on: "host", speaks: "3.0" });
+    expect(verdict).not.toHaveProperty("row");
   });
 
   it("reads a daemon from before 2.5 as speaking its one number for every row", () => {
