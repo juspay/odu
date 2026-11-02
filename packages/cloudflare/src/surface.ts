@@ -30,7 +30,7 @@ export const CLOUDFLARE_CONTRACT_VERSION = "2.4";
 
 /** THE TUNNEL AND NOTHING ELSE — what `odu cloudflare …` declares, in the shape
  *  `admitService` takes. */
-export const CLOUDFLARE_NEEDS = { [CLOUDFLARE_KEY]: CLOUDFLARE_CONTRACT_VERSION } as const;
+export const CLOUDFLARE_NEEDS = { [CLOUDFLARE_KEY]: { requires: CLOUDFLARE_CONTRACT_VERSION } } as const;
 
 // ── the facts ───────────────────────────────────────────────────────────────
 

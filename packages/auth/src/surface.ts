@@ -50,7 +50,7 @@ export const AUTH_CONTRACT_VERSION = "2.4";
 
 /** THE DOOR AND NOTHING ELSE — what `odu auth …` declares, in the shape
  *  `admitService` takes. Required: there is nothing to do without a door. */
-export const AUTH_NEEDS = { [AUTH_KEY]: AUTH_CONTRACT_VERSION } as const;
+export const AUTH_NEEDS = { [AUTH_KEY]: { requires: AUTH_CONTRACT_VERSION } } as const;
 
 /** THE SIGN-IN PAGE'S WORDS, once — the server-rendered page (`./routes`) and
  *  the browser's own copy (`./face`) say the same three things, and a page an

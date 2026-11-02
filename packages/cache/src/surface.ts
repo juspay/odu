@@ -595,7 +595,7 @@ export const CACHE_CONTRACT_VERSION = "3.0";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */
-export const CACHE_NEEDS = { [CACHE_KEY]: CACHE_CONTRACT_VERSION } as const;
+export const CACHE_NEEDS = { [CACHE_KEY]: { requires: CACHE_CONTRACT_VERSION } } as const;
 
 /**
  * WHAT AN AGENT IS TOLD about the cache: its surface, its exposure policy and

@@ -26,7 +26,7 @@
 import { composedWire } from "@odu/cordis/compose";
 import {
   CI_NEEDS,
-  ifMountedAll,
+  ifMounted,
   oduServiceSurface,
   type RowNeeds,
 } from "@odu/service-client/surface";
@@ -67,7 +67,12 @@ export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLIN
  */
 export const EVERY_ROW_NEEDS: RowNeeds = {
   ...CI_NEEDS,
-  ...ifMountedAll({ ...CACHE_NEEDS, ...AUTH_NEEDS, ...CLOUDFLARE_NEEDS }),
+  ...Object.fromEntries(
+    Object.entries({ ...CACHE_NEEDS, ...AUTH_NEEDS, ...CLOUDFLARE_NEEDS }).map(([row, need]) => [
+      row,
+      ifMounted(need.requires),
+    ]),
+  ),
 };
 
 /**

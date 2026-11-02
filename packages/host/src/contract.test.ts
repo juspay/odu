@@ -28,6 +28,7 @@ import {
   CI_ROW,
   HOST_CONTRACT_VERSION,
   oduServiceSurface,
+  requires,
   type ServiceCell,
   UNKNOWN_SERVICE,
 } from "@odu/service-client/surface";
@@ -101,11 +102,11 @@ describe("this daemon, after the cache row's own major", () => {
 
   it("adopts a client that needs only the runs at 2.x — kolu's padi", () => {
     expect(admitService(THIS_DAEMON, "here", CI_NEEDS).kind).toBe("adopt");
-    expect(admitService(THIS_DAEMON, "here", { [CI_ROW]: "2.0" }).kind).toBe("adopt");
+    expect(admitService(THIS_DAEMON, "here", { [CI_ROW]: requires("2.0") }).kind).toBe("adopt");
   });
 
   it("refuses a client that needs a 2.x cache, naming the cache row", () => {
-    const verdict = admitService(THIS_DAEMON, "here", { [CACHE_KEY]: "2.4" });
+    const verdict = admitService(THIS_DAEMON, "here", { [CACHE_KEY]: requires("2.4") });
     expect(verdict).toMatchObject({
       kind: "refuse",
       on: "row",

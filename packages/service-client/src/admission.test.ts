@@ -13,6 +13,7 @@ import {
   CI_ROW,
   HOST_CONTRACT_VERSION,
   ifMounted,
+  requires,
   type ServiceCell,
   skewNote,
   UNKNOWN_SERVICE,
@@ -40,7 +41,7 @@ describe("admitService, per row", () => {
   });
 
   it("refuses a client that needs the moved row, naming it", () => {
-    const verdict = admitService(MOVED, WHERE, { ...CI_NEEDS, other: "2.4" });
+    const verdict = admitService(MOVED, WHERE, { ...CI_NEEDS, other: requires("2.4") });
     expect(verdict).toMatchObject({
       kind: "refuse",
       on: "row",
@@ -52,7 +53,7 @@ describe("admitService, per row", () => {
   });
 
   it("refuses a needed row the daemon does not mount, with that fact", () => {
-    const verdict = admitService(MOVED, WHERE, { absent: "1.0" });
+    const verdict = admitService(MOVED, WHERE, { absent: requires("1.0") });
     expect(verdict).toMatchObject({ kind: "refuse", on: "absent", row: "absent" });
     expect(verdict).not.toHaveProperty("speaks");
     if (verdict.kind === "refuse") expect(verdict.message).toContain("does not mount the absent row");
@@ -75,7 +76,7 @@ describe("admitService, per row", () => {
   it("reads a daemon from before 2.5 as speaking its one number for every row", () => {
     // The composed-wire era: `protocolVersion` covered every row at once.
     expect(admitService(daemon("2.4"), WHERE, CI_NEEDS).kind).toBe("adopt");
-    expect(admitService(daemon("2.4"), WHERE, { other: "3.0" })).toMatchObject({
+    expect(admitService(daemon("2.4"), WHERE, { other: requires("3.0") })).toMatchObject({
       kind: "refuse",
       row: "other",
       speaks: "2.4",
@@ -84,7 +85,7 @@ describe("admitService, per row", () => {
 
   it("notes, per row, every needed row whose minor is behind", () => {
     const behind = daemon(HOST_CONTRACT_VERSION, { [CI_ROW]: "2.1", other: "2.0" });
-    const note = skewNote(behind, WHERE, { [CI_ROW]: "2.4", other: "2.0" });
+    const note = skewNote(behind, WHERE, { [CI_ROW]: requires("2.4"), other: requires("2.0") });
     expect(note).toContain(`${CI_ROW} 2.1 (this build 2.4)`);
     expect(note).not.toContain("other");
     expect(skewNote(MOVED, WHERE, CI_NEEDS)).toBeNull();

@@ -368,37 +368,31 @@ export const UNKNOWN_SERVICE: ServiceCell = {
 /**
  * WHAT A BUILD READS OF ONE ROW — the version its code was written against.
  *
- * A bare version is REQUIRED: the client is refused when that row is not
- * mounted, because a face that needs the cache and is admitted without it would
- * meet `unknown verb` on its first call and read it as a skew. `ifMounted` is
- * for a face that draws a row only when the daemon has it (the door, the
- * tunnel): absent is fine, mounted at another major is not.
+ * Two values, each carrying its version:
+ *
+ *   - `{ requires }` — the client is refused when that row is not mounted,
+ *     because a face that needs the cache and is admitted without it would meet
+ *     `unknown verb` on its first call and read it as a skew;
+ *   - `{ ifMounted }` — for a face that draws a row only when the daemon has it
+ *     (the door, the tunnel): absent is fine, mounted at another major is not.
  */
-export type RowNeed = string | { readonly reads: string; readonly ifMounted: true };
+export type RowNeed = { readonly requires: string } | { readonly ifMounted: string };
 
 /** The rows a face reads, by row name, and at which version. */
 export type RowNeeds = Readonly<Record<string, RowNeed>>;
 
-/** A row read only when the daemon mounts it. */
-export const ifMounted = (reads: string): RowNeed => ({ reads, ifMounted: true });
+/** A row this build cannot work without. */
+export const requires = (version: string): RowNeed => ({ requires: version });
 
-/** Every row of `needs`, read only when mounted — what a face that projects
- *  whichever siblings the daemon has declares for them. */
-export function ifMountedAll(needs: RowNeeds): RowNeeds {
-  return Object.fromEntries(
-    Object.entries(needs).map(([row, need]) => [
-      row,
-      ifMounted(typeof need === "string" ? need : need.reads),
-    ]),
-  );
-}
+/** A row read only when the daemon mounts it. */
+export const ifMounted = (version: string): RowNeed => ({ ifMounted: version });
 
 /**
  * THE RUNS AND NOTHING ELSE — the need of every consumer that reads only the
  * board: kolu's padi, a socket dial, `odu run`/`wait`/`logs`. A daemon is
  * adopted on this however far the cache, the door or the tunnel has moved.
  */
-export const CI_NEEDS: RowNeeds = { [CI_ROW]: CI_CONTRACT_VERSION };
+export const CI_NEEDS: RowNeeds = { [CI_ROW]: requires(CI_CONTRACT_VERSION) };
 
 /** The verdict on a daemon that ANSWERED — whether this build can speak to it.
  *
@@ -445,8 +439,8 @@ function contractMinor(version: string): number | null {
   return match === null ? null : Number(match[2]);
 }
 
-const needReads = (need: RowNeed): string => (typeof need === "string" ? need : need.reads);
-const needOptional = (need: RowNeed): boolean => typeof need !== "string";
+const needReads = (need: RowNeed): string =>
+  "requires" in need ? need.requires : need.ifMounted;
 
 /** The version a daemon publishes for one row, or `null` when it does not
  *  mount it. A daemon from before 2.5 publishes no `rows`: its one number
@@ -497,7 +491,7 @@ export function admitService(
     const reads = needReads(need);
     const speaks = rowSpeaks(identity, row);
     if (speaks === null) {
-      if (needOptional(need)) continue;
+      if ("ifMounted" in need) continue;
       return {
         kind: "refuse",
         on: "absent",
