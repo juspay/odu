@@ -76,9 +76,9 @@ const REPORTS = join(HERE, "..", "reports");
 const workerId = (): string => process.env.CUCUMBER_WORKER_ID ?? "0";
 
 /** A desktop this app was designed for, and the phone-width viewport the
- *  `@narrow` scenarios ask for. 380 px is narrower than the 44 rem breakpoint
- *  `styles.css` reflows the board at, so a scenario tagged `@narrow` is on the
- *  other side of that media query rather than near it. */
+ *  `@narrow` scenarios ask for. 380 px is narrower than the 46 rem breakpoint
+ *  `@odu/face`'s `theme.css` reflows the board at, so a scenario tagged
+ *  `@narrow` is on the other side of that media query rather than near it. */
 const DESKTOP = { width: 1280, height: 900 } as const;
 const NARROW = { width: 380, height: 720 } as const;
 
