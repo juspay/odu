@@ -339,13 +339,13 @@ odu surface auth user_grant --origin https://odu.example.com \
   --input '{"login":"alice","role":"admin","rootToken":""}' --json   # or People on the board
 ```
 
-Or from the board: an owner's header has **People**, which lists who is in — every grant, and every login that has ever signed in (signing out does not remove you), with its role — and grants or changes a role from a select. `odu surface auth grant_list` prints the same list. The row refuses a grant that would leave the daemon with no owner: grant a second owner before stepping down.
+Or from the board: an owner's rail has **People**, which lists who is in — every grant, and every login that has ever signed in (signing out does not remove you), with its role — and grants or changes a role from a select. `odu surface auth grant_list` prints the same list. The row refuses a grant that would leave the daemon with no owner: grant a second owner before stepping down.
 
 That is the root token's only job on a daemon with a door: it is not a principal, and it cannot start a run or read a bucket.
 
 ### A token for a machine or an agent
 
-The header's name opens the **profile page**: your sessions and your personal access tokens. Create one — it is shown **once** — and either store it on a machine or hand it to an agent:
+Your name at the foot of the rail opens the **profile page**: your sessions and your personal access tokens. Create one — it is shown **once** — and either store it on a machine or hand it to an agent:
 
 ```sh
 odu auth login https://odu.example.com      # paste the token; it is kept at ~/.config/odu/auth/credentials, mode 0600
