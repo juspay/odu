@@ -17,6 +17,7 @@ import { CACHE_CONTRACT_VERSION, ODU_CACHE_EXPOSE, oduCacheSurface } from "./sur
 const LEDGER: ContractLedger = {
   "2.4": "ce07c59972729e8e",
   "3.0": "8988b569266ac6a6",
+  "3.1": "e4d56557cc5fd002",
 };
 
 describe("the cache row's contract", () => {

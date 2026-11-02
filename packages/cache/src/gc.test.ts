@@ -28,6 +28,7 @@ const bucket: BucketRow = {
   upstreamKeys: [],
   created: OLD,
   domain: null,
+  store: "local",
 };
 
 const other: BucketRow = { ...bucket, name: "other" };
@@ -145,7 +146,7 @@ describe("runGc", () => {
     const report = await runGc(
       repo,
       planGc({ buckets: [bucket], objects, pins, now: NOW }),
-      { delete: async (key) => void deleted.push(key) },
+      () => ({ delete: async (key: string) => void deleted.push(key) }),
     );
 
     expect(deleted.sort()).toEqual(
@@ -172,7 +173,7 @@ describe("runGc", () => {
     const report = await runGc(
       repo,
       planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }),
-      { delete: async (key) => void deleted.push(key) },
+      () => ({ delete: async (key: string) => void deleted.push(key) }),
     );
     expect(deleted).toEqual([]);
     expect(report.evicted).toBe(1);
@@ -187,8 +188,8 @@ describe("runGc", () => {
     for (const row of rows) repo.putObject(row);
     const keyOf = (row: ObjectRow): string => `main/nar/${row.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const deleted: string[] = [];
-    await runGc(repo, planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }), {
-      delete: async (key) => {
+    await runGc(repo, planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }), () => ({
+      delete: async (key: string) => {
         deleted.push(key);
         if (deleted.length === 1) {
           const other = rows.find((row) => keyOf(row) !== key) as ObjectRow;
@@ -200,7 +201,7 @@ describe("runGc", () => {
           });
         }
       },
-    });
+    }));
     expect(deleted).toHaveLength(1);
   });
 
@@ -214,7 +215,7 @@ describe("runGc", () => {
     const report = await runGc(
       repo,
       planGc({ buckets: [bucket], objects: sized, pins: [], now: NOW }),
-      { delete: async () => {} },
+      () => ({ delete: async () => {} }),
     );
     const expected = [C, D, E, F].reduce(
       (sum, row) => sum + (row.storePath === C.storePath ? 999 : row.narSize),

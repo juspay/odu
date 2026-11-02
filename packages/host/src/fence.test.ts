@@ -104,7 +104,9 @@ const declaration = {
       "packages/host/src/bucketDomain.ts": 2,
       // The same header, on the shared door reader's one request.
       "packages/cordis/src/services.ts": 4,
-      "packages/launch/src/webDaemonLaunch.ts": 1,
+      // The daemon's environment allowlist: `ODU_CACHE_STORE` (the migration's
+      // old store) and `ODU_CACHE_STORES` (the declared object stores, 3c).
+      "packages/launch/src/webDaemonLaunch.ts": 2,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,
     },
@@ -334,7 +336,7 @@ describe("the row's word", () => {
     );
     expect(source("packages/cache/src/server.ts")).toMatch(/\.\.\.CACHE_ROW,/);
     const roster = source("packages/host/src/web.ts");
-    expect(roster).toMatch(/ROWS: ReadonlyArray<Row> = \[\s*ciRowRecord,\s*cacheRowRecord,/);
+    expect(roster).toMatch(/ROWS: ReadonlyArray<Row> = \[\s*ciRowRecord,\s*cacheRowRecord\(cacheStores\.stores\),/);
     expect(roster).not.toMatch(/_CONTRACT_VERSION/);
   });
 });

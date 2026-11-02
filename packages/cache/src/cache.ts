@@ -5,8 +5,8 @@
  * they must agree about one thing: what a bucket IS. The protocol face is what
  * a Nix client speaks (`./routes`); the admin face is what `odu cache` reaches
  * through the service. Between them sit the rows (`./db`), the tokens
- * (`./tokens`), the collector (`./gc`), the object store (`./objectStore`) and
- * the one-time migration.
+ * (`./tokens`), the collector (`./gc`), the object stores (`./objectStore`,
+ * one per declared store, chosen per bucket) and the one-time migration.
  *
  * The WRITE PATH is not here: staging an upload, proving it and keeping the
  * object moves on the Nix protocol's clock rather than on the product's, and it
@@ -41,7 +41,7 @@ import {
 } from "./narinfo";
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
-import { PATH_PAGE_SIZE } from "./surface";
+import { LOCAL_STORE, PATH_PAGE_SIZE } from "./surface";
 import {
   createStaging,
   objectKey,
@@ -49,9 +49,9 @@ import {
   type NarinfoOutcome,
   type Upload,
 } from "./staging";
-import { diskObjectStore, type ObjectStore } from "./objectStore";
+import { type ByteRange, diskObjectStore, type ObjectFacts, type ObjectStore } from "./objectStore";
 import { contentAddressOf } from "./storePath";
-import { verifyNarFile } from "./store";
+import { verifyNarStream } from "./store";
 import { createSlots } from "./slots";
 import {
   globMatches,
@@ -82,6 +82,8 @@ export interface BucketFacts {
   lastPush: number | null;
   /** narinfo reads, summed over the bucket's objects. */
   hits: number;
+  /** The declared store its objects live in. */
+  store: string;
 }
 
 /**
@@ -130,7 +132,8 @@ export type CacheRefusalCode =
   | "no_root_token"
   | "unknown_bucket"
   | "bucket_exists"
-  | "bad_input";
+  | "bad_input"
+  | "unknown_store";
 
 export type CacheOutcome<T> =
   | { ok: true; value: T }
@@ -171,6 +174,8 @@ export interface CacheAdmin {
     public: boolean;
     retentionDays: number;
     upstreamKeys: readonly string[];
+    /** A declared store's name; absent is `local`, the daemon's disk. */
+    store?: string;
   }): Promise<CacheOutcome<BucketFacts>>;
   list(input: { authority: Authority }): Promise<CacheOutcome<readonly BucketFacts[]>>;
   /**
@@ -244,11 +249,34 @@ export interface PathPageRow {
 export type AuthVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404; message: string };
 
 export type NarSource =
-  | { kind: "file"; storePath: string; path: string; size: number }
-  | { kind: "stream"; storePath: string; stream: ReadableStream<Uint8Array>; size: number }
+  /** A KEPT OBJECT, in whichever store its bucket lives: the whole size, and
+   *  a read of any range of it. Every store answers the same way. */
+  | {
+      kind: "object";
+      storePath: string;
+      size: number;
+      read(range?: ByteRange): Promise<ReadableStream<Uint8Array> | null>;
+    }
   /** THE ONE-TIME MIGRATION: the old Nix store still has this row's path and
    *  its object has not been produced yet. Removed when that store is. */
   | { kind: "legacy"; storePath: string; stream: ReadableStream<Uint8Array> };
+
+/** Why the cache cannot be mounted. A value naming the fact, rendered once at
+ *  the row's boundary. */
+export type CacheMountRefusal = {
+  kind: "undeclared_store";
+  bucket: string;
+  store: string;
+  declared: readonly string[];
+};
+
+export function mountRefusalMessage(refusal: CacheMountRefusal): string {
+  return (
+    `the bucket "${refusal.bucket}" keeps its objects in the store "${refusal.store}", ` +
+    `which this daemon does not declare (declared: ${refusal.declared.join(", ")}) — ` +
+    "declare it again, or the bucket's objects cannot be served"
+  );
+}
 
 /** What one boot's SYNCHRONOUS work found: before mount, no pushes can race. */
 export interface BootReport {
@@ -344,7 +372,7 @@ export interface Cache {
   admin: CacheAdmin;
   /** BEFORE MOUNT: prove `CA:`, sweep orphan objects and abandoned temp files.
    *  Nothing is writing yet, so a sweep cannot race a put. */
-  boot(): Promise<BootReport>;
+  boot(): Promise<{ ok: true; report: BootReport } | { ok: false; refusal: CacheMountRefusal }>;
   /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: prove self-referencing rows
    *  from their kept bytes, ONCE per row (the verdict is persisted). */
   proveSelf(): Promise<SelfProofReport>;
@@ -374,8 +402,10 @@ export interface CacheOptions {
   migrationRetryMs?: number;
   /** Injected by the suite for the disk-floor test. */
   freeBytes?: () => Promise<number | null>;
-  /** Injected by the suite; production is the disk under the cache's dir. */
-  objects?: ObjectStore;
+  /** THE STORES, by declared name — the row builds them from the operator's
+   *  declarations (`./stores`). `local` is the disk under the cache's dir when
+   *  the map does not name it; a suite injects its own. */
+  stores?: ReadonlyMap<string, ObjectStore>;
   now?: () => number;
   /** ONE structured line per operational fact (serve, import, boot, refusal).
    *  The row hands the daemon's logger here; a suite that does not care omits
@@ -402,7 +432,19 @@ export function createCache(options: CacheOptions): Cache {
   const now = options.now ?? (() => Date.now());
   const dir = join(options.stateRoot, "cache");
   const repo = openCacheRepo(join(dir, "cache.sqlite"));
-  const objects = options.objects ?? diskObjectStore({ dir });
+  const stores = new Map(options.stores ?? []);
+  if (!stores.has(LOCAL_STORE)) stores.set(LOCAL_STORE, diskObjectStore({ dir }));
+  /**
+   * THE ONE PLACE A BUCKET BECOMES ITS STORE. Every bucket's store was proved
+   * declared at boot and at create, so a missing one here is a broken
+   * invariant, not a refusal.
+   */
+  const objectsOf = (bucket: string): ObjectStore => {
+    const row = repo.bucket(bucket);
+    const store = stores.get(row?.store ?? LOCAL_STORE);
+    if (store === undefined) throw new Error(`bucket "${bucket}" names an undeclared store`);
+    return store;
+  };
 
   /**
    * ONE writer at a time, across keep-and-record (staging's), `pin` and `gc`.
@@ -471,6 +513,7 @@ export function createCache(options: CacheOptions): Cache {
       created: bucket.created,
       lastPush: counts?.lastPush ?? null,
       hits: counts?.hits ?? 0,
+      store: bucket.store,
     };
   }
 
@@ -577,7 +620,7 @@ export function createCache(options: CacheOptions): Cache {
   // The write path, wired to the ONE lock: staging keeps an object and records
   // its row under it, so neither a pin nor a collection lands in between.
   const staging = createStaging({
-    objects,
+    objectsOf: (bucket) => objectsOf(bucket.name),
     dir,
     now,
     withWriteLock,
@@ -589,6 +632,7 @@ export function createCache(options: CacheOptions): Cache {
     // store, which for S3 is a stored checksum rather than a read of the bytes.
     async keptFacts(bucket, narHash, compression) {
       const key = objectKey(bucket.name, narHash, compression);
+      const objects = objectsOf(bucket.name);
       const size = await objects.head(key);
       if (size === null) return null;
       const row = repo.objectByNarHashCompression(bucket.name, narHash, compression ?? "none");
@@ -671,6 +715,14 @@ export function createCache(options: CacheOptions): Cache {
       if (repo.bucket(input.name) !== null) {
         return { ok: false, code: "bucket_exists", message: `bucket "${input.name}" already exists` };
       }
+      const store = input.store ?? LOCAL_STORE;
+      if (!stores.has(store)) {
+        return {
+          ok: false,
+          code: "unknown_store",
+          message: `no store "${store}" — this daemon declares ${[...stores.keys()].join(", ")}`,
+        };
+      }
       const keypair = generateKeypair(`${input.name}-1`);
       const bucket: BucketRow = {
         name: input.name,
@@ -682,6 +734,7 @@ export function createCache(options: CacheOptions): Cache {
         upstreamKeys: input.upstreamKeys,
         created: now(),
         domain: null,
+        store,
       };
       repo.putBucket(bucket);
       // A bucket that appeared is a row that appeared.
@@ -845,7 +898,7 @@ export function createCache(options: CacheOptions): Cache {
           pins: repo.pins(),
           now: now(),
         });
-        const report = await runGc(repo, plan, objects);
+        const report = await runGc(repo, plan, objectsOf);
         // Every bucket the sweep touched answers a different object count now.
         notify();
         return { ok: true as const, value: report };
@@ -959,14 +1012,20 @@ export function createCache(options: CacheOptions): Cache {
         if (stopping) return;
         const row = rows[next++];
         if (row === undefined) return;
-        const path = objects.localPath(objectKey(row.bucket, row.narHash, row.compression));
-        if (path === null) {
+        // FROM THE STORE, whichever it is: the kept bytes, streamed.
+        const object = await objectsOf(row.bucket)
+          .get(objectKey(row.bucket, row.narHash, row.compression))
+          .catch(() => null);
+        if (object === null) {
           unreadable += 1;
           continue;
         }
         const checked = await Promise.race([
-          verifyNarFile(path, row.compression, storePathHash(row.storePath)),
-          stopSignal.promise.then(() => null),
+          verifyNarStream(object, row.compression, storePathHash(row.storePath)),
+          stopSignal.promise.then(() => {
+            void object.stream.cancel().catch(() => {});
+            return null;
+          }),
         ]);
         if (checked === null || stopping) return;
         done += 1;
@@ -1091,6 +1150,7 @@ export function createCache(options: CacheOptions): Cache {
           // A TWIN MAY HAVE LANDED THE SAME OBJECT: ask before spawning a dump
           // whose bytes would be thrown away.
           const key = objectKey(row.bucket, row.narHash, row.compression);
+          const objects = objectsOf(row.bucket);
           // A READ, not an empty put: a put racing a delete would store 0 bytes.
           const stored = await objects.facts(key);
           if (stored !== null) {
@@ -1099,9 +1159,14 @@ export function createCache(options: CacheOptions): Cache {
             return;
           }
           const dump = legacy.dump(row.storePath);
-          const writing = migrationSlots.withSlot(() =>
-            objects.put(objectKey(row.bucket, row.narHash, row.compression), dump),
-          );
+          // FIRST KEPT WINS: a twin that landed the key meanwhile is refused
+          // with `exists`, and its facts are the row's.
+          const writing = migrationSlots.withSlot(async (): Promise<ObjectFacts> => {
+            const outcome = await objects.put(key, dump);
+            if (outcome.ok) return outcome.facts;
+            if (outcome.refusal.kind === "exists") return outcome.refusal.facts;
+            throw new Error(`${key}: the store kept nothing (${outcome.refusal.kind})`);
+          });
           // A losing write is not left running: cancelling the stream kills the
           // dump pipeline's process group.
           void writing.catch(() => {});
@@ -1225,14 +1290,15 @@ export function createCache(options: CacheOptions): Cache {
         })();
       if (row === null) return null;
       const key = objectKey(bucket.name, narHash, row.compression);
+      const objects = objectsOf(bucket.name);
       const size = await objects.head(key);
       if (size !== null) {
-        const path = objects.localPath(key);
-        if (path !== null) return { kind: "file", storePath: row.storePath, path, size };
-        const object = await objects.get(key);
-        if (object !== null) {
-          return { kind: "stream", storePath: row.storePath, stream: object.stream, size };
-        }
+        return {
+          kind: "object",
+          storePath: row.storePath,
+          size,
+          read: async (range) => (await objects.get(key, range))?.stream ?? null,
+        };
       }
       // THE ONE-TIME TRANSITION. A row from before objects were kept has no
       // object yet; the old Nix store serves it until the boot migration lands
@@ -1301,6 +1367,24 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async boot() {
+      // 0. EVERY BUCKET'S STORE IS DECLARED, or the row does not mount: a
+      // bucket whose objects nobody can reach would answer 404 for every path
+      // it has, which reads as data loss rather than as a missing line of
+      // configuration.
+      for (const bucket of repo.buckets()) {
+        if (!stores.has(bucket.store)) {
+          return {
+            ok: false as const,
+            refusal: {
+              kind: "undeclared_store" as const,
+              bucket: bucket.name,
+              store: bucket.store,
+              declared: [...stores.keys()],
+            },
+          };
+        }
+      }
+
       // 1. CA IS PROVED FROM THE PATH. Pure and instant: no store query, no
       // pusher line. A self-reference's modulo hash comes from its bytes in 1b.
       let caProved = 0;
@@ -1327,20 +1411,26 @@ export function createCache(options: CacheOptions): Cache {
       // 2. NOBODY IS WRITING YET: an object with no row is a crash between put
       // and record; a `.tmp-*` older than this boot is a put that died. Both
       // are swept BEFORE the mount, so the sweep cannot race a live push.
-      const tempSwept = (await objects.sweepTemp?.(now())) ?? 0;
+      // PER BUCKET, under its own prefix in its own store: a store may be
+      // shared, and only a bucket's prefix is the cache's to sweep.
       const owned = new Set(
         repo.objects().map((row) => objectKey(row.bucket, row.narHash, row.compression)),
       );
+      let tempSwept = 0;
       let orphansSwept = 0;
-      for (const object of await objects.list("")) {
-        if (owned.has(object.key)) continue;
-        await objects.delete(object.key);
-        orphansSwept += 1;
+      for (const bucket of repo.buckets()) {
+        const objects = objectsOf(bucket.name);
+        tempSwept += await objects.sweepTemp(bucket.name, now());
+        for (const object of await objects.list(bucket.name)) {
+          if (owned.has(object.key)) continue;
+          await objects.delete(object.key);
+          orphansSwept += 1;
+        }
       }
       if (orphansSwept > 0 || tempSwept > 0) {
         options.log?.("cache.boot.orphans", { swept: orphansSwept, temp: tempSwept });
       }
-      return { caProved, orphansSwept, tempSwept };
+      return { ok: true as const, report: { caProved, orphansSwept, tempSwept } };
     },
 
     proveSelf() {

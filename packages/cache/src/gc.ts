@@ -122,7 +122,8 @@ export interface GcReport {
 export async function runGc(
   repo: CacheRepo,
   plan: readonly GcBucketPlan[],
-  objects: { delete(key: string): Promise<void> },
+  /** The store each bucket's objects live in. */
+  objectsOf: (bucket: string) => { delete(key: string): Promise<void> },
 ): Promise<GcReport> {
   const planned = plan.flatMap((entry) =>
     entry.evict.map((row) => ({ ...row, bucket: entry.bucket })),
@@ -138,7 +139,7 @@ export async function runGc(
     // of the plan's snapshot, so a row that appeared mid-run keeps its object.
     const twin = repo.objectsByNarHash(row.bucket, row.narHash).length > 0;
     if (!twin) {
-      await objects.delete(objectKey(row.bucket, row.narHash, row.compression));
+      await objectsOf(row.bucket).delete(objectKey(row.bucket, row.narHash, row.compression));
     }
     const report = perBucket.get(row.bucket);
     if (report !== undefined) {

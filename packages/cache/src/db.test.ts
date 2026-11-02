@@ -35,6 +35,7 @@ const bucket: BucketRow = {
   upstreamKeys: ["cache.nixos.org-1"],
   created: NOW,
   domain: null,
+  store: "local",
 };
 
 const token: TokenRow = {

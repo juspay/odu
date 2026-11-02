@@ -587,7 +587,7 @@ describe("operational lines", () => {
     expect(lines.some((line) => line.startsWith("cache.nar.served"))).toBe(false);
     await response.arrayBuffer();
     const servedLine = lines.find((line) => line.startsWith("cache.nar.served"));
-    expect(servedLine).toContain('"source":"file"');
+    expect(servedLine).toContain('"source":"object"');
     expect(servedLine).toContain(`"bytes":${hello.bytes.length}`);
     expect(servedLine).toContain('"cancelled":false');
 

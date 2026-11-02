@@ -252,6 +252,9 @@ const WEB_DAEMON_ENV_KEYS = [
   // cache's root token stays in the daemon and out of every run it launches.
   "ODU_ROOT_TOKEN",
   "ODU_CACHE_STORE",
+  // The declared object stores (a JSON file naming each store and its
+  // credentials file): read by the daemon, and like the token, never a run's.
+  "ODU_CACHE_STORES",
   // What a bucket's substituter URL is published under. Same reason as the two
   // above — the daemon is what builds that URL — and the same reason it stays
   // out of `ODU_CHILD_ENV_KEYS`: a run has no business naming the cache's
