@@ -6,8 +6,33 @@ rows import it and none owns it.
 
 | door | what | consumers |
 | --- | --- | --- |
+| `./theme.css` | **Night shift** — the tokens, the base, every primitive's look, and the layout of every screen | the bundle, through `scripts/build-web-ui.ts` |
+| `./theme` | `ThemeToggle`, `THEME_KEY`, `readTheme`, `applyTheme` — which of the two schemes is showing, and remembering it | `@odu/web-ui` (the shell) |
+| `./ui` | the primitives: `Button` `Field` `TextInput` `SearchInput` `Toggle` `Choice` `Pill` `Tag` `Stat` `Panel` `KeyValue` `CopyButton` `LaneStrip` `BackLink` `PageHead` `Confirm` `Receipt`, and `StatusHue` | every row's face, and the shell |
 | `./control` | `createControl(call)` — one control's story: idle, busy, then an answer or a refusal | `@odu/cache/face`, `@odu/auth/face`, `@odu/ci/face` |
 | `./refusal` | `refusalText(err)` — a refusal as the sentence a person reads, with the recovery when it carries one | the same three |
+
+**One stylesheet, one vocabulary.** A component here is markup and semantics
+only — not one of them names a colour, a size or a layout. The agreement
+between `./ui` and `./theme.css` is a class name, so a row that needs a new
+look needs a rule in the stylesheet rather than a style attribute in a view.
+
+**Colour carries status, and nothing else.** Green passed, amber running, red
+failed, violet errored, cyan link or selection. `Pill` is a verdict and takes
+a hue; `Tag` is a property and does not. A status is never carried by hue
+alone: every pill's marker differs in SHAPE, and every lane cell has a name.
+
+**Dark by default, light from the same tokens.** Every colour is one
+`light-dark(light, dark)` line and `color-scheme` picks the half, so the two
+themes cannot drift apart. `:root` with no `data-theme` follows the OS; the
+toggle pins it and remembers. The shell's `<head>` writes the attribute before
+the first paint, which is why `THEME_KEY` is exported and pinned by
+`packages/web-ui/src/theme.test.ts`.
+
+**The typefaces travel with the bundle.** Geist and Geist Mono come from
+nixpkgs (`nix/env.nix`'s `ODU_GEIST_FONTS`) and are content-hashed beside the
+stylesheet, never fetched from a font CDN — a tailnet-only or air-gapped board
+must render the same page as a public one.
 
 **A factory, not a store.** Each `createControl` makes its own signals inside
 the caller's owner, and `onCleanup` retires it with that owner — an answer

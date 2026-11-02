@@ -4,12 +4,16 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//": "WHAT EVERY ROW'S FACE SHARES, and nothing a server needs: the one control state machine (`./control` — idle, busy, then an answer or a refusal, retired with its owner) and the sentence a refusal becomes (`./refusal`). In NO row, after `@odu/credentials`'s precedent: two or more rows import it and none owns it. Not `@odu/cordis`, which is the contract host and rows share and must not carry a UI runtime into every server-side consumer.",
-  "//dependencies": "`solid-js` (the control's signals) and `effect` (the type of what a control runs). No `@odu/*` at all. `src/closure.test.ts` pins both.",
+  "//": "WHAT EVERY ROW'S FACE SHARES, and nothing a server needs: the design system (`./theme.css` — the Night shift tokens, and what every primitive looks like; `./theme` — which of its two schemes is showing), the primitives themselves (`./ui` — the button, the field, the pill, the panel, the lane strip, the confirmation, the receipt), the one control state machine (`./control` — idle, busy, then an answer or a refusal, retired with its owner) and the sentence a refusal becomes (`./refusal`). In NO row, after `@odu/credentials`'s precedent: two or more rows import it and none owns it. Not `@odu/cordis`, which is the contract host and rows share and must not carry a UI runtime into every server-side consumer.",
+  "//dependencies": "`solid-js` (the control's signals, and every component here) and `effect` (the type of what a control runs). No `@odu/*` at all. `src/closure.test.ts` pins both.",
+  "//theme.css": "An export so the one path to the stylesheet is in the manifest rather than in a build script's string literal. `scripts/build-web-ui.ts` reads it, rewrites the two font placeholders in it, and ships it content-hashed beside the bundle; nothing imports it as a module.",
   "sideEffects": false,
   "exports": {
     "./control": "./src/control.ts",
-    "./refusal": "./src/refusal.ts"
+    "./refusal": "./src/refusal.ts",
+    "./theme": "./src/theme.tsx",
+    "./theme.css": "./src/theme.css",
+    "./ui": "./src/ui.tsx"
   },
   "dependencies": {
     "effect": "4.0.0",

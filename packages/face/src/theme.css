@@ -1,0 +1,2177 @@
+/*
+ * NIGHT SHIFT — odu's design system, in one file.
+ *
+ * It lives in `@odu/face`, the package of NO row, for the reason the control
+ * state machine does: every row's face draws with it and none of them owns it.
+ * A row still draws its own screens (Cordis) — what it does not do is invent a
+ * second idea of what a panel, a pill or a lane cell is.
+ *
+ * ── WHAT THE DESIGN IS ────────────────────────────────────────────────────
+ *
+ * A near-black ground (`#0A0D0C`) with one typeface for prose and one for
+ * anything a person COPIES or COMPARES — a hash, a store path, a key, a
+ * duration, a platform triple. Those two are Geist and Geist Mono, bundled
+ * with the bundle (`scripts/build-web-ui.ts` reads them from nixpkgs and
+ * content-hashes them beside the stylesheet) and never fetched from a font
+ * CDN: a tailnet-only or air-gapped board must render exactly the same page.
+ *
+ * **COLOUR CARRIES STATUS, AND NOTHING ELSE.** Green passed, amber running,
+ * red failed, violet errored, cyan is a link or a selection. Everything that
+ * is not one of those — a store's name, a bucket's visibility, a token's
+ * scope — is drawn in ink, grey and shape. Two consequences worth stating,
+ * because both are departures somebody will otherwise "fix":
+ *
+ *   - the design canvas tints a bucket's STORE (orange for R2, blue for local
+ *     disk). This file does not: where a path's bytes live is not a verdict
+ *     about anything, and a page that spends amber on "R2" has spent the
+ *     colour that means "running";
+ *   - no status is carried by hue ALONE. Every pill says its state in words
+ *     and carries a marker whose SHAPE differs per hue (✔ ✗ ● ◦ ◆); every lane
+ *     cell has a title; every node row draws the TUI's own glyph. A reader who
+ *     cannot tell this green from this red still reads the board correctly.
+ *
+ * **THE LANE STRIP is the signature element.** One cell per node, one line per
+ * platform, on the board and on each run. It is the smallest drawing of "what
+ * is this pipeline doing" that still answers the question from across a desk.
+ *
+ * ── THEME ─────────────────────────────────────────────────────────────────
+ *
+ * Dark is the product. Light is the SAME tokens re-valued, not a second
+ * stylesheet: every colour is one `light-dark(light, dark)` line, so the two
+ * halves cannot drift apart the way a token added to one media block and
+ * forgotten in the other did.
+ *
+ * Which half resolves is `color-scheme`, and `:root` carries three states:
+ *
+ *   - no `data-theme`        → `dark light`: the OS decides, and a desktop with
+ *                              NO preference gets dark, which is the default
+ *                              this product is designed in;
+ *   - `data-theme="dark"`    → pinned dark;
+ *   - `data-theme="light"`   → pinned light.
+ *
+ * `./theme`'s `ThemeToggle` writes that attribute and persists the choice. The
+ * attribute is written on `<html>` before the bundle paints (see `./theme`),
+ * so a person who chose light never sees a dark frame first.
+ *
+ * ── HOW THIS FILE IS ORDERED ──────────────────────────────────────────────
+ *
+ * Four cascade layers, declared once on the next line so the order is a fact
+ * you can read rather than one you infer from line numbers:
+ *
+ *   tokens      the palette and the two typefaces — nothing that paints
+ *   base        the document: resets, the body, the focus ring
+ *   components  what a thing LOOKS like — buttons, pills, cells, panels
+ *   layout      where things GO — the frame, the grids, and the size queries
+ *
+ * A layer beats every layer named before it whatever the selectors say, which
+ * is why `layout` can put a one-class rule over a component's without either
+ * side counting specificity.
+ *
+ * ── THE TWO ACCEPTANCE GATES ──────────────────────────────────────────────
+ *
+ *   - **Every screen works down to phone width with no horizontal page
+ *     scroll.** Grids reflow; nothing is hidden, because a fact hidden on the
+ *     device somebody is holding is a fact they do not have. The two places
+ *     that scroll sideways do it INSIDE their own box: a log line and a store
+ *     path, both of which change meaning when wrapped.
+ *   - **Focus is visible.** `:focus-visible` is styled up, never off, in the
+ *     selection hue — never a status hue, because a ring that reads as "this
+ *     node failed" is worse than no ring.
+ */
+
+@layer tokens, base, components, layout;
+
+/*
+ * THE TWO TYPEFACES, BUNDLED.
+ *
+ * The VARIABLE cuts of nixpkgs' `geist-font`, converted to woff2 by
+ * `nix/overlay.nix`'s `odu-geist-fonts`: the asset pipeline precompresses
+ * TEXT siblings and would ship a `.ttf` raw, and a woff2 is a brotli'd
+ * TrueType — so the conversion is the compression the pipeline cannot do.
+ * One file per family covers every weight this page draws (400, 500, 600,
+ * 700).
+ *
+ * The two `url()`s below are BUILD PLACEHOLDERS: `scripts/build-web-ui.ts`
+ * replaces each with the content-hashed href it emitted, and fails the build
+ * if either substring is missing — a stylesheet shipped still naming a
+ * relative path no server answers is exactly the silent failure that would
+ * leave the page in a fallback face.
+ */
+@font-face {
+  font-family: "Geist";
+  src: url("./geist-sans.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("./geist-mono.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@layer tokens {
+  :root {
+    /* The OS decides, and dark wins a tie — see the header. */
+    color-scheme: dark light;
+
+    /* ── ground and paper ────────────────────────────────────────────────
+     *
+     * Four surfaces and two rules between them. `--canvas` is the page;
+     * `--panel` is anything with an edge on it; `--panel-2` is a panel's own
+     * furniture (a head, a hovered row); `--sunken` is where a MACHINE's bytes
+     * go — a log, a snippet somebody copies — and it is the one surface that
+     * stays dark in both themes, because a terminal is a terminal.
+     */
+    --canvas: light-dark(#f4f7f5, #0a0d0c);
+    --panel: light-dark(#ffffff, #0d1210);
+    --panel-2: light-dark(#eef2f0, #141a17);
+    --sunken: light-dark(#0c100e, #070908);
+    --field: light-dark(#ffffff, #0f1412);
+    --line: light-dark(#dde5e0, #1c2420);
+    --line-strong: light-dark(#c3d0c9, #2a342f);
+
+    /* ── type ─────────────────────────────────────────────────────────────
+     *
+     * Four steps of grey, and each has a job. `--ink` is what you read;
+     * `--ink-2` is a secondary FACT (a commit, a size) that must still be
+     * read; `--muted` is a label; `--quiet` is furniture — a column head, a
+     * byte offset. Nothing on this page is drawn below `--quiet`.
+     */
+    --ink: light-dark(#10201a, #e6ede9);
+    --ink-2: light-dark(#2b3a33, #c9d4ce);
+    --muted: light-dark(#48584f, #93a39b);
+    --quiet: light-dark(#5d6d66, #7a8982);
+
+    /* ── the five status hues ─────────────────────────────────────────────
+     *
+     * Each is a PAIR. `--x` paints a SURFACE — a cell, a rail, a pill's tint;
+     * `--x-ink` paints TYPE, and clears 4.5:1 on this page's smallest size in
+     * both themes. On the near-black canvas the two halves are usually the
+     * same value; on the near-white one they part company, because a hue that
+     * is fine as a bar under a heading is not fine as `exit 3`.
+     */
+    --green: light-dark(#0ca678, #2fbf7f);
+    --green-ink: light-dark(#077a58, #3ddc97);
+    --amber: light-dark(#b47500, #f2c14e);
+    --amber-ink: light-dark(#8f5d00, #f2c14e);
+    --red: light-dark(#e5484d, #ff6b5e);
+    --red-ink: light-dark(#c42a30, #ff8a7f);
+    --violet: light-dark(#7c5cff, #a98bff);
+    --violet-ink: light-dark(#6b45e8, #c2abff);
+    --cyan: light-dark(#0e9ab0, #3fd0de);
+    --cyan-ink: light-dark(#0a7385, #3fd0de);
+
+    /* SELECTION — which filter, which attempt, which node's log is open, and
+       where the keyboard is. Its own token rather than a reach for cyan at
+       each site, because the rule it encodes is a rule about MEANING:
+       selection is the one signal here that is not a status, and it may never
+       borrow a status hue. A pressed chip filled with green would read as
+       "green CI" to somebody scanning. */
+    --select: var(--cyan-ink);
+    --on-select: light-dark(#ffffff, #04140c);
+
+    /* THE ONE FILLED CONTROL. Night shift's primary action is the page
+       INVERTED — near-white on near-black, near-black on near-white — rather
+       than a coloured button, because every colour this page owns already
+       means something about a run. */
+    --brand: light-dark(#10201a, #e6ede9);
+    --brand-ink: light-dark(#f4f7f5, #0a0d0c);
+
+    /* A lane cell nothing has happened in yet, and the dashed edge of one that
+       was skipped. Structural, not a status: pending is the absence of news. */
+    --cell-idle: light-dark(#dbe3de, #26302b);
+    --cell-edge: light-dark(#b7c4bd, #3a4640);
+
+    --mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    --sans: "Geist", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  /* THE TOGGLE'S TWO PINS. `color-scheme` is the whole mechanism: every token
+     above re-resolves from it, so a theme is two declarations rather than a
+     second palette. */
+  :root[data-theme="dark"] { color-scheme: dark; }
+  :root[data-theme="light"] { color-scheme: light; }
+
+  /* THE SIXTEEN ANSI COLOURS — the CLI's own table, verbatim from
+     `packages/cli/src/logView.ts`. A recipe that prints a red FAIL prints the
+     same red whether a person reads it through `odu attach` or through this
+     page; two palettes for one byte stream would make the terminal and the
+     browser disagree about a colour the recipe chose.
+
+     CHECKED, not promised: `logView.test.ts` reads this file and pins every
+     token below to that table, in both directions. The CLI is node-side so it
+     may read the stylesheet, which is why the assertion lives over there.
+
+     Scoped to the console rather than declared on `:root`: these only ever
+     paint on `.log-text`, which is pinned dark in both themes, so a
+     light-theme variant would be a token nothing could use. */
+  .log-text {
+    --ansi-0: #3b4650;
+    --ansi-1: #e8695b;
+    --ansi-2: #6fcf8e;
+    --ansi-3: #e6b24d;
+    --ansi-4: #6a9fdc;
+    --ansi-5: #bb8ce2;
+    --ansi-6: #5ec8c4;
+    --ansi-7: #c6d2d3;
+    --ansi-8: #5d6d70;
+    --ansi-9: #ef8578;
+    --ansi-10: #8ddba6;
+    --ansi-11: #f0c46e;
+    --ansi-12: #8bb8e8;
+    --ansi-13: #cda6ec;
+    --ansi-14: #7fd8d4;
+    --ansi-15: #e8f0f0;
+  }
+}
+
+@layer base {
+  * { box-sizing: border-box; }
+
+  html { background: var(--canvas); }
+
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+    font: 0.875rem/1.55 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    /* Geist's own tabular figures, so a column of durations and byte counts
+       lines up without a second font size. */
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    color: var(--on-select);
+    background: var(--select);
+  }
+
+  a {
+    color: var(--cyan-ink);
+    text-decoration-color: color-mix(in srgb, var(--cyan-ink) 45%, transparent);
+    text-underline-offset: 0.2em;
+  }
+
+  a:hover { color: var(--cyan); }
+
+  code {
+    padding: 0.05rem 0.28rem;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel-2);
+    color: var(--ink);
+    font: 0.9em var(--mono);
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] { accent-color: var(--select); }
+
+  /* NEVER removed — see the header. The ring is what makes the keyboard path
+     the same app rather than a second, invisible one. */
+  :focus-visible {
+    outline: 2px solid var(--select);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* ── THE FONT FLOOR ───────────────────────────────────────────────────────
+   *
+   * 0.8 rem for every piece of DATA. Body sans is 0.875 rem. The only things
+   * allowed below the floor are the uppercase LABEL strips at 0.72 rem, where
+   * caps and letter-spacing carry the size back and the words are furniture
+   * rather than facts.
+   */
+
+  /* ── THE FIVE HUES, once ──────────────────────────────────────────────────
+   *
+   * One family, every consumer. `--hue` paints a SURFACE; `--hue-ink` paints
+   * TYPE. The class is emitted from one place per consumer — `./ui`'s `Pill`,
+   * the glyph spans, the lane cells, and the shell's wire — and the hue NAMES
+   * are `@odu/run-client`'s `StatusHue`, so a status carries one colour across
+   * the terminal dashboard and this page.
+   */
+  .hue-grey { --hue: var(--quiet); --hue-ink: var(--quiet); }
+  .hue-amber { --hue: var(--amber); --hue-ink: var(--amber-ink); }
+  .hue-green { --hue: var(--green); --hue-ink: var(--green-ink); }
+  .hue-red { --hue: var(--red); --hue-ink: var(--red-ink); }
+  .hue-violet { --hue: var(--violet); --hue-ink: var(--violet-ink); }
+  .hue-cyan { --hue: var(--cyan); --hue-ink: var(--cyan-ink); }
+
+  /* ── the wordmark ─────────────────────────────────────────────────────── */
+
+  .brand {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.45rem;
+    min-width: 0;
+  }
+
+  .brand-name {
+    font: 600 1.3rem/1 var(--mono);
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+
+  .brand-org {
+    font: 500 0.7rem/1 var(--mono);
+    color: var(--quiet);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ── the connection ───────────────────────────────────────────────────── */
+
+  .wire {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    /* Shrinkable to nothing, so the sentence WRAPS on a phone rather than
+       pushing the page sideways. `reconnecting — showing the last thing the
+       service said` is the longest string this app draws in its chrome, and
+       also the one nobody may be allowed to miss. */
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--hue-ink, var(--muted));
+    font: 500 0.75rem/1.5 var(--mono);
+  }
+
+  .wire::before {
+    content: "";
+    width: 0.44rem;
+    height: 0.44rem;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
+    flex: none;
+  }
+
+  /* ── controls ─────────────────────────────────────────────────────────────
+   *
+   * Mono, because every control here names a machine action. No transition and
+   * no shadow: a dashboard that shimmers while a run is in flight is a
+   * dashboard people stop watching. A 2 rem floor on the height, because these
+   * are pressed on a phone too.
+   */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    min-height: 2rem;
+    padding: 0.2rem 0.7rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: var(--panel-2);
+    color: var(--ink);
+    font: 500 0.8rem/1.4 var(--mono);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .btn:hover:not(:disabled) {
+    border-color: var(--select);
+    color: var(--ink);
+  }
+
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* THE ONE FILLED CONTROL — the page inverted. See `--brand`. */
+  .btn-primary {
+    border-color: var(--brand);
+    background: var(--brand);
+    color: var(--brand-ink);
+    font-weight: 600;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    border-color: var(--brand);
+    background: color-mix(in srgb, var(--brand) 88%, var(--select));
+    color: var(--brand-ink);
+  }
+
+  /* The one control that destroys work — "Cancel run", and a dialog's confirm.
+     Outlined rather than filled: red type on a panel is a warning, red paint
+     under white type is a primary action, and this is not one. */
+  .btn-danger {
+    border-color: color-mix(in srgb, var(--red) 55%, transparent);
+    background: transparent;
+    color: var(--red-ink);
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    border-color: var(--red);
+    background: color-mix(in srgb, var(--red) 12%, transparent);
+    color: var(--red-ink);
+  }
+
+  /* A control that reads as part of the chrome — "Dismiss", "Sign out". */
+  .btn-quiet {
+    border-color: transparent;
+    background: transparent;
+    color: var(--muted);
+  }
+
+  .btn-quiet:hover:not(:disabled) {
+    border-color: var(--line-strong);
+    color: var(--ink);
+  }
+
+  /* WHICH OF A GROUP IS CHOSEN, drawn. Styled off the ATTRIBUTE rather than a
+     class so the state a screen reader hears and the state an eye sees are one
+     fact. Filled, so the chosen one differs in WEIGHT and not only in hue —
+     and filled with the SELECTION colour rather than green, because a green
+     chip in a row of CI states reads as a verdict about the runs behind it. */
+  .btn[aria-pressed="true"] {
+    border-color: var(--select);
+    background: var(--select);
+    color: var(--on-select);
+    font-weight: 600;
+  }
+
+  .btn[aria-pressed="true"]:hover:not(:disabled) {
+    border-color: var(--select);
+    background: var(--select);
+    color: var(--on-select);
+  }
+
+  /* ── the hint a button already carries, drawn ────────────────────────────
+   *
+   * Every control with a `title` also holds a `.tip` child carrying the same
+   * sentence in `data-hint` (see `./ui`'s `Hint`), so the explanation is
+   * already in the DOM — it was just waiting on the browser's own tooltip,
+   * which takes a second to appear, cannot be styled, and never shows up for a
+   * keyboard user at all.
+   *
+   * ANY element with a `.tip` child, not `.btn` with one: how a hint is drawn
+   * is not a fact about being a button, and two of this page's controls are
+   * hand-spelled grids of labelled cells.
+   *
+   * WHY A CHILD AND NOT THE BUTTON'S OWN `::after`. Generated content is part
+   * of an element's accessible name, so a tooltip drawn as the button's
+   * pseudo-element renames the button the moment it is hovered or focused —
+   * and anything addressing it by name, a screen reader or the acceptance
+   * suite, loses it.
+   *
+   * ANCHOR POSITIONING, and only where it exists. Inside `@supports` this
+   * paints a real tooltip under the control; outside it NOTHING is drawn and
+   * the native `title` is what a person gets. One anchor name for every button
+   * on the page is only safe because of `anchor-scope`: the name is confined
+   * to the element that declares it, so a button's own tooltip is the only box
+   * that can see it. A browser with anchor names but no scoping resolves every
+   * tooltip to the LAST button that carries one — hence the `and`.
+   */
+  .tip { display: none; }
+
+  @supports (anchor-name: --x) and (anchor-scope: --x) {
+    :has(> .tip) { anchor-name: --btn; anchor-scope: --btn; }
+
+    :hover > .tip,
+    :focus-visible > .tip {
+      display: block;
+      position: fixed;
+      position-anchor: --btn;
+      top: anchor(bottom);
+      left: anchor(left);
+      position-try-fallbacks: flip-inline, flip-block;
+      margin-top: 0.35rem;
+      z-index: 5;
+      max-width: 22rem;
+      padding: 0.35rem 0.55rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      font: 400 0.8rem/1.45 var(--sans);
+      white-space: normal;
+      /* A HINT about the control, not a second control: it must never eat the
+         click aimed at the button underneath it. */
+      pointer-events: none;
+    }
+
+    .tip::after { content: attr(data-hint); }
+  }
+
+  /* ── a status, said ───────────────────────────────────────────────────────
+   *
+   * The hue is one of the five; the WORD inside is drawn in ink at full
+   * contrast, and the marker in front of it differs in SHAPE per hue — so the
+   * pill survives both a colour-blind reader and a bad monitor.
+   */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    min-height: 1.5rem;
+    padding: 0.05rem 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--hue) 45%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--hue) 13%, transparent);
+    color: var(--hue-ink);
+    font: 500 0.78rem/1.5 var(--mono);
+    white-space: nowrap;
+  }
+
+  .pill::before { font-size: 0.85em; }
+
+  /* The MARKER's shape per hue — the half of a pill that is not colour. */
+  .pill.hue-grey::before { content: "◦"; }
+  .pill.hue-amber::before { content: "●"; }
+  .pill.hue-green::before { content: "✔"; }
+  .pill.hue-red::before { content: "✗"; }
+  .pill.hue-violet::before { content: "◆"; }
+
+  /* A FACT THAT IS NOT A STATUS — a store's name, "public", a bucket's
+     visibility, a token's scope. Square rather than round, and grey rather
+     than coloured, which is the whole distinction being drawn: a pill is a
+     verdict, a tag is a property. A tag MAY take a `hue-*` class, and exactly
+     one does — a live domain, which is a status. */
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-height: 1.5rem;
+    padding: 0.05rem 0.5rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    background: var(--panel-2);
+    color: var(--ink-2);
+    font: 500 0.75rem/1.5 var(--mono);
+    white-space: nowrap;
+  }
+
+  .tag.hue-green,
+  .tag.hue-amber,
+  .tag.hue-red,
+  .tag.hue-violet {
+    border-color: color-mix(in srgb, var(--hue) 45%, transparent);
+    background: color-mix(in srgb, var(--hue) 13%, transparent);
+    color: var(--hue-ink);
+  }
+
+  /* A dot that takes its parent's colour. Used where a word already says the
+     state and the dot is only the eye's anchor. */
+  .dot {
+    width: 0.44rem;
+    height: 0.44rem;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+  }
+
+  /* ── THE LANE STRIP — the signature element ───────────────────────────────
+   *
+   * One cell per node, in pipeline order, one line per platform. It is on the
+   * board (a run's whole pipeline, at a glance, inside a list row) and on a
+   * run (the same strip, above its lane's nodes), and it is the same markup
+   * both times: a `.lane-strip` of `.cell`s with a `.lane-strip-label`.
+   *
+   * A cell is 11 px and square-ish, which is the size at which forty of them
+   * fit a board row and each is still a thing you can point at. Hue is the
+   * status pair; SHAPE carries the two states that are not a verdict —
+   * skipped is dashed and hollow, pending is flat grey — and every cell
+   * carries a `title`, because eleven pixels cannot say "e2e-web, failed".
+   */
+  .lane-strip {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .lane-strip-label {
+    flex: none;
+    width: 3.2rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--quiet);
+    font: 0.68rem/1.4 var(--mono);
+  }
+
+  .lane-cells {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .cell {
+    width: 11px;
+    height: 11px;
+    border-radius: 2px;
+    background: var(--cell-idle);
+    flex: none;
+  }
+
+  .cell.hue-green { background: var(--green); }
+  .cell.hue-red { background: var(--red); }
+  .cell.hue-amber { background: var(--amber); }
+  .cell.hue-violet { background: var(--violet); }
+  .cell.hue-grey { background: var(--cell-idle); }
+
+  /* SKIPPED is not a colour, it is an absence with an edge. */
+  .cell-skipped {
+    background: transparent;
+    outline: 1px dashed var(--cell-edge);
+    outline-offset: -1px;
+  }
+
+  /* The legend under the board, so the vocabulary is taught once on the page
+     that uses it rather than in a tooltip per cell. */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.1rem;
+    color: var(--quiet);
+    font: 0.75rem/1.5 var(--mono);
+  }
+
+  .legend > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  /* ── the TUI's glyph vocabulary ───────────────────────────────────────────
+   *
+   * A fixed column, so the glyphs stack into a readable strip down the left of
+   * a DAG rather than jittering with each id's width. The vocabulary is the
+   * terminal dashboard's.
+   */
+  .glyph {
+    flex: none;
+    width: 1rem;
+    text-align: center;
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--hue-ink);
+  }
+
+  /* A glyph in a line of RUNNING TEXT drops that fixed column, where it would
+     be a hole rather than an alignment. `:where()` adds no specificity, so
+     this is the same weight as `.glyph` and wins on order alone. */
+  :where(.lane-counts, .log-follow) .glyph { width: auto; font-size: 0.85rem; }
+
+  /* ── panels ───────────────────────────────────────────────────────────────
+   *
+   * One card, three optional parts: a head that names it, a body, and a foot
+   * of controls. Everything with an edge on this page is one of these, so a
+   * new section is a `Panel` rather than a new border radius.
+   */
+  .panel {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--panel);
+    min-width: 0;
+  }
+
+  .panel-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem 1rem;
+    padding: 0.9rem 1rem;
+  }
+
+  /* A head with a body under it needs the rule between them; a head that IS
+     the panel (a stat strip, a one-line section) must not draw one. */
+  .panel-head + * { border-top: 1px solid var(--line); }
+
+  .panel-title {
+    margin: 0;
+    font: 600 0.95rem/1.3 var(--sans);
+    letter-spacing: -0.01em;
+  }
+
+  .panel-note {
+    margin: 0.2rem 0 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
+  }
+
+  .panel-body { padding: 1rem; }
+
+  .panel-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.7rem 1rem;
+    border-top: 1px solid var(--line);
+    color: var(--quiet);
+    font: 0.75rem var(--mono);
+  }
+
+  /* A panel that is a LINK — a bucket, a machine. The whole card is the
+     control, so the hit target is the card and not a word inside it. */
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1.1rem;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--panel);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .card:hover {
+    border-color: var(--line-strong);
+    background: var(--panel-2);
+  }
+
+  /* THREE NUMBERS AND WHAT THEY COUNT. The number is mono and large because it
+     is the thing being compared across cards; the word under it is small sans
+     because it is read once. */
+  .stats-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+
+  .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+
+  .stat b {
+    font: 600 1.1rem/1.2 var(--mono);
+    color: var(--ink);
+    overflow-wrap: anywhere;
+  }
+
+  .stat span {
+    font: 0.75rem/1.3 var(--sans);
+    color: var(--quiet);
+  }
+
+  /* A LABELLED VALUE somebody copies — a substituter URL, a public key. Three
+     cells: what it is, what it is, and the button that takes it. */
+  .kv {
+    display: grid;
+    grid-template-columns: 7rem minmax(0, 1fr) auto;
+    gap: 0.5rem 0.9rem;
+    align-items: center;
+    padding: 0.7rem 1rem;
+  }
+
+  .kv + .kv { border-top: 1px solid var(--line); }
+  .kv-key { color: var(--muted); font-size: 0.8rem; }
+
+  .kv-value {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font: 0.8rem var(--mono);
+    color: var(--ink);
+  }
+
+  /* ── tabs ─────────────────────────────────────────────────────────────────
+   *
+   * Where to put a snippet — `nix.conf`, NixOS, a flake, the CLI. A real
+   * tablist, so arrow keys work and the chosen one is `aria-selected` rather
+   * than a colour. The underline is the selection hue for the same reason
+   * every other chosen thing is.
+   */
+  .tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.2rem;
+    padding: 0 0.6rem;
+  }
+
+  .tab {
+    min-height: 2.25rem;
+    padding: 0 0.7rem;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    font: 500 0.8rem var(--mono);
+    cursor: pointer;
+  }
+
+  .tab:hover { color: var(--ink); }
+
+  .tab[aria-selected="true"] {
+    color: var(--ink);
+    border-bottom-color: var(--select);
+  }
+
+  /* ── code a person copies ─────────────────────────────────────────────── */
+
+  .code,
+  .use-block {
+    margin: 0;
+    padding: 1rem 1.1rem;
+    background: var(--sunken);
+    color: light-dark(#c9d4ce, #c9d4ce);
+    font: 0.78rem/1.7 var(--mono);
+    /* The one place sideways scrolling is right: a snippet is copied, so it is
+       never re-wrapped. Scoped to this box, so the PAGE never scrolls. */
+    overflow-x: auto;
+    white-space: pre;
+    scrollbar-width: thin;
+  }
+
+  /* A snippet inside a panel takes the panel's bottom corners and nothing
+     else: two radii on one card reads as two cards. */
+  .panel > .code:last-child,
+  .panel > .use-block:last-child {
+    border-radius: 0 0 13px 13px;
+  }
+
+  /* The three parts of a YAML snippet that are not prose. Hue is NOT spent
+     here — a key is not a status — so these are greys and one warm ink that
+     exists only to separate a value from its key. */
+  .code .k { color: var(--quiet); }
+  .code .s { color: light-dark(#e3b473, #f5c77e); }
+  .code .c { color: color-mix(in srgb, var(--quiet) 75%, transparent); }
+
+  .copy { flex: none; }
+
+  /* ── fields ───────────────────────────────────────────────────────────── */
+
+  .field { display: grid; gap: 0.35rem; min-width: 0; }
+
+  .field label,
+  .field-label {
+    font: 500 0.78rem var(--mono);
+    color: var(--muted);
+  }
+
+  .hint {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.55;
+  }
+
+  /* THE BOARD'S ONE FIELD STYLE — every input, textarea and select on every
+     row's face wears it. 2.5 rem tall, because a field is the control most
+     often pressed on a phone. */
+  .input {
+    min-height: 2.5rem;
+    padding: 0.4rem 0.7rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    background: var(--field);
+    color: var(--ink);
+    font: 0.82rem var(--mono);
+  }
+
+  .input::placeholder { color: var(--quiet); }
+  .input:hover { border-color: var(--select); }
+
+  /* A search field with its magnifier — the board's filter, a bucket's paths.
+     The icon is a child rather than a background image, so it takes the theme
+     from `currentColor` like everything else. */
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 2.5rem;
+    min-width: 0;
+    padding: 0 0.75rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    background: var(--field);
+    color: var(--quiet);
+  }
+
+  .search:focus-within { border-color: var(--select); }
+
+  .search > input {
+    flex: 1 1 auto;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--ink);
+    font: 0.82rem var(--mono);
+  }
+
+  .search > input::placeholder { color: var(--quiet); }
+
+  .toggles {
+    display: grid;
+    gap: 0.15rem;
+    margin: 0;
+    padding: 0.6rem 1rem 0.85rem;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+  }
+
+  .toggles legend {
+    padding: 0 0.35rem;
+    color: var(--quiet);
+    font: 500 0.72rem var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 2rem;
+    font-size: 0.85rem;
+  }
+
+  /* A CHOICE WITH A SENTENCE UNDER IT — where a bucket's objects live. A
+     radio, drawn as the card it labels, so the explanation is part of the
+     target rather than beside it. */
+  .choice {
+    display: flex;
+    gap: 0.7rem;
+    align-items: flex-start;
+    padding: 0.8rem 0.9rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 11px;
+    background: var(--panel);
+    cursor: pointer;
+  }
+
+  .choice:hover { border-color: var(--select); }
+  .choice:has(> input:checked) {
+    border-color: var(--select);
+    background: color-mix(in srgb, var(--select) 8%, var(--panel));
+  }
+
+  .choice > input { margin-top: 0.2rem; flex: none; }
+  .choice-name { font: 600 0.85rem var(--mono); }
+  .choice-note { color: var(--muted); font-size: 0.8rem; line-height: 1.5; }
+
+  /* ── answers ──────────────────────────────────────────────────────────────
+   *
+   * What a control answered, refusal included. A left rail rather than a
+   * filled banner: this sits above a dense list and has to be noticed without
+   * pushing the work off the screen. A receipt that has been READ is clutter,
+   * so one that is an ANSWER carries its own dismissal; a pending one has
+   * none.
+   */
+  .receipt {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-start;
+    margin: 0 0 0.85rem;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--cyan-ink);
+    border-radius: 0 10px 10px 0;
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 0.83rem;
+  }
+
+  .receipt-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .receipt-dismiss { flex: none; }
+
+  .receipt-bad {
+    border-left-color: var(--red);
+    background: color-mix(in srgb, var(--red) 8%, var(--panel));
+  }
+
+  /* An empty state is an ANSWER — "nothing yet", "nothing matching", "pick a
+     node" are three different ones — so it is a panel with a dashed edge
+     rather than a stray line of grey text that reads like a page still
+     loading. */
+  .empty {
+    margin: 0;
+    padding: 1.6rem 1.2rem;
+    border: 1px dashed var(--line-strong);
+    border-radius: 12px;
+    background: var(--panel);
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  .fault { color: var(--red-ink); }
+
+  /* AN ACTION THAT READS AS TEXT — "try again", "more", "revoke". */
+  .text-action,
+  .link {
+    padding: 0;
+    background: none;
+    border: 0;
+    color: var(--cyan-ink);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .text-action:hover:not(:disabled),
+  .link:hover:not(:disabled) { color: var(--cyan); }
+  .text-action:disabled { color: var(--muted); cursor: default; }
+
+  /* ── the confirmation ─────────────────────────────────────────────────────
+   *
+   * A native `<dialog>`, so Esc closes it, the backdrop is the browser's,
+   * focus is trapped inside it and everything behind it is inert — four
+   * behaviours a hand-rolled overlay gets wrong one at a time. It stands in
+   * front of exactly one class of action: the ones that throw away work.
+   */
+  .confirm {
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    background: var(--panel);
+    color: var(--ink);
+    padding: 1.2rem 1.3rem;
+    max-width: 26rem;
+    font: 0.875rem/1.55 var(--sans);
+  }
+
+  .confirm::backdrop { background: rgb(0 0 0 / 0.6); }
+  .confirm h2 { margin: 0 0 0.5rem; font: 600 1rem var(--sans); }
+  .confirm p { margin: 0 0 1rem; color: var(--muted); }
+  .confirm-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+
+  /* ── the board's rows ─────────────────────────────────────────────────────
+   *
+   * What a row LOOKS like lives here with the node rows it mirrors; where its
+   * columns GO is in `layout`.
+   */
+
+  /* Below the font floor deliberately: caps and letter-spacing carry the size
+     back, and these are furniture rather than facts. */
+  .row-head {
+    color: var(--quiet);
+    font: 500 0.72rem/1.4 var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .row {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    border-top: 1px solid var(--line);
+    cursor: pointer;
+  }
+
+  .row:hover { background: var(--panel-2); }
+
+  .row-project {
+    font: 600 0.95rem/1.3 var(--sans);
+    overflow-wrap: anywhere;
+  }
+
+  .row-sha { font: 0.8rem var(--mono); color: var(--ink-2); }
+  .row-scope,
+  .row-took { color: var(--ink-2); font: 0.8rem/1.4 var(--mono); }
+  .row-age { color: var(--quiet); font: 0.8rem/1.4 var(--mono); }
+  /* "4 earlier" — how many runs of this checkout the board folded away. It
+     rides the age cell because that is what it is about. */
+  .row-earlier { display: block; color: var(--quiet); font: 0.78rem/1.4 var(--mono); }
+  .row-lanes { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+
+  /* ── one run's nodes ────────────────────────────────────────────────────── */
+
+  .node-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+
+  /* A run that has published no work yet gets a sentence above this list, not
+     a hairline card with nothing in it. */
+  .node-list:empty { display: none; }
+
+  .node {
+    display: flex;
+    /* WRAPS so the timeline track can take a line of its own below the row's
+       cells — which is why the track is a child of THIS box and not of the
+       button inside it. */
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    padding-right: 0.5rem;
+  }
+
+  /* Between rows rather than on top of each one, and the list has two kinds of
+     row: a node follows another node, or it follows the lane head above it. */
+  .node + .node,
+  .lane + .node { border-top: 1px solid var(--line); }
+  .node:hover { background: var(--panel-2); }
+
+  .node-open {
+    display: flex;
+    align-items: center;
+    /* WRAPPING, because the nodes panel is a column and not a page. A node id
+       is a namepath and a platform — `packages/web-acceptance/e2e@aarch64-darwin`
+       — and beside it sit an attempt, a host, a duration and an exit code.
+       Held on one line in a 26 rem column that text SHATTERS. */
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0.5rem;
+    cursor: pointer;
+  }
+
+  .node-open:disabled { cursor: default; opacity: 0.55; }
+
+  /* WHICH node's log is open. The selection colour, so being selected can
+     never be mistaken for being a status. */
+  .node-current {
+    background: var(--panel-2);
+    box-shadow: inset 2px 0 0 var(--select);
+  }
+
+  /* A basis rather than `auto`, and it is what keeps the glyph and the id on
+     ONE line. Flex breaks a line on an item's HYPOTHETICAL size, before any
+     shrinking — so an id wider than the column starts a line of its own and
+     leaves the status glyph sitting alone above it. */
+  .node-id {
+    flex: 1 1 8rem;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+  }
+
+  .node-attempt,
+  .node-host,
+  .node-duration,
+  .node-exit { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
+  .node-exit { color: var(--red-ink); }
+  .node-controls { display: flex; gap: 0.3rem; flex: none; }
+
+  /* ── the lane timeline ────────────────────────────────────────────────────
+   *
+   * A GANTT across the run: a bar sits WHERE its node ran, so two lanes that
+   * overlap are drawn overlapping and the critical path is the bar nothing is
+   * beside. The geometry is `@odu/service-client/board`'s `laneSpan`; this
+   * file only paints what it is told.
+   *
+   * ONE BOX, and that is the whole rule. The track is a child of `.node` — the
+   * ROW — and takes a line of its own (`flex-basis: 100%`, a late `order`).
+   * The row's own box does not vary, and the axis gets the IDENTICAL inset so
+   * its last tick lands exactly where a full-length bar ends.
+   */
+  .node-track,
+  .node-axis-track {
+    position: relative;
+    flex-basis: 100%;
+    order: 9;
+    min-width: 0;
+    /* A bar clamped to the track's end still carries `min-width`, and without
+       this it would paint past the edge the axis marks as the run's total. */
+    overflow: hidden;
+  }
+
+  .node-track {
+    height: 0.4rem;
+    margin: 0 0 0.4rem 0.5rem;
+    border-radius: 3px;
+    /* NOT `--panel-2`: that is what `.node:hover` and `.node-current` paint the
+       row with, so an empty track — the signal that a lane never started —
+       would disappear under a pointer and under the selected row. */
+    background: var(--line);
+  }
+
+  /* The hue is the `hue-*` class's own — the SAME pair the glyph beside it
+     wears, so a bar and its glyph can never disagree. A floor on the width
+     keeps a one-second lane in a ten-minute run visible: a bar rounded away to
+     nothing says the node never ran. */
+  .node-bar {
+    position: absolute;
+    inset-block: 0;
+    min-width: 2px;
+    border-radius: 3px;
+    background: var(--hue-ink, var(--muted));
+    opacity: 0.75;
+  }
+
+  /* A node still going has not finished where its bar currently reaches, and a
+     solid fill would claim it had. The whole bar is hatched — not just a tail
+     — because every millisecond of it is provisional. */
+  .node-bar-running {
+    background: repeating-linear-gradient(
+      135deg,
+      var(--hue-ink, var(--muted)) 0 4px,
+      transparent 4px 8px
+    );
+    opacity: 0.85;
+  }
+
+  /* The scale, once per list rather than once per row. `aria-hidden` in the
+     markup: it is furniture a sighted reader measures bars against, and four
+     bare durations announced before a DAG would be noise. The padding is the
+     row's inset, spelled as padding because this li has no button to hold it. */
+  .node-axis {
+    display: flex;
+    padding: 0.2rem 0.5rem 0;
+  }
+
+  .node-axis-track { height: 0.9rem; }
+
+  .node-axis-tick {
+    position: absolute;
+    top: 0;
+    color: var(--quiet);
+    font: 0.65rem var(--mono);
+    white-space: nowrap;
+    /* Each label hangs from its own mark, and the two at the ends would
+       otherwise overflow the panel. */
+    transform: translateX(-50%);
+  }
+
+  .node-axis-tick:first-child { transform: none; }
+  .node-axis-tick:last-child { transform: translateX(-100%); }
+
+  /* A LANE — one platform's worth of the DAG, headed by the machine it is
+     running on, the strip of what it has done, and the button that drops the
+     whole lane. It is a row in the same list as the nodes it heads, so a
+     person reads "this platform, on this host, and here is its work"
+     downwards. */
+  .lane {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.55rem 0.6rem;
+    background: var(--panel-2);
+    border-top: 1px solid var(--line);
+    font: 600 0.8rem var(--mono);
+  }
+
+  .lane-platform { color: var(--ink); white-space: nowrap; }
+  .lane-host { color: var(--muted); font-weight: 400; }
+
+  /* The counts push everything after them to the right edge, so the lane's
+     cancel button lands in one column down the list however wide the names. */
+  .lane-counts {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-right: auto;
+    color: var(--muted);
+    font-weight: 400;
+  }
+
+  .lane-counts > span { display: inline-flex; align-items: center; gap: 0.2rem; }
+
+  /* ── the console ──────────────────────────────────────────────────────────
+   *
+   * The output panel is one card: a bar of controls over a console, and a bar
+   * of paging under it. The frame is what says "this text is a machine's".
+   */
+  .log-body {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+
+  /* The head over the pane and its MIRROR under it, one bar written once.
+     Paging belongs at the END of a log for the same reason a book's page
+     number does: it is what you reach for once you have run out of text. */
+  .log-head,
+  .log-foot {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    padding: 0.6rem 0.8rem;
+    background: var(--panel-2);
+  }
+
+  .log-head { border-bottom: 1px solid var(--line); }
+  .log-foot { border-top: 1px solid var(--line); }
+
+  /* Whether this pane is still following the tail — and, when it is not, the
+     way back. A log that stopped moving because the reader scrolled up looks
+     exactly like a log that stopped because the recipe did. */
+  .log-follow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-left: auto;
+    color: var(--muted);
+    font: 0.78rem var(--mono);
+  }
+
+  .log-head h3 {
+    margin: 0;
+    font: 600 0.85rem/1.4 var(--mono);
+    overflow-wrap: anywhere;
+  }
+
+  .log-meta { color: var(--muted); font: 0.78rem var(--mono); margin-right: auto; }
+
+  /* The attempt picker and the page-window readout. Both are FACTS rather than
+     decoration — the window offsets are the same byte offsets `odu logs
+     --offset` takes, and a person copying one needs the digits to line up. */
+  .attempts { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .log-page { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
+
+  /* Inside the card the panel IS the frame, so the empty state drops its own:
+     a dashed box within a bordered box reads as two panels. */
+  .log-body .empty,
+  .log-body .fault {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    font-size: 0.8rem;
+  }
+
+  /* A CONSOLE, in both themes — a log is a machine's output and reads as one.
+     `color-scheme` is pinned with it so the scrollbar belongs to the box
+     rather than to the page around it. */
+  .log-text {
+    color-scheme: dark;
+    margin: 0;
+    padding: 0.9rem 1rem;
+    background: #070908;
+    color: #b9c7c0;
+    font: 0.78rem/1.65 var(--mono);
+    /* The one place sideways scrolling is right: a log line is a log line, and
+       wrapping one changes what it says. Scoped to this box. */
+    overflow: auto;
+    max-height: 60vh;
+    white-space: pre;
+    scrollbar-width: thin;
+
+    /* What a recipe's own colours become. The classes are the 16 ANSI slots
+       and nothing else — the meaning of "red" in a log belongs to the program
+       that printed it. */
+    .ansi-0 { color: var(--ansi-0); }
+    .ansi-1 { color: var(--ansi-1); }
+    .ansi-2 { color: var(--ansi-2); }
+    .ansi-3 { color: var(--ansi-3); }
+    .ansi-4 { color: var(--ansi-4); }
+    .ansi-5 { color: var(--ansi-5); }
+    .ansi-6 { color: var(--ansi-6); }
+    .ansi-7 { color: var(--ansi-7); }
+    .ansi-8 { color: var(--ansi-8); }
+    .ansi-9 { color: var(--ansi-9); }
+    .ansi-10 { color: var(--ansi-10); }
+    .ansi-11 { color: var(--ansi-11); }
+    .ansi-12 { color: var(--ansi-12); }
+    .ansi-13 { color: var(--ansi-13); }
+    .ansi-14 { color: var(--ansi-14); }
+    .ansi-15 { color: var(--ansi-15); }
+    .ansi-b { font-weight: 700; }
+    .ansi-d { opacity: 0.6; }
+  }
+
+  /* WRAPPED, when the reader asks. The default above is right, but a stack
+     trace in a narrow pane is unreadable behind a horizontal scrollbar, and
+     `anywhere` is what breaks the unbroken 400-character token a build tool
+     prints. */
+  .log-text.log-wrap {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  /* ── lists of facts ───────────────────────────────────────────────────────
+   *
+   * Tokens, people, paths, venues, routes: five lists with one grammar — a
+   * line per thing, a hairline between, the identifying string in mono on the
+   * left and its controls on the right.
+   */
+  .facts,
+  .tokens,
+  .people,
+  .venues,
+  .paths,
+  .buckets {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+  }
+
+  .tokens li,
+  .people li,
+  .venues li,
+  .facts li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .buckets li + li,
+  .paths li + li { border-top: 1px solid var(--line); }
+
+  .paths li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 0.55rem 1rem;
+  }
+
+  /* A store path is a store path: it wraps nowhere and scrolls within its own
+     line, which is the one place this page allows a sideways scroll. */
+  .paths .path {
+    overflow-x: auto;
+    white-space: nowrap;
+    font: 0.78rem var(--mono);
+    scrollbar-width: thin;
+  }
+
+  /* The dim half of a store path — the hash nobody reads — so the NAME is what
+     the eye lands on. */
+  .path-hash { color: var(--quiet); }
+
+  .bucket-facts,
+  .fact-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.9rem;
+    color: var(--muted);
+    font: 0.78rem var(--mono);
+  }
+
+  .stats { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 0.9rem; margin: 0; }
+  .stats dt { font: 500 0.78rem var(--mono); color: var(--muted); }
+  .stats dd { margin: 0; font: 0.78rem var(--mono); color: var(--ink); }
+
+  /* ── the commit a run tested, and the branch it was on ────────────────────
+   *
+   * ONE spelling for both views: the board row and the run header name the
+   * same fact. `+dirty` is amber and not muted because it is a caveat on the
+   * ref beside it — the ref alone would claim this run tested that commit, and
+   * it did not.
+   */
+  .branch { color: var(--muted); font-weight: 400; margin-left: 0.4rem; }
+  .dirty { color: var(--amber-ink); margin-left: 0.3rem; }
+
+  /* ── STATE MOTION, and nothing else ───────────────────────────────────────
+   *
+   * The one thing an operator has to tell apart at a glance is a run that is
+   * MOVING from a run that is STUCK, and those look identical in a still
+   * frame. So the running glyph, the running pill's marker, a running lane
+   * cell and a live run's left rail breathe — slowly, on opacity alone, at a
+   * rate closer to a heartbeat than to a spinner. Nothing else on this page
+   * moves. Motion here MEANS something, which it stops doing the moment it is
+   * also decoration.
+   *
+   * Under `prefers-reduced-motion` the whole block is absent and the page is
+   * exactly the page it was — the state is still in the words, the glyph, the
+   * cell's hue and the rail.
+   */
+  @media (prefers-reduced-motion: no-preference) {
+    @keyframes odu-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    /* The amber pill's marker pulses only where amber MEANS live: the board
+       row's status cell. Every amber pill used to breathe, which put a
+       heartbeat on a row's "3 unposted" — a debt sitting perfectly still. */
+    .glyph.hue-amber,
+    .cell.hue-amber,
+    .row-status .pill.hue-amber::before,
+    .row-running::before,
+    .row-provisioning::before {
+      animation: odu-pulse 1.8s ease-in-out infinite;
+    }
+  }
+}
+
+@layer layout {
+  /* ── THE FRAME ────────────────────────────────────────────────────────────
+   *
+   * A rail of rows on the left, the screen on the right. The rail is where
+   * "what is this server doing" lives — which rows exist, what each is saying,
+   * who you are — and it stays put while a screen changes, because the counts
+   * on it are the reason a person leaves a page.
+   *
+   * `flex-wrap` and two very different `flex-grow`s, rather than a media
+   * query: the rail asks for 15 rem and the screen asks for 40 rem, so they
+   * sit side by side when there is room for both and the rail becomes a band
+   * across the top when there is not. One rule, no breakpoint to get wrong,
+   * and the phone layout is the same layout.
+   */
+  .app {
+    display: flex;
+    flex-wrap: wrap;
+    min-height: 100vh;
+    min-height: 100dvh;
+    background: var(--canvas);
+  }
+
+  .sidebar {
+    flex: 1 1 15rem;
+    max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    padding: 1.3rem 1rem;
+    border-right: 1px solid var(--line);
+  }
+
+  .sidebar-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0 0.5rem;
+  }
+
+  .nav {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+
+  /* A row of the rail. A real `<button>` (they are states of one page, not
+     documents), so `aria-pressed` carries which one is showing and the
+     keyboard reaches them all. The chosen one takes a cyan edge on its inside
+     left — the selection hue, never a status one. */
+  .nav-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 2.5rem;
+    width: 100%;
+    padding: 0 0.75rem;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--muted);
+    font: 500 0.875rem var(--sans);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .nav-item:hover { background: var(--panel-2); color: var(--ink); }
+
+  .nav-item[aria-pressed="true"] {
+    background: var(--panel-2);
+    color: var(--ink);
+    box-shadow: inset 2px 0 0 var(--select);
+  }
+
+  /* WHAT THAT ROW IS SAYING right now — "2 failing", "3 buckets", "connected".
+     The one place in the rail a status hue is spent, and it is spent on a
+     count that IS a status. */
+  .nav-count {
+    flex: none;
+    color: var(--hue-ink, var(--quiet));
+    font: 0.75rem var(--mono);
+  }
+
+  /* WHO IS SIGNED IN, at the foot of the rail, where an account lives in every
+     application a person has ever used. */
+  .whoami {
+    margin-top: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    min-width: 0;
+  }
+
+  .avatar {
+    flex: none;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    background: var(--panel-2);
+    display: grid;
+    place-items: center;
+    font: 600 0.8rem var(--sans);
+    color: var(--muted);
+  }
+
+  .whoami-who {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .whoami-name {
+    font: 600 0.82rem var(--sans);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .whoami-role { font: 0.7rem var(--mono); color: var(--quiet); }
+
+  .main {
+    flex: 999 1 40rem;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    padding: 1.75rem 1.5rem 4rem;
+  }
+
+  /* ── a screen's head ──────────────────────────────────────────────────────
+   *
+   * The title, one sentence of what this page is or how it is doing, and the
+   * actions that belong to the whole screen. The actions wrap under the title
+   * rather than squeezing it, because a title that has been crushed to two
+   * characters is a page nobody can navigate.
+   */
+  .page-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .page-head h1 {
+    margin: 0;
+    font: 600 1.75rem/1.2 var(--sans);
+    letter-spacing: -0.025em;
+    overflow-wrap: anywhere;
+  }
+
+  /* A bucket and a run are NAMED BY A STRING A MACHINE CHOSE, so their titles
+     are mono — the name is a thing you compare and paste, not a phrase. */
+  .page-head h1.mono { font-family: var(--mono); letter-spacing: -0.03em; }
+
+  .page-sub {
+    margin: 0.4rem 0 0;
+    color: var(--muted);
+    font-size: 0.93rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.2rem 1.1rem;
+  }
+
+  /* A COUNT inside a screen's sub line. The sentence around it is prose and
+     grey; the numbers in it are DATA, so they take the mono face and full ink
+     — the same treatment `Stat` gives a number, because they are the same
+     numbers read in a narrower place. */
+  .page-sub b {
+    font: 600 0.93rem var(--mono);
+    color: var(--ink);
+  }
+
+  .page-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+  /* The way back, above the head. A link and not a button: it goes somewhere.
+     Mono, small, and never more than one — a trail of four crumbs on a board
+     with three screens is furniture pretending to be navigation. */
+  .back {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 2rem;
+    align-self: flex-start;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font: 0.8rem var(--mono);
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .back:hover { color: var(--ink); }
+
+  /* The filter bar: a search that grows, chips that do not. */
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .toolbar .search { flex: 1 1 16rem; }
+  .filters { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+
+  /* ── the board ────────────────────────────────────────────────────────────
+   *
+   * One geometry, two users: the column heads and the rows beneath them,
+   * written once so a column cannot drift out from under its own label.
+   *
+   * SEVEN columns — checkout, commit, pipeline, status, attention, took, age.
+   * `took` is the run's own DURATION and `age` is how long ago it started, two
+   * different questions, which is why neither cell can answer for the other.
+   * The PIPELINE column is the lane strip, and it is the widest one: it is the
+   * column that answers "what is this run doing" without a click.
+   */
+  .board-rows {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+
+  .row,
+  .row-head {
+    display: grid;
+    grid-template-columns:
+      minmax(8rem, 1.3fr) minmax(5.5rem, 0.6fr) minmax(8rem, 1.6fr)
+      8rem minmax(5rem, 0.7fr) 4.5rem 5rem;
+    gap: 0.6rem;
+    align-items: center;
+  }
+
+  /* `aria-hidden` in the markup says the heads are a visual guide and nothing
+     else — the rows are buttons rather than a table, so a handful of stray
+     nouns announced ahead of them would be noise to a screen reader. */
+  .row-head { padding: 0.75rem 1rem; }
+
+  .row {
+    /* `relative` is here rather than beside the rail it positions, because it
+       is this element's own box that is being established. */
+    position: relative;
+    width: 100%;
+    text-align: left;
+    padding: 0.8rem 1rem;
+  }
+
+  .row:first-of-type { border-top: 0; }
+
+  /* THE ROW'S LEFT RAIL: a run that is MOVING and a run that is BROKEN are the
+     two a person scanning is looking for, and both are visible from the edge
+     of the row before any word is read. Red is written after amber
+     deliberately — a live run with a failure in it is a failure. */
+  .row-running::before,
+  .row-provisioning::before,
+  .row-red::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--amber);
+  }
+
+  .row-red::before { background: var(--red); }
+
+  .row-checkout { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .row-attention { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+
+  /* ── one run ──────────────────────────────────────────────────────────────
+   *
+   * The nodes and the console, side by side — and the switch to stacked is a
+   * CONTAINER query rather than a viewport one, because what decides it is how
+   * much room this body has, not how wide the window is.
+   */
+  .detail {
+    container-type: inline-size;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .detail-sub { font-family: var(--mono); font-size: 0.8rem; overflow-wrap: anywhere; }
+  .detail-ref { color: var(--ink); font: 0.85rem var(--mono); }
+  .detail-scope { color: var(--muted); font: 0.8rem var(--mono); }
+  .detail-parent { color: var(--violet-ink); font: 0.8rem var(--mono); }
+  .detail-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+  .detail-body {
+    display: grid;
+    grid-template-columns: minmax(18rem, 26rem) minmax(0, 1fr);
+    gap: 1.25rem;
+    align-items: start;
+  }
+
+  .nodes,
+  .log { min-width: 0; }
+  .nodes { display: flex; flex-direction: column; gap: 0.75rem; }
+
+  /* ── THE APP FRAME, for the detail route only ─────────────────────────────
+   *
+   * Two pages, two ways of using a screen. The BOARD is scanned: it is a list
+   * that can be any length, and the page scroll is the right way through it. A
+   * RUN is read: the thing a person came for is the log, and a log that
+   * scrolls the whole document takes the header, the node list and the rail
+   * off the top of the screen exactly when they are needed. So the detail
+   * route becomes a viewport-height frame — the chrome stays put, and the pane
+   * holding the bytes scrolls inside itself.
+   *
+   * WIDE SCREENS ONLY. On a phone the frame is the wrong trade: the header,
+   * the receipt and the node list stack above the console and leave it a few
+   * lines of a fixed-height viewport, with no way to give it more. There the
+   * page scrolls as a page and the console keeps its own 60vh cap.
+   */
+  @media (min-width: 64rem) {
+    html:has(.app-frame),
+    body:has(.app-frame) { height: 100%; }
+
+    .app-frame { height: 100dvh; }
+    .app-frame .sidebar { overflow: auto; }
+
+    .app-frame .main {
+      height: 100dvh;
+      overflow: hidden;
+      padding-bottom: 1.5rem;
+    }
+
+    .app-frame .detail { flex: 1 1 auto; min-height: 0; }
+
+    /* `min-height: 0` on every link of the chain, because a flex or grid
+       item's default minimum is its CONTENT — one un-zeroed link and a long
+       log makes the whole frame taller than the viewport instead of scrolling
+       inside it. */
+    .app-frame .detail-body {
+      flex: 1 1 auto;
+      min-height: 0;
+      grid-template-rows: minmax(0, 1fr);
+      align-items: stretch;
+    }
+
+    .app-frame .nodes { min-height: 0; overflow: auto; }
+
+    .app-frame .log,
+    .app-frame .log-body {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .app-frame .log-text {
+      flex: 1 1 auto;
+      max-height: none;
+    }
+  }
+
+  /* ── cards in a grid ──────────────────────────────────────────────────────
+   *
+   * Buckets, machines. `auto-fit` with a `min()` basis, so one card fills the
+   * row on a phone and four sit across a desktop, with no breakpoint.
+   */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr));
+    gap: 1rem;
+  }
+
+  /* ── a bucket ─────────────────────────────────────────────────────────────
+   *
+   * A wide column of what the bucket IS and a narrow one of what an
+   * administrator does to it. Same flex-basis trick as the frame: they sit
+   * side by side when both fit and stack when they do not.
+   */
+  .split {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    align-items: flex-start;
+  }
+
+  .split-main { flex: 999 1 32rem; min-width: 0; display: flex; flex-direction: column; gap: 1.25rem; }
+  .split-side { flex: 1 1 19rem; min-width: 0; display: flex; flex-direction: column; gap: 1rem; }
+
+  /* A column of controls inside a panel — a token minter, a domain, a pin. */
+  .stack { display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
+  .stack-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .stack-row > * { flex: 1 1 8rem; }
+
+  /* ── forms ────────────────────────────────────────────────────────────── */
+
+  .form {
+    display: grid;
+    gap: 1.1rem;
+    max-width: 44rem;
+    min-width: 0;
+  }
+
+  /* The submit is a BUTTON, not a banner: as a bare grid item it stretched to
+     the full width of the form, which read as a coloured bar somebody had to
+     work out was clickable. */
+  .form .btn-primary,
+  .form > button { justify-self: start; min-height: 2.5rem; padding: 0 1.2rem; }
+
+  .form-pair {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+    gap: 0.75rem;
+  }
+
+  /* A LIST DRAWN AS A GRID. The `.facts`-family lists put a hairline between
+     items because they are rows; the same list laid out as cards is not, and
+     a rule between two boxes that already have borders is a stray line. */
+  .cards li + li { border-top: 0; }
+
+  /* A PANEL THAT IS AN INVITATION rather than a record — the new-bucket form,
+     and anything else that is a blank waiting to be filled. Dashed, because
+     that is the one edge this design spends on "nothing here yet": it is the
+     same edge `.empty` wears. */
+  .panel-dashed {
+    border-style: dashed;
+    border-color: var(--line-strong);
+    background: none;
+  }
+
+  /* A CARD'S OWN HEAD — what it is on the left, what KIND of thing it is on
+     the right. The name is mono and large because it is the string a person
+     compares across cards and then types into a command. */
+  .card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-width: 0;
+  }
+
+  .card-name {
+    font: 600 1.15rem/1.25 var(--mono);
+    letter-spacing: -0.01em;
+    overflow-wrap: anywhere;
+  }
+
+  .card-url {
+    font: 0.75rem var(--mono);
+    color: var(--quiet);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* A ROW'S ADMINISTRATION — the controls a role draws below what everyone
+     reads. One grammar for every section: a small heading, the fields, one
+     button, and the answer under it. */
+  .admin-section {
+    display: grid;
+    gap: 0.6rem;
+    min-width: 0;
+  }
+
+  .admin-section h3 { margin: 0; font: 600 0.9rem var(--sans); }
+  .admin-section > button { justify-self: start; }
+  .control-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+  .field-inline { display: flex; align-items: center; gap: 0.5rem; font: 0.82rem var(--mono); }
+
+  /* ── a screen is a column ────────────────────────────────────────────────
+   *
+   * Every face's outermost element. Named per screen rather than shared,
+   * because the acceptance suite addresses them by name and because a reader
+   * opening a row's face should find its own word in the stylesheet — but
+   * they are ONE rule, because a screen is a column of panels and nothing on
+   * this board is an exception to that.
+   */
+  .board,
+  .create,
+  .ops,
+  .cache,
+  .tunnel,
+  .profile,
+  .people-page {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .board-body { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+
+  /* The board row's verdict cell. Named because it is the one place an amber
+     pill is allowed to breathe — see the motion block. */
+  .row-status { min-width: 0; }
+
+  /* The way back from a run or a bucket, when the face draws it as a line of
+     text rather than as the frame's own control. */
+  .crumbs { margin: 0; }
+
+  /* A run's header is a page head that also carries the outcome. */
+  .detail-head { align-items: flex-start; }
+
+  /* The pipeline a form is about to start, and the machines a venue offers:
+     two lists of short strings that read as a paragraph of chips. */
+  .pipeline-preview .tokens,
+  .pipeline-preview ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+
+  .venue-age { color: var(--quiet); font: 0.78rem var(--mono); }
+
+  /* A TOKEN, SHOWN ONCE. The only secret this board ever prints, so it is a
+     console rather than a field: it is read, copied and never seen again. */
+  .minted-token { border: 1px solid var(--line); border-radius: 12px; }
+
+  /* A control's own two answers, where a face draws them beside the control
+     rather than through a `Receipt`. */
+  .done { color: var(--green-ink); }
+  .refused { color: var(--red-ink); }
+
+  /* ── the sign-in screen ───────────────────────────────────────────────────
+   *
+   * Two panes: a field of lane cells that says what this server is for without
+   * a word, and the one control. The field is decorative and `aria-hidden`;
+   * it is the only decoration in this design, and it earns its place by being
+   * the product's own data structure rather than an illustration.
+   */
+  .signin {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  .signin-art {
+    flex: 1 1 22rem;
+    min-height: 14rem;
+    display: grid;
+    place-items: center;
+    padding: 3rem;
+    border-right: 1px solid var(--line);
+    overflow: hidden;
+  }
+
+  .signin-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, 14px);
+    gap: 5px;
+    max-width: 19rem;
+    opacity: 0.85;
+  }
+
+  .signin-grid .cell { width: 14px; height: 14px; border-radius: 3px; }
+
+  .signin-main {
+    flex: 1 1 24rem;
+    display: grid;
+    place-items: center;
+    padding: 3rem 1.5rem;
+  }
+
+  .signin-card {
+    width: 100%;
+    max-width: 24rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .signin-title {
+    margin: 0;
+    font: 600 1.7rem/1.2 var(--sans);
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+
+  .signin-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    min-height: 3rem;
+    border-radius: 11px;
+    border: 1px solid var(--brand);
+    background: var(--brand);
+    color: var(--brand-ink);
+    font: 600 0.95rem var(--sans);
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .signin-action:hover { color: var(--brand-ink); background: color-mix(in srgb, var(--brand) 88%, var(--select)); }
+  .signin-foot { margin: 0; color: var(--quiet); font: 0.75rem var(--mono); }
+
+  /* ── odds ─────────────────────────────────────────────────────────────── */
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* ── narrow ───────────────────────────────────────────────────────────────
+   *
+   * Three reflows, and not one of them hides a fact.
+   */
+
+  @container (max-width: 60rem) {
+    .detail-body { grid-template-columns: minmax(0, 1fr); }
+
+    /* Stacked AND inside the frame: the node list must not eat the height the
+       log came for. Two rows, the first capped at 40% of the frame — a short
+       DAG still takes only the room it needs, a hundred-node one stops at four
+       tenths and scrolls, and the console always starts at or below the bottom
+       of the list. */
+    @media (min-width: 64rem) {
+      .app-frame .detail-body {
+        grid-template-rows: minmax(0, 40%) minmax(0, 1fr);
+      }
+    }
+  }
+
+  @media (max-width: 52rem) {
+    /* The rail becomes a band. It already wrapped (see `.app`); what changes
+       is that a column of five nav rows across the top of a phone is half a
+       screen, so they become a wrapping row of chips and the account card
+       joins them instead of being pinned to a bottom that no longer exists. */
+    .sidebar {
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+      gap: 1rem;
+      padding: 0.9rem 1rem;
+    }
+
+    .nav { flex-direction: row; flex-wrap: wrap; }
+    .nav-item { width: auto; min-height: 2.25rem; }
+    .nav-item[aria-pressed="true"] { box-shadow: inset 0 -2px 0 var(--select); }
+    .whoami { margin-top: 0; }
+    .main { padding: 1.25rem 1rem 3rem; }
+    .page-head h1 { font-size: 1.45rem; }
+  }
+
+  @media (max-width: 46rem) {
+    /* Two columns instead of seven. Everything stays on screen; nothing is
+       hidden and nothing scrolls sideways — and the heads go, because a label
+       strip over a reflowed row labels the wrong cells. */
+    .row-head { display: none; }
+
+    .row {
+      grid-template-columns: minmax(0, 1fr) auto;
+      row-gap: 0.4rem;
+    }
+
+    .row-lanes,
+    .row-scope,
+    .row-attention { grid-column: 1 / -1; }
+
+    .kv { grid-template-columns: minmax(0, 1fr) auto; }
+    .kv-key { grid-column: 1 / -1; }
+
+    .signin-art { display: none; }
+  }
+}
