@@ -80,7 +80,9 @@ const F = obj("main", "f", OLD);
 const X = obj("other", "x", OLD);
 
 const objects = [A, B, C, D, E, F, X];
-const pins: PinRow[] = [{ bucket: "main", name: "keep-d", rootPaths: [D.storePath], created: OLD }];
+const pins: PinRow[] = [
+  { bucket: "main", name: "keep-d", rootPaths: [D.storePath], created: OLD, createdBy: "admin" },
+];
 
 const evicted = (plan: ReturnType<typeof planGc>, bucketName: string): string[] =>
   (plan.find((entry) => entry.bucket === bucketName)?.evict ?? []).map((row) => row.storePath);
@@ -124,7 +126,7 @@ describe("planGc", () => {
     const plan = planGc({
       buckets: [bucket],
       objects: withChild,
-      pins: [{ bucket: "main", name: "p", rootPaths: [D.storePath], created: OLD }],
+      pins: [{ bucket: "main", name: "p", rootPaths: [D.storePath], created: OLD, createdBy: "admin" }],
       now: NOW,
     });
     // `g` references the pinned `d`; that does not protect `g` (nothing keeps

@@ -62,7 +62,12 @@
 # token can already keep a closure alive by pushing it again every night, so a
 # pin is the same promise made once instead of nightly. The push itself pins
 # (`odu cache push --pin`) — one command, one token — and only when every path
-# landed. Deleting a pin stays an administrator's.
+# landed.
+#
+# It may re-point only a pin a WRITE token made. Re-pointing releases whatever
+# the pin held before, so an administrator's pin (the `release-1.0` somebody
+# asked for) answers 403 rather than being dropped by a typo in the `pin:`
+# above. Deleting a pin is an administrator's either way.
 #
 # **It proves what it pushed, where Nix will ask.** For every path the bucket
 # serves (`check.sh`): the narinfo must answer at the SUBSTITUTER URL the bucket

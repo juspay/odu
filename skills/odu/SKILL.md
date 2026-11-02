@@ -615,7 +615,9 @@ declares.
 - **GC and pins reach every bucket** (cache 4.0): retention counts from `lastWanted` —
   renewed by a push and by the `missing` query, never by a read, since reads are leaving
   odu — 90 days by default and per bucket with `cache_bucket_retention`; `cache_gc_plan`
-  is the dry run; `cache_pin_list`/`cache_pin_delete` read and drop pins; the row collects
+  is the dry run; `cache_pin_list`/`cache_pin_delete` read and drop pins (a write token may pin, and may
+  re-point only a pin a write token made, because re-pointing releases what the pin held);
+  the row collects
   every bucket daily on its own; and a collection speaks only the object store's `list`
   and `delete`, so an R2 bucket collects exactly as one on disk. The old
   last-access field is gone from a path and from `cache_stats_read`.

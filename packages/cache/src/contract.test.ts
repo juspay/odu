@@ -18,7 +18,10 @@ const LEDGER: ContractLedger = {
   "2.4": "ce07c59972729e8e",
   "3.0": "8988b569266ac6a6",
   "3.1": "585f670f12a0d425",
-  "4.0": "b67f558bd20484da",
+  // 4.0 is THIS branch's own line, not a historical one: it has never been
+  // on master, so review moving the surface inside it (a pin's `createdBy`)
+  // re-pins the fingerprint rather than inventing a 4.1 nobody ever spoke.
+  "4.0": "500e6115015b54b2",
 };
 
 describe("the cache row's contract", () => {

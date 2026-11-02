@@ -497,6 +497,7 @@ Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or 
 
 The `pin` route is the one pin verb outside the administrative surface, and it takes write scope rather than admin on purpose: a write token can already keep any closure alive forever by pushing it again, because a stored push renews a path's `lastWanted`. A pin it creates makes that same promise once instead of nightly, and it reads nothing and deletes nothing.
 
+
 Re-pointing a pin releases whatever that pin held before, so the line is drawn by who made it — `createdBy`, which `pin_list` shows. A write token may re-point a pin a write token made, and never an administrator's: a leaked CI token, or a typo in a workflow's `pin:`, must not drop `release-1.0`. Write tokens of one bucket are peers here, as they already are in pushing to it. Deleting a pin stays an administrator's either way.
 
 ## Command reference

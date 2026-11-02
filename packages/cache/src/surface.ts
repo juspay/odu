@@ -161,6 +161,11 @@ export const CachePinSchema = Schema.Struct({
    *  references from these roots, so a path added later is held too. */
   rootPaths: Schema.Array(Schema.String),
   created: Schema.Number,
+  /** WHO MADE IT, and therefore who may take it back: a pin a write token
+   *  made (a push's `--pin`) may be re-pointed by any write token of this
+   *  bucket; an administrator's may not, because re-pointing releases
+   *  whatever the pin held before. Deleting is an administrator's either way. */
+  createdBy: Schema.Literals(["write", "admin"]),
 });
 export type CachePin = typeof CachePinSchema.Type;
 
@@ -725,8 +730,11 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "WITHOUT doing it — the paths and the bytes the next collection would take,",
   "which is what to read before running one. `cache_pin_create` keeps a",
   "closure out of collection by name (re-pointing a pin of the same name),",
-  "`cache_pin_list` says what each pin holds, and `cache_pin_delete` lets one",
-  "go. `cache_bucket_paths` pages a bucket's paths newest first, and takes a",
+  "`cache_pin_list` says what each pin holds and who made it, and",
+  "`cache_pin_delete` lets one go. A pin a WRITE token made (a push's",
+  "`--pin`) may be re-pointed by a write token; an administrator's may not,",
+  "because re-pointing releases whatever the pin held before.",
+  "`cache_bucket_paths` pages a bucket's paths newest first, and takes a",
   "substring `filter` and the `after` cursor it returned. `cache_bucket_domain`",
   "gives a bucket a DNS name of its own (clear it with no `domain`); the",
   "advertised `url` becomes that name while `pushUrl` keeps the path the push",
@@ -772,7 +780,8 @@ export const CACHE_KEY = "cache";
  * by a push and by the `missing` query, never by a read. A MAJOR, because a
  * 3.x reader rendered the old field. Additive beside it: `bucket.retention`,
  * `pin.list`, `pin.delete`, `gc.plan` (the dry run), `orphans` on the GC
- * report, and `bucket.create`'s `retentionDays` is now optional (90 days).
+ * report, `createdBy` on a pin (who may re-point it), and
+ * `bucket.create`'s `retentionDays` is now optional (90 days).
  */
 export const CACHE_CONTRACT_VERSION = "4.0";
 

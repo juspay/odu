@@ -69,7 +69,9 @@
 # half-pushed closure would promise paths the bucket does not have). A write
 # token is authority enough because a write token can already keep a closure
 # alive by pushing it again every night; a pin is that same promise made once.
-# Deleting a pin stays an administrator's.
+# It re-points only a pin a WRITE token made: re-pointing releases what the
+# pin held before, so an administrator's pin answers 403 instead of being
+# dropped by a typo here. Deleting a pin stays an administrator's.
 #
 # ## It proves what it pushed, where Nix will ask
 #

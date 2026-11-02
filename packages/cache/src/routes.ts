@@ -842,7 +842,17 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
           return refused(cache, request, 'expected {"name": "…", "paths": ["/nix/store/…"]}');
         }
         const outcome = yield* Effect.promise(() => cache.pinAs(admitted.bucket, asked));
-        if (!outcome.ok) return refused(cache, request, outcome.message);
+        // 403, NOT 400, when the rule refused rather than the request: the
+        // token is real and may not move THIS pin, which is the difference
+        // between "fix your body" and "ask an administrator".
+        if (!outcome.ok) {
+          return refused(
+            cache,
+            request,
+            outcome.message,
+            outcome.code === "not_permitted" ? 403 : 400,
+          );
+        }
         return HttpServerResponse.jsonUnsafe({
           bucket: outcome.value.bucket,
           name: outcome.value.name,

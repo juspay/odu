@@ -109,14 +109,19 @@ on the wire and `cache_bucket_create` to an agent.
   `CachePurge` (`@odu/cordis`): the cloudflare row purges them at the CDN, and
   with nobody registered `announce` is a no-op — no CDN, no purge, no refusal.
   This package never names Cloudflare.
-- **A write token may pin.** `POST /_odu/v1/buckets/<bucket>/pin` with
-  `{"name": "…", "paths": ["/nix/store/…"]}` — what `odu cache push --pin NAME`
-  and the repository's push action use. The scope rule is a capability argument
-  rather than a convenience: a write token can already keep a closure alive
-  forever by pushing it again, since a stored push renews `lastWanted`, so a
-  pin it creates or re-points grants it no retention it lacked — it makes the
-  same promise once instead of nightly. DELETING a pin stays the admin
-  surface's: that is giving up retention somebody else asked for.
+- **A write token may pin — its own pins.** `POST /_odu/v1/buckets/<bucket>/pin`
+  with `{"name": "…", "paths": ["/nix/store/…"]}` — what `odu cache push --pin
+  NAME` and the repository's push action use. The scope rule is a capability
+  argument rather than a convenience: a write token can already keep a closure
+  alive forever by pushing it again, since a stored push renews `lastWanted`,
+  so a pin it creates grants it no retention it lacked — it makes the same
+  promise once instead of nightly.
+  RE-POINTING IS RELEASING, though, so the line is drawn by who made the pin
+  (`createdBy`, on the row and on `pin.list`): a write token may re-point a
+  pin a write token made, and never an administrator's — a leaked CI token or
+  a typo in a workflow's `pin:` must not drop `release-1.0`. Write tokens of
+  one bucket are peers in this, as they already are in pushing to it.
+  DELETING a pin stays the admin surface's either way.
 
 ## The row a board follows
 

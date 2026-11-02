@@ -22,7 +22,7 @@
 
 import { statfs } from "node:fs/promises";
 import { join } from "node:path";
-import type { BucketRow, BucketTotals, ObjectRow, Scope, TokenRow } from "./db";
+import type { BucketRow, BucketTotals, ObjectRow, PinAuthor, Scope, TokenRow } from "./db";
 import { cursorFor, openCacheRepo } from "./db";
 import {
   type GcBucketPlan,
@@ -124,6 +124,8 @@ export interface PinFacts {
   name: string;
   rootPaths: readonly string[];
   created: number;
+  /** The authority that made it — what decides who may re-point it. */
+  createdBy: PinAuthor;
 }
 
 export interface CacheStats {
@@ -142,6 +144,9 @@ export type CacheRefusalCode =
   | "unknown_bucket"
   | "bucket_exists"
   | "bad_input"
+  /** The credential is real and may not do THIS — a write token asked to
+   *  re-point an administrator's pin. */
+  | "not_permitted"
   | "unknown_store";
 
 export type CacheOutcome<T> =
@@ -961,7 +966,7 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      return pinChecked(bucket, input);
+      return pinChecked(bucket, input, "admin");
     },
 
     async pinList(input) {
@@ -1066,6 +1071,7 @@ export function createCache(options: CacheOptions): Cache {
   async function pinChecked(
     bucket: BucketRow,
     input: { name: string; paths: readonly string[] },
+    by: PinAuthor,
   ): Promise<CacheOutcome<PinFacts>> {
     if (input.name.trim() === "") {
       return { ok: false, code: "bad_input", message: "a pin needs a name, e.g. release-1.2" };
@@ -1073,12 +1079,34 @@ export function createCache(options: CacheOptions): Cache {
     if (input.paths.length === 0) {
       return { ok: false, code: "bad_input", message: "a pin needs at least one path" };
     }
-    return withWriteLock(() => pinNow(bucket, input));
+    // RE-POINTING IS RELEASING: the roots a pin held before are let go in the
+    // same statement, so a write token re-pointing an ADMIN's pin would undo
+    // an administrator's retention with a credential that may not delete one.
+    // A write token makes its own pins and re-points those; everything else
+    // in this bucket is an admin's to move.
+    //
+    // UNDER THE LOCK, with the write it guards: read outside it, the answer
+    // could be about a pin an admin made a moment ago.
+    return withWriteLock(async () => {
+      const held = repo.pins(bucket.name).find((pin) => pin.name === input.name.trim());
+      if (by === "write" && held !== undefined && held.createdBy === "admin") {
+        return {
+          ok: false as const,
+          code: "not_permitted" as const,
+          message:
+            `the pin "${held.name}" was made by an administrator — a write token may ` +
+            "re-point only a pin a write token made, because re-pointing releases " +
+            "whatever the pin held before",
+        };
+      }
+      return pinNow(bucket, input, by);
+    });
   }
 
   async function pinNow(
     bucket: BucketRow,
     input: { name: string; paths: readonly string[] },
+    by: PinAuthor,
   ): Promise<CacheOutcome<PinFacts>> {
     // THE CLOSURE IS THE BUCKET'S OWN ROWS: a pin holds what this cache
     // serves, so the references are followed in the metadata, not asked of a
@@ -1111,13 +1139,20 @@ export function createCache(options: CacheOptions): Cache {
       name: input.name,
       rootPaths: [...reached],
       created,
+      createdBy: by,
     });
     // A pin changes `pinnedPaths`, which is a column of the bucket's row — so
     // this is the third mutator that NOTIFIES, beside create and gc.
     notify();
     return {
       ok: true,
-      value: { bucket: bucket.name, name: input.name, rootPaths: [...reached], created },
+      value: {
+        bucket: bucket.name,
+        name: input.name,
+        rootPaths: [...reached],
+        created,
+        createdBy: by,
+      },
     };
   }
 
@@ -1541,7 +1576,7 @@ export function createCache(options: CacheOptions): Cache {
 
     collect: () => collectNow(repo.buckets()),
 
-    pinAs: (bucket, input) => pinChecked(bucket, input),
+    pinAs: (bucket, input) => pinChecked(bucket, input, "write"),
 
     admin,
 

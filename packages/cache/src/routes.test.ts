@@ -912,6 +912,56 @@ describe("a pin made with a write token", () => {
     await h.dispose();
   });
 
+  it("may not re-point an ADMIN's pin, which an admin may still re-point", async () => {
+    // RE-POINTING IS RELEASING: the roots a pin held are let go in the same
+    // statement, so a leaked CI token — or a typo in a workflow's `pin:` —
+    // must not be able to drop the retention an administrator asked for.
+    const h = await harness(true);
+    const second = "/nix/store/00000000000000000000000000000001-second";
+    expect((await upload(h.fetch, h.tokens.write, second, nar("a second NAR"))).status).toBe(200);
+    expect(
+      await h.cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "release-1.0", paths: [HELLO] }),
+    ).toMatchObject({ ok: true });
+
+    const write = bearer(h.tokens.write);
+    const stolen = await h.raw("/_odu/v1/buckets/main/pin", {
+      ...write,
+      method: "POST",
+      headers: { ...write.headers, "content-type": "application/json" },
+      body: JSON.stringify({ name: "release-1.0", paths: [second] }),
+    });
+    // 403: the token is real and may not move THIS pin.
+    expect(stolen.status).toBe(403);
+    expect(await stolen.text()).toContain("made by an administrator");
+    const held = await h.cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" });
+    if (held.ok) expect(held.value.map((one) => one.rootPaths)).toEqual([[HELLO]]);
+
+    // AN ADMIN MAY MOVE EITHER. The write token's own pin first, to prove the
+    // rule is about who made it rather than about who is asking.
+    expect(
+      (
+        await h.raw("/_odu/v1/buckets/main/pin", {
+          ...write,
+          method: "POST",
+          headers: { ...write.headers, "content-type": "application/json" },
+          body: JSON.stringify({ name: "master", paths: [HELLO] }),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      await h.cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "master", paths: [second] }),
+    ).toMatchObject({ ok: true, value: { createdBy: "admin" } });
+    expect(
+      await h.cache.admin.pin({
+        ...asRoot(ROOT),
+        bucket: "main",
+        name: "release-1.0",
+        paths: [second],
+      }),
+    ).toMatchObject({ ok: true });
+    await h.dispose();
+  });
+
   it("refuses a read token, a path the bucket lacks, and a body it cannot read", async () => {
     const h = await harness(true);
     const read = bearer(h.tokens.read);

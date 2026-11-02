@@ -255,12 +255,15 @@ describe("counting", () => {
 });
 
 describe("pins", () => {
-  it("round-trips a closure, and replaces it by name", () => {
+  it("round-trips a closure with its author, and replaces it by name", () => {
     const repo = openCacheRepo(":memory:");
-    repo.putPin({ bucket: "main", name: "release-1.2", rootPaths: ["/nix/store/a"], created: NOW });
-    repo.putPin({ bucket: "main", name: "release-1.2", rootPaths: ["/nix/store/b"], created: NOW });
+    const pin = { bucket: "main", name: "release-1.2" };
+    repo.putPin({ ...pin, rootPaths: ["/nix/store/a"], created: NOW, createdBy: "admin" });
+    // A RE-POINT CARRIES THE NEW AUTHOR: a pin is whoever last made it, and
+    // the rule about who may move it next reads that column.
+    repo.putPin({ ...pin, rootPaths: ["/nix/store/b"], created: NOW, createdBy: "write" });
     expect(repo.pins("main")).toEqual([
-      { bucket: "main", name: "release-1.2", rootPaths: ["/nix/store/b"], created: NOW },
+      { ...pin, rootPaths: ["/nix/store/b"], created: NOW, createdBy: "write" },
     ]);
     expect(repo.deletePin("main", "release-1.2")).toBe(true);
     expect(repo.deletePin("main", "release-1.2")).toBe(false);
@@ -273,7 +276,7 @@ describe("deleting a bucket", () => {
     const repo = openCacheRepo(":memory:");
     repo.putBucket(bucket);
     repo.putObject(object);
-    repo.putPin({ bucket: "main", name: "p", rootPaths: [], created: NOW });
+    repo.putPin({ bucket: "main", name: "p", rootPaths: [], created: NOW, createdBy: "admin" });
     repo.deleteBucket("main");
     expect(repo.buckets()).toHaveLength(0);
     expect(repo.objects()).toHaveLength(0);

@@ -1308,6 +1308,10 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
                       {held.rootPaths.length} path
                       {held.rootPaths.length === 1 ? "" : "s"} in its closure · pinned{" "}
                       {ago(held.created, props.now)}
+                      {/* WHO MADE IT decides who may re-point it: a pin a
+                          push made is any write token's to move, an
+                          administrator's is nobody's but an admin's. */}
+                      {held.createdBy === "write" ? " · by a push" : " · by an admin"}
                     </span>
                   </span>
                   {/* WHAT IT HOLDS, rather than that it holds something: the

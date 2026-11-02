@@ -126,6 +126,21 @@ export interface BucketTotals {
   lastPush: number | null;
 }
 
+/**
+ * WHAT AUTHORITY MADE A PIN — and therefore what may take it back.
+ *
+ * Two words, not a token id, and the choice is about what survives: a CI
+ * secret is rotated and revoked on a schedule, so a pin keyed to the token
+ * that made it would stop being re-pointable by the very job whose next push
+ * is supposed to re-point it. The question the rule actually asks is "may
+ * this caller take back this promise", and there are two answers to it.
+ *
+ * Write tokens of one bucket are PEERS here: any of them may re-point a pin
+ * another made, which is the same authority they already share — each can
+ * push any path into the bucket.
+ */
+export type PinAuthor = "write" | "admin";
+
 /** A named closure kept out of garbage collection. */
 export interface PinRow {
   bucket: string;
@@ -135,6 +150,9 @@ export interface PinRow {
    *  still protected. */
   rootPaths: readonly string[];
   created: number;
+  /** Who made it. An admin's pin is an admin's to re-point or remove; a write
+   *  token may only re-point one a write token made. */
+  createdBy: PinAuthor;
 }
 
 export interface CacheRepo {
@@ -361,6 +379,14 @@ export const MIGRATIONS: readonly string[] = [
   DROP INDEX IF EXISTS object_accessed;
   CREATE INDEX object_wanted ON object (bucket, last_wanted);
   `,
+  // Migration 14 — WHO MADE A PIN. A write token may now pin (so CI can hold
+  // its master closure), and re-pointing a pin releases whatever it held
+  // before — which on an ADMIN's pin would be a write token undoing an
+  // administrator's retention. Every pin that predates this was made with the
+  // root token or an admin's role, so that is what they are.
+  `
+  ALTER TABLE pin ADD COLUMN created_by TEXT NOT NULL DEFAULT 'admin';
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -456,6 +482,7 @@ const pinOf = (row: Row): PinRow => ({
   name: text(row, "name"),
   rootPaths: list(row, "root_paths"),
   created: integer(row, "created"),
+  createdBy: text(row, "created_by") as PinRow["createdBy"],
 });
 
 /** Open (or create) the cache database. `":memory:"` is what the suite uses.
@@ -677,10 +704,11 @@ export function openCacheRepo(path: string): CacheRepo {
 
     putPin(row) {
       db.run(
-        `INSERT INTO pin (bucket, name, root_paths, created) VALUES (?, ?, ?, ?)
+        `INSERT INTO pin (bucket, name, root_paths, created, created_by)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(bucket, name) DO UPDATE SET root_paths = excluded.root_paths,
-           created = excluded.created`,
-        [row.bucket, row.name, JSON.stringify(row.rootPaths), row.created],
+           created = excluded.created, created_by = excluded.created_by`,
+        [row.bucket, row.name, JSON.stringify(row.rootPaths), row.created, row.createdBy],
       );
     },
     pins: (bucket) =>
