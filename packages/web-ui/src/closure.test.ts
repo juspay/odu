@@ -37,6 +37,9 @@ const EXPECTED_DEPENDENCIES = [
   "@odu/ci",
   "@odu/cloudflare",
   "@odu/cordis",
+  // The design system and the primitives every face draws with — a package of
+  // no row, so the shell may name it without naming a row through it.
+  "@odu/face",
   "@odu/service-client",
   "effect",
   "solid-js",
