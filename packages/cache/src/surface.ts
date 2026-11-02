@@ -146,9 +146,28 @@ export const CachePathSchema = Schema.Struct({
   /** When the narinfo landed — what "newest first" sorts on. */
   created: Schema.Number,
   hits: Schema.Int,
-  lastAccessed: Schema.Number,
+  /** WHEN SOMEBODY LAST WANTED IT: a push, or a `missing` query that named
+   *  it. Retention counts from here, and a read never moves it — reads are
+   *  leaving odu, so the busiest paths would be the first to look idle. */
+  lastWanted: Schema.Number,
 });
 export type CachePath = typeof CachePathSchema.Type;
+
+/** One pin, and what it holds. */
+export const CachePinSchema = Schema.Struct({
+  bucket: Schema.String,
+  name: Schema.String,
+  /** The closure resolved at pin time. GC also walks the bucket's own
+   *  references from these roots, so a path added later is held too. */
+  rootPaths: Schema.Array(Schema.String),
+  created: Schema.Number,
+  /** WHO MADE IT, and therefore who may take it back: a pin a write token
+   *  made (a push's `--pin`) may be re-pointed by any write token of this
+   *  bucket; an administrator's may not, because re-pointing releases
+   *  whatever the pin held before. Deleting is an administrator's either way. */
+  createdBy: Schema.Literals(["write", "admin"]),
+});
+export type CachePin = typeof CachePinSchema.Type;
 
 // ── the refusal ─────────────────────────────────────────────────────────────
 
@@ -200,7 +219,9 @@ const CreateInputSchema = Schema.Struct({
   name: CheckedName,
   /** A public bucket reads without a token; a private one needs read scope. */
   public: Schema.Boolean,
-  retentionDays: Schema.Int,
+  /** Days from `lastWanted`. Absent is {@link DEFAULT_RETENTION_DAYS}, and a
+   *  bucket changes its mind with `bucket.retention`. */
+  retentionDays: Schema.optionalKey(Schema.Int),
   /** Defaults to `["cache.nixos.org-1"]` — the filter that keeps nixpkgs out
    *  of a bucket. An empty list takes everything. */
   upstreamKeys: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -251,18 +272,36 @@ const TokenRevokeOutputSchema = Schema.Struct({
   revoked: Schema.Boolean,
 });
 
+const RetentionInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  bucket: Schema.String,
+  /** Days from `lastWanted`. Zero expires everything nothing references and
+   *  no pin holds. */
+  retentionDays: Schema.Int,
+});
+
 const PinInputSchema = Schema.Struct({
   rootToken: Schema.String,
   bucket: Schema.String,
   name: CheckedName,
   paths: Schema.Array(Schema.String),
 });
-const PinOutputSchema = Schema.Struct({
+/** What a pin answers: the row itself — the same shape `pin.list` carries,
+ *  so a face renders one list whether it just made the pin or read it. */
+const PinOutputSchema = CachePinSchema;
+const PinListInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  bucket: Schema.String,
+});
+const PinListOutputSchema = Schema.Struct({ pins: Schema.Array(CachePinSchema) });
+const PinDeleteInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  bucket: Schema.String,
+  name: CheckedName,
+});
+const PinDeleteOutputSchema = Schema.Struct({
   bucket: Schema.String,
   name: Schema.String,
-  /** The closure resolved at pin time. */
-  rootPaths: Schema.Array(Schema.String),
-  created: Schema.Number,
 });
 
 const GcInputSchema = Schema.Struct({
@@ -273,17 +312,46 @@ const GcInputSchema = Schema.Struct({
 const GcBucketSchema = Schema.Struct({
   bucket: Schema.String,
   evicted: Schema.Int,
-  /** Rows dropped whose bytes another root on this machine still holds. */
+  /** Rows dropped whose bytes a TWIN row still names: the narinfo went, the
+   *  object stayed. */
   kept: Schema.Int,
   bytes: Schema.Int,
+  /** Object keys the store held that no row named — a put whose record never
+   *  landed, found by listing the bucket's own prefix. */
+  orphans: Schema.Int,
 });
 const GcOutputSchema = Schema.Struct({
   buckets: Schema.Array(GcBucketSchema),
   evicted: Schema.Int,
   kept: Schema.Int,
   bytes: Schema.Int,
+  orphans: Schema.Int,
 });
 export type CacheGcReport = typeof GcOutputSchema.Type;
+
+/** THE DRY RUN: what the next collection would do, and nothing done. */
+const GcPlanBucketSchema = Schema.Struct({
+  bucket: Schema.String,
+  /** The WHOLE count and total, however many paths are listed below. */
+  evicted: Schema.Int,
+  bytes: Schema.Int,
+  remaining: Schema.Int,
+  /** A readable head of them, oldest want first — the row decides how many,
+   *  and `evicted` above is the whole count either way. */
+  paths: Schema.Array(
+    Schema.Struct({
+      storePath: Schema.String,
+      bytes: Schema.Int,
+      lastWanted: Schema.Number,
+    }),
+  ),
+});
+const GcPlanOutputSchema = Schema.Struct({
+  buckets: Schema.Array(GcPlanBucketSchema),
+  evicted: Schema.Int,
+  bytes: Schema.Int,
+});
+export type CacheGcPlan = typeof GcPlanOutputSchema.Type;
 
 const StatsInputSchema = Schema.Struct({ rootToken: Schema.String });
 const StatsOutputSchema = Schema.Struct({
@@ -291,8 +359,9 @@ const StatsOutputSchema = Schema.Struct({
   objects: Schema.Int,
   bytes: Schema.Int,
   hits: Schema.Int,
-  /** The newest read across the whole cache; null when it holds nothing. */
-  lastAccessed: Schema.NullOr(Schema.Number),
+  /** The newest RENEWAL across the whole cache — a push or a `missing` query;
+   *  null when it holds nothing. */
+  lastWanted: Schema.NullOr(Schema.Number),
 });
 export type CacheStats = typeof StatsOutputSchema.Type;
 
@@ -323,6 +392,17 @@ export type CachePaths = typeof PathsOutputSchema.Type;
  *  without a scroll, and what a person reading a bucket wants before deciding to
  *  filter. Here because the VERB's page and the VIEW's page are one number. */
 export const PATH_PAGE_SIZE = 100;
+
+/**
+ * HOW LONG A BUCKET KEEPS WHAT NOBODY WANTS, when its creator says nothing.
+ *
+ * Ninety days from `lastWanted` — a quarter, which is longer than any release
+ * cycle a cache is warming for and short enough that an abandoned project
+ * stops costing disk. Each bucket overrides it (`bucket.retention`), and zero
+ * means "keep only what is referenced or pinned", which is what the e2e suite
+ * uses to make a collection deterministic.
+ */
+export const DEFAULT_RETENTION_DAYS = 90;
 
 /**
  * HOW BIG ONE UPLOAD REQUEST MAY BE.
@@ -493,8 +573,11 @@ export function actionsPushBlock(input: {
     origin: ${input.origin.replace(/\/$/, "")}
     bucket: ${input.bucket}
     token: \${{ secrets.ODU_CACHE_TOKEN }}
-    paths: |
-      .#your-package
+    # No \`paths\`: every package, dev shell and check of this flake, for the
+    # runner's system. Name \`paths\` to push only what you name. \`pin\` holds
+    # what this push landed, under a name derived from the repository, the
+    # ref and the system.
+    pin: \${{ github.ref_name == github.event.repository.default_branch }}
 `;
 }
 
@@ -549,6 +632,7 @@ export const oduCacheSurface = defineSurface({
       },
       domain: { input: DomainInputSchema, output: CacheBucketSchema, error: REFUSES },
       paths: { input: PathsInputSchema, output: PathsOutputSchema, error: REFUSES },
+      retention: { input: RetentionInputSchema, output: CacheBucketSchema, error: REFUSES },
     },
     token: {
       mint: { input: TokenMintInputSchema, output: TokenMintOutputSchema, error: REFUSES },
@@ -561,9 +645,13 @@ export const oduCacheSurface = defineSurface({
     },
     pin: {
       create: { input: PinInputSchema, output: PinOutputSchema, error: REFUSES },
+      list: { input: PinListInputSchema, output: PinListOutputSchema, error: REFUSES },
+      delete: { input: PinDeleteInputSchema, output: PinDeleteOutputSchema, error: REFUSES },
     },
     gc: {
       run: { input: GcInputSchema, output: GcOutputSchema, error: REFUSES },
+      /** THE DRY RUN, and a READ: it changes nothing. */
+      plan: { input: GcInputSchema, output: GcPlanOutputSchema, error: REFUSES },
     },
     stats: {
       read: { input: StatsInputSchema, output: StatsOutputSchema, error: REFUSES },
@@ -583,9 +671,10 @@ export type OduCacheSurface = typeof oduCacheSurface;
  * reads the collection. The names fall out of the framework's own derivation —
  * `<namespace>_<verb>`, with the sibling key in front when the row is composed —
  * so the cache answers `cache_bucket_create`, `cache_bucket_list`,
- * `cache_bucket_describe`, `cache_bucket_paths`, `cache_token_mint`,
- * `cache_token_list`, `cache_token_revoke`, `cache_pin_create`, `cache_gc_run`
- * and `cache_stats_read`.
+ * `cache_bucket_describe`, `cache_bucket_paths`, `cache_bucket_retention`,
+ * `cache_token_mint`, `cache_token_list`, `cache_token_revoke`,
+ * `cache_pin_create`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan`,
+ * `cache_gc_run` and `cache_stats_read`.
  *
  * `buckets` is a RESOURCE because the board subscribes to it; `paths` is not,
  * because its input is an address (a bucket name and a page cursor) and a stream
@@ -603,10 +692,16 @@ export const ODU_CACHE_EXPOSE = {
   "bucket.describe": { tool: { mutates: false } },
   "bucket.domain": { tool: { mutates: true } },
   "bucket.paths": { tool: { mutates: false } },
+  "bucket.retention": { tool: { mutates: true } },
   "token.mint": { tool: { mutates: true } },
   "token.list": { tool: { mutates: false } },
   "token.revoke": { tool: { mutates: true } },
   "pin.create": { tool: { mutates: true } },
+  "pin.list": { tool: { mutates: false } },
+  "pin.delete": { tool: { mutates: true } },
+  // THE DRY RUN IS A READ: an agent may ask what a collection would evict
+  // without a confirmation, and must not run one without.
+  "gc.plan": { tool: { mutates: false } },
   "gc.run": { tool: { mutates: true } },
   "stats.read": { tool: { mutates: false } },
 } as const satisfies ExposeMap<(typeof oduCacheSurface)["spec"]>;
@@ -625,9 +720,19 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "publishes to every client that can read it anyway. `cache_bucket_create`",
   "answers a substituter URL and a public key; `cache_token_mint` answers a",
   "plaintext token ONCE (only its hash is kept) and is the credential a pusher",
-  "uses; `cache_pin_create` keeps a closure out of `cache_gc_run`, which evicts",
-  "only what retention has expired AND nothing retained references AND no pin",
-  "holds. `cache_bucket_paths` pages a bucket's paths newest first, and takes a",
+  "uses. RETENTION is a bucket's own number of days (`cache_bucket_retention`,",
+  "90 by default), counted from the last time somebody WANTED a path — a push",
+  "of it, or a `missing` query naming it. A read never renews it.",
+  "`cache_gc_run` evicts only what retention has expired AND nothing retained",
+  "references AND no pin holds; `cache_gc_plan` answers the same decision",
+  "WITHOUT doing it — the paths and the bytes the next collection would take,",
+  "which is what to read before running one. `cache_pin_create` keeps a",
+  "closure out of collection by name (re-pointing a pin of the same name),",
+  "`cache_pin_list` says what each pin holds and who made it, and",
+  "`cache_pin_delete` lets one go. A pin a WRITE token made (a push's",
+  "`--pin`) may be re-pointed by a write token; an administrator's may not,",
+  "because re-pointing releases whatever the pin held before.",
+  "`cache_bucket_paths` pages a bucket's paths newest first, and takes a",
   "substring `filter` and the `after` cursor it returned. `cache_bucket_domain`",
   "gives a bucket a DNS name of its own (clear it with no `domain`); the",
   "advertised `url` becomes that name while `pushUrl` keeps the path the push",
@@ -667,8 +772,16 @@ export const CACHE_KEY = "cache";
  * 3.1: a bucket lives in a STORE — the row's `store`, `bucket.create`'s
  * optional `store`, and the `stores` cell naming what this daemon declared.
  * Additive: a 3.0 reader ignores the field and never asks for the cell.
+ *
+ * 4.0: RETENTION RUNS ON `lastWanted`. `CachePath.lastAccessed` and
+ * `stats.read`'s `lastAccessed` are gone, replaced by `lastWanted` — renewed
+ * by a push and by the `missing` query, never by a read. A MAJOR, because a
+ * 3.x reader rendered the old field. Additive beside it: `bucket.retention`,
+ * `pin.list`, `pin.delete`, `gc.plan` (the dry run), `orphans` on the GC
+ * report, `createdBy` on a pin (who may re-point it), and
+ * `bucket.create`'s `retentionDays` is now optional (90 days).
  */
-export const CACHE_CONTRACT_VERSION = "3.1";
+export const CACHE_CONTRACT_VERSION = "4.0";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import type { BucketDomainFact, BucketDomains } from "@odu/cordis/services";
+import { purgeBroker, type BucketDomainFact, type BucketDomains } from "@odu/cordis/services";
 import type { Logger } from "@kolu/surface-daemon";
 import { cloudflareServer } from "./server";
 import type { CloudflareRoute, CloudflareTunnel } from "./surface";
@@ -37,6 +37,9 @@ interface Stub {
   preexisting: Map<string, { id: string; content: string }>;
   tunnelCreates: number;
   verifyOk: boolean;
+  /** Does `purge_cache` refuse? A purge is best effort, and the suite proves
+   *  it by having Cloudflare say no. */
+  purgeRefuses: boolean;
   stop: () => void;
 }
 
@@ -57,6 +60,7 @@ function startStub(): Stub {
     preexisting: new Map(),
     tunnelCreates: 0,
     verifyOk: true,
+    purgeRefuses: false,
     stop: () => {},
   };
   const server = Bun.serve({
@@ -125,6 +129,18 @@ function startStub(): Stub {
           if (record.id === id) state.preexisting.delete(name);
         }
         return envelope({ id });
+      }
+      if (url.pathname === "/zones/zone-1/purge_cache" && request.method === "POST") {
+        return state.purgeRefuses
+          ? Response.json(
+              {
+                success: false,
+                errors: [{ code: 1012, message: "Request failed" }],
+                result: null,
+              },
+              { status: 400 },
+            )
+          : envelope({ id: "zone-1" });
       }
       return new Response("not found", { status: 404 });
     },
@@ -371,5 +387,81 @@ describe("the cloudflare row", () => {
     await w.server.close();
     await until("the child to exit", () => existsSync(join(markers, "exited")));
     expect(w.server.status().tunnel.state).toBe("stopped");
+  });
+
+  it("forgets a collection's deleted URLs at the zone that fronts them", async () => {
+    const w = await world({ initial: [{ bucket: "kolu", domain: "cache.example.org" }] });
+    await w.server.start();
+    await until("the name to be live", () => w.routes.get("cache.example.org")?.state === "live");
+
+    // THROUGH THE PORT, not the method: this is the shape the host's broker
+    // calls, and a collection has already moved on by the time the edge hears
+    // about it — so the suite keeps the promise the announcement discards.
+    const purges = purgeBroker();
+    const inFlight: Promise<void>[] = [];
+    purges.register((urls) => void inFlight.push(w.server.purge(urls)));
+    purges.announce([
+      "https://cache.example.org/9rk8.narinfo",
+      "https://cache.example.org/nar/9rk8.nar.zst",
+    ]);
+    await Promise.all(inFlight);
+
+    const purged = w.stub.seen.filter((one) => one.path === "/zones/zone-1/purge_cache");
+    expect(purged).toHaveLength(1);
+    expect(purged[0]?.body).toEqual({
+      files: [
+        "https://cache.example.org/9rk8.narinfo",
+        "https://cache.example.org/nar/9rk8.nar.zst",
+      ],
+    });
+  });
+
+  it("skips a URL whose host it does not route", async () => {
+    const w = await world({ initial: [{ bucket: "kolu", domain: "cache.example.org" }] });
+    await w.server.start();
+    await until("the name to be live", () => w.routes.get("cache.example.org")?.state === "live");
+
+    await w.server.purge([
+      "https://cache.example.org/9rk8.narinfo",
+      // A bucket whose domain this daemon never wired, and something that is
+      // not a URL at all: nothing of this row's stands in front of either.
+      "https://cache.unknown.test/9rk8.narinfo",
+      "nar/9rk8.nar.zst",
+    ]);
+
+    const purged = w.stub.seen.filter((one) => one.path.endsWith("/purge_cache"));
+    expect(purged).toHaveLength(1);
+    expect(purged[0]?.body).toEqual({ files: ["https://cache.example.org/9rk8.narinfo"] });
+  });
+
+  it("sends at most thirty files per call", async () => {
+    const w = await world({ initial: [{ bucket: "kolu", domain: "cache.example.org" }] });
+    await w.server.start();
+    await until("the name to be live", () => w.routes.get("cache.example.org")?.state === "live");
+
+    const urls = Array.from(
+      { length: 31 },
+      (_, at) => `https://cache.example.org/${at}.narinfo`,
+    );
+    await w.server.purge(urls);
+    const purged = w.stub.seen.filter((one) => one.path === "/zones/zone-1/purge_cache");
+    // THE SPLIT IS THE LIMIT, not a count: the thirty-first file rides a second
+    // call, in the order it was announced.
+    expect(purged.map((one) => one.body)).toEqual([
+      { files: urls.slice(0, 30) },
+      { files: urls.slice(30) },
+    ]);
+  });
+
+  it("does not let a refused purge escape into the collection that announced it", async () => {
+    const w = await world({ initial: [{ bucket: "kolu", domain: "cache.example.org" }] });
+    await w.server.start();
+    await until("the name to be live", () => w.routes.get("cache.example.org")?.state === "live");
+
+    w.stub.purgeRefuses = true;
+    await expect(
+      w.server.purge(["https://cache.example.org/9rk8.narinfo"]),
+    ).resolves.toBeUndefined();
+    expect(w.stub.seen.filter((one) => one.path === "/zones/zone-1/purge_cache")).toHaveLength(1);
   });
 });

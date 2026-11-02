@@ -89,7 +89,7 @@ The board lists runs across repositories. Open a run to inspect nodes, follow lo
 
 ### The board and the API do everything the CLI does
 
-The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`login`/`use`, and `odu auth login`. **Cache, people and tunnel administration is the board or the API, not the CLI.** An admin creates a bucket from the Cache view — with the upstream switch that `"upstreamKeys": []` spells on the API — mints, lists and revokes its tokens, pins a closure and runs GC without a terminal; an owner opens a people page, sees who is in, and grants or changes a role. Anything the board does, `odu surface <row> <verb> --input '{…}' --json` does from a shell.
+The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`login`/`use`, and `odu auth login`. **Cache, people and tunnel administration is the board or the API, not the CLI.** An admin creates a bucket from the Cache view — with the upstream switch that `"upstreamKeys": []` spells on the API — mints, lists and revokes its tokens, sets retention, pins and unpins a closure, reads what the next collection would take and runs GC without a terminal; an owner opens a people page, sees who is in, and grants or changes a role. Anything the board does, `odu surface <row> <verb> --input '{…}' --json` does from a shell.
 
 | You want | CLI | API verb | On the board |
 | --- | --- | --- | --- |
@@ -99,7 +99,7 @@ The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`lo
 | machines and holds | `odu ci hosts`, `odu ci lease`, `odu ci release` | `venue_probe`, `venue_hold`, `venue_release` | **Machines** |
 | import or expire history | `odu ci history import`, `odu ci history prune` | `catalog_import`, `catalog_prune` | **Maintenance** (dry run first) |
 | require odu's checks | `odu ci protect` | `protect_apply` | **Maintenance** → **Apply protection** (admin; dry run first) |
-| administer the cache | — | `odu surface cache bucket_create\|bucket_list\|bucket_domain\|token_mint\|token_list\|token_revoke\|pin_create\|gc_run\|stats_read` | **Cache**, and a bucket's page (admin) — see [the cache docs](cache/#the-cache-view) |
+| administer the cache | — | `odu surface cache bucket_create\|bucket_list\|bucket_domain\|bucket_retention\|token_mint\|token_list\|token_revoke\|pin_create\|pin_list\|pin_delete\|gc_plan\|gc_run\|stats_read` | **Cache**, and a bucket's page (admin) — **Retention**, **Pins**, **Dry run**, **Run GC**; see [the cache docs](cache/#the-cache-view) |
 | tokens and sessions | — | `odu surface auth token_create\|token_list\|token_revoke` | the profile page |
 | roles and who you are | — | `odu surface auth user_grant`, `odu surface auth grant_list`, `odu surface auth user_whoami` | **People** (owner) |
 | the tunnel and its names | — | `odu surface cloudflare status_read` | **Tunnel** |
@@ -197,6 +197,8 @@ A bucket can also have **a name of its own** — `https://cache.kolu.dev` — se
 
 **Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret; `ODU_OBJECT_STORES` names a JSON file of declared S3 stores, the shape the module writes. The cache stores the compressed NARs under `<state>/cache/objects`; disk is those objects plus staging for the largest in-flight NAR, memory is constant per NAR, and a `--no-upstream` bucket also stores the upstream closures it is pushed.
 
+**Disk does not grow forever.** A bucket keeps what nobody wants for 90 days by default (`retentionDays` at `cache bucket_create`, and the bucket page's **Retention** afterwards), counted from the last time somebody *wanted* a path — a push of it, or the `missing` query a push asks first. A read never renews that clock, because reads are leaving odu and a clock a read wound would make the busiest paths the first to look idle. The row collects every bucket once a day on its own, and nothing is evicted while retention holds, something retained references it, or a pin holds it; **Dry run** on a bucket page says what the next collection would take. A pin holds a closure by name and a push re-points it (`pin: true` in the push action, `--pin NAME` from a shell), which is how a repository keeps its default branch's closure. [Keep and reclaim](cache/#keep-and-reclaim) has the rest.
+
 
 ### Upgrading from a store-backed cache
 
@@ -216,11 +218,11 @@ Each row versions its own surface. The daemon publishes the host's version and e
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
 | `ci` (runs) | 2.4 | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
-| `cache` | **3.1** | `odu cache`, `odu surface cache`, the board |
+| `cache` | **4.0** | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
 
-Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
+Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource; **4.0** runs retention on `lastWanted` and drops the last-access field a path and `cache_stats_read` used to carry, and adds `cache_bucket_retention`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan` and `orphans` on the GC report (`retentionDays` at creation is now optional, defaulting to 90 days). A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
 
 
 ## Server mode
@@ -470,14 +472,18 @@ Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, 
 | `cache_list` | `cache_bucket_list` | yes |
 | `cache_describe` | `cache_bucket_describe` | no |
 | — | `cache_bucket_paths` | no |
+| — | `cache_bucket_retention` (4.0) | yes |
 | `cache_tokenMint` | `cache_token_mint` | yes |
 | `cache_tokenList` | `cache_token_list` | yes |
 | `cache_tokenRevoke` | `cache_token_revoke` | yes |
 | `cache_pin` | `cache_pin_create` | yes |
+| — | `cache_pin_list` (4.0) | yes |
+| — | `cache_pin_delete` (4.0) | yes |
 | `cache_gc` | `cache_gc_run` | yes |
+| — | `cache_gc_plan` (4.0, the dry run) | yes\* |
 | `cache_stats` | `cache_stats_read` | yes |
 
-The same rename reaches argv: `odu surface cache_create …` is `odu surface cache bucket_create …`, because a sibling's commands mount under its key — and that argv face is now how a cache is administered from a shell, the CLI's own `cache create`/`list`/`token`/`pin`/`gc`/`stats` having been retired. `odu cache push`/`login`/`use` — the shell-native commands — are unchanged. A service started without `$ODU_ROOT_TOKEN` refuses the token-taking verbs with `no_root_token` while the substituter keeps serving; `cache_bucket_describe` and `cache_bucket_paths` take no credential at all, because a bucket's URL, its key and its path list are what it publishes to every client that can read it.
+The same rename reaches argv: `odu surface cache_create …` is `odu surface cache bucket_create …`, because a sibling's commands mount under its key — and that argv face is now how a cache is administered from a shell, the CLI's own `cache create`/`list`/`token`/`pin`/`gc`/`stats` having been retired. `odu cache push`/`login`/`use` — the shell-native commands — are unchanged. A service started without `$ODU_ROOT_TOKEN` refuses the token-taking verbs with `no_root_token` while the substituter keeps serving; `cache_bucket_describe` and `cache_bucket_paths` take no credential at all, because a bucket's URL, its key and its path list are what it publishes to every client that can read it. \*`cache_gc_plan` does take a `rootToken` like the other administrative verbs, but it is annotated read-only — an agent may ask what a collection would evict without a confirmation, and must not run one without.
 
 ## CLI reference
 
@@ -507,7 +513,7 @@ odu mcp
 | `ci protect` | Configure GitHub required checks; preview with `--dry-run` | **Maintenance** → **Apply protection** |
 | `cache use <bucket>` | Print the nix.conf settings, a `nixConfig` block and netrc for a bucket | **Cache** |
 | `cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — (a machine's disk) |
-| `cache push <bucket> <path>…` | Upload only what the bucket is missing; talks to the cache directly | — (a build box's job) |
+| `cache push <bucket> <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--pin NAME` re-points that pin at the closure it landed | — (a build box's job) |
 | `auth login <origin>` | Save a personal access token in `~/.config/odu/auth/credentials` | — (a machine's disk) |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport | — |
 

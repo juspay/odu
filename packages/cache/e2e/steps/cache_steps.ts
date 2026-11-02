@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Given, Then, When } from "@cucumber/cucumber";
+import type { Locator } from "playwright";
 import { oduCli, ROOT_TOKEN, until } from "../../../web-acceptance/support/service.ts";
 import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
@@ -324,6 +325,19 @@ Then("the pushed path is listed", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no path was arranged");
   await this.page.locator("li", { hasText: name }).first().waitFor({ timeout: 30_000 });
+});
+
+/** WANTED, not read. The row prints the clock GC decides by, and the push that
+ *  arranged this scenario has just renewed it — so what is asserted is the
+ *  SHAPE of the fact rather than a number that moves while the page is open. */
+Then("that path says when it was last wanted", async function (this: OduWorld) {
+  const name = this.cachePathName;
+  assert.ok(name !== undefined && name !== "", "no path was arranged");
+  const row = this.page.locator("ol.paths li", { hasText: name }).first();
+  await row.waitFor({ timeout: 30_000 });
+  await until("the path's row to say when it was last wanted", async () =>
+    /wanted \d+[smhd] ago/.test(await row.innerText()) ? true : null,
+  );
 });
 
 Then("no path is listed", async function (this: OduWorld) {
@@ -697,39 +711,151 @@ When("I revoke the minted token", async function (this: OduWorld) {
   await this.page.getByRole("button", { name: `revoke ${id}`, exact: true }).click();
 });
 
-When("a path is pushed with that token from the CLI", function (this: OduWorld) {
-  const bucket = this.cacheBucket;
-  const token = minted(this).token;
+/** A LEAF PATH PUSHED WITH THE TOKEN THE PAGE MINTED, and only it: the push
+ *  talks to the cache's HTTP API with a bucket credential, so a token the page
+ *  minted wrongly fails here rather than three steps later. */
+function pushWithMintedToken(world: OduWorld): string {
+  const bucket = world.cacheBucket;
+  const token = minted(world).token;
   assert.ok(bucket !== undefined && token !== undefined, "no bucket or token");
   const dir = mkdtempSync(join(tmpdir(), "odu-wa-cache-"));
   const name = unique("pinned");
   const file = join(dir, name);
   writeFileSync(file, `odu web acceptance: ${name}\n`);
   const added = spawnSync("nix", ["store", "add-file", file], {
-    env: this.service.env,
+    env: world.service.env,
     encoding: "utf-8",
   });
   assert.strictEqual(added.status, 0, `nix store add-file failed: ${added.stderr}`);
   const path = added.stdout.trim();
-  // THE PAGE'S TOKEN, and only it: the push talks to the cache's HTTP API with
-  // a bucket credential, so a token the page minted wrongly fails right here.
-  const pushed = oduCli(this.service, ["cache", "push", bucket, path, "-o", "json"], {
+  const pushed = oduCli(world.service, ["cache", "push", bucket, path, "-o", "json"], {
     ODU_CACHE_TOKEN: token,
   });
   assert.strictEqual(pushed.status, 0, `odu cache push failed: ${pushed.stderr}`);
+  return path;
+}
+
+When("a path is pushed with that token from the CLI", function (this: OduWorld) {
+  const path = pushWithMintedToken(this);
   this.cachePath = path;
+  this.cachePaths = [path];
 });
+
+/** TWO leaf paths, neither referencing the other, so a pin over the first is
+ *  the WHOLE difference between them when the collector comes — no clock has
+ *  to move for one to go and the other to stay. */
+When("two paths are pushed with that token from the CLI", function (this: OduWorld) {
+  const paths = [pushWithMintedToken(this), pushWithMintedToken(this)];
+  this.cachePath = paths[0] as string;
+  this.cachePaths = paths;
+});
+
+async function pinThatPath(world: OduWorld, name: string): Promise<void> {
+  const path = world.cachePath;
+  assert.ok(path !== undefined, "no path was pushed");
+  await world.page.getByLabel("pin name", { exact: true }).fill(name);
+  await world.page.getByLabel("store paths to pin", { exact: true }).fill(path);
+  await world.page.getByRole("button", { name: "Pin closure", exact: true }).click();
+}
 
 When("I pin that path as {string}", async function (this: OduWorld, name: string) {
-  const path = this.cachePath;
-  assert.ok(path !== undefined, "no path was pushed");
-  await this.page.getByLabel("pin name", { exact: true }).fill(name);
-  await this.page.getByLabel("store paths to pin", { exact: true }).fill(path);
-  await this.page.getByRole("button", { name: "Pin closure", exact: true }).click();
+  await pinThatPath(this, name);
 });
 
-Then("the stats say {string}", async function (this: OduWorld, text: string) {
-  await this.saysThat(this.page.locator("dl.stats"), "the stats", text);
+/** The same control, said the way a scenario holding TWO paths has to say it. */
+When("I pin the first path as {string}", async function (this: OduWorld, name: string) {
+  await pinThatPath(this, name);
+});
+
+/** WHAT A PIN HOLDS, beside the button that takes it away: a name on its own
+ *  says that something is kept, never what, and a pin nobody can read is a pin
+ *  nobody dares remove. */
+Then(
+  "the pin {string} is listed holding that path",
+  async function (this: OduWorld, name: string) {
+    const path = this.cachePath;
+    assert.ok(path !== undefined, "no path was pushed");
+    await this.saysThat(
+      this.page.locator("ul.pins li", { hasText: name }),
+      `the pin ${name}`,
+      path,
+    );
+  },
+);
+
+When("I unpin {string}", async function (this: OduWorld, name: string) {
+  await this.page.getByRole("button", { name: `unpin ${name}`, exact: true }).click();
+});
+
+/** The list is ASKED AGAIN after an unpin rather than patched in place, so the
+ *  empty answer here is `pin.list`'s and not the page's memory of its own
+ *  click. */
+Then("the pin list says nothing is pinned", async function (this: OduWorld) {
+  await this.saysThat(
+    this.page.locator('section[aria-label="pins"]'),
+    "the pin list",
+    "Nothing is pinned in this bucket.",
+  );
+});
+
+Then("the retention form defaults to 90 days", async function (this: OduWorld) {
+  assert.strictEqual(
+    await this.page.getByLabel("retention days", { exact: true }).inputValue(),
+    "90",
+    "the retention field is not the ninety-day default",
+  );
+});
+
+When("I set the retention to {string} days", async function (this: OduWorld, days: string) {
+  await this.page.getByLabel("retention days", { exact: true }).fill(days);
+  await this.page.getByRole("button", { name: "Set retention", exact: true }).click();
+});
+
+/** THE FACTS LINE at the top of the bucket page, which is drawn from the row
+ *  the cache republished — so a number read here is the bucket's, never the
+ *  field that was typed into. */
+Then("the bucket's facts say {string}", async function (this: OduWorld, text: string) {
+  await this.saysThat(this.page.locator("p.bucket-facts"), "the bucket's facts", text);
+});
+
+/** The collection's section — the dry run, the button, and the report the
+ *  button leaves. The bucket's own path list carries an `ol.paths` too, so
+ *  every GC assertion is scoped to this section. */
+function gcSection(world: OduWorld): Locator {
+  return world.page.locator('section[aria-label="garbage collection"]');
+}
+
+Then("the dry run says {string}", async function (this: OduWorld, text: string) {
+  await this.saysThat(gcSection(this), "the dry run", text);
+});
+
+Then("the dry run names the unpinned path", async function (this: OduWorld) {
+  const path = this.cachePaths?.[1];
+  assert.ok(path !== undefined, "two paths were not pushed");
+  await gcSection(this)
+    .locator("ol.paths li", { hasText: path })
+    .first()
+    .waitFor({ timeout: 30_000 });
+});
+
+/** The NEGATIVE half, and it means something only after the positive one: the
+ *  list has rendered, so a path missing from it is one the pin holds rather
+ *  than one the page has not drawn yet. */
+Then("the dry run does not name the pinned path", async function (this: OduWorld) {
+  const path = this.cachePath;
+  assert.ok(path !== undefined, "no path was pinned");
+  assert.strictEqual(
+    await gcSection(this).locator("ol.paths li", { hasText: path }).count(),
+    0,
+    "the dry run would take the pinned path",
+  );
+});
+
+/** THIS BUCKET'S line of the stats, not the cache-wide one beneath it: every
+ *  scenario in this worker shares one daemon, so the whole cache's totals are
+ *  somebody else's paths and would match a count this scenario never caused. */
+Then("the bucket's own stats say {string}", async function (this: OduWorld, text: string) {
+  await this.saysThat(this.page.locator("dl.stats dd").first(), "this bucket's stats", text);
 });
 
 Then("the push block names the minted token", async function (this: OduWorld) {

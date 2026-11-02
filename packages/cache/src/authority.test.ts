@@ -27,6 +27,7 @@ import { buildSurfaceFace } from "@kolu/surface/client";
 import { directDispatch } from "@kolu/surface/links/direct";
 import { implementSurface } from "@kolu/surface/server";
 import { CurrentPrincipal, type Principal } from "@odu/cordis/principal";
+import { purgeBroker } from "@odu/cordis/services";
 import type { SurfaceClientOf } from "@kolu/surface/project";
 import { createCache } from "./cache";
 import { cacheServer } from "./server";
@@ -56,6 +57,8 @@ function face(rootToken: string | null) {
   const server = cacheServer({
     cache,
     publicOrigin: "http://cache.test",
+    // The broker a host always provides; nothing registers on it here.
+    purge: purgeBroker(),
     mount: "/cache",
     stores: storeFacts(new Map()),
   });

@@ -85,11 +85,15 @@ use <bucket>                  the nix.conf settings, the nixConfig block and the
                               bucket's URL and public key are public
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
-push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [-o json]
+push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [-o json]
                               upload only the paths the bucket is missing.
                               Talks to the cache directly, from HERE. A NAR
                               larger than --part-size (64 MiB) is sent in parts,
-                              each retried on its own
+                              each retried on its own.
+                              --pin re-points that named pin at the closure
+                              this push landed, so garbage collection keeps it.
+                              The write token is the authority; nothing is
+                              pinned if any path was refused
 
 Buckets, tokens, domains, pins, GC and stats are the bucket page on the board,
 or the API: \`odu surface cache bucket_create --input '{…}' --json\`,
@@ -220,6 +224,7 @@ export async function cacheCommand(
 }
 
 
+
 async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,
@@ -343,6 +348,7 @@ async function pushCommand(rest: string[]): Promise<number> {
       "token-file": { type: "string" },
       concurrency: { type: "string" },
       "part-size": { type: "string" },
+      pin: { type: "string" },
       origin: originOption,
       output: outputOption,
     },
@@ -371,6 +377,10 @@ async function pushCommand(rest: string[]): Promise<number> {
             partSize:
               wholeNumber("--part-size", values["part-size"]) * 1024 * 1024,
           }),
+      // THE PIN THE PUSH RE-POINTS, when the caller asked for one. A flag on
+      // the push rather than a verb of its own: the pin names what THIS push
+      // put there, and the write token is already in hand.
+      ...(values.pin === undefined ? {} : { pin: values.pin }),
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
       },
@@ -384,6 +394,11 @@ async function pushCommand(rest: string[]): Promise<number> {
       );
       for (const failure of summary.failures) {
         process.stderr.write(`  ${failure.path}: ${failure.message}\n`);
+      }
+      if (summary.pinned !== null) {
+        process.stdout.write(
+          `pinned "${summary.pinned.name}": ${summary.pinned.rootPaths} paths kept from GC\n`,
+        );
       }
     }
     return summary.failed === 0 ? 0 : 1;

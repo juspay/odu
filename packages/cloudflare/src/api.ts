@@ -1,10 +1,11 @@
 /**
  * CLOUDFLARE'S API, AS FAR AS THIS ROW NEEDS IT.
  *
- * Five calls: verify the token, find the zone a name belongs to, make one
- * tunnel, give it its ingress, and keep one proxied CNAME. Everything this row
- * creates is named after this server — the tunnel after the public origin — so
- * a person looking at the Cloudflare dashboard can tell two odu installs apart.
+ * Six calls: verify the token, find the zone a name belongs to, make one
+ * tunnel, give it its ingress, keep one proxied CNAME, and forget at the edge
+ * what a collection deleted. Everything this row creates is named after this
+ * server — the tunnel after the public origin — so a person looking at the
+ * Cloudflare dashboard can tell two odu installs apart.
  *
  * The base URL and the fetch are constructor arguments so the suite records a
  * conversation instead of reaching the network. Errors are Cloudflare's own
@@ -80,6 +81,15 @@ export interface CloudflareApi {
   /** Delete one record — after checking it still points at this tunnel, so a
    *  record somebody else repointed is left alone. */
   deleteRecord(zoneId: string, recordId: string, tunnelId: string): Promise<void>;
+  /**
+   * FORGET THESE URLS AT THE EDGE — `POST /zones/<id>/purge_cache`.
+   *
+   * What a garbage collection deleted at the origin, the edge may still be
+   * holding, and an edge serving a NAR the origin no longer has is a client
+   * importing a path that is gone. Cloudflare takes at most thirty files in
+   * one call, so the caller sends batches.
+   */
+  purge(zoneId: string, files: readonly string[]): Promise<void>;
 }
 
 export interface CloudflareApiOptions {
@@ -258,6 +268,10 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
         );
       }
       await call("DELETE", `/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(recordId)}`);
+    },
+
+    async purge(zoneId, files) {
+      await call("POST", `/zones/${encodeURIComponent(zoneId)}/purge_cache`, { files });
     },
   };
 }

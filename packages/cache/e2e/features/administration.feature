@@ -1,9 +1,10 @@
 Feature: An admin administers the cache from the board
   # The board does everything `odu surface cache …` does. Each scenario here is
   # one verb of the cache row, reached through its control on the page — create
-  # (with the upstream switch), token mint / list / revoke, pin, GC and stats —
-  # and the one arrange step that leaves the page (a push) uses the token the
-  # page minted, which is the proof that the token is real.
+  # (with the upstream switch), retention, token mint / list / revoke, pin /
+  # pin list / unpin, the dry run, GC and stats — and the one arrange step that
+  # leaves the page (a push) uses the token the page minted, which is the proof
+  # that the token is real.
   #
   # @signed-in:admin: the row's floor for administration, on a daemon with a
   # door. A member is drawn none of these controls (auth.feature) and the row
@@ -84,16 +85,56 @@ Feature: An admin administers the cache from the board
     Then the minted token shows an expiry
     And there should be no page errors
 
-  Scenario: A path pushed with a page-minted token is pinned, collected and counted
+  # THE ONE CREATION FACT A BUCKET MAY CHANGE ITS MIND ABOUT. The number is
+  # the page's answer twice over: the row's sentence under the button, and the
+  # facts line at the top, which is drawn from the republished bucket row
+  # rather than from the field that was typed.
+  Scenario: A bucket is told how long to keep a path, and says the number back
+    Given a bucket created from the board
+    Then the retention form defaults to 90 days
+    When I set the retention to "7" days
+    Then the cache says "now keeps a path 7 days after the last time anything wanted it"
+    And the bucket's facts say "7d retention"
+    And there should be no page errors
+
+  # A PIN CONTRADICTS A COLLECTION, so a person has to be able to audit one:
+  # the list says what each pin HOLDS, beside the button that takes it away.
+  # The push is arranged with the token the page minted, which is the proof
+  # that the token is real.
+  Scenario: A pin says what it holds, and unpinning gives the path back to retention
     Given a bucket created from the board
     And I mint a "write" token
     When a path is pushed with that token from the CLI
     And I pin that path as "release"
     Then the cache says "Pinned release"
+    And the pin "release" is listed holding that path
+    When I unpin "release"
+    Then the cache says "Unpinned release"
+    And the pin list says nothing is pinned
+    And there should be no page errors
+
+  # "WHAT AM I ABOUT TO LOSE" is asked BEFORE the button, so the dry run is
+  # graded naming the path the collection then takes — and not naming the one
+  # the pin holds. ZERO DAYS is the bucket saying "keep only what a reference
+  # or a pin holds": both paths are expired the moment they land, so the pin is
+  # the whole difference between them and the scenario needs no clock to move.
+  Scenario: A dry run names the next collection, which keeps the pin and takes the rest
+    Given a bucket created from the board
+    And I mint a "write" token
+    And two paths are pushed with that token from the CLI
+    And I pin the first path as "release"
+    Then the cache says "Pinned release"
+    When I set the retention to "0" days
+    Then the cache says "now keeps only what a reference or a pin holds"
+    When I press "Dry run"
+    Then the dry run says "would take 1 path"
+    And the dry run names the unpinned path
+    And the dry run does not name the pinned path
     When I press "Run GC"
-    Then the cache says "Collected: evicted"
+    Then the cache says "Collected: evicted 1 path"
+    And the dry run says "would take nothing here"
     When I press "refresh stats"
-    Then the stats say "1 paths"
+    Then the bucket's own stats say "1 paths"
     And there should be no page errors
 
   @signed-in:admin

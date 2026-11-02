@@ -130,6 +130,8 @@ A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retri
 
 `push` asks the bucket which paths it is missing, then uploads only those, with retries. It talks to the cache's HTTP API directly, so it runs on the machine that holds the paths.
 
+`--pin NAME` re-points that named pin at the closure the push just landed, so garbage collection keeps it — one command and one token, and nothing is pinned if any path was refused. `--output json` reports it as `pinned: {name, rootPaths}`, or `null` when no pin was asked for. The write token is the authority: a token that may push may already keep a closure alive forever by pushing it again, so pinning grants it nothing it lacked.
+
 In GitHub Actions there is an action for it, and it pushes with the checkout's own `odu`: see [Push from GitHub Actions](#push-from-github-actions).
 
 Prefer plain Nix? `nix copy --to` works without any odu code on the client:
@@ -183,11 +185,16 @@ Then it proves the push. For every path the bucket serves, `check.sh` asks `<sub
     origin: https://odu.example.com
     bucket: main
     token: ${{ secrets.ODU_CACHE_TOKEN }}
-    paths: |
-      .#your-package
+    # No `paths`: every package, dev shell and check of this flake, for the
+    # runner's system. Name `paths` to push only what you name. `pin` holds
+    # what this push landed, under a name derived from the repository, the
+    # ref and the system.
+    pin: ${{ github.ref_name == github.event.repository.default_branch }}
 ```
 
-`paths` takes store paths, `result` links, or flake installables, space- or newline-separated; installables are built first. A bucket page prints this block filled in with its own origin and name under **Push from GitHub Actions**.
+**With no `paths`, the whole flake goes** — every `packages.<system>`, `devShells.<system>` and `checks.<system>` output for the runner's system, enumerated by Nix rather than listed by hand, so a flake that gains an output gains it here on the next push. Name `paths` to push exactly what you name instead: store paths, `result` links, or flake installables, space- or newline-separated, installables built first. A bucket page prints this block filled in with its own origin and name under **Push from GitHub Actions**.
+
+**`pin:` is a boolean, and the line above is the policy.** The action holds none of its own: it pins whatever this push landed, whenever the workflow says true. The pin's NAME is derived — `<owner>/<repo>@<ref>/<system>`, e.g. `juspay/kolu@master/x86_64-linux` — because several repositories share one bucket and a matrix pushes a Linux closure and a macOS closure on the same commit; under one name the second job to finish would re-point the pin and hand the first job's closure to the next collection. Anything falsy, the default, pins nothing. Free-text pin names stay in the API, for the board and an administrator.
 
 **Nix must already be on the runner.** The action never installs it — the `extra_nix_config` block above is the `nix_conf` of whichever install step you already run.
 
@@ -254,7 +261,17 @@ odu surface cache gc_run --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"m
 odu surface cache stats_read --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'"}' --json
 ```
 
-On the board: a bucket page's **Pin a closure**, **Run GC** and **Stats** sections — the same three verbs, with no terminal. Pins are named and root a closure. Garbage collection applies per-bucket retention on last access: an object is evicted only when nothing retained in the bucket references it and it is not under a pin. `stats_read` reports the objects, their bytes on disk and hit counts.
+**Retention counts from the last time somebody wanted a path**, not from the last time one was read. A path's `lastWanted` is renewed by a stored push, and by the `missing` query a push asks first — whether the bucket was missing that path or already had it. A read never renews it; a read moves `hits` and nothing else. That is deliberate: reads are leaving odu, and a clock a read wound would make the busiest paths in the cache the first to look idle.
+
+A bucket keeps what nobody wants for **90 days** unless it says otherwise. `cache bucket_create` takes the number at creation, the bucket page's **Retention** control (`cache bucket_retention`) changes it afterwards, and zero means "keep only what something references or a pin holds".
+
+**A pin is a name over a closure.** Pinning under a name that already exists re-points it: the same name, today's closure, yesterday's roots let go in the same statement. Garbage collection walks the bucket's own references out from a pin's roots, so a path pushed later under a pinned root is held too.
+
+**Read the dry run before you collect.** It answers exactly what the next collection would take — the count, the bytes it would free, and the oldest-wanted paths, first to go at the top — and does nothing at all. On the board it is the **Dry run** button beside **Run GC**; to an agent it is `cache_gc_plan`.
+
+**Collection also happens on its own, once a day,** over every bucket, so a cache nobody administers still stops growing; `cache gc_run` and **Run GC** are that same collection asked for sooner. An object is evicted only when retention has expired, nothing retained in the bucket references it, and no pin holds it. A collection of *every* bucket also sweeps **orphans** — object keys the store held that no row ever named, a put whose record never landed — and reports them beside what it evicted. It collects with nothing but the store's own `list` and `delete`, so a bucket on R2 collects exactly as one on local disk. Whatever was deleted is announced as URLs: a bucket behind a Cloudflare tunnel has them purged at the edge, and with no CDN in front nothing is purged because nothing was cached.
+
+On the board, a bucket page carries **Retention**, **Pins** (pin a closure, read what each pin holds, delete one), **Dry run**, **Run GC** and **Stats** — the objects, their bytes on disk and hit counts. Deleting a pin needs an administrator; a *write* token may create or re-point one it made, which is how a CI push keeps a master pin current (see [Protocol](#protocol)).
 
 ## Keep a bucket on S3
 
@@ -432,7 +449,7 @@ The connector needs outbound HTTPS from the server and nothing inbound: no port 
 
 `odu web`'s page has **Runs** and **Cache** in the header. `#/cache` lists the buckets — name, public or private, how many paths, how much space, when it last took a push, how many reads — and `#/cache/<bucket>` is one bucket: its substituter URL, its public key, the `nix.conf` / netrc block above ready to copy, and its paths newest first with a filter box.
 
-**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page **Tokens** (mint write or read, shown once; list; revoke), **Pin a closure**, **Run GC** and **Stats**. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
+**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page **Tokens** (mint write or read, shown once; list; revoke), **Retention**, **Pins** (pin a closure; what each pin holds; delete one), **Dry run**, **Run GC** and **Stats**. The dry run is asked for rather than taken on arrival, and is asked again after every collection — "what am I about to lose" is a question a report answers too late, and a question nobody asked must not answer in red. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
 
 The rows arrive over the wire the page already holds, so a path pushed from a build box appears without a reload; reads are folded into a bucket's counters at most once a second rather than once per NAR.
 
@@ -446,22 +463,26 @@ Watch these lines on a foreground `odu web` (it prints a row's operational `info
 - `cache.nar.unavailable` — no object and the old store lacks it; served as 404 once per path.
 - `cache.boot.orphans`, `cache.boot.ca` — sweep and metadata-CA counts at boot.
 - `cache.import.recorded`, `cache.request.refused`, `cache.object.put_failed`.
+- `cache.gc` — one line per collection, scheduled or asked for: `evicted`, `kept` (rows whose bytes a twin still names), `orphans`, `bytes`. `cache.gc.purge` says how many URLs were announced and whether anything was `listening`; `cache.gc.failed` is a scheduled pass that hit something, with the next one still scheduled.
 
 ## Protocol
 
 One bucket is one substituter. Point any Nix-compatible tool at these routes:
 
 ```text
-GET  /cache/<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 40
+GET  /cache/<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 41
 HEAD /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/nar/<narHash>.<ext>       the object, from its store; Content-Length + Range
 PUT  /cache/<bucket>/nar/<narHash>.<ext>         Bearer or Basic; any ext Nix sends
 PUT  /cache/<bucket>/<hash>.narinfo             server re-signs with the bucket key
 POST /_odu/v1/buckets/<bucket>/missing          batch "which of these are you missing"
+POST /_odu/v1/buckets/<bucket>/pin              name a closure a WRITE token keeps
 GET  /cache/<bucket>/                           a public bucket's facts: the use block,
                                                 or JSON on Accept: application/json
 ```
+
+**Priority 41 is one worse than `cache.nixos.org`'s 40, on purpose.** A bucket created to take everything also holds upstream-signed paths, and at an equal priority the client's own substituter order decides who serves them — this machine's uplink, or the CDN that would have served them from nearer and for free. Losing the tie takes that decision away from whoever wrote the `nix.conf`.
 
 On a bucket's own domain the same four Nix paths sit at `/`: `/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>` and their uploads. `Host` names the bucket.
 
@@ -472,6 +493,11 @@ shadow the page's own JavaScript. A bucket called `cache` lives at
 
 Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or HTTP Basic with any username and the token as the password. Nix uses the second through curl on every request, uploads included. The `missing` route backs `odu cache push`; it is not part of the Nix protocol. It answers `missing` — the paths to send — and `skippedUpstream`, the paths the bucket will never take because an upstream key signed them, so a push can report the two as different things.
 
+The `pin` route is the one pin verb outside the administrative surface, and it takes write scope rather than admin on purpose: a write token can already keep any closure alive forever by pushing it again, because a stored push renews a path's `lastWanted`. A pin it creates makes that same promise once instead of nightly, and it reads nothing and deletes nothing.
+
+
+Re-pointing a pin releases whatever that pin held before, so the line is drawn by who made it — `createdBy`, which `pin_list` shows. A write token may re-point a pin a write token made, and never an administrator's: a leaked CI token, or a typo in a workflow's `pin:`, must not drop `release-1.0`. Write tokens of one bucket are peers here, as they already are in pushing to it. Deleting a pin stays an administrator's either way.
+
 ## Command reference
 
 The CLI keeps the three cache commands a shell is the natural place for. Everything else is the board or the API verb — `odu surface cache <verb> --input '{…}' --json`, with `rootToken` a field of the input.
@@ -480,13 +506,17 @@ The CLI keeps the three cache commands a shell is the natural place for. Everyth
 | --- | --- | --- | --- |
 | Print the substituter and key settings, the `nixConfig` block, and the netrc lines. No account for a public bucket | `odu cache use <bucket>` | `bucket_describe` | a bucket page's block |
 | Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — | — (a machine's disk) |
-| Upload only the paths the bucket is missing; the bucket keeps what it takes | `odu cache push <bucket> <paths…> [--part-size MiB]` | — | — (a build box's job) |
-| Create a bucket; answer its substituter URL, public key and store. `upstreamKeys: []` takes everything, including upstream-signed closures (costs disk; for consumers that cannot reach cache.nixos.org). `store` keeps its objects in a declared store (default `local`) | — | `bucket_create` | Cache → **Create bucket**, **Skip upstream paths** off, the **store** field |
+| Upload only the paths the bucket is missing; the bucket keeps what it takes. `--pin NAME` re-points that pin at the closure this push landed, unless a path was refused | `odu cache push <bucket> <paths…> [--part-size MiB] [--pin NAME]` | — | — (a build box's job) |
+| Create a bucket; answer its substituter URL, public key and store. `retentionDays` is how long it keeps what nobody wants (90 when absent). `upstreamKeys: []` takes everything, including upstream-signed closures (costs disk; for consumers that cannot reach cache.nixos.org). `store` keeps its objects in a declared store (default `local`) | — | `bucket_create` | Cache → **Create bucket**, **Skip upstream paths** off, the **store** field |
 | List buckets | — | `bucket_list` | Cache |
 | Give a bucket a DNS name of its own, or take it away (omit `domain`) | — | `bucket_domain` | bucket → **Domain** |
+| Change how long a bucket keeps what nobody wants | — | `bucket_retention` | bucket → **Retention** |
 | Mint a token, answered once (`scope`: `read`, `write` or `admin`) | — | `token_mint` | bucket → **Mint token** (write or read) |
 | List tokens with scope, expiry and last use | — | `token_list` | bucket → Tokens |
 | Revoke one token | — | `token_revoke` | bucket → Tokens → **revoke** |
-| Pin a closure against garbage collection | — | `pin_create` | bucket → **Pin closure** |
-| Evict objects past retention that nothing references and no pin holds | — | `gc_run` | bucket → **Run GC** |
+| Pin a closure against garbage collection; a name that exists is re-pointed | — | `pin_create` | bucket → **Pin closure** |
+| What each pin holds, and who made it | — | `pin_list` | bucket → Pins |
+| Let a pin go | — | `pin_delete` | bucket → Pins → **unpin** |
+| What the next collection would take, without taking it | — | `gc_plan` | bucket → **Dry run** |
+| Evict objects past retention that nothing references and no pin holds — the daily pass, asked for now | — | `gc_run` | bucket → **Run GC** |
 | Show storage and hit counts | — | `stats_read` | bucket → Stats |

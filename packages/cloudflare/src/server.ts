@@ -46,6 +46,7 @@ import {
   BoundOrigin,
   Bundle,
   BucketDomains,
+  CachePurge,
   Log,
   PublicOrigin,
   StateDir,
@@ -127,6 +128,9 @@ export interface CloudflareServer {
   start(): Promise<void>;
   status(): CloudflareStatus;
   reconcile(): Promise<void>;
+  /** Forget these URLs at the edge, for whichever of them this row routes.
+   *  NEVER rejects: a collection announced them and has already moved on. */
+  purge(urls: readonly string[]): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -134,6 +138,8 @@ const PROBE_ATTEMPTS = 20;
 const PROBE_INTERVAL_MS = 2_000;
 const RETRY_MIN_MS = 2_000;
 const RETRY_MAX_MS = 60_000;
+/** Cloudflare takes at most thirty files in one `purge_cache` call. */
+const PURGE_FILES = 30;
 
 const signalOf = (signal: AbortSignal | undefined): AbortSignal =>
   signal === undefined
@@ -424,6 +430,62 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     dropRoute(row.domain);
   }
 
+  // ── forgetting what was deleted ──────────────────────────────────────────
+
+  /**
+   * WHICH ZONE EACH ANNOUNCED URL IS BEHIND, by the routes this row made.
+   *
+   * A URL whose host no route names is skipped: nothing of this row's stands
+   * in front of it, and a route still being wired has no zone yet — the same
+   * answer, for the same reason. The server's own public origin is a route
+   * like any other here, so a page this daemon deleted is forgotten with the
+   * NARs.
+   */
+  function byZone(urls: readonly string[]): Map<string, string[]> {
+    const zoneOf = new Map<string, string>();
+    for (const row of db().routes()) {
+      if (row.zoneId !== "") zoneOf.set(row.domain.toLowerCase(), row.zoneId);
+    }
+    const grouped = new Map<string, string[]>();
+    for (const url of urls) {
+      let host: string;
+      try {
+        host = new URL(url).hostname.toLowerCase();
+      } catch {
+        continue;
+      }
+      const zoneId = zoneOf.get(host);
+      if (zoneId === undefined) continue;
+      const held = grouped.get(zoneId);
+      if (held === undefined) grouped.set(zoneId, [url]);
+      else held.push(url);
+    }
+    return grouped;
+  }
+
+  /** Forget what a collection deleted. BEST EFFORT in both directions: nobody
+   *  is waiting for this (the announcement returned when it was made), and a
+   *  purge that fails is one line in the log — an edge holding a NAR an hour
+   *  longer than it should is a smaller harm than a collection that could not
+   *  finish because Cloudflare was busy. */
+  async function purge(urls: readonly string[]): Promise<void> {
+    if (closed || repo === null || urls.length === 0) return;
+    for (const [zoneId, files] of byZone(urls)) {
+      for (let at = 0; at < files.length; at += PURGE_FILES) {
+        if (closed) return;
+        const batch = files.slice(at, at + PURGE_FILES);
+        try {
+          await api.purge(zoneId, batch);
+        } catch (err) {
+          log.warn(
+            { zone: zoneId, files: batch.length, error: messageOf(err) },
+            "odu cloudflare: the edge still holds URLs a collection deleted",
+          );
+        }
+      }
+    }
+  }
+
   // ── reconciliation ───────────────────────────────────────────────────────
 
   /** An API call failed while wiring: mark one route failed, and schedule a
@@ -706,6 +768,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     },
     status,
     reconcile,
+    purge,
     async close() {
       if (closed) return;
       closed = true;
@@ -738,12 +801,13 @@ function hostOf(origin: string): string {
 /** The row as a plugin — mounted by the host only when the token file is set.
  *
  *  THE ORDER IS THE LIFETIME: open the database, register its release, mount,
- *  register the mount's drop, and only then start. A refusal from `start`
- *  unwinds through both finalizers; an outage does not throw at all. */
+ *  register the mount's drop, claim the purge port, register its withdrawal,
+ *  and only then start. A refusal from `start` unwinds through every
+ *  finalizer; an outage does not throw at all. */
 export const cloudflareRow = (config: CloudflareRowConfig) =>
   definePlugin({
     name: CLOUDFLARE_KEY,
-    needs: [Bundle, StateDir, BoundOrigin, PublicOrigin, BucketDomains, Log],
+    needs: [Bundle, StateDir, BoundOrigin, PublicOrigin, BucketDomains, CachePurge, Log],
     apply: Effect.gen(function* () {
       const bundle = yield* Bundle;
       const stateDir = yield* StateDir;
@@ -751,6 +815,7 @@ export const cloudflareRow = (config: CloudflareRowConfig) =>
       const publicOrigin = yield* PublicOrigin;
       const domains: BucketDomainFacts = yield* BucketDomains;
       const log = yield* Log;
+      const purges = yield* CachePurge;
 
       const server = cloudflareServer({
         config,
@@ -775,6 +840,14 @@ export const cloudflareRow = (config: CloudflareRowConfig) =>
         },
       });
       yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
+
+      // THIS ROW IS WHAT STANDS IN FRONT OF THE CACHE'S URLS, so it is the row
+      // that forgets them: a collection announces what it deleted, and this
+      // answers. The claim is withdrawn with the row — a purger outliving the
+      // row that made it would ask Cloudflare about routes read from a closed
+      // database.
+      const withdraw = purges.register((urls) => void server.purge(urls));
+      yield* Effect.addFinalizer(() => Effect.sync(withdraw));
 
       // THE TOKEN BEFORE SERVING: a refusal fails the row; an outage marks the
       // tunnel failed and retries.

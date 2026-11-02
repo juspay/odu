@@ -340,11 +340,18 @@ describe("a bucket's consumer facts", () => {
 });
 
 describe("nix-cache-info", () => {
-  it("answers the three lines a client reads first", async () => {
+  it("answers the three lines a client reads first, and loses the tie to nixos.org", async () => {
     const h = await harness(true);
     const response = await h.fetch("/main/nix-cache-info");
     expect(response.status).toBe(200);
-    expect(await response.text()).toBe(NIX_CACHE_INFO);
+    const text = await response.text();
+    expect(text).toBe(NIX_CACHE_INFO);
+    // THE NUMBER, not just the constant: 41 is one WORSE than
+    // cache.nixos.org's 40, so an upstream-signed path this bucket also
+    // holds is fetched from the CDN whatever order a client's
+    // `substituters` are in. At 40 the two are equal, and equal means
+    // whoever wrote the `nix.conf` decides which uplink pays.
+    expect(text).toContain("Priority: 41\n");
     await h.dispose();
   });
 
@@ -875,6 +882,127 @@ describe("missing", () => {
       body: '{"paths": "nope"}',
     });
     expect(bad.status).toBe(400);
+    await h.dispose();
+  });
+});
+
+describe("a pin made with a write token", () => {
+  it("holds the closure, and re-points when the same name is pinned again", async () => {
+    // WHY A WRITE TOKEN MAY DO THIS: it can already keep any closure alive by
+    // pushing it again — a stored push renews `lastWanted` — so the pin is
+    // the same promise made once. It is how CI keeps a master closure out of
+    // collection (`.github/actions/push`'s `pin:`).
+    const h = await harness(true);
+    const write = bearer(h.tokens.write);
+    // A SECOND path to re-point at, pushed the way everything else here is.
+    const second = "/nix/store/00000000000000000000000000000001-second";
+    expect((await upload(h.fetch, h.tokens.write, second, nar("a second NAR"))).status).toBe(200);
+    const pin = (paths: readonly string[]): Promise<Response> =>
+      h.raw("/_odu/v1/buckets/main/pin", {
+        ...write,
+        method: "POST",
+        headers: { ...write.headers, "content-type": "application/json" },
+        body: JSON.stringify({ name: "master", paths }),
+      });
+
+    const first = await pin([HELLO]);
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ bucket: "main", name: "master" });
+
+    const again = await pin([second]);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ name: "master", rootPaths: [second] });
+    const listed = await h.cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" });
+    expect(listed).toMatchObject({ ok: true });
+    // ONE pin, re-pointed — not two, and yesterday's roots let go.
+    if (listed.ok) expect(listed.value.map((one) => one.rootPaths)).toEqual([[second]]);
+    await h.dispose();
+  });
+
+  it("may not re-point an ADMIN's pin, which an admin may still re-point", async () => {
+    // RE-POINTING IS RELEASING: the roots a pin held are let go in the same
+    // statement, so a leaked CI token — or a typo in a workflow's `pin:` —
+    // must not be able to drop the retention an administrator asked for.
+    const h = await harness(true);
+    const second = "/nix/store/00000000000000000000000000000001-second";
+    expect((await upload(h.fetch, h.tokens.write, second, nar("a second NAR"))).status).toBe(200);
+    expect(
+      await h.cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "release-1.0", paths: [HELLO] }),
+    ).toMatchObject({ ok: true });
+
+    const write = bearer(h.tokens.write);
+    const stolen = await h.raw("/_odu/v1/buckets/main/pin", {
+      ...write,
+      method: "POST",
+      headers: { ...write.headers, "content-type": "application/json" },
+      body: JSON.stringify({ name: "release-1.0", paths: [second] }),
+    });
+    // 403: the token is real and may not move THIS pin.
+    expect(stolen.status).toBe(403);
+    expect(await stolen.text()).toContain("made by an administrator");
+    const held = await h.cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" });
+    if (held.ok) expect(held.value.map((one) => one.rootPaths)).toEqual([[HELLO]]);
+
+    // AN ADMIN MAY MOVE EITHER. The write token's own pin first, to prove the
+    // rule is about who made it rather than about who is asking.
+    expect(
+      (
+        await h.raw("/_odu/v1/buckets/main/pin", {
+          ...write,
+          method: "POST",
+          headers: { ...write.headers, "content-type": "application/json" },
+          body: JSON.stringify({ name: "master", paths: [HELLO] }),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      await h.cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "master", paths: [second] }),
+    ).toMatchObject({ ok: true, value: { createdBy: "admin" } });
+    expect(
+      await h.cache.admin.pin({
+        ...asRoot(ROOT),
+        bucket: "main",
+        name: "release-1.0",
+        paths: [second],
+      }),
+    ).toMatchObject({ ok: true });
+    await h.dispose();
+  });
+
+  it("refuses a read token, a path the bucket lacks, and a body it cannot read", async () => {
+    const h = await harness(true);
+    const read = bearer(h.tokens.read);
+    expect(
+      (
+        await h.raw("/_odu/v1/buckets/main/pin", {
+          ...read,
+          method: "POST",
+          headers: { ...read.headers, "content-type": "application/json" },
+          body: JSON.stringify({ name: "master", paths: [HELLO] }),
+        })
+      ).status,
+    ).toBe(403);
+
+    const write = bearer(h.tokens.write);
+    const absent = await h.raw("/_odu/v1/buckets/main/pin", {
+      ...write,
+      method: "POST",
+      headers: { ...write.headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "master",
+        paths: ["/nix/store/00000000000000000000000000000000-nope"],
+      }),
+    });
+    expect(absent.status).toBe(400);
+    expect(await absent.text()).toContain("no such path in the bucket");
+
+    const malformed = await h.raw("/_odu/v1/buckets/main/pin", {
+      ...write,
+      method: "POST",
+      headers: { ...write.headers, "content-type": "application/json" },
+      body: '{"name": "master"}',
+    });
+    expect(malformed.status).toBe(400);
     await h.dispose();
   });
 });

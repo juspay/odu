@@ -54,6 +54,20 @@ export function compressionExtension(compression: string | null): string {
   }
 }
 
+/**
+ * THE NAME A NAR IS SERVED UNDER — `<narHash>.<ext>`, which is the narinfo's
+ * `URL:` after the `nar/` segment.
+ *
+ * One spelling, because two things reach for it on different clocks: the
+ * PROTOCOL (what a Nix client asks for, fixed by Nix) and the object KEY a
+ * store writes (`./staging`'s `objectKey`, which has moved with every storage
+ * step and will move again). They agree today; a collection that derived a
+ * purge URL from a key would announce the wrong address the day they stop.
+ */
+export function narFileName(narHash: string, compression: string | null): string {
+  return `${narHash.replace(/^sha256:/, "")}.${compressionExtension(compression)}`;
+}
+
 /** The compression a NAR URL's extension names, or null for an unknown one. */
 export function compressionOfFile(file: string): string | null {
   const at = file.indexOf(".nar");

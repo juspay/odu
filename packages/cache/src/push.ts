@@ -171,6 +171,9 @@ export interface PushSummary {
    *  Read from the bucket, not assembled here: only the daemon knows whether a
    *  name stands in front. */
   substituter: string;
+  /** THE PIN THIS PUSH RE-POINTED, when one was asked for: its name and how
+   *  many paths the closure it now holds has. Null when none was. */
+  pinned: { name: string; rootPaths: number } | null;
   /** The daemon that answered, for a refusal's follow-up. */
   pageUrl: string;
 }
@@ -206,6 +209,17 @@ export interface PushOptions {
   partSize?: number;
   /** Attempts per path. */
   attempts?: number;
+  /**
+   * RE-POINT THIS PIN AT WHAT WAS PUSHED, by name — the one thing CI needs to
+   * keep a master closure out of collection (`.github/actions/push`'s `pin:`).
+   *
+   * It runs AFTER the uploads and only when every one of them landed: a pin
+   * over a half-pushed closure would promise to keep paths the bucket does not
+   * have. The bucket resolves the closure itself from the roots named here,
+   * and the write token is the whole authority — see the route's own note on
+   * why write, not admin.
+   */
+  pin?: string;
   onLine?: (line: string) => void;
   platform?: PushPlatform;
 }
@@ -318,6 +332,16 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const served = [...closure.keys()].filter(
     (storePath) => !refused.has(storePath) && !upstream.has(storePath),
   );
+
+  // THE PIN, LAST AND ONLY IF NOTHING WAS REFUSED. A pin names the roots the
+  // CALLER asked for — the bucket walks their closure in its own rows — and
+  // over a half-pushed closure it would promise to keep paths that are not
+  // there. A refusal here is thrown, not counted: a caller that asked for a
+  // pin and did not get one has not done what it was told.
+  const pinned =
+    options.pin === undefined || options.pin === "" || failures.length > 0
+      ? null
+      : await pinClosure(resolved, headers, options.pin, served, say);
   return {
     pushed,
     skippedUpstream: answer.skippedUpstream.length,
@@ -331,6 +355,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     // URL for a bucket with no domain and the honest approximation for one
     // that has a name nobody here was told.
     substituter: answer.substituter ?? base,
+    pinned,
     pageUrl: `${board.replace(/\/$/, "")}/#/cache/${encodeURIComponent(resolved.name)}`,
   };
 }
@@ -416,6 +441,52 @@ async function askMissing(
     skippedUpstream: skipped.filter((path): path is string => typeof path === "string"),
     substituter,
   };
+}
+
+/**
+ * RE-POINT A NAMED PIN AT WHAT THIS BUCKET NOW SERVES.
+ *
+ * The roots are the SERVED paths — the closure minus what an upstream key
+ * signed and minus what was refused — because a pin may only name paths the
+ * bucket holds, and the bucket walks their references itself. A name that
+ * already exists is re-pointed, which is the whole behaviour CI wants: today's
+ * master closure held, yesterday's let go.
+ *
+ * The write token is the authority (the route's own note says why), so this
+ * needs nothing a push did not already have.
+ */
+async function pinClosure(
+  bucket: ResolvedBucket,
+  headers: Record<string, string>,
+  name: string,
+  served: readonly string[],
+  say: (line: string) => void,
+): Promise<{ name: string; rootPaths: number }> {
+  const response = await fetch(`${bucket.origin}/_odu/v1/buckets/${bucket.name}/pin`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ name, paths: served }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `the bucket refused the pin "${name}": ${response.status} ${await response.text()}`,
+    );
+  }
+  // WHAT THE BUCKET SAYS IT HOLDS, never what this client sent: the closure
+  // is resolved there, so its own roots are the only true count — and a
+  // daemon that answered something else has not done what was asked.
+  const body: unknown = await response.json();
+  if (
+    body === null ||
+    typeof body !== "object" ||
+    !("rootPaths" in body) ||
+    !Array.isArray(body.rootPaths)
+  ) {
+    throw new Error(`the bucket answered the pin "${name}" without a \`rootPaths\` list`);
+  }
+  const rootPaths = body.rootPaths.length;
+  say(`📌 ${name} now holds ${rootPaths} paths`);
+  return { name, rootPaths };
 }
 
 /** A fetch rejection, as an Error. The `.catch` arm of an upload is a network

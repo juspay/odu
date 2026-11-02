@@ -55,6 +55,17 @@ Nix protocol's paths are served, and everything else — the board, `/mcp`,
 `/auth`, `/rpc/ws` — is the cache row's 404. The host's bucket-domain gate reads
 `BucketDomains.paths` to enforce that; this row only makes the name resolve.
 
+## What a collection deleted, forgotten at the edge
+
+A garbage collection announces the URLs it removed on the cordis purge port,
+and this row — the only thing standing in front of them — registers the purger
+that answers. Each URL goes to the zone whose route carries its host; a host no
+route names is skipped, because nothing of this row's is in front of it. Files
+go thirty at a time, which is Cloudflare's limit, and a purge that fails is one
+line in the log: an edge holding a NAR an hour longer than it should is a
+smaller harm than a collection that could not finish. The cache row still never
+learns Cloudflare exists.
+
 ## Tests
 
 - `src/server.test.ts` — the API/connector conversation, against a stub that
