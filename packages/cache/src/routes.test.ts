@@ -879,6 +879,77 @@ describe("missing", () => {
   });
 });
 
+describe("a pin made with a write token", () => {
+  it("holds the closure, and re-points when the same name is pinned again", async () => {
+    // WHY A WRITE TOKEN MAY DO THIS: it can already keep any closure alive by
+    // pushing it again — a stored push renews `lastWanted` — so the pin is
+    // the same promise made once. It is how CI keeps a master closure out of
+    // collection (`.github/actions/push`'s `pin:`).
+    const h = await harness(true);
+    const write = bearer(h.tokens.write);
+    // A SECOND path to re-point at, pushed the way everything else here is.
+    const second = "/nix/store/00000000000000000000000000000001-second";
+    expect((await upload(h.fetch, h.tokens.write, second, nar("a second NAR"))).status).toBe(200);
+    const pin = (paths: readonly string[]): Promise<Response> =>
+      h.raw("/_odu/v1/buckets/main/pin", {
+        ...write,
+        method: "POST",
+        headers: { ...write.headers, "content-type": "application/json" },
+        body: JSON.stringify({ name: "master", paths }),
+      });
+
+    const first = await pin([HELLO]);
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ bucket: "main", name: "master" });
+
+    const again = await pin([second]);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ name: "master", rootPaths: [second] });
+    const listed = await h.cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" });
+    expect(listed).toMatchObject({ ok: true });
+    // ONE pin, re-pointed — not two, and yesterday's roots let go.
+    if (listed.ok) expect(listed.value.map((one) => one.rootPaths)).toEqual([[second]]);
+    await h.dispose();
+  });
+
+  it("refuses a read token, a path the bucket lacks, and a body it cannot read", async () => {
+    const h = await harness(true);
+    const read = bearer(h.tokens.read);
+    expect(
+      (
+        await h.raw("/_odu/v1/buckets/main/pin", {
+          ...read,
+          method: "POST",
+          headers: { ...read.headers, "content-type": "application/json" },
+          body: JSON.stringify({ name: "master", paths: [HELLO] }),
+        })
+      ).status,
+    ).toBe(403);
+
+    const write = bearer(h.tokens.write);
+    const absent = await h.raw("/_odu/v1/buckets/main/pin", {
+      ...write,
+      method: "POST",
+      headers: { ...write.headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "master",
+        paths: ["/nix/store/00000000000000000000000000000000-nope"],
+      }),
+    });
+    expect(absent.status).toBe(400);
+    expect(await absent.text()).toContain("no such path in the bucket");
+
+    const malformed = await h.raw("/_odu/v1/buckets/main/pin", {
+      ...write,
+      method: "POST",
+      headers: { ...write.headers, "content-type": "application/json" },
+      body: '{"name": "master"}',
+    });
+    expect(malformed.status).toBe(400);
+    await h.dispose();
+  });
+});
+
 describe("uploading", () => {
   it("records a path whose bytes match its narinfo", async () => {
     const h = await harness(true);

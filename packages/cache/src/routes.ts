@@ -817,6 +817,41 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     ),
 
     /**
+     * PIN A CLOSURE WITH THE TOKEN THAT PUSHED IT — the one pin verb outside
+     * the administrative surface, and the reason CI can keep a master pin
+     * current (`.github/actions/push`'s `pin:` input).
+     *
+     * WRITE scope, and the rule is a capability argument rather than a
+     * convenience: a write token can already keep any closure alive forever by
+     * pushing it again, because a stored push renews `lastWanted`. A pin it
+     * may create or re-point makes that same promise once instead of nightly;
+     * it reads nothing, deletes nothing, and administers nothing. DELETING a
+     * pin stays the admin surface's — that is giving up retention somebody
+     * else asked for.
+     *
+     * Re-pointing is the whole point: the same name, the closure of today's
+     * build, and yesterday's roots let go in the same statement.
+     */
+    HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/pin`, (request) =>
+      Effect.gen(function* () {
+        const admitted = admit(cache, request, yield* param("bucket"), "write");
+        if (!admitted.ok) return admitted.response;
+        const body = yield* request.json;
+        const asked = pinRequestOf(body);
+        if (asked === null) {
+          return refused(cache, request, 'expected {"name": "…", "paths": ["/nix/store/…"]}');
+        }
+        const outcome = yield* Effect.promise(() => cache.pinAs(admitted.bucket, asked));
+        if (!outcome.ok) return refused(cache, request, outcome.message);
+        return HttpServerResponse.jsonUnsafe({
+          bucket: outcome.value.bucket,
+          name: outcome.value.name,
+          rootPaths: outcome.value.rootPaths,
+        });
+      }),
+    ),
+
+    /**
      * A CLAIMED PREFIX MEANS "MINE". Anything under one of this row's paths
      * that matched no protocol file is the CACHE's 404 — text, never the
      * shell's catch-all. Without these, `…/cache/kolu/nope` met the board's
@@ -875,4 +910,18 @@ function missingRequestOf(body: unknown): MissingRequest[] | null {
     out.push({ path: entry.path, sigs: entry.sigs as string[] });
   }
   return out;
+}
+
+/**
+ * The pin body, parsed by hand for the same reason the `missing` body is: a
+ * small frozen shape with one producer, whose refusal has to be a sentence.
+ * The row checks what a pin MEANS (a name that is not blank, paths the bucket
+ * actually holds); this only says the bytes are the shape they claim.
+ */
+function pinRequestOf(body: unknown): { name: string; paths: readonly string[] } | null {
+  if (body === null || typeof body !== "object") return null;
+  if (!("name" in body) || typeof body.name !== "string") return null;
+  if (!("paths" in body) || !Array.isArray(body.paths)) return null;
+  if (body.paths.some((path: unknown) => typeof path !== "string")) return null;
+  return { name: body.name, paths: body.paths as string[] };
 }
