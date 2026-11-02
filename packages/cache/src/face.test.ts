@@ -60,9 +60,9 @@ describe("the Solid compiler that builds the Cache view", () => {
  * they do not need. Pure, so it is pinned here rather than in a browser.
  */
 describe("the empty state names what this person can do", () => {
-  it("points an admin at the form above it", async () => {
+  it("points an admin at the form below it", async () => {
     const { emptyBucketsText } = await import("./face");
-    expect(emptyBucketsText({ canAdminister: true, local: false })).toContain("form above");
+    expect(emptyBucketsText({ canAdminister: true, local: false })).toContain("form below");
     expect(emptyBucketsText({ canAdminister: true, local: false })).not.toContain("odu cache");
   });
 
