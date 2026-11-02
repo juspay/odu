@@ -56,8 +56,8 @@ describe("reading the declarations", () => {
     });
     // WHAT THE BOARD IS TOLD: names and kinds, never an endpoint or a key.
     expect(storeFacts(reading.stores)).toEqual([
-      { name: "local", kind: "local" },
-      { name: "r2", kind: "s3" },
+      { name: "local", kind: "local", default: true },
+      { name: "r2", kind: "s3", default: false },
     ]);
   });
 

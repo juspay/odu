@@ -211,8 +211,8 @@ export const UPSTREAM_HINT =
  * by default, and WHERE its objects live when this daemon declared more than
  * its own disk — beside the two it is created with (public, ninety days of
  * retention). The stores are the row's `stores` cell, drawn as the row names
- * them: the face spells no store, not even the default, which is whatever the
- * row does when none is sent. The button is ENABLED whenever this control is drawn: the name
+ * them: the face spells no store, not even the default — the cell marks it,
+ * and choosing it sends nothing, so the row's own default applies. The button is ENABLED whenever this control is drawn: the name
  * is sent as typed, empty included, and the ROW's refusal is what the person
  * reads — one rule, in one place, rather than a face's copy of it.
  */
@@ -224,7 +224,9 @@ function CreateBucket(
   /** The stores this daemon declared; one store is no choice, so no control. */
   const stores = props.client.cells.stores.use();
   const offered = createMemo(() => stores.value() ?? []);
-  /** `null` until the person picks one: the row's own default then applies. */
+  /** The entry the row marks as its default: what an unpicked select shows. */
+  const fallback = createMemo(() => offered().find((one) => one.default)?.name ?? "");
+  /** `null` while the default is chosen: nothing is sent, and the row decides. */
   const [store, setStore] = createSignal<string | null>(null);
   const control = createControl(props.call);
   const create = (): void => {
@@ -275,13 +277,17 @@ function CreateBucket(
           <select
             class="input"
             aria-label="bucket store"
-            value={store() ?? offered()[0]?.name ?? ""}
-            onChange={(event) => setStore(event.currentTarget.value)}
+            value={store() ?? fallback()}
+            onChange={(event) => {
+              const picked = event.currentTarget.value;
+              setStore(picked === fallback() ? null : picked);
+            }}
           >
             <For each={offered()}>
               {(one) => (
                 <option value={one.name}>
                   {one.name} — {one.kind === "local" ? "this server's disk" : "S3"}
+                  {one.default ? " (default)" : ""}
                 </option>
               )}
             </For>

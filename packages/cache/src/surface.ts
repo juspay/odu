@@ -92,6 +92,9 @@ export type CacheBucket = typeof CacheBucketSchema.Type;
 export const CacheStoreSchema = Schema.Struct({
   name: Schema.String,
   kind: Schema.Literals(["local", "s3"]),
+  /** The store a bucket created without one lands on — true on exactly one
+   *  entry, so a face never guesses it from the order. */
+  default: Schema.Boolean,
 });
 export type CacheStore = typeof CacheStoreSchema.Type;
 
@@ -519,7 +522,7 @@ export const oduCacheSurface = defineSurface({
   cells: {
     stores: {
       schema: Schema.Array(CacheStoreSchema),
-      default: [{ name: LOCAL_STORE, kind: "local" }],
+      default: [{ name: LOCAL_STORE, kind: "local", default: true }],
       verbs: ["get"],
     },
   },

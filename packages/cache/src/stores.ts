@@ -206,7 +206,7 @@ export function objectStores(
 /** What the `stores` cell publishes: names and kinds, nothing else. */
 export function storeFacts(declared: StoreDeclarations): CacheStore[] {
   return [
-    { name: LOCAL_STORE, kind: "local" },
-    ...[...declared].map(([name, declaration]) => ({ name, kind: declaration.kind })),
+    { name: LOCAL_STORE, kind: "local", default: true },
+    ...[...declared].map(([name, declaration]) => ({ name, kind: declaration.kind, default: false })),
   ];
 }
