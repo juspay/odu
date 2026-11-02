@@ -94,8 +94,11 @@ Then("the page offers the board rows", async function (this: OduWorld) {
 Then(
   "the header names {string} as {string}",
   async function (this: OduWorld, login: string, role: string) {
+    // TWO ELEMENTS, because the rail's account card draws them as two: the
+    // login is the control that opens the profile, and the role is the line
+    // under it. One `.account-name` holding both was the old masthead.
     await this.saysThat(this.page.locator(".account-name"), "the header", login);
-    await this.saysThat(this.page.locator(".account-name"), "the header", role);
+    await this.saysThat(this.page.locator(".whoami-role"), "the header", role);
   },
 );
 
@@ -140,7 +143,9 @@ Then("the API reports the bucket", function (this: OduWorld) {
 });
 
 Then("the page shows the bucket list", async function (this: OduWorld) {
-  await this.page.getByRole("heading", { name: "Buckets", exact: true }).waitFor({
+  // The cache SCREEN is what loaded; its bucket grid is a labelled list rather
+  // than a section with a heading of its own.
+  await this.page.getByRole("heading", { name: "Cache", exact: true }).waitFor({
     timeout: 30_000,
   });
 });
