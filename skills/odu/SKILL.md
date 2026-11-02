@@ -368,6 +368,18 @@ the bucket. The cache row is at contract 3.0, which removed `held` and `--wait`.
 - **`catalog_prune` never expires a run with a live owner** — it reports it in
   `kept` with a reason instead.
 
+- **A workflow pushes in ONE step.** `juspay/odu/.github/actions/push@<sha>`
+  takes `origin`, `bucket`, `token` and `paths`; it builds the `odu` it pushes
+  with from the revision it is pinned to, and then proves the push where Nix
+  asks: each served path's narinfo at the bucket's SUBSTITUTER URL (its domain
+  when it has one), and the NAR that narinfo names at the `FileSize:` it
+  claims — truncated objects are a narinfo that answers and a NAR that does not.
+  Each failure is named and reddens the step. An empty `token` builds and pushes
+  nothing on a pull request, and fails a `push` event with the secret to set.
+  When asked to add a cache push to a repository's CI, this is the step — not
+  `attic login` + `attic push`, and not a hand-rolled `nix run … odu cache
+  push` with a token in `env`.
+
 ### Signing in
 
 A server may have a **door**: GitHub sign-in, roles, and personal tokens. You are
@@ -540,6 +552,13 @@ declares.
   (`serves the cache row at 3.0; this build reads cache 2.4`): run `odu web --upgrade`.
   A runs-only reader is never refused because the cache moved.
 - The cache's `held` resource and `odu cache push --wait` are gone (cache 3.0).
+- `odu cache push --output json` also answers `served` — the paths the bucket
+  serves after the push, by name — and `substituter`, the URL a Nix client is
+  told to use. A caller proving a push checks that list at that address, not
+  the closure: the closure still holds the upstream-signed paths a bucket
+  refuses by design.
+- The repository ships a GitHub Actions push step
+  (`juspay/odu/.github/actions/push@<sha>`), which verifies its own push.
 
 - `odu runs` is gone. Use `odu history list` (or the `runs` resource); the JSON
   shape differs.

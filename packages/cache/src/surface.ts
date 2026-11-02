@@ -436,6 +436,43 @@ odu cache push ${input.bucket} <paths> --origin ${input.origin.replace(/\/$/, ""
 `;
 }
 
+/**
+ * A page cannot know which commit a repository should pin — and here the
+ * revision IS a security property, not bookkeeping: the action builds the
+ * `odu` it pushes with from the commit it is pinned to, so moving the pin moves
+ * the pusher. A placeholder is the honest answer; a tag would be a page
+ * choosing a publisher on the reader's behalf.
+ */
+export const ACTION_REF_PLACEHOLDER = "<odu-revision>";
+
+/**
+ * THE SAME PUSH, AS A GITHUB ACTIONS STEP — the bucket page's workflow block
+ * and the docs' "Push from GitHub Actions" section, from one function.
+ *
+ * It is NOT a spelling of {@link pushBlock}: the action takes the token as an
+ * input fed from a secret, so the token is a `secrets.` reference here rather
+ * than the once-shown value. What the two share is the ORIGIN and the bucket,
+ * which is exactly what a page knows and a person would mistype.
+ */
+export function actionsPushBlock(input: {
+  readonly origin: string;
+  readonly bucket: string;
+  /** The revision the action is pinned to: the daemon's own commit
+   *  (`build.commit` on the service cell), or {@link ACTION_REF_PLACEHOLDER}
+   *  when its build baked none. */
+  readonly ref: string;
+}): string {
+  return `# .github/workflows — with Nix installed in an earlier step
+- uses: juspay/odu/.github/actions/push@${input.ref}
+  with:
+    origin: ${input.origin.replace(/\/$/, "")}
+    bucket: ${input.bucket}
+    token: \${{ secrets.ODU_CACHE_TOKEN }}
+    paths: |
+      .#your-package
+`;
+}
+
 // ── the surface ─────────────────────────────────────────────────────────────
 
 /**

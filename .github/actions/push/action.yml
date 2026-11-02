@@ -1,0 +1,98 @@
+# PUSH TO AN ODU CACHE, from any workflow, in one step.
+#
+#   - uses: nixbuild/nix-quick-install-action@<sha>   # Nix must already be here
+#     with:
+#       # THE TWO LINES YOUR BUCKET PRINTS under `nix.conf` — a bucket page's
+#       # "Use it" block, or `odu cache use <bucket>` — so THIS repository's
+#       # builds substitute from YOUR bucket. Not odu's: an action that baked
+#       # odu's cache into a caller's Nix configuration would be choosing a
+#       # cache for somebody else's build.
+#       nix_conf: |
+#         extra-substituters = <your bucket's substituter URL>
+#         extra-trusted-public-keys = <bucket>-1:<your bucket's public key>
+#   - uses: actions/checkout@<sha>
+#   - uses: juspay/odu/.github/actions/push@<sha>
+#     with:
+#       origin: <your bucket's substituter URL>
+#       bucket: <bucket>
+#       token: ${{ secrets.ODU_CACHE_TOKEN }}
+#       paths: |
+#         .#my-package
+#
+# **The pusher is this action's own `odu`.** It is built from the checkout the
+# action itself runs out of — `$GITHUB_ACTION_PATH/../../..` — so pinning the
+# action to a commit pins the pusher to that commit's code, and
+# `uses: ./.github/actions/push` in odu's own repository pushes with the
+# checkout's odu. Nothing is downloaded from a release page, nothing floats.
+#
+# **Nix is required on PATH and is never installed here.** An action that
+# installed a package manager would be an action that decided which Nix a
+# repository builds with; the block above is the `nix_conf` to paste into
+# whichever install step the repository already runs.
+#
+# **Where odu itself is substituted from is odu's own flake's business.** The
+# pusher build passes `--accept-flake-config` and nothing else, so odu's
+# `nixConfig` applies on a Nix that trusts it, and a Nix that does not trust it
+# builds odu instead. The caller's installables are built with the caller's own
+# configuration — no substituter, no key, nothing this action chose.
+#
+# **The token rule, unchanged from the shell this replaced** (see `push.sh`,
+# which is where it is enforced — never in an `if:` here, where an expression
+# would be able to read a secret):
+#
+#   - no token on a pull request  → build, push nothing, say so, succeed
+#   - no token on a `push` event  → fail, naming the missing secret
+#   - the token is never echoed, and never appears in a command line
+#
+# **It proves what it pushed, where Nix will ask.** For every path the bucket
+# serves (`check.sh`): the narinfo must answer at the SUBSTITUTER URL the bucket
+# publishes — its own domain when it has one — and the NAR that narinfo names
+# must answer 200 with a `Content-Length` equal to its `FileSize:`. All of it
+# over plain HTTP, so no local narinfo cache can answer for the bucket, and a
+# NAR truncated by a proxy's body cap is caught rather than counted as landed.
+# Any path that fails turns the step red and is named.
+#
+# The step summary is a table read from `odu cache push --output json`, never
+# scraped from human output.
+name: Push to an odu cache
+description: Push a closure to an odu bucket with the odu built from this action's own checkout, and prove every pushed path answers from the bucket.
+author: odu
+branding:
+  icon: upload-cloud
+  color: purple
+
+inputs:
+  origin:
+    description: >-
+      The bucket's URL — the substituter URL a bucket page prints, e.g.
+      https://cache.kolu.dev. A bucket's own domain, or the instance's origin,
+      both work: the action asks for /cache/<bucket>/... at it.
+    required: true
+  bucket:
+    description: The bucket's name, e.g. kolu.
+    required: true
+  token:
+    description: >-
+      A bucket write token (a bucket page mints one, once). Empty on a pull
+      request builds and pushes nothing; empty on a `push` event fails.
+    required: false
+    default: ""
+  paths:
+    description: >-
+      Space- or newline-separated store paths, `result` links, or flake
+      installables (`.#your-package`). Installables are built first.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Push the closure, and prove it landed
+      shell: bash
+      # The four inputs ride as ENVIRONMENT, not interpolated into the script:
+      # a `paths:` value cannot become shell, and a token cannot become shell.
+      env:
+        ODU_PUSH_ORIGIN: ${{ inputs.origin }}
+        ODU_PUSH_BUCKET: ${{ inputs.bucket }}
+        ODU_PUSH_TOKEN: ${{ inputs.token }}
+        ODU_PUSH_PATHS: ${{ inputs.paths }}
+      run: bash "$GITHUB_ACTION_PATH/push.sh"

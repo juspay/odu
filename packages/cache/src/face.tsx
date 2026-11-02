@@ -59,6 +59,8 @@ import {
   type CacheToken,
   oduCacheSurface,
   PATH_PAGE_SIZE,
+  ACTION_REF_PLACEHOLDER,
+  actionsPushBlock,
   pushBlock,
   useBlock,
   useCommand,
@@ -66,6 +68,21 @@ import {
 } from "./surface";
 
 type CacheSpec = (typeof oduCacheSurface)["spec"];
+
+/**
+ * The address a PUSH goes to, from the bucket's advertised `pushUrl`: its
+ * origin, so a block names `https://the-instance` rather than a path underneath
+ * it, and the bucket is named separately. Both push blocks compute it here so
+ * they cannot disagree, and a `pushUrl` that is not a URL is passed through
+ * unchanged rather than thrown at.
+ */
+function pushOriginOf(pushUrl: string): string {
+  try {
+    return new URL(pushUrl).origin;
+  } catch {
+    return pushUrl;
+  }
+}
 
 /** The cache's client as a VIEW holds it — exported so a shell can type the
  *  prop it threads down without naming the surface framework itself. */
@@ -79,6 +96,12 @@ export interface CacheFaceProps {
   bucket: string | null;
   /** Move the route: `null` closes the bucket. */
   onOpen: (bucket: string | null) => void;
+  /** WHICH COMMIT THE DAEMON WAS BUILT FROM, as an ACCESSOR — the service
+   *  cell's `build.commit`, read live, since a page left open across a service
+   *  handover should offer the build that is serving it now. The shell holds
+   *  the runs' client and so the cell; this face holds the cache's and cannot
+   *  reach it. `null` for a build that baked none. */
+  pushActionRef: () => string | null;
   /** One clock for the page, read once a second by the shell. */
   now: number;
   /** MAY THIS PERSON ADMINISTER BUCKETS? The ROW's floor is `admin`, and the
@@ -165,6 +188,7 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
             onOpen={props.onOpen}
             canAdminister={props.canAdminister}
             tunnelRow={props.tunnelRow}
+            pushActionRef={props.pushActionRef}
           />
         )}
       </Show>
@@ -374,8 +398,14 @@ function BucketPage(
     onOpen: (bucket: string | null) => void;
     canAdminister: boolean;
     tunnelRow: boolean;
+    pushActionRef: () => string | null;
   },
 ): JSX.Element {
+  /** THE REF THE PUSH BLOCK OFFERS — the daemon's own commit when it baked one,
+   *  else the placeholder. Read in the bindings below, so a cell that moves
+   *  redraws the block. */
+  const pushActionRef = (): string => props.pushActionRef() ?? ACTION_REF_PLACEHOLDER;
+
   /** What the person typed, and what the query is allowed to see. Two signals:
    *  the box must track every keystroke, and the request must not. */
   const [typed, setTyped] = createSignal("");
@@ -569,11 +599,11 @@ function BucketPage(
                   : `skips ${row().upstreamKeys.join(", ")}`}
               </span>
             </p>
-            {/* HOW TO USE THIS BUCKET, in two blocks a person copies: reading
-                from it, and pushing to it. Both come from the contract's own
-                functions — `odu cache use` prints the first, and the docs quote
-                the second — so the page, the terminal and the docs cannot say
-                three different things. */}
+            {/* HOW TO USE THIS BUCKET, in blocks a person copies: reading from
+                it, pushing to it, and the same push as a workflow step. All
+                come from the contract's own functions — `odu cache use` prints
+                the first, and the docs quote the others — so the page, the
+                terminal and the docs cannot say three different things. */}
             <h3>Use it</h3>
             <p class="hint">
               The lines for a Nix client — or let a terminal print them:{" "}
@@ -588,20 +618,31 @@ function BucketPage(
                 ? "With the write token you just minted — paste it into your build's secrets now; it is not shown again."
                 : props.canAdminister
                   ? "Mint a write token below, and this block fills it in while it can be shown."
-                  : "With a write token an admin of this server mints for you."}{" "}
-              A ready-made GitHub Actions step is planned.
+                  : "With a write token an admin of this server mints for you."}
             </p>
             <pre class="use-block push-block">
               {pushBlock({
-                origin: (() => {
-                  try {
-                    return new URL(row().pushUrl).origin;
-                  } catch {
-                    return row().pushUrl;
-                  }
-                })(),
+                origin: pushOriginOf(row().pushUrl),
                 bucket: props.name,
                 token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
+              })}
+            </pre>
+            <h3>Push from GitHub Actions</h3>
+            <p class="hint">
+              The action odu ships. It builds its own <code>odu</code> from the
+              revision you pin it to, pushes this bucket, and fails if a path it
+              pushed does not answer here.{" "}
+              {pushActionRef() === ACTION_REF_PLACEHOLDER
+                ? "Pin a revision: that commit is the pusher."
+                : `This block pins ${pushActionRef()} — the commit this server was built from, so the pusher matches the cache you are looking at.`}{" "}
+              Nix must already be on the runner — the{" "}
+              <code>extra_nix_config</code> in the block above is what it needs.
+            </p>
+            <pre class="use-block actions-push-block">
+              {actionsPushBlock({
+                origin: pushOriginOf(row().pushUrl),
+                bucket: props.name,
+                ref: pushActionRef(),
               })}
             </pre>
           </>
