@@ -1,8 +1,8 @@
 # Odu as a product: Nix cache + CI you run yourself
 
 Status: living, 2026-11-02.
-- Phase 1, phases 2.1–2.5 and 2.10 are on master.
-- **Next is 2.6**, the board redesign.
+- Phase 1, phases 2.1–2.7 and 2.10 are on master.
+- **Next is 2.8**, reads leaving odu.
 - One step is one PR, and the order is a dependency order. There is no schedule.
 
 ## Contents
@@ -147,8 +147,8 @@ the read path wherever it can be, behind a board people want to use.
 | 2.3 | Push from GitHub Actions | ✅ #142 |
 | 2.4 | Object storage | ✅ #143 |
 | 2.5 | Staging never refuses a valid NAR | ✅ #147 |
-| 2.6 | The board, redesigned | |
-| 2.7 | GC and pins on every store | |
+| 2.6 | The board, redesigned | ✅ #146 |
+| 2.7 | GC and pins on every store | ✅ #145 |
 | 2.8 | Reads leave odu | |
 | 2.9 | Uploads go straight to the store | |
 | 2.10 | The admin CLI is retired | ✅ #144 |
