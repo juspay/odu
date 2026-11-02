@@ -369,9 +369,9 @@ const bad = (message: string): HttpServerResponse.HttpServerResponse =>
 
 /**
  * THE UPLOAD SESSION a chunked upload's parts and join carry (`x-odu-upload`,
- * contract 2.4): the parts are that upload's own, so two clients sending one
- * NAR cannot have theirs joined together. Absent is a 2.x client, and keeps
- * the shared part names; malformed (`undefined`) is refused.
+ * since the cache row's 2.4): the parts are that upload's own, so two clients
+ * sending one NAR cannot have theirs joined together. Absent is an older
+ * pusher, and keeps the shared part names; malformed (`undefined`) is refused.
  */
 function uploadSession(request: HttpServerRequest.HttpServerRequest): string | null | undefined {
   const value = request.headers[UPLOAD_SESSION_HEADER];

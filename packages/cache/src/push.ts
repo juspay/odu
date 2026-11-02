@@ -587,7 +587,7 @@ async function uploadOne(
   let lastMessage = "no attempt was made";
   const narinfoOnly = false;
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
-  // THIS PATH'S OWN PARTS (contract 2.4): another pusher of the same path, at
+  // THIS PATH'S OWN PARTS (since the cache row's 2.4): another pusher of the same path, at
   // another zstd level, cannot have its parts joined into ours. ONE session for
   // every attempt, so a retry overwrites its own parts rather than abandoning
   // them to the hour-long sweep. An older server ignores the header.

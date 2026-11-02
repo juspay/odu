@@ -266,12 +266,12 @@ const REFUSES = ServiceRefused;
 /**
  * WHO is serving, and whether a caller may believe what it says.
  *
- * `protocolVersion` and `storageVersion` are the two axes a compatible reuse is
- * decided on: the first is this surface's contract, the second is the on-disk
- * record format the catalog is written in. A caller that finds a daemon
- * already running compares both before adopting it — a service speaking a
- * contract it cannot decode is a recycle, and one writing a storage format it
- * cannot read is a refusal a person has to settle.
+ * `protocolVersion` with `rows`, and `storageVersion`, are the two axes a
+ * compatible reuse is decided on: the first is the host's contract and each
+ * mounted row's own (judged by {@link admitService} against the rows a caller
+ * reads), the second is the on-disk record format the catalog is written in. A
+ * service speaking a contract a caller cannot decode is a recycle, and one
+ * writing a storage format it cannot read is a refusal a person has to settle.
  */
 export const ServiceIdentitySchema = Schema.Struct({
   /** The daemon's own process, so an operator can find it. */

@@ -70,8 +70,8 @@ import {
  * reads a run, a bucket or a session.
  */
 export const IDENTITY_TAGS: Readonly<Record<string, true>> = {
-  // The board's identity cell — the contract version a client is admitted
-  // against, and the build it compares.
+  // The board's identity cell — the host's contract and every mounted row's
+  // own, which a client is admitted against, and the build it compares.
   "surface/service/get": true,
   // The frozen control fragment's `hello`: the supervisor's probe, and the
   // ONE control member that is safe to answer anonymously. `drain` is not.
