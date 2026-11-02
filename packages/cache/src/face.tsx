@@ -66,7 +66,6 @@ import {
   PATH_PAGE_SIZE,
   ACTION_REF_PLACEHOLDER,
   DEFAULT_RETENTION_DAYS,
-  GC_PREVIEW_PATHS,
   actionsPushBlock,
   pushBlock,
   useBlock,
@@ -817,6 +816,57 @@ function Answer(props: { control: Control }): JSX.Element {
  *  the same rule {@link FirstPage} keeps, for the same reason. */
 type Reading<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly message: string };
 
+/** What a READ on this page is: a value, the sentence saying why there is
+ *  none, whether it is in flight, and the way to ask again. */
+interface Read<T> {
+  value: () => T | null;
+  fault: () => string | null;
+  loading: () => boolean;
+  refetch: () => void;
+}
+
+/**
+ * ONE SHAPE FOR EVERY GATED READ on this page — the tokens, the pins and the
+ * dry run were three copies of it, and they had already drifted on the
+ * decision that matters: WHEN to ask again. The key is `[bucket, token]`,
+ * because on a daemon with no door the root token is a box the local owner
+ * fills AFTER the page draws, and a list keyed on the bucket alone shows "the
+ * root token does not match" until it is reloaded. A refusal is a VALUE here,
+ * never a rejection: a rejected resource is an unhandled rejection in Solid.
+ */
+function reading<T>(
+  key: () => string | null,
+  rootToken: () => string,
+  ask: (bucket: string) => Promise<T>,
+): Read<T> {
+  const [answer, { refetch }] = createResource(
+    () => {
+      const named = key();
+      return named === null ? null : ([named, rootToken()] as const);
+    },
+    async ([bucket]): Promise<Reading<T>> => {
+      try {
+        return { ok: true, value: await ask(bucket) };
+      } catch (err) {
+        return { ok: false, message: refusalText(err) };
+      }
+    },
+  );
+  const held = createMemo<Reading<T> | undefined>(() => answer());
+  return {
+    value: () => {
+      const one = held();
+      return one !== undefined && one.ok ? one.value : null;
+    },
+    fault: () => {
+      const one = held();
+      return one === undefined || one.ok ? null : one.message;
+    },
+    loading: () => answer.loading,
+    refetch: () => void refetch(),
+  };
+}
+
 /** How a token's life reads, in one phrase. */
 function tokenLife(token: CacheToken, now: number): string {
   if (token.revoked) return "revoked";
@@ -1028,27 +1078,14 @@ function BucketTokens(props: TokenProps): JSX.Element {
   const setMinted = props.onMinted;
   const action = createControl(props.call);
 
-  const [tokens, { refetch }] = createResource(
+  const tokens = reading(
     () => props.name,
-    async (bucket): Promise<Reading<readonly CacheToken[]>> => {
-      try {
-        const answer = await props.call(
-          props.client.procedures.token.list({ rootToken: props.rootToken(), bucket }),
-        );
-        return { ok: true, value: answer.tokens };
-      } catch (err) {
-        return { ok: false, message: refusalText(err) };
-      }
-    },
+    props.rootToken,
+    async (bucket) =>
+      (await props.call(props.client.procedures.token.list({ rootToken: props.rootToken(), bucket })))
+        .tokens,
   );
-  const listed = createMemo<readonly CacheToken[]>(() => {
-    const answer = tokens();
-    return answer !== undefined && answer.ok ? answer.value : [];
-  });
-  const listFault = createMemo<string | null>(() => {
-    const answer = tokens();
-    return answer === undefined || answer.ok ? null : answer.message;
-  });
+  const listed = (): readonly CacheToken[] => tokens.value() ?? [];
 
   const mint = (): void => {
     const chosen = scope();
@@ -1062,7 +1099,7 @@ function BucketTokens(props: TokenProps): JSX.Element {
       }),
       (answer) => {
         setMinted({ id: answer.facts.id, token: answer.token, scope: answer.facts.scope });
-        void refetch();
+        tokens.refetch();
         return expiry() === "never"
           ? `Minted a ${chosen} token for ${props.name}, with no expiry.`
           : `Minted a ${chosen} token for ${props.name}, expiring in ${expiry()} days.`;
@@ -1074,7 +1111,7 @@ function BucketTokens(props: TokenProps): JSX.Element {
       props.client.procedures.token.revoke({ rootToken: props.rootToken(), id }),
       () => {
         if (minted()?.id === id) setMinted(null);
-        void refetch();
+        tokens.refetch();
         return `Revoked ${id}.`;
       },
     );
@@ -1125,12 +1162,12 @@ function BucketTokens(props: TokenProps): JSX.Element {
           </div>
         )}
       </Show>
-      <Show when={listFault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={tokens.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
       <Show
         when={listed().length > 0}
         fallback={
-          <Show when={listFault() === null}>
-            <p class="hint">{tokens.loading ? "reading…" : "No tokens for this bucket yet."}</p>
+          <Show when={tokens.fault() === null}>
+            <p class="hint">{tokens.loading() ? "reading…" : "No tokens for this bucket yet."}</p>
           </Show>
         }
       >
@@ -1188,37 +1225,14 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
   const [paths, setPaths] = createSignal("");
   const action = createControl(props.call);
 
-  /**
-   * THE LIST FOLLOWS THE CREDENTIAL, not only the bucket.
-   *
-   * On a daemon with no door the root token is a box this page asks the local
-   * owner to fill, and a list keyed on the bucket alone reads once — before
-   * anything is typed — and then shows "the root token does not match" for
-   * as long as the page is open. Keying on the token too means the pins
-   * appear the moment the credential is right. For a signed-in admin the
-   * token is always the empty string and this is one read, as before.
-   */
-  const [pins, { refetch }] = createResource(
-    () => [props.name, props.rootToken()] as const,
-    async ([bucket]): Promise<Reading<readonly CachePin[]>> => {
-      try {
-        const answer = await props.call(
-          props.client.procedures.pin.list({ rootToken: props.rootToken(), bucket }),
-        );
-        return { ok: true, value: answer.pins };
-      } catch (err) {
-        return { ok: false, message: refusalText(err) };
-      }
-    },
+  const pins = reading(
+    () => props.name,
+    props.rootToken,
+    async (bucket) =>
+      (await props.call(props.client.procedures.pin.list({ rootToken: props.rootToken(), bucket })))
+        .pins,
   );
-  const listed = createMemo<readonly CachePin[]>(() => {
-    const answer = pins();
-    return answer !== undefined && answer.ok ? answer.value : [];
-  });
-  const listFault = createMemo<string | null>(() => {
-    const answer = pins();
-    return answer === undefined || answer.ok ? null : answer.message;
-  });
+  const listed = (): readonly CachePin[] => pins.value() ?? [];
 
   const create = (): void => {
     // Sent as typed, empty included: the ROW refuses a nameless or pathless
@@ -1239,7 +1253,7 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
           ? `Pinned ${answer.name}: 1 path in its closure is kept from GC.`
           : `Pinned ${answer.name}: ${answer.rootPaths.length} paths in its closure are kept from GC.`;
       },
-      () => void refetch(),
+      pins.refetch,
     );
   };
   const unpin = (name: string): void => {
@@ -1251,7 +1265,7 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
       }),
       (answer) =>
         `Unpinned ${answer.name}; its closure is now retention's to collect like any other path.`,
-      () => void refetch(),
+      pins.refetch,
     );
   };
 
@@ -1287,12 +1301,12 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
         {action.busy() ? "pinning…" : "Pin closure"}
       </button>
       <Answer control={action} />
-      <Show when={listFault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={pins.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
       <Show
         when={listed().length > 0}
         fallback={
-          <Show when={listFault() === null}>
-            <p class="hint">{pins.loading ? "reading…" : "Nothing is pinned in this bucket."}</p>
+          <Show when={pins.fault() === null}>
+            <p class="hint">{pins.loading() ? "reading…" : "Nothing is pinned in this bucket."}</p>
           </Show>
         }
       >
@@ -1308,10 +1322,13 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
                       {held.rootPaths.length} path
                       {held.rootPaths.length === 1 ? "" : "s"} in its closure · pinned{" "}
                       {ago(held.created, props.now)}
-                      {/* WHO MADE IT decides who may re-point it: a pin a
-                          push made is any write token's to move, an
-                          administrator's is nobody's but an admin's. */}
-                      {held.createdBy === "write" ? " · by a push" : " · by an admin"}
+                      {/* WHO MADE IT decides who may re-point it — and an
+                          admin who re-points a pushed pin TAKES IT OVER: the
+                          next push naming it is refused and that workflow
+                          step goes red, which is loud on purpose. */}
+                      {held.createdBy === "write"
+                        ? " · made by a push, which may re-point it"
+                        : " · made by an administrator: a push can no longer move it"}
                     </span>
                   </span>
                   {/* WHAT IT HOLDS, rather than that it holds something: the
@@ -1350,55 +1367,34 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
  */
 function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Element {
   const action = createControl(props.call);
-  /**
-   * THE DRY RUN IS ASKED FOR, NEVER TAKEN ON ARRIVAL.
-   *
-   * The source is null until the button is pressed, which is what keeps this
-   * resource from firing at mount — and at mount, on a daemon with no door,
-   * the root token is still an empty box, so an eager plan greeted every
-   * local owner with "the root token does not match" before they had typed
-   * anything. A question nobody asked must not answer in red.
-   */
-  const [asked, setAsked] = createSignal(0);
-  const [plan, { refetch }] = createResource(
-    () => (asked() === 0 ? null : ([props.name, asked()] as const)),
-    async ([bucket]): Promise<Reading<CacheGcPlan>> => {
-      try {
-        return {
-          ok: true,
-          value: await props.call(
-            props.client.procedures.gc.plan({ rootToken: props.rootToken(), bucket }),
-          ),
-        };
-      } catch (err) {
-        return { ok: false, message: refusalText(err) };
-      }
-    },
+  /** THE DRY RUN IS ASKED FOR, NEVER TAKEN ON ARRIVAL: the key is null until
+   *  the button is pressed, because at mount a daemon with no door has an
+   *  empty root-token box and an eager plan would greet its local owner with
+   *  "the root token does not match" before they had typed anything. */
+  const [asked, setAsked] = createSignal(false);
+  const plan = reading(
+    () => (asked() ? props.name : null),
+    props.rootToken,
+    (bucket) => props.call(props.client.procedures.gc.plan({ rootToken: props.rootToken(), bucket })),
   );
   /** Ask for it: the button, and what a collection does to its own answer —
    *  but only when somebody had asked, since a collection must not turn a
    *  silent section into one. */
   const askAgain = (): void => {
-    if (asked() === 0) setAsked(1);
-    else void refetch();
+    if (!asked()) setAsked(true);
+    else plan.refetch();
   };
   /** This bucket's share of the plan. A plan that does not mention it has
    *  nothing to say about it, which is not the same as not having answered. */
-  const next = createMemo<CacheGcPlan["buckets"][number] | null>(() => {
-    const answer = plan();
-    if (answer === undefined || !answer.ok) return null;
-    return answer.value.buckets.find((row) => row.bucket === props.name) ?? null;
-  });
-  const planFault = createMemo<string | null>(() => {
-    const answer = plan();
-    return answer === undefined || answer.ok ? null : answer.message;
-  });
+  const next = (): CacheGcPlan["buckets"][number] | null =>
+    plan.value()?.buckets.find((row) => row.bucket === props.name) ?? null;
   const collect = (): void => {
     action.run(
       props.client.procedures.gc.run({ rootToken: props.rootToken(), bucket: props.name }),
       (report) =>
         `Collected: evicted ${report.evicted} path${report.evicted === 1 ? "" : "s"}` +
-        `${report.kept > 0 ? ` (${report.kept} kept by another root)` : ""}, freed ${bytes(report.bytes)}` +
+        `${report.kept > 0 ? ` (${report.kept} whose bytes a twin path still names)` : ""}` +
+        `, freed ${bytes(report.bytes)}` +
         // The objects no row ever named — a put whose record never landed.
         // They are bytes nothing on this page could list, so the one moment
         // they are visible is the pass that swept them.
@@ -1406,7 +1402,7 @@ function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Elemen
       // WHATEVER THE COLLECTION ANSWERED, a plan somebody asked for is now a
       // guess — so it is asked again, and a section nobody asked stays quiet.
       () => {
-        if (asked() !== 0) void refetch();
+        if (asked()) plan.refetch();
       },
     );
   };
@@ -1420,12 +1416,12 @@ function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Elemen
         <button type="button" class="btn" disabled={action.busy()} onClick={collect}>
           {action.busy() ? "collecting…" : "Run GC"}
         </button>
-        <button type="button" class="btn" disabled={plan.loading} onClick={askAgain}>
-          {plan.loading ? "counting…" : "Dry run"}
+        <button type="button" class="btn" disabled={plan.loading()} onClick={askAgain}>
+          {plan.loading() ? "counting…" : "Dry run"}
         </button>
       </div>
       <Answer control={action} />
-      <Show when={planFault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={plan.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
       <Show when={next()}>
         {(would) => (
           <>
@@ -1450,8 +1446,8 @@ function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Elemen
               </ol>
               <Show when={would().evicted > would().paths.length}>
                 <p class="hint">
-                  The {GC_PREVIEW_PATHS} oldest wants are listed; the count and the
-                  total above are the whole of it.
+                  The {would().paths.length} oldest wants are listed; the count and
+                  the total above are the whole of it.
                 </p>
               </Show>
             </Show>
@@ -1464,35 +1460,25 @@ function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Elemen
 
 /** `stats.read` — this bucket beside the whole cache. */
 function BucketStats(props: AdminProps & { name: string; now: number }): JSX.Element {
-  const [stats, { refetch }] = createResource(
+  const stats = reading<CacheStats>(
     () => props.name,
-    async (): Promise<Reading<CacheStats>> => {
-      try {
-        return {
-          ok: true,
-          value: await props.call(
-            props.client.procedures.stats.read({ rootToken: props.rootToken() }),
-          ),
-        };
-      } catch (err) {
-        return { ok: false, message: refusalText(err) };
-      }
-    },
+    props.rootToken,
+    () => props.call(props.client.procedures.stats.read({ rootToken: props.rootToken() })),
   );
-  const reading = createMemo<CacheStats | null>(() => {
-    const answer = stats();
-    return answer !== undefined && answer.ok ? answer.value : null;
-  });
-  const fault = createMemo<string | null>(() => {
-    const answer = stats();
-    return answer === undefined || answer.ok ? null : answer.message;
-  });
-  const mine = createMemo(() => reading()?.buckets.find((row) => row.name === props.name));
+  const mine = (): CacheBucket | undefined =>
+    stats.value()?.buckets.find((row) => row.name === props.name);
   return (
     <section class="admin-section" aria-label="stats">
       <h3>Stats</h3>
-      <Show when={fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
-      <Show when={reading()} fallback={<Show when={fault() === null}><p class="hint">reading…</p></Show>}>
+      <Show when={stats.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show
+        when={stats.value()}
+        fallback={
+          <Show when={stats.fault() === null}>
+            <p class="hint">reading…</p>
+          </Show>
+        }
+      >
         {(all) => (
           <dl class="stats">
             <dt>this bucket</dt>
@@ -1522,7 +1508,7 @@ function BucketStats(props: AdminProps & { name: string; now: number }): JSX.Ele
         A path is wanted by a push or by a <code>missing</code> query that names
         it — never by a read, which is a substitution leaving odu.
       </p>
-      <button type="button" class="text-action" disabled={stats.loading} onClick={() => refetch()}>
+      <button type="button" class="text-action" disabled={stats.loading()} onClick={stats.refetch}>
         refresh stats
       </button>
     </section>

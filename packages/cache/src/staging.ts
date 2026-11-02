@@ -55,7 +55,7 @@ import { writeAll } from "./sink";
 import { verifyNarFile } from "./store";
 import type { BucketRow } from "./db";
 import {
-  compressionExtension,
+  narFileName,
   isDerivationPath,
   isStagedFileName,
   isStorePathHash,
@@ -138,13 +138,14 @@ const STAGE_TTL_MS = 60 * 60 * 1000;
  *  a readdir of every bucket on every PUT. */
 const SWEEP_EVERY_MS = 60 * 1000;
 
-/** The object key a bucket's compressed NAR lives at. */
+/** The object key a bucket's compressed NAR lives at: the name the protocol
+ *  serves it under, under this bucket's own prefix. */
 export function objectKey(
   bucket: string,
   narHash: string,
   compression: string | null = "zstd",
 ): string {
-  return `${bucket}/nar/${narHash.replace(/^sha256:/, "")}.${compressionExtension(compression)}`;
+  return `${bucket}/nar/${narFileName(narHash, compression)}`;
 }
 
 export interface StagingDeps {

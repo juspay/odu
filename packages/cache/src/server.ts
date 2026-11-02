@@ -71,7 +71,7 @@ import {
   type Cache,
   type CacheOutcome,
 } from "./cache";
-import type { GcReport } from "./gc";
+import type { GcCollection, GcReport } from "./gc";
 import { objectStores, type StoreDeclarations, storeFacts } from "./stores";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
@@ -121,7 +121,7 @@ export interface CacheServerOptions {
    * over; who purges them, and whether anybody does, is not this row's
    * business — see `@odu/cordis`'s `CachePurge`.
    */
-  readonly purge?: CachePurge;
+  readonly purge: CachePurge;
   /** One operational line. The row hands the daemon's logger over. */
   readonly log?: (event: string, fields: Record<string, unknown>) => void;
 }
@@ -149,11 +149,15 @@ export interface CacheServer {
 /**
  * HOW OFTEN A CACHE COLLECTS ITSELF.
  *
- * Daily. Retention is measured in days, so a collection that ran more often
- * would find the same answer and delete nothing; one that ran less often would
- * let a bucket sit over its retention for as long as the gap. The first run is
- * one interval after the row mounts, not at boot: a daemon restarting in a
- * crash loop must not spend each boot walking every bucket's object list.
+ * Daily, which is the floor retention's own granularity sets: a collection
+ * that ran more often would read the same day-counted clock and delete
+ * nothing, and one that ran less often would let a bucket sit over its
+ * retention for the gap. A bucket at ZERO days is the one case where sooner
+ * would find more — it waits up to one interval, or until somebody presses
+ * the button, which is what the button is for.
+ *
+ * The first run is one interval after the row mounts, not at boot: a daemon
+ * restarting in a crash loop must not spend each boot walking every bucket.
  */
 export const GC_EVERY_MS = 24 * 60 * 60 * 1000;
 
@@ -276,30 +280,44 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    * an edge may hold `https://cache.example.org/<hash>.narinfo` AND
    * `https://odu.example.org/cache/<bucket>/<hash>.narinfo`, and purging one
    * of them leaves the other serving a path the origin has forgotten.
+   *
+   * NOTHING IS BUILT WHEN NOBODY FRONTS THESE URLS. The broker knows whether
+   * anybody does, and on a daemon with no CDN — most of them — a nightly
+   * collection must not compose two URLs per evicted path for a no-op.
    */
-  const announce = (report: GcReport): void => {
-    const purge = opts.purge;
-    if (purge === undefined) return;
+  const announce = (collected: GcCollection): void => {
+    if (!opts.purge.listening()) return;
     const urls: string[] = [];
-    for (const bucket of report.buckets) {
-      if (bucket.removed.length === 0) continue;
-      const facts = cache.bucket(bucket.bucket);
-      const bases = new Set([pushUrlOf(bucket.bucket)]);
-      if (facts?.domain != null) bases.add(urlOf({ name: bucket.bucket, domain: facts.domain }));
+    for (const [name, removed] of collected.removed) {
+      if (removed.length === 0) continue;
+      const facts = cache.bucket(name);
+      // THE READ ADDRESS, not the push API's. They are the same string today
+      // and they are different facts: one is where Nix asks, the other is
+      // where a client uploads.
+      const bases = new Set([urlOf({ name, domain: null })]);
+      if (facts?.domain != null) bases.add(urlOf({ name, domain: facts.domain }));
       for (const base of bases) {
-        for (const removal of bucket.removed) {
+        for (const removal of removed) {
           urls.push(`${base}/${removal.hash}.narinfo`);
           if (removal.narFile !== null) urls.push(`${base}/nar/${removal.narFile}`);
         }
       }
     }
     if (urls.length === 0) return;
-    opts.log?.("cache.gc.purge", { urls: urls.length, listening: purge.listening() });
-    purge.announce(urls);
+    opts.log?.("cache.gc.purge", { urls: urls.length });
+    opts.purge.announce(urls);
+  };
+
+  /** A collection, announced. BOTH doors go through this — the verb and the
+   *  schedule — so "a deletion is announced" is one fact rather than two call
+   *  sites that can drift, and what crosses the wire is the report alone. */
+  const announced = (done: GcCollection): GcReport => {
+    announce(done);
+    return done.report;
   };
 
   const collect = async (): Promise<void> => {
-    announce(await cache.collect());
+    announced(await cache.collect());
   };
 
   /** One admin call as a procedure's answer: the outcome mapped onto the
@@ -526,22 +544,20 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         run: ({ input }) =>
           admin(
             input,
-            (authority) =>
-              cache.admin.gc({
-                authority,
-                bucket: input.bucket ?? null,
-              }),
             // THE COLLECTION IS ALSO AN ANNOUNCEMENT: what left has to reach
             // whatever is caching it, and the ROW is where a store path
-            // becomes a URL. The wire carries the counts; the port carries
-            // the addresses.
-            (report) => {
-              announce(report);
-              return {
-                ...report,
-                buckets: report.buckets.map(({ removed: _removed, ...counts }) => counts),
-              };
+            // becomes a URL. The wire carries the counts, the port the
+            // addresses, and `announced` is the one place that splits them.
+            async (authority) => {
+              const outcome = await cache.admin.gc({
+                authority,
+                bucket: input.bucket ?? null,
+              });
+              return outcome.ok
+                ? { ok: true as const, value: announced(outcome.value) }
+                : outcome;
             },
+            (report) => report,
           ),
         plan: ({ input }) =>
           admin(

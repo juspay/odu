@@ -52,6 +52,7 @@
 
 import type { ObjectStore } from "@odu/objects";
 import type { BucketRow, CacheRepo, ObjectRow, PinRow } from "./db";
+import { narFileName } from "./narinfo";
 import { objectKey } from "./staging";
 
 export interface GcInput {
@@ -71,23 +72,58 @@ export interface GcBucketPlan {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** How many paths a DRY RUN lists per bucket. The counts and the bytes are
+ *  the whole truth; this is how much of it a person reads before pressing the
+ *  button, and the reason a million-path eviction is not a million-row
+ *  answer. Beside `previewGc`, the only thing that applies it. */
+export const GC_PREVIEW_PATHS = 50;
+
 /** What one evicted row costs: the compressed object when the row knows its
  *  size, the NAR's otherwise (a row from before objects were kept). */
 const sizeOf = (row: ObjectRow): number => row.fileSize ?? row.narSize;
 
-/** Every path reachable from `roots` by following `references`, including the
- *  roots themselves. Iterative, because a store closure is a graph and a
- *  recursive walk over somebody's million-path closure is a stack overflow. */
-function closureOf(roots: Iterable<string>, byPath: Map<string, ObjectRow>): Set<string> {
+/**
+ * Every path reachable from `roots` by following `references`, including the
+ * roots themselves. Iterative, because a store closure is a graph and a
+ * recursive walk over somebody's million-path closure is a stack overflow.
+ *
+ * A reference may be a bare basename or a full store path, depending on what
+ * wrote the row, and both are followed HERE — so a pin's closure and the
+ * collector's reach are the same set. Two walks with two rules is a pin that
+ * promises paths the collector does not protect.
+ */
+export function closureOf(roots: Iterable<string>, byPath: Map<string, ObjectRow>): Set<string> {
   const seen = new Set<string>();
   const queue = [...roots];
   while (queue.length > 0) {
     const path = queue.pop() as string;
     if (seen.has(path)) continue;
     seen.add(path);
-    for (const reference of byPath.get(path)?.references ?? []) queue.push(reference);
+    for (const reference of byPath.get(path)?.references ?? []) {
+      queue.push(reference.startsWith("/nix/store/") ? reference : `/nix/store/${reference}`);
+    }
   }
   return seen;
+}
+
+/**
+ * WHAT EVICTING THESE ROWS ACTUALLY FREES — one rule, so the dry run and the
+ * collection cannot answer differently about the same bucket.
+ *
+ * A row's bytes go only when its object goes, and the object goes only when
+ * no SURVIVING row names that NarHash — and then once, however many of the
+ * evicted rows are twins of each other.
+ */
+function freedBytes(evict: readonly ObjectRow[], kept: readonly ObjectRow[]): number {
+  const survives = new Set(kept.map((row) => row.narHash));
+  const counted = new Set<string>();
+  let bytes = 0;
+  for (const row of evict) {
+    if (survives.has(row.narHash) || counted.has(row.narHash)) continue;
+    counted.add(row.narHash);
+    bytes += sizeOf(row);
+  }
+  return bytes;
 }
 
 export function planGc(input: GcInput): GcBucketPlan[] {
@@ -109,17 +145,19 @@ export function planGc(input: GcInput): GcBucketPlan[] {
     const pinnedRoots = pins.flatMap((pin) => pin.rootPaths);
     const protectedByPin = closureOf(pinnedRoots, byPath);
 
-    const evict = objects.filter(
-      (row) =>
-        expired(row) &&
-        !protectedByReference.has(row.storePath) &&
-        !protectedByPin.has(row.storePath),
-    );
+    const doomed = (row: ObjectRow): boolean =>
+      expired(row) &&
+      !protectedByReference.has(row.storePath) &&
+      !protectedByPin.has(row.storePath);
+    const evict = objects.filter(doomed);
     return {
       bucket: bucket.name,
       evict,
       remaining: objects.length - evict.length,
-      bytes: evict.reduce((sum, row) => sum + sizeOf(row), 0),
+      bytes: freedBytes(
+        evict,
+        objects.filter((row) => !doomed(row)),
+      ),
     };
   });
 }
@@ -183,13 +221,12 @@ export interface GcBucketReport {
   evicted: number;
   /** Rows dropped whose bytes a TWIN row still names — the object stayed. */
   kept: number;
-  /** Bytes reclaimed, by the kept object's own size. */
+  /** Bytes reclaimed, by the one rule {@link planGc} previews. */
   bytes: number;
   /** Object keys the store held that no row named — a crash between keeping
-   *  an object and recording it. Found with `list`, deleted with `delete`. */
+   *  an object and recording it. Swept by {@link sweepOrphans}, counted here
+   *  because this is the report a person reads. */
   orphans: number;
-  /** What left, for the purge announcement. */
-  removed: readonly GcRemoval[];
 }
 
 export interface GcReport {
@@ -201,32 +238,41 @@ export interface GcReport {
 }
 
 /**
+ * WHAT A COLLECTION DID, and separately WHAT LEFT.
+ *
+ * The report is the answer a caller reads and the shape the wire carries; the
+ * removals are the purge port's payload. They are two things on two clocks —
+ * a contract major moves the first, an edge's needs the second — so a report
+ * that carried removals would be a wire answer somebody has to remember to
+ * strip, and would leak the day somebody forgot.
+ */
+export interface GcCollection {
+  report: GcReport;
+  /** By bucket, in the order they were deleted. */
+  removed: ReadonlyMap<string, readonly GcRemoval[]>;
+}
+
+/**
  * Do the plan. An object leaves with its row; the bytes are the object store's,
  * deleted by key, so nothing on this machine's Nix store is touched (the
  * server does not have one).
- *
- * Then the ORPHAN SWEEP, with the same two members: every key under the
- * bucket's prefix that no surviving row names is a put whose record never
- * landed, and the write lock is held, so nothing in flight owns one. The boot
- * sweep does this once at startup; a collection is the other moment a daemon
- * knows it is safe, and without it a crashed push's bytes waited for a
- * restart.
  */
 export async function runGc(
   repo: CacheRepo,
   plan: readonly GcBucketPlan[],
   /** The store each bucket's objects live in. */
   objectsOf: (bucket: string) => ObjectStore,
-): Promise<GcReport> {
+): Promise<GcCollection> {
   const perBucket = new Map<string, GcBucketReport>(
     plan.map((entry) => [
       entry.bucket,
-      { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0, orphans: 0, removed: [] },
+      { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0, orphans: 0 },
     ]),
   );
+  const removed = new Map<string, GcRemoval[]>();
   for (const entry of plan) {
     const report = perBucket.get(entry.bucket) as GcBucketReport;
-    const removed: GcRemoval[] = [];
+    const left: GcRemoval[] = [];
     const objects = objectsOf(entry.bucket);
     for (const row of entry.evict) {
       repo.deleteObject(entry.bucket, row.storePath);
@@ -234,41 +280,60 @@ export async function runGc(
       // object). The bytes go only when no row in the bucket names them NOW —
       // asked of the database right before the delete (an indexed lookup), not
       // of the plan's snapshot, so a row that appeared mid-run keeps its object.
+      // It is `freedBytes`' rule, applied against the rows as they are.
       const twin = repo.objectsByNarHash(entry.bucket, row.narHash).length > 0;
-      const key = objectKey(entry.bucket, row.narHash, row.compression);
-      if (!twin) await objects.delete(key);
-      removed.push({
+      if (!twin) await objects.delete(objectKey(entry.bucket, row.narHash, row.compression));
+      left.push({
         storePath: row.storePath,
         hash: row.hash,
-        narFile: twin ? null : (key.split("/").at(-1) as string),
+        narFile: twin ? null : narFileName(row.narHash, row.compression),
       });
       report.evicted += 1;
       if (twin) report.kept += 1;
       else report.bytes += sizeOf(row);
     }
-    report.removed = removed;
-
-    // THE ORPHANS, from the store itself: `list` is the only way to learn of a
-    // key no row remembers, and the rows are re-read here rather than taken
-    // from the plan so a path recorded during this run keeps its object.
-    const named = new Set(
-      repo
-        .objects(entry.bucket)
-        .map((row) => objectKey(entry.bucket, row.narHash, row.compression)),
-    );
-    for (const object of await objects.list(entry.bucket)) {
-      if (named.has(object.key)) continue;
-      await objects.delete(object.key);
-      report.orphans += 1;
-      report.bytes += object.size;
-    }
+    removed.set(entry.bucket, left);
   }
   const buckets = [...perBucket.values()];
   return {
-    buckets,
-    evicted: buckets.reduce((sum, bucket) => sum + bucket.evicted, 0),
-    kept: buckets.reduce((sum, bucket) => sum + bucket.kept, 0),
-    bytes: buckets.reduce((sum, bucket) => sum + bucket.bytes, 0),
-    orphans: buckets.reduce((sum, bucket) => sum + bucket.orphans, 0),
+    report: {
+      buckets,
+      evicted: buckets.reduce((sum, bucket) => sum + bucket.evicted, 0),
+      kept: buckets.reduce((sum, bucket) => sum + bucket.kept, 0),
+      bytes: buckets.reduce((sum, bucket) => sum + bucket.bytes, 0),
+      orphans: 0,
+    },
+    removed,
   };
+}
+
+/**
+ * EVERY KEY UNDER A BUCKET THAT NO ROW NAMES — a put whose record never
+ * landed, deleted. `list` is the only way to learn of one, which is why this
+ * is the other half of "GC speaks only `ObjectStore`".
+ *
+ * It runs on the CRASH clock, not the retention clock: orphans appear when a
+ * push dies mid-put, so the sweep belongs to the two moments a daemon knows
+ * nothing it owns is writing and is walking everything anyway — boot, and a
+ * collection of every bucket. The single-bucket button does not pay a full
+ * paged LIST of a million-key store to find what a crash leaves behind.
+ *
+ * The rows are re-read here rather than taken from a plan, so a path recorded
+ * during the collection keeps its object.
+ */
+export async function sweepOrphans(
+  repo: CacheRepo,
+  bucket: string,
+  objects: ObjectStore,
+): Promise<number> {
+  const named = new Set(
+    repo.objects(bucket).map((row) => objectKey(bucket, row.narHash, row.compression)),
+  );
+  let swept = 0;
+  for (const object of await objects.list(bucket)) {
+    if (named.has(object.key)) continue;
+    await objects.delete(object.key);
+    swept += 1;
+  }
+  return swept;
 }

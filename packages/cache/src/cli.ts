@@ -224,6 +224,7 @@ export async function cacheCommand(
 }
 
 
+
 async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,

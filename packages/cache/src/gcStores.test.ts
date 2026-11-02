@@ -125,7 +125,7 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       const report = await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
       expect(report).toMatchObject({ ok: true });
       if (!report.ok) return;
-      expect(report.value.evicted).toBe(1);
+      expect(report.value.report.evicted).toBe(1);
 
       const bucket = cache.bucket("main");
       if (bucket === null) throw new Error("no bucket");
@@ -178,7 +178,7 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
 
       const report = await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
       expect(report).toMatchObject({ ok: true });
-      if (report.ok) expect(report.value.evicted).toBe(plan.value.evicted);
+      if (report.ok) expect(report.value.report.evicted).toBe(plan.value.evicted);
       expect(await keysOf(objects)).toEqual([keyFor(fresh)]);
       await dispose();
     });
@@ -214,9 +214,12 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       await objects.put("main/nar/deadbeefdeadbeef.nar", new Blob(["orphaned"]));
 
       travel(1 * DAY);
-      const report = await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
+      // EVERY bucket, because that is the collection the orphan sweep rides
+      // on: orphans appear when a push crashes, not when retention passes,
+      // so a single bucket's button does not pay a full LIST for them.
+      const report = await cache.admin.gc({ ...asRoot(ROOT), bucket: null });
       expect(report).toMatchObject({ ok: true });
-      if (report.ok) expect(report.value.orphans).toBe(1);
+      if (report.ok) expect(report.value.report.orphans).toBe(1);
       expect(await keysOf(objects)).toEqual([keyFor(alive)]);
       await dispose();
     });

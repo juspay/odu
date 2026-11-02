@@ -336,7 +336,8 @@ const GcPlanBucketSchema = Schema.Struct({
   evicted: Schema.Int,
   bytes: Schema.Int,
   remaining: Schema.Int,
-  /** The first {@link GC_PREVIEW_PATHS}, oldest want first. */
+  /** A readable head of them, oldest want first — the row decides how many,
+   *  and `evicted` above is the whole count either way. */
   paths: Schema.Array(
     Schema.Struct({
       storePath: Schema.String,
@@ -402,12 +403,6 @@ export const PATH_PAGE_SIZE = 100;
  * uses to make a collection deterministic.
  */
 export const DEFAULT_RETENTION_DAYS = 90;
-
-/** How many paths a DRY RUN lists per bucket. The counts and the bytes are the
- *  whole truth; this is how much of it a person reads before pressing the
- *  button, and the reason a million-path eviction is not a million-row
- *  answer. */
-export const GC_PREVIEW_PATHS = 50;
 
 /**
  * HOW BIG ONE UPLOAD REQUEST MAY BE.

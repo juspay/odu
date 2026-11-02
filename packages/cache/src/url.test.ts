@@ -18,6 +18,7 @@ import { createCache, type Cache } from "./cache";
 import { storeFacts } from "./stores";
 import { asRoot, localStores } from "./testlib";
 import { cacheServer } from "./server";
+import { purgeBroker } from "@odu/cordis/services";
 import type { CacheBucket } from "./surface";
 
 const BOUND = "http://127.0.0.1:18440";
@@ -51,6 +52,8 @@ async function row(publicOrigin: string): Promise<{
   const server = cacheServer({
     cache,
     publicOrigin,
+    // The broker a host always provides; nothing registers on it here.
+    purge: purgeBroker(),
     mount: "/cache",
     stores: storeFacts(new Map()),
   });

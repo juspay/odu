@@ -25,12 +25,15 @@ import { join } from "node:path";
 import type { BucketRow, BucketTotals, ObjectRow, PinAuthor, Scope, TokenRow } from "./db";
 import { cursorFor, openCacheRepo } from "./db";
 import {
+  closureOf,
   type GcBucketPlan,
+  type GcCollection,
+  GC_PREVIEW_PATHS,
   type GcPreview,
-  type GcReport,
   planGc,
   previewGc,
   runGc,
+  sweepOrphans,
 } from "./gc";
 import {
   fingerprintOf,
@@ -42,13 +45,13 @@ import {
   compressionOfFile,
   canonicalNarHash,
   type NarInfo,
-  compressionExtension,
+  narFileName,
   signFingerprint,
   storePathHash,
 } from "./narinfo";
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
-import { GC_PREVIEW_PATHS, LOCAL_STORE, PATH_PAGE_SIZE } from "./surface";
+import { LOCAL_STORE, PATH_PAGE_SIZE } from "./surface";
 import {
   createStaging,
   objectKey,
@@ -253,7 +256,10 @@ export interface CacheAdmin {
     bucket: string;
     name: string;
   }): Promise<CacheOutcome<{ bucket: string; name: string }>>;
-  gc(input: { authority: Authority; bucket: string | null }): Promise<CacheOutcome<GcReport>>;
+  gc(input: {
+    authority: Authority;
+    bucket: string | null;
+  }): Promise<CacheOutcome<GcCollection>>;
   /** THE SAME DECISION, WITHOUT DOING IT — what the next collection would
    *  evict, path by path, and what it would reclaim. */
   gcPlan(input: {
@@ -422,7 +428,7 @@ export interface Cache {
    * check. The verb authorises and then calls this; the schedule calls it
    * directly.
    */
-  collect(): Promise<GcReport>;
+  collect(): Promise<GcCollection>;
   /**
    * PIN A CLOSURE ON A BUCKET'S OWN AUTHORITY — what the protocol route
    * offers a WRITE token, and the one pin verb that is not administration.
@@ -612,7 +618,7 @@ export function createCache(options: CacheOptions): Cache {
   function narinfoFor(bucket: BucketRow, row: ObjectRow): string {
     const info: NarInfo = {
       storePath: row.storePath,
-      url: `nar/${row.narHash.replace(/^sha256:/, "")}.${compressionExtension(row.compression)}`,
+      url: `nar/${narFileName(row.narHash, row.compression)}`,
       compression: row.compression,
       fileHash: row.fileHash,
       fileSize: row.fileSize,
@@ -1007,7 +1013,8 @@ export function createCache(options: CacheOptions): Cache {
       if (!root.ok) return root;
       const chosen = bucketsFor(input.bucket);
       if (!chosen.ok) return chosen;
-      return { ok: true, value: await collectNow(chosen.value) };
+      // A NAMED BUCKET IS NOT A SWEEP: see `collectNow`.
+      return { ok: true, value: await collectNow(chosen.value, input.bucket === null) };
     },
 
     async gcPlan(input) {
@@ -1073,7 +1080,12 @@ export function createCache(options: CacheOptions): Cache {
     input: { name: string; paths: readonly string[] },
     by: PinAuthor,
   ): Promise<CacheOutcome<PinFacts>> {
-    if (input.name.trim() === "") {
+    // THE NAME IS TRIMMED ONCE, here, and what follows is that name: the
+    // table's key is `(bucket, name)`, so a `"rel "` checked against `rel`
+    // and then STORED with its space would be a second pin — and re-pointing
+    // that releases nothing, which is the one thing re-pointing is for.
+    const name = input.name.trim();
+    if (name === "") {
       return { ok: false, code: "bad_input", message: "a pin needs a name, e.g. release-1.2" };
     }
     if (input.paths.length === 0) {
@@ -1088,7 +1100,7 @@ export function createCache(options: CacheOptions): Cache {
     // UNDER THE LOCK, with the write it guards: read outside it, the answer
     // could be about a pin an admin made a moment ago.
     return withWriteLock(async () => {
-      const held = repo.pins(bucket.name).find((pin) => pin.name === input.name.trim());
+      const held = repo.pins(bucket.name).find((pin) => pin.name === name);
       if (by === "write" && held !== undefined && held.createdBy === "admin") {
         return {
           ok: false as const,
@@ -1099,7 +1111,7 @@ export function createCache(options: CacheOptions): Cache {
             "whatever the pin held before",
         };
       }
-      return pinNow(bucket, input, by);
+      return pinNow(bucket, { name, paths: input.paths }, by);
     });
   }
 
@@ -1108,24 +1120,13 @@ export function createCache(options: CacheOptions): Cache {
     input: { name: string; paths: readonly string[] },
     by: PinAuthor,
   ): Promise<CacheOutcome<PinFacts>> {
-    // THE CLOSURE IS THE BUCKET'S OWN ROWS: a pin holds what this cache
-    // serves, so the references are followed in the metadata, not asked of a
-    // Nix store the server no longer has.
+    // THE CLOSURE IS THE BUCKET'S OWN ROWS, walked by the COLLECTOR'S own
+    // function: a pin promises exactly what GC protects, and two walks with
+    // two rules is a pin that holds paths the collector lets go. The
+    // references are followed in the metadata, never asked of a Nix store
+    // the server no longer has.
     const rows = new Map(repo.objects(bucket.name).map((row) => [row.storePath, row]));
-    const reached = new Set<string>();
-    const queue = [...input.paths];
-    while (queue.length > 0) {
-      const path = queue.pop() as string;
-      if (reached.has(path)) continue;
-      const row = rows.get(path);
-      if (row === undefined) continue;
-      reached.add(path);
-      for (const reference of row.references) {
-        const full = reference.startsWith("/nix/store/") ? reference : `/nix/store/${reference}`;
-        queue.push(full);
-      }
-    }
-    const absent = input.paths.filter((path) => !reached.has(path));
+    const absent = input.paths.filter((path) => !rows.has(path));
     if (absent.length > 0) {
       return {
         ok: false,
@@ -1133,11 +1134,12 @@ export function createCache(options: CacheOptions): Cache {
         message: `no such path in the bucket: ${absent.join(", ")}`,
       };
     }
+    const reached = [...closureOf(input.paths, rows)].filter((path) => rows.has(path));
     const created = now();
     repo.putPin({
       bucket: bucket.name,
       name: input.name,
-      rootPaths: [...reached],
+      rootPaths: reached,
       created,
       createdBy: by,
     });
@@ -1149,7 +1151,7 @@ export function createCache(options: CacheOptions): Cache {
       value: {
         bucket: bucket.name,
         name: input.name,
-        rootPaths: [...reached],
+        rootPaths: reached,
         created,
         createdBy: by,
       },
@@ -1172,13 +1174,33 @@ export function createCache(options: CacheOptions): Cache {
   const planFor = (buckets: readonly BucketRow[]): GcBucketPlan[] =>
     planGc({ buckets, objects: repo.objects(), pins: repo.pins(), now: now() });
 
-  /** The whole collection — plan, delete, sweep — under the one write lock, so
-   *  a pin or a re-push cannot land between the plan and the delete and lose a
-   *  path it had just promised to keep. */
-  async function collectNow(buckets: readonly BucketRow[]): Promise<GcReport> {
+  /**
+   * The whole collection — plan, delete, and (for a collection of EVERY
+   * bucket) the orphan sweep — under the one write lock, so a pin or a
+   * re-push cannot land between the plan and the delete and lose a path it
+   * had just promised to keep.
+   *
+   * `sweep` is false for one named bucket: orphans appear when a push dies,
+   * not when retention passes, so the button a person presses twice must not
+   * pay a full paged LIST of the store each time. The schedule collects every
+   * bucket, and that is when the sweep rides along.
+   */
+  async function collectNow(
+    buckets: readonly BucketRow[],
+    sweep: boolean,
+  ): Promise<GcCollection> {
     return withWriteLock(async () => {
-      const report = await runGc(repo, planFor(buckets), objectsOf);
-      // Every bucket the sweep touched answers a different object count now.
+      const collected = await runGc(repo, planFor(buckets), objectsOf);
+      const { report } = collected;
+      if (sweep) {
+        for (const bucket of buckets) {
+          const swept = await sweepOrphans(repo, bucket.name, storeOf(bucket));
+          const entry = report.buckets.find((one) => one.bucket === bucket.name);
+          if (entry !== undefined) entry.orphans = swept;
+          report.orphans += swept;
+        }
+      }
+      // Every bucket the collection touched answers a different count now.
       if (report.evicted > 0 || report.orphans > 0) notify();
       options.log?.("cache.gc", {
         evicted: report.evicted,
@@ -1186,7 +1208,7 @@ export function createCache(options: CacheOptions): Cache {
         orphans: report.orphans,
         bytes: report.bytes,
       });
-      return report;
+      return collected;
     });
   }
 
@@ -1574,7 +1596,7 @@ export function createCache(options: CacheOptions): Cache {
       return { missing, skipped };
     },
 
-    collect: () => collectNow(repo.buckets()),
+    collect: () => collectNow(repo.buckets(), true),
 
     pinAs: (bucket, input) => pinChecked(bucket, input, "write"),
 

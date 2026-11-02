@@ -472,11 +472,19 @@ async function pinClosure(
       `the bucket refused the pin "${name}": ${response.status} ${await response.text()}`,
     );
   }
+  // WHAT THE BUCKET SAYS IT HOLDS, never what this client sent: the closure
+  // is resolved there, so its own roots are the only true count — and a
+  // daemon that answered something else has not done what was asked.
   const body: unknown = await response.json();
-  const rootPaths =
-    body !== null && typeof body === "object" && "rootPaths" in body && Array.isArray(body.rootPaths)
-      ? body.rootPaths.length
-      : served.length;
+  if (
+    body === null ||
+    typeof body !== "object" ||
+    !("rootPaths" in body) ||
+    !Array.isArray(body.rootPaths)
+  ) {
+    throw new Error(`the bucket answered the pin "${name}" without a \`rootPaths\` list`);
+  }
+  const rootPaths = body.rootPaths.length;
   say(`📌 ${name} now holds ${rootPaths} paths`);
   return { name, rootPaths };
 }

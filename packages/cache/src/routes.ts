@@ -853,11 +853,10 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
             outcome.code === "not_permitted" ? 403 : 400,
           );
         }
-        return HttpServerResponse.jsonUnsafe({
-          bucket: outcome.value.bucket,
-          name: outcome.value.name,
-          rootPaths: outcome.value.rootPaths,
-        });
+        // THE PIN AS THE ROW KNOWS IT — the same shape `pin.list` answers,
+        // rather than a hand-picked copy that stops following the day the
+        // row learns another fact about a pin (it just learned two).
+        return HttpServerResponse.jsonUnsafe(outcome.value);
       }),
     ),
 

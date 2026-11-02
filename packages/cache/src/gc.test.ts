@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { diskObjectStore } from "@odu/objects";
 import { type BucketRow, type CacheRepo, type ObjectRow, type PinRow, openCacheRepo } from "./db";
-import { planGc, previewGc, runGc } from "./gc";
+import { planGc, previewGc, runGc, sweepOrphans } from "./gc";
 import { objectKey } from "./staging";
 
 const NOW = 1_700_000_000_000;
@@ -211,8 +211,10 @@ describe("runGc", () => {
 
   it("drops the rows and deletes each evicted object's key", async () => {
     const repo = await seeded(objects.filter((row) => row.bucket === "main"));
-    const report = await runGc(repo, planGc({ buckets: [bucket], objects, pins, now: NOW }), () =>
-      store(),
+    const { report, removed } = await runGc(
+      repo,
+      planGc({ buckets: [bucket], objects, pins, now: NOW }),
+      () => store(),
     );
 
     expect(repo.objects("main").map((row) => row.storePath).sort()).toEqual(
@@ -221,17 +223,37 @@ describe("runGc", () => {
     expect(await keys("main")).toEqual([A, B, D].map(keyOf).sort());
     expect(report.evicted).toBe(3);
     expect(report.bytes).toBe(300);
-    expect(report.buckets[0]?.removed.map((one) => one.storePath).sort()).toEqual(
+    expect([...(removed.get("main") ?? [])].map((one) => one.storePath).sort()).toEqual(
       [C, E, F].map((row) => row.storePath).sort(),
     );
   });
 
+  it("promises in the plan exactly the bytes the collection frees", async () => {
+    // ONE RULE, TWO READERS. The dry run is what a person presses the button
+    // on, so a plan that counted a twin's object twice — or counted bytes a
+    // surviving row still names — would be a page that lies about the disk.
+    const twin = { ...C, storePath: "/nix/store/cccccccccccccccccccccccccccccccc-c-twin" };
+    const rows = [C, twin, E, F];
+    const repo = await seeded(rows);
+    const plan = planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW });
+    const promised = plan[0]?.bytes ?? -1;
+    const { report } = await runGc(repo, plan, () => store());
+    expect(report.bytes).toBe(promised);
+    // Non-vacuous: C and its twin are both evicted and share ONE object, so
+    // a plan that summed every row would have promised 100 bytes too many.
+    expect(report.evicted).toBe(4);
+    expect(report.kept).toBe(1);
+    expect(promised).toBe(300);
+  });
+
   it("names what left, so the deletion can be announced", async () => {
     const repo = await seeded([C]);
-    const report = await runGc(repo, planGc({ buckets: [bucket], objects: [C], pins: [], now: NOW }), () =>
-      store(),
+    const { removed } = await runGc(
+      repo,
+      planGc({ buckets: [bucket], objects: [C], pins: [], now: NOW }),
+      () => store(),
     );
-    expect(report.buckets[0]?.removed).toEqual([
+    expect(removed.get("main")).toEqual([
       {
         storePath: C.storePath,
         hash: C.hash,
@@ -249,7 +271,7 @@ describe("runGc", () => {
     };
     const repo = await seeded([oldTwin, liveTwin]);
     const rows = [oldTwin, liveTwin];
-    const report = await runGc(
+    const { report, removed } = await runGc(
       repo,
       planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }),
       () => store(),
@@ -260,7 +282,7 @@ describe("runGc", () => {
     // the announcement must not claim the NAR's URL is gone.
     expect(report.kept).toBe(1);
     expect(report.bytes).toBe(0);
-    expect(report.buckets[0]?.removed[0]?.narFile).toBeNull();
+    expect(removed.get("main")?.[0]?.narFile).toBeNull();
   });
 
   it("re-checks the rows before each delete: a NarHash recorded mid-run keeps its bytes", async () => {
@@ -286,7 +308,7 @@ describe("runGc", () => {
         await arriving.delete(key);
       },
     };
-    const report = await runGc(
+    const { report } = await runGc(
       repo,
       planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }),
       () => watched,
@@ -296,27 +318,12 @@ describe("runGc", () => {
     expect(await keys("main")).toHaveLength(1);
   });
 
-  it("sweeps an object no row names, found by listing the bucket", async () => {
-    // A crash between keeping an object and recording its row leaves bytes
-    // nothing can ever serve. The boot sweep finds them at startup; a
-    // collection is the other moment the write lock makes that safe, and
-    // without this they waited for a restart.
-    const repo = await seeded([B]);
-    await store().put("main/nar/deadbeef.nar.zst", new Blob(["orphan"]));
-    const report = await runGc(repo, planGc({ buckets: [bucket], objects: [B], pins: [], now: NOW }), () =>
-      store(),
-    );
-    expect(report.orphans).toBe(1);
-    expect(report.bytes).toBe("orphan".length);
-    expect(await keys("main")).toEqual([keyOf(B)]);
-  });
-
   it("counts the object's compressed size when the row has one", async () => {
     const sized = objects
       .filter((row) => row.bucket === "main")
       .map((row) => (row.storePath === C.storePath ? { ...row, fileSize: 999 } : row));
     const repo = await seeded(sized);
-    const report = await runGc(
+    const { report } = await runGc(
       repo,
       planGc({ buckets: [bucket], objects: sized, pins: [], now: NOW }),
       () => store(),
@@ -328,5 +335,17 @@ describe("runGc", () => {
       0,
     );
     expect(report.buckets[0]?.bytes).toBe(expected);
+  });
+
+  it("sweeps the keys no row names, and leaves another bucket's alone", async () => {
+    // The sweep is its own verb now: orphans appear when a push CRASHES, not
+    // when retention passes, so a collection of one bucket does not pay a
+    // full paged LIST for them — boot and a full collection do.
+    const repo = await seeded([B]);
+    await store().put("main/nar/deadbeefdeadbeef.nar.zst", new Blob(["orphan"]));
+    await store().put("other/nar/deadbeefdeadbeef.nar.zst", new Blob(["somebody else's"]));
+    expect(await sweepOrphans(repo, "main", store())).toBe(1);
+    expect(await keys("main")).toEqual([keyOf(B)]);
+    expect(await keys("other")).toHaveLength(1);
   });
 });
