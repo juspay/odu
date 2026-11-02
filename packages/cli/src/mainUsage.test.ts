@@ -1,8 +1,8 @@
 /**
  * THE USAGE TEXT IS A PROMISE — and this is what keeps it one.
  *
- * `src/main.ts` ends its help with a sentence every script author reads as a
- * guarantee:
+ * Both dispatchers end their help with a sentence every script author reads as
+ * a guarantee:
  *
  *   > `--origin URL` is accepted by every service client.
  *
@@ -13,9 +13,13 @@
  * only the argv declaration was missing, which is exactly the kind of gap that
  * survives review because every individual file looks right.
  *
- * The check is a PARSE of `main.ts` rather than a run of it, because the thing
- * being asserted is a property of the argv grammar, and running twenty commands
- * to discover it would need a service for most of them.
+ * There are TWO grammars to read now: the root (`src/main.ts`) names rows and
+ * the service, and the runs' row names its own verbs (`./ciCli`). The promise
+ * is the same in both, so both are parsed.
+ *
+ * The check is a PARSE rather than a run, because the thing being asserted is
+ * a property of the argv grammar, and running twenty commands to discover it
+ * would need a service for most of them.
  */
 
 import { readFileSync } from "node:fs";
@@ -25,18 +29,18 @@ import ts from "typescript";
 
 const mainPath = join(import.meta.dirname, "..", "..", "..", "src", "main.ts");
 const source = readFileSync(mainPath, "utf-8");
+const ciPath = join(import.meta.dirname, "ciCli.ts");
+const ciSource = readFileSync(ciPath, "utf-8");
 
 /**
- * Every command whose subject is the shared service — which, since the
- * consolidation, is every public command except the three that answer without
- * dialling anything.
+ * Every verb of the runs' row — which, since the consolidation, is every one
+ * of them: each is a client of the shared service, and `--origin` is how a
+ * caller points one at a server that is not this machine's default.
  *
- * `help`, `--help`, `-h` and the bare invocation print text. `web` and
- * `web-daemon` ARE the service rather than clients of one, and `surface` owns
- * its own argv grammar (`--origin` included) through the generated face. `runs`
- * is a removal stub. Everything else is here.
+ * `help`, `--help`, `-h` and the bare invocation print text; `history` is a
+ * dispatcher whose four sub-commands are checked separately below.
  */
-const SERVICE_CLIENTS = [
+const CI_CLIENTS = [
   "run",
   "wait",
   "rerun",
@@ -50,8 +54,18 @@ const SERVICE_CLIENTS = [
   "dump",
   "graph",
   "protect",
-  "mcp",
 ] as const;
+
+/**
+ * The root's own service clients.
+ *
+ * `ci`, `cache` and `auth` are ROWS: they take a word and hand the rest to the
+ * row's face, which declares the flag itself (`odu cache use --origin …`), so
+ * the root case has no `parseArgs` of its own to check. `web` and `web-daemon`
+ * ARE the service rather than clients of one, and `surface` owns its whole
+ * argv grammar — `--origin` included — through the generated face.
+ */
+const ROOT_CLIENTS = ["mcp"] as const;
 
 /** The `history` sub-commands, which have a dispatcher of their own. */
 const HISTORY_SUBS = ["list", "show", "import", "prune"] as const;
@@ -68,7 +82,7 @@ const HISTORY_SUBS = ["list", "show", "import", "prune"] as const;
  */
 function optionsOfCases(text: string): Map<string, Set<string>> {
   const parsed = ts.createSourceFile(
-    "main.ts",
+    "dispatch.ts",
     text,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ true,
@@ -118,32 +132,39 @@ function optionsOfCases(text: string): Map<string, Set<string>> {
 }
 
 const cases = optionsOfCases(source);
+const ciCases = optionsOfCases(ciSource);
 
-describe("src/main.ts's argv grammar", () => {
-  it("found the dispatch at all", () => {
+describe("odu's argv grammar", () => {
+  it("found both dispatches at all", () => {
     // A parse that matched nothing would make every assertion below vacuous —
     // the failure mode this whole file exists to catch, arriving one level up.
-    expect(cases.size).toBeGreaterThan(15);
-    expect([...cases.keys()]).toContain("run");
+    expect([...ciCases.keys()]).toContain("run");
+    expect(ciCases.size).toBeGreaterThan(15);
+    // The root is small on purpose: one word per row, plus the service.
+    expect([...cases.keys()]).toContain("ci");
+    expect([...cases.keys()]).toContain("mcp");
   });
 
   it("lets every service client be pointed at an origin, as the help promises", () => {
     const missing: string[] = [];
-    for (const command of SERVICE_CLIENTS) {
-      const options = cases.get(command);
+    for (const [command, parsedCases, where] of [
+      ...CI_CLIENTS.map((c) => [c, ciCases, "odu ci"] as const),
+      ...ROOT_CLIENTS.map((c) => [c, cases, "odu"] as const),
+    ]) {
+      const options = parsedCases.get(command);
       if (options === undefined) {
-        missing.push(`${command} (no case found — was it renamed?)`);
+        missing.push(`${where} ${command} (no case found — was it renamed?)`);
         continue;
       }
       // `dump` and `graph` share a body; the empty clause is the one that falls
       // through, so an empty set here is only a failure if its neighbour is
       // empty too. Both are asserted, so a genuine omission still fails.
       if (options.size === 0) continue;
-      if (!options.has("origin")) missing.push(command);
+      if (!options.has("origin")) missing.push(`${where} ${command}`);
     }
     expect(
       missing,
-      `${missing.join(", ")} do not declare --origin, but src/main.ts's USAGE ` +
+      `${missing.join(", ")} do not declare --origin, but the usage text ` +
         "says every service client accepts it. `parseArgs` THROWS on an " +
         "unknown option, so this is not a silently ignored flag — it is a " +
         "parser error from a flag the program's own help advertises.",
@@ -152,17 +173,48 @@ describe("src/main.ts's argv grammar", () => {
 
   it("lets every history sub-command be pointed at an origin too", () => {
     const missing = HISTORY_SUBS.filter(
-      (sub) => !(cases.get(sub)?.has("origin") ?? false),
+      (sub) => !(ciCases.get(sub)?.has("origin") ?? false),
     );
     expect(missing, `history ${missing.join(", ")} do not declare --origin`).toEqual(
       [],
     );
   });
 
-  it("still says so in the usage text", () => {
+  it("still says so in both usage texts", () => {
     // The other half. If the sentence is ever removed, this test is asserting a
     // promise nobody makes — which is a different bug, and worth failing on so
     // somebody decides rather than drifts.
     expect(source).toContain("--origin URL");
+    expect(ciSource).toContain("--origin URL");
+  });
+
+  it("keeps no retired command at the root", () => {
+    // THE RETIREMENT, FROM THE OTHER SIDE (PLAN 2.10). A row's verb typed bare
+    // is an unknown command, and a `case` that quietly came back — as an alias,
+    // or as a "just this one" exception — is the drift this step removes.
+    for (const retired of [
+      "run",
+      "wait",
+      "rerun",
+      "cancel",
+      "logs",
+      "history",
+      "status",
+      "attach",
+      "hosts",
+      "lease",
+      "release",
+      "dump",
+      "graph",
+      "protect",
+      "runs",
+      "cloudflare",
+    ]) {
+      expect(
+        [...cases.keys()],
+        `odu ${retired} is a row's verb (or a spelling that is gone); the root ` +
+          "names rows and the service, and nothing else.",
+      ).not.toContain(retired);
+    }
   });
 });
