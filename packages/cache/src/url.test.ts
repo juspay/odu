@@ -15,7 +15,8 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createCache, type Cache } from "./cache";
-import { asRoot } from "./testlib";
+import { storeFacts } from "./stores";
+import { asRoot, localStores } from "./testlib";
 import { cacheServer } from "./server";
 import type { CacheBucket } from "./surface";
 
@@ -37,15 +38,22 @@ async function row(publicOrigin: string): Promise<{
   publish: () => void;
 }> {
   world += 1;
+  const stateRoot = `${import.meta.dirname}/../../../.ci/cache-url-test/${process.pid}-${world}`;
   const cache = createCache({
     // A WORLD PER CASE: a bucket created by one case must not be visible to the
     // next, or a `create` would answer `bucket_exists` for a reason this test is
     // not about.
-    stateRoot: `${import.meta.dirname}/../../../.ci/cache-url-test/${process.pid}-${world}`,
+    stateRoot,
+    stores: localStores(stateRoot),
     rootToken: "root-token",
   });
   trash.push(cache);
-  const server = cacheServer({ cache, publicOrigin, mount: "/cache" });
+  const server = cacheServer({
+    cache,
+    publicOrigin,
+    mount: "/cache",
+    stores: storeFacts(new Map()),
+  });
   const published = new Map<string, CacheBucket>();
   server.attach({
     buckets: {

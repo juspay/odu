@@ -15,6 +15,9 @@ pkgs.mkShell ({
     zstd
     xz
     bzip2
+    # The S3 store's contract suite runs against a real S3 gateway over a temp
+    # directory, started by the test on a free port (packages/cache/test).
+    versitygw
   ];
 
   # The browsers come from nixpkgs, and only in the `e2e` shell (flake.nix) — so

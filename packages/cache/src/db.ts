@@ -47,6 +47,10 @@ export interface BucketRow {
    *  row answers by `Host` as well as by `/cache/<name>`, and the advertised
    *  substituter URL becomes this name. `null` means the path form. */
   domain: string | null;
+  /** THE STORE ITS OBJECTS LIVE IN, by declared name: `local` (the disk under
+   *  the state directory, always there) or a store the operator declared. A
+   *  name, never a credential: the store's facts are config, not data. */
+  store: string;
 }
 
 export type Scope = "read" | "write" | "admin";
@@ -324,6 +328,11 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE object ADD COLUMN ca_proof TEXT NOT NULL DEFAULT 'unknown';
   UPDATE object SET ca_proof = 'content-addressed' WHERE ca IS NOT NULL;
   `,
+  // Migration 12 — A STORE PER BUCKET. Every bucket that predates the choice
+  // kept its objects on the local disk, so that is what it names.
+  `
+  ALTER TABLE bucket ADD COLUMN store TEXT NOT NULL DEFAULT 'local';
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -379,6 +388,7 @@ const bucketOf = (row: Row): BucketRow => ({
   upstreamKeys: list(row, "upstream_keys"),
   created: integer(row, "created"),
   domain: maybeText(row, "domain"),
+  store: text(row, "store"),
 });
 
 const tokenOf = (row: Row): TokenRow => ({
@@ -488,12 +498,13 @@ export function openCacheRepo(path: string): CacheRepo {
     putBucket(row) {
       db.run(
         `INSERT INTO bucket (name, is_public, retention_days, key_name, secret_key,
-           public_key, upstream_keys, created, domain)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           public_key, upstream_keys, created, domain, store)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET is_public = excluded.is_public,
            retention_days = excluded.retention_days, key_name = excluded.key_name,
            secret_key = excluded.secret_key, public_key = excluded.public_key,
-           upstream_keys = excluded.upstream_keys, domain = excluded.domain`,
+           upstream_keys = excluded.upstream_keys, domain = excluded.domain,
+           store = excluded.store`,
         [
           row.name,
           row.isPublic ? 1 : 0,
@@ -504,6 +515,7 @@ export function openCacheRepo(path: string): CacheRepo {
           JSON.stringify(row.upstreamKeys),
           row.created,
           row.domain,
+          row.store,
         ],
       );
     },

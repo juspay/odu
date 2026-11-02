@@ -1,0 +1,15 @@
+{
+  "name": "@odu/objects",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "//": "OBJECT STORES — immutable bytes under opaque keys: local disk, or any S3-compatible service (R2, AWS, Garage, versitygw). See README.md. A LIBRARY, not a Cordis row: it serves nothing and mounts nothing, and the cache row is the one consumer that holds stores. It knows nothing about Nix — keys are the caller's strings, facts are a size and a hex sha256 — and `src/closure.test.ts` refuses any `@odu/*` import, so a store can never learn what its bytes mean.",
+  "//exports": "Two doors. `.` is the stores, the SigV4 signer and the declarations parser. `./testing` is the versitygw fixture, for a consumer's own suite that runs cases against a real S3 service; nothing shipped imports it.",
+  "//dependencies": "None installed. `node:` builtins, and `bun` for its `S3Client` (the S3 store's reads and lists) — named in the closure test, never prefix-matched.",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./test/testing.ts"
+  }
+}

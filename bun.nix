@@ -235,6 +235,7 @@
   "@odu/face" = copyPathToStore ./packages/face;
   "@odu/host" = copyPathToStore ./packages/host;
   "@odu/launch" = copyPathToStore ./packages/launch;
+  "@odu/objects" = copyPathToStore ./packages/objects;
   "@odu/run-client" = copyPathToStore ./packages/run-client;
   "@odu/run-history" = copyPathToStore ./packages/run-history;
   "@odu/service" = copyPathToStore ./packages/service;

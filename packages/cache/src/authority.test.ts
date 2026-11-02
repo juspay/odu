@@ -31,6 +31,8 @@ import type { SurfaceClientOf } from "@kolu/surface/project";
 import { createCache } from "./cache";
 import { cacheServer } from "./server";
 import { CacheRefused, oduCacheSurface } from "./surface";
+import { storeFacts } from "./stores";
+import { localStores } from "./testlib";
 
 /** The cache's spec-precise client — the shape `odu cache` holds. */
 type CacheClient = SurfaceClientOf<(typeof oduCacheSurface)["spec"]>;
@@ -50,11 +52,12 @@ afterEach(() => {
 /** The cache's procedures, dialled the in-process way a face does — so what is
  *  exercised is the surface's own dispatch, not a private handle. */
 function face(rootToken: string | null) {
-  const cache = createCache({ stateRoot: scratch, rootToken });
+  const cache = createCache({ stateRoot: scratch, stores: localStores(scratch), rootToken });
   const server = cacheServer({
     cache,
     publicOrigin: "http://cache.test",
     mount: "/cache",
+    stores: storeFacts(new Map()),
   });
   const runtime = implementSurface(oduCacheSurface, server.deps);
   return {
@@ -149,7 +152,7 @@ describe("signed in: the role is the rule", () => {
     // caller can write, and the engine must not take the word for the thing.
     // (`Authority` never crosses the surface — this is the engine's own
     // boundary, which is exactly where the seal has to hold.)
-    const cache = createCache({ stateRoot: scratch, rootToken: null });
+    const cache = createCache({ stateRoot: scratch, stores: localStores(scratch), rootToken: null });
     try {
       const forged = { kind: "role", login: "srid" } as unknown as Parameters<
         typeof cache.admin.create

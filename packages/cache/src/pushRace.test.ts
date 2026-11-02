@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createCache } from "./cache";
 import { base32 } from "./narinfo";
-import { asRoot } from "./testlib";
+import { asRoot, localStores } from "./testlib";
 
 const LINUX = process.platform === "linux";
 const NIX32 = "0123456789abcdfghijklmnpqrsvwxyz";
@@ -91,7 +91,7 @@ beforeAll(async () => {
   if (!LINUX) return;
   dir = mkdtempSync(join(tmpdir(), "odu-push-race-"));
   const stateRoot = join(dir, "state");
-  const cache = createCache({ stateRoot, rootToken: "root" });
+  const cache = createCache({ stateRoot, stores: localStores(stateRoot), rootToken: "root" });
   const created = await cache.admin.create({
     ...asRoot("root"),
     name: "main",

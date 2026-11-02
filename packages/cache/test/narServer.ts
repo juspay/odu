@@ -15,7 +15,8 @@ import { NodeHttpServer } from "@effect/platform-node";
 import { nixDump } from "../src/store";
 import { createCache } from "../src/cache";
 import { cacheRoutes } from "../src/routes";
-import { diskObjectStore, type ObjectStore } from "../src/objectStore";
+import { diskObjectStore, type ObjectStore } from "@odu/objects";
+import { LOCAL_STORE } from "../src/surface";
 import { join } from "node:path";
 
 const path = process.argv[2];
@@ -46,8 +47,8 @@ if (path === "routes") {
   const objects: ObjectStore = flags.has("slow")
     ? {
         ...disk,
-        async get(key) {
-          const found = await disk.get(key);
+        async get(key, range) {
+          const found = await disk.get(key, range);
           if (found === null) return null;
           const reader = found.stream.getReader();
           return {
@@ -65,7 +66,7 @@ if (path === "routes") {
         },
       }
     : disk;
-  const cache = createCache({ stateRoot, rootToken: null, log, objects });
+  const cache = createCache({ stateRoot, rootToken: null, log, stores: new Map([[LOCAL_STORE, objects]]) });
   // THE PRODUCTION ADAPTER: a Node request handler made by
   // `NodeHttpServer.makeHandler` over the same Effect layer `odu web` uses.
   // A handler called directly (or Bun's fetch) is not a test of serving: a

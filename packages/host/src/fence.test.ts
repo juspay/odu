@@ -334,7 +334,7 @@ describe("the row's word", () => {
     );
     expect(source("packages/cache/src/server.ts")).toMatch(/\.\.\.CACHE_ROW,/);
     const roster = source("packages/host/src/web.ts");
-    expect(roster).toMatch(/ROWS: ReadonlyArray<Row> = \[\s*ciRowRecord,\s*cacheRowRecord,/);
+    expect(roster).toMatch(/ROWS: ReadonlyArray<Row> = \[\s*ciRowRecord,\s*cacheRowRecord\(cacheStores\.stores\),/);
     expect(roster).not.toMatch(/_CONTRACT_VERSION/);
   });
 });

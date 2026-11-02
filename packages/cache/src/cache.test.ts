@@ -25,14 +25,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
-import { asRoot } from "./testlib";
+import { asRoot, localStores } from "./testlib";
 import { base32, canonicalNarHash } from "./narinfo";
 import { base32Bytes, storePathHashOf } from "./storePath";
 import { type Cache, createCache } from "./cache";
 import type { NarinfoOutcome } from "./staging";
 import { hashOf } from "../test/fakeStore";
 import { openCacheRepo } from "./db";
-import { diskObjectStore } from "./objectStore";
+import { diskObjectStore } from "@odu/objects";
 
 const ROOT = "root-token";
 const NOW = 1_700_000_000_000;
@@ -50,6 +50,7 @@ afterEach(() => {
 function cacheWith(rootToken: string | null): Cache {
   return createCache({
     stateRoot: scratch,
+    stores: localStores(scratch),
     rootToken,
     now: () => NOW,
   });
@@ -411,7 +412,7 @@ describe("a restart", () => {
       value: { objects: 1, bytes: payload.bytes.length },
     });
     const source = await second.narSource(second.bucket("main") as never, `${payload.narHash.slice(7)}.nar.zst`);
-    expect(source).toMatchObject({ kind: "file", size: payload.bytes.length });
+    expect(source).toMatchObject({ kind: "object", size: payload.bytes.length });
     second.close();
   });
 });
@@ -501,14 +502,19 @@ describe("gc and a concurrent push", () => {
       stateRoot: scratch,
       rootToken: ROOT,
       now: () => NOW,
-      objects: {
-        ...disk,
-        async delete(key) {
-          deleting.resolve();
-          await gate.promise;
-          await disk.delete(key);
-        },
-      },
+      stores: new Map([
+        [
+          "local",
+          {
+            ...disk,
+            async delete(key: string) {
+              deleting.resolve();
+              await gate.promise;
+              await disk.delete(key);
+            },
+          },
+        ],
+      ]),
     });
     await cache.admin.create({ ...createInput, retentionDays: 0 });
     const path = "/nix/store/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr-repushed";
@@ -533,7 +539,7 @@ describe("gc and a concurrent push", () => {
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toBeNull();
     expect(
       await cache.narSource(cache.bucket("main") as never, `${payload.narHash.slice(7)}.nar`),
-    ).toMatchObject({ kind: "file" });
+    ).toMatchObject({ kind: "object" });
     await cache.close();
   });
 });
@@ -565,7 +571,7 @@ describe("gc and pin", () => {
     ).toBeNull();
     expect(
       await cache.narSource(cache.bucket("main") as never, `${nar(kept).narHash.slice(7)}.nar`),
-    ).toMatchObject({ kind: "file" });
+    ).toMatchObject({ kind: "object" });
     await cache.close();
   });
 });
@@ -676,7 +682,7 @@ describe("CA is proved from the path", () => {
     db.run("UPDATE object SET ca = NULL, ca_proof = 'unknown'");
     db.close();
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
-    expect(await cache.boot()).toMatchObject({ caProved: 1 });
+    expect(await cache.boot()).toMatchObject({ ok: true, report: { caProved: 1 } });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain("CA:");
     await cache.close();
   });
@@ -719,6 +725,7 @@ describe("CA is proved from the path", () => {
       const logs: string[] = [];
       const cache = createCache({
         stateRoot: scratch,
+        stores: localStores(scratch),
         rootToken: ROOT,
         now: () => NOW,
         log: (event, fields) => logs.push(`${event} ${JSON.stringify(fields)}`),
@@ -753,7 +760,7 @@ describe("CA is proved from the path", () => {
       db.run("UPDATE object SET ca = ?, ca_proof = 'unknown'", [facts.ca]);
       db.close();
       expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
-      expect(await cache.boot()).toMatchObject({ caProved: 0 });
+      expect(await cache.boot()).toMatchObject({ ok: true, report: { caProved: 0 } });
       expect(await cache.proveSelf()).toMatchObject({ rows: 1, proved: 1, refused: 0 });
       expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
         `CA: ${facts.ca}`,
@@ -784,24 +791,27 @@ describe("CA is proved from the path", () => {
     db.run("UPDATE object SET file_hash = NULL, file_size = NULL");
     db.close();
 
-    const orphanDir = join(scratch, "cache", "objects", "orphan", "nar");
+    // A crash between put and record, under the bucket's own prefix: the
+    // sweep reads each bucket's prefix, never a whole (maybe shared) store.
+    const orphanDir = join(scratch, "cache", "objects", "main", "nar");
     mkdirSync(orphanDir, { recursive: true });
     writeFileSync(join(orphanDir, "dead.nar.zst"), "no row");
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
       legacyStore: { dump: () => bytesStream(payload.bytes) },
     });
-    expect(await second.boot()).toMatchObject({ orphansSwept: 1 });
+    expect(await second.boot()).toMatchObject({ ok: true, report: { orphansSwept: 1 } });
     expect(await second.migrate()).toMatchObject({
       migrated: 1,
       complete: true,
       paused: null,
     });
     expect(await second.narSource(second.bucket("main") as never, `${payload.narHash.slice(7)}.nar.zst`)).toMatchObject({
-      kind: "file",
+      kind: "object",
       size: payload.bytes.length,
     });
     await second.close();
@@ -827,6 +837,7 @@ describe("CA is proved from the path", () => {
     const gate = Promise.withResolvers<void>();
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
@@ -850,7 +861,7 @@ describe("CA is proved from the path", () => {
     expect(await migrating).toMatchObject({ migrated: 1, complete: true });
     expect(
       await second.narSource(second.bucket("main") as never, `${payload.narHash.slice(7)}.nar`),
-    ).toMatchObject({ kind: "file" });
+    ).toMatchObject({ kind: "object" });
     await second.close();
   });
 
@@ -886,6 +897,7 @@ describe("CA is proved from the path", () => {
     const payload = new Uint8Array(1024);
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
@@ -923,6 +935,7 @@ describe("CA is proved from the path", () => {
     let dumped = false;
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
@@ -958,6 +971,7 @@ describe("CA is proved from the path", () => {
 
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 0,
@@ -997,6 +1011,7 @@ describe("CA is proved from the path", () => {
     let reads = 0;
     const second = createCache({
       stateRoot: scratch,
+      stores: localStores(scratch),
       rootToken: ROOT,
       now: () => NOW,
       migrationFreeFloor: 1024,
