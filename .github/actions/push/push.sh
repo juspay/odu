@@ -9,8 +9,7 @@
 #       origin: https://cache.kolu.dev
 #       bucket: kolu
 #       token: ${{ secrets.ODU_CACHE_TOKEN }}
-#       paths: |
-#         .#my-package
+#       pin: ${{ github.ref_name == github.event.repository.default_branch }}
 #
 # ## The pusher is this checkout's odu
 #
@@ -51,18 +50,18 @@
 #     read from the environment, handed to `odu` through the environment, and
 #     handed to curl through a 0600 config file that is removed on exit
 #
-# ## The pin, and the one ref that may move it
+# ## The pin
 #
-# `pin:` names a pin in the bucket that the DEFAULT BRANCH's push re-points at
-# the closure it just pushed — the one closure garbage collection must not
-# take, because it is the tree every other build substitutes from. Every other
-# ref and event — a pull request, a tag, a topic branch — pushes exactly as it
-# did before and leaves the pin where it is: a pin moved by a branch would hold
-# a closure nobody substitutes and release the one everybody does.
+# `pin:` is a BOOLEAN and this script decides nothing about when a pin may
+# move: the workflow does, with `${{ github.ref_name ==
+# github.event.repository.default_branch }}` or whatever rule it holds. A
+# policy baked in here is a policy the one repository whose branch is called
+# something else cannot see.
 #
-# THE DEFAULT BRANCH IS THE EVENT'S OWN (`repository.default_branch` in
-# `$GITHUB_EVENT_PATH`), never a name spelled here, so a repository that
-# renames its branch does not also have to edit its cache step.
+# THE NAME IS DERIVED (`pin-name.sh`): `<owner>/<repo>@<ref>/<system>`. Four
+# repositories share one bucket and each matrix job pushes a different
+# system's closure, so a typed name is a name two jobs collide on — and the
+# collision is silent, because re-pointing a pin releases what it held.
 #
 # IT IS THE PUSH THAT PINS — `odu cache push --pin <name>`: one command, the
 # push's own write token, and a pin only when every path landed (a pin over a
@@ -71,7 +70,15 @@
 # alive by pushing it again every night; a pin is that same promise made once.
 # It re-points only a pin a WRITE token made: re-pointing releases what the
 # pin held before, so an administrator's pin answers 403 instead of being
-# dropped by a typo here. Deleting a pin stays an administrator's.
+# dropped by a workflow. Deleting a pin stays an administrator's.
+#
+# ## What gets pushed
+#
+# `paths:` as given, or — when it is omitted — EVERY flake output for the
+# runner's system: `packages.<system>`, `devShells.<system>` and
+# `checks.<system>`, enumerated by Nix. That is the set a developer's machine
+# substitutes, and it is what makes a pin worth taking: a pin over three named
+# packages holds three packages.
 #
 # ## It proves what it pushed, where Nix will ask
 #
@@ -108,6 +115,10 @@ trim() {
 
 # ── inputs ──────────────────────────────────────────────────────────────────
 
+# WHERE THIS ACTION LIVES. The pusher is built from the checkout above it
+# (`repo_root` below) and the two helpers beside it are addressed from here.
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 origin=$(trim "${ODU_PUSH_ORIGIN:-}")
 origin=${origin%/}
 bucket=$(trim "${ODU_PUSH_BUCKET:-}")
@@ -118,8 +129,6 @@ event=${GITHUB_EVENT_NAME:-local}
 
 [ -n "$origin" ] || fail "odu push: the \`origin:\` input is empty — give the bucket's URL, e.g. https://cache.kolu.dev."
 [ -n "$bucket" ] || fail "odu push: the \`bucket:\` input is empty — give the bucket's name, e.g. kolu."
-[ -n "$requested" ] ||
-  fail "odu push: the \`paths:\` input names nothing — give store paths, \`result\` links, or flake installables (one per line)."
 
 command -v nix >/dev/null 2>&1 ||
   fail "odu push: \`nix\` is not on PATH, and this action never installs it. Install Nix in an earlier step — with the bucket's \"GitHub Actions\" block as its \`nix_conf\` — and run this action after it."
@@ -128,10 +137,43 @@ command -v jq >/dev/null 2>&1 ||
 command -v curl >/dev/null 2>&1 ||
   fail "odu push: \`curl\` is not on PATH. GitHub-hosted runners ship it; a self-hosted runner needs it installed."
 
-# ── what the caller named ───────────────────────────────────────────────────
+# ── what to push ────────────────────────────────────────────────────────────
 
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/odu-push.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+
+# NO `paths:` MEANS THE WHOLE FLAKE, for the system this runner is: every
+# `packages.<system>`, `devShells.<system>` and `checks.<system>` output.
+#
+# That is the set a developer's machine actually substitutes — the dev shell
+# is most of what a fresh checkout waits for, and the checks are what CI is
+# about to build anyway — and it is what makes `pin: true` worth having: a
+# pin over three named packages holds three packages, while a pin over this
+# holds the tree.
+#
+# ENUMERATED BY NIX, not by a list somebody keeps current: a flake that gains
+# an output gains it here on the next push. `--impure` is what lets
+# `builtins.currentSystem` name the runner instead of this script guessing,
+# and `getFlake` of the checkout evaluates the same flake the build will.
+if [ -z "$requested" ]; then
+  say "odu push: no paths named — pushing every flake output for this system"
+  # shellcheck disable=SC2016 — the `${…}` below are NIX's interpolations,
+  # evaluated by `nix eval`; the shell must hand them over untouched.
+  requested=$(
+    nix eval --impure --raw --accept-flake-config --expr '
+      let
+        flake = builtins.getFlake (toString ./.);
+        system = builtins.currentSystem;
+        named = kind:
+          let outputs = flake.${kind}.${system} or { };
+          in map (name: ".#${kind}.${system}.\"${name}\"") (builtins.attrNames outputs);
+      in
+      builtins.concatStringsSep "\n" (builtins.concatMap named [ "packages" "devShells" "checks" ])
+    ' < /dev/null
+  ) || fail "odu push: could not enumerate this flake's outputs — name \`paths:\` explicitly, or fix the evaluation error above."
+  [ -n "$requested" ] ||
+    fail "odu push: this flake has no packages, devShells or checks for this system, and \`paths:\` named none either — there is nothing to push."
+fi
 
 # AN INSTALLABLE IS BUILT FIRST and an existing path is used as it is: `nix
 # path-info` (which the pusher uses to walk the closure) does not build, so an
@@ -179,32 +221,41 @@ summary() {
   fi
 }
 
-# ── the pin, and the one ref that may move it ───────────────────────────────
+# ── the pin ─────────────────────────────────────────────────────────────────
 
-# ONLY A PUSH TO THE DEFAULT BRANCH MOVES A PIN, and the default branch is the
-# event's own rather than a name this script knows. When this ref is not that
-# one the pin is not touched at all — and the readout says so, because a step
-# that was asked to pin and silently did not would be read as having pinned.
+# `pin:` IS A BOOLEAN, and the action holds no policy of its own about when a
+# pin may move. The workflow decides — `${{ github.ref_name ==
+# github.event.repository.default_branch }}` is the line odu's own uses — and
+# a step that carries a policy its caller cannot see is a step that surprises
+# the one repository whose branch is called something else.
+#
+# THE NAME IS DERIVED (`pin-name.sh`), never typed: four repositories share
+# one bucket and each matrix job pushes a different system's closure, so a
+# name a person writes is a name two jobs eventually collide on.
 pin_args=()
 pin_requested=""
-pin_skipped=""
-if [ -n "$pin" ]; then
-  default_branch=""
-  if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH:-}" ]; then
-    default_branch=$(jq -r '.repository.default_branch // empty' "$GITHUB_EVENT_PATH")
-  fi
-  ref=${GITHUB_REF:-}
-  if [ "$event" = "push" ] && [ -n "$default_branch" ] && [ "$ref" = "refs/heads/$default_branch" ]; then
-    pin_args=(--pin "$pin")
-    pin_requested=$pin
-  elif [ "$event" != "push" ]; then
-    pin_skipped="a \`$event\` event never moves a pin — only a push to the default branch does."
-  elif [ -z "$default_branch" ]; then
-    pin_skipped="the event payload names no \`repository.default_branch\`, and a pin is moved by the default branch or by nothing."
-  else
-    pin_skipped="\`$ref\` is not the default branch (\`refs/heads/$default_branch\`)."
-  fi
-fi
+case "$pin" in
+  "" | false | False | FALSE | 0 | no)
+    ;;
+  true | True | TRUE | 1 | yes)
+    # THE REF THAT WAS PUSHED. A pull request's `GITHUB_REF_NAME` is
+    # `<n>/merge`, a synthetic ref nobody substitutes, so the head branch is
+    # what a pin over that build should be called.
+    ref_name=${GITHUB_HEAD_REF:-}
+    [ -n "$ref_name" ] || ref_name=${GITHUB_REF_NAME:-}
+    system=$(nix eval --impure --raw --expr 'builtins.currentSystem' < /dev/null) ||
+      fail "odu push: could not ask Nix what system this runner is, and a pin's name carries it."
+    [ -n "${GITHUB_REPOSITORY:-}" ] ||
+      fail "odu push: \`pin: true\` needs \$GITHUB_REPOSITORY — a pin's name is <owner>/<repo>@<ref>/<system>, and outside Actions there is no repository to name."
+    [ -n "$ref_name" ] ||
+      fail "odu push: \`pin: true\` needs \$GITHUB_REF_NAME (or \$GITHUB_HEAD_REF) — a pin's name says which ref it holds."
+    pin_requested=$("$here/pin-name.sh" "$GITHUB_REPOSITORY" "$ref_name" "$system")
+    pin_args=(--pin "$pin_requested")
+    ;;
+  *)
+    fail "odu push: \`pin:\` is a boolean — \`true\` pins this push's closure, anything falsy pins nothing (got \"$pin\"). The NAME is derived; to pin only on your default branch, write \`pin: \${{ github.ref_name == github.event.repository.default_branch }}\`."
+    ;;
+esac
 
 # ── the token, before anything expensive ────────────────────────────────────
 
@@ -216,15 +267,14 @@ if [ -z "$token" ]; then
   summary "### Cache push — \`$bucket\` on \`$origin\`
 
 **Built, pushed nothing.** No token: a \`$event\` event is not required to publish, so this step built $count store path(s) and stopped."
-  if [ -n "$pin" ]; then
-    summary "**Pin:** \`$pin\` was not re-pointed — nothing was pushed."
+  if [ -n "$pin_requested" ]; then
+    summary "**Pin:** \`$pin_requested\` was not re-pointed — nothing was pushed."
   fi
   exit 0
 fi
 
 # ── the pusher, from this action's own checkout ─────────────────────────────
 
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$here/../../.." && pwd)
 [ -f "$repo_root/flake.nix" ] ||
   fail "odu push: no flake.nix at $repo_root — this action expects to live at .github/actions/push in the odu checkout it pushes with."
@@ -297,12 +347,9 @@ fi
 # every path landed, and nothing lands past the check above without having.
 if [ -n "$pinned_name" ]; then
   say "odu push: the pin \"$pinned_name\" now holds $pinned_paths path(s)"
-  summary "**Pinned:** \`$pinned_name\` now holds $pinned_paths path(s) — this closure stays out of garbage collection until the next default-branch push moves the pin."
+  summary "**Pinned:** \`$pinned_name\` now holds $pinned_paths path(s) — this closure stays out of garbage collection until a later push of this ref, on this system, moves the pin."
 elif [ -n "$pin_requested" ]; then
   fail "odu push: \`--pin $pin_requested\` was asked for and \`odu cache push\` answered no pin — the closure is pushed but nothing holds it."
-elif [ -n "$pin" ]; then
-  say "odu push: the pin \"$pin\" was not re-pointed — $pin_skipped"
-  summary "**Pin:** \`$pin\` was not re-pointed — $pin_skipped"
 fi
 
 # ── proof: every path the bucket serves answers where Nix will ask ─────────

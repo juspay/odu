@@ -185,20 +185,16 @@ Then it proves the push. For every path the bucket serves, `check.sh` asks `<sub
     origin: https://odu.example.com
     bucket: main
     token: ${{ secrets.ODU_CACHE_TOKEN }}
-    paths: |
-      .#your-package
+    # No `paths`: every package, dev shell and check of this flake, for the
+    # runner's system. Name `paths` to push only what you name. `pin` holds
+    # what this push landed, under a name derived from the repository, the
+    # ref and the system.
+    pin: ${{ github.ref_name == github.event.repository.default_branch }}
 ```
 
-`paths` takes store paths, `result` links, or flake installables, space- or newline-separated; installables are built first. A bucket page prints this block filled in with its own origin and name under **Push from GitHub Actions**.
+**With no `paths`, the whole flake goes** — every `packages.<system>`, `devShells.<system>` and `checks.<system>` output for the runner's system, enumerated by Nix rather than listed by hand, so a flake that gains an output gains it here on the next push. Name `paths` to push exactly what you name instead: store paths, `result` links, or flake installables, space- or newline-separated, installables built first. A bucket page prints this block filled in with its own origin and name under **Push from GitHub Actions**.
 
-**One more line keeps your default branch's closure.** Add `pin:` and a name, and a push to the repository's **default branch** re-points that pin at the closure it just pushed:
-
-```yaml
-    # beside origin / bucket / token / paths, in the same `with:`
-    pin: kolu-master
-```
-
-Every other ref and every other event — a pull request, a tag, a release branch — leaves the pin exactly where it is, and the step summary says so. Empty, the default, never pins. odu's own workflow sets `pin: odu-master`.
+**`pin:` is a boolean, and the line above is the policy.** The action holds none of its own: it pins whatever this push landed, whenever the workflow says true. The pin's NAME is derived — `<owner>/<repo>@<ref>/<system>`, e.g. `juspay/kolu@master/x86_64-linux` — because several repositories share one bucket and a matrix pushes a Linux closure and a macOS closure on the same commit; under one name the second job to finish would re-point the pin and hand the first job's closure to the next collection. Anything falsy, the default, pins nothing. Free-text pin names stay in the API, for the board and an administrator.
 
 **Nix must already be on the runner.** The action never installs it — the `extra_nix_config` block above is the `nix_conf` of whichever install step you already run.
 

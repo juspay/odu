@@ -573,8 +573,11 @@ export function actionsPushBlock(input: {
     origin: ${input.origin.replace(/\/$/, "")}
     bucket: ${input.bucket}
     token: \${{ secrets.ODU_CACHE_TOKEN }}
-    paths: |
-      .#your-package
+    # No \`paths\`: every package, dev shell and check of this flake, for the
+    # runner's system. Name \`paths\` to push only what you name. \`pin\` holds
+    # what this push landed, under a name derived from the repository, the
+    # ref and the system.
+    pin: \${{ github.ref_name == github.event.repository.default_branch }}
 `;
 }
 

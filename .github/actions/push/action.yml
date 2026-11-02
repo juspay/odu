@@ -44,19 +44,20 @@
 #   - no token on a `push` event  → fail, naming the missing secret
 #   - the token is never echoed, and never appears in a command line
 #
-# **`pin:` holds the default branch's closure.** One optional line, naming a
-# pin in the bucket — the line another repository pastes beside the four
-# above:
+# **`pin: true` keeps this closure out of garbage collection.** A boolean,
+# not a name, and the action holds no policy about WHEN. The documented line,
+# which odu's own workflow uses:
 #
-#       pin: kolu-master
+#       pin: ${{ github.ref_name == github.event.repository.default_branch }}
 #
-# A push to the repository's DEFAULT BRANCH re-points that pin at the closure
-# it just pushed, so garbage collection never takes the tree everything else
-# substitutes from. Any other ref or event — a pull request, a tag, a topic
-# branch — leaves the pin exactly where it is, and the step summary says so.
-# The default branch is read from the event (`repository.default_branch`), not
-# spelled here, so renaming a branch costs no edit to a cache step. Empty, the
-# default, never pins.
+# THE NAME IS DERIVED and never typed: `<owner>/<repo>@<ref>/<system>`, e.g.
+# `juspay/kolu@master/x86_64-linux`. Four repositories share one bucket, so
+# the repository is in it; a matrix pushes Linux and macOS closures on the
+# same commit, so the system is in it — under one shared name the second job
+# to finish would re-point the pin and hand the first job's closure to the
+# next collection. A pull request's ref is its head branch, not the synthetic
+# merge ref nobody substitutes. Free-text names stay in the API, for a board
+# and an administrator.
 #
 # A WRITE TOKEN IS ALLOWED TO PIN, and nothing stronger is asked for: a write
 # token can already keep a closure alive by pushing it again every night, so a
@@ -65,15 +66,14 @@
 # landed.
 #
 # It may re-point only a pin a WRITE token made. Re-pointing releases whatever
-# the pin held before, so an administrator's pin (the `release-1.0` somebody
-# asked for) answers 403 rather than being dropped by a typo in the `pin:`
-# above. Deleting a pin is an administrator's either way.
+# the pin held before, so an administrator's pin answers 403 rather than being
+# dropped by a workflow. Deleting a pin is an administrator's either way.
 #
 # ONE CONSEQUENCE WORTH KNOWING: if an administrator re-points THIS pin from
 # the board, it becomes an administrator's pin — and the next push here is
 # refused and this step goes red. That is deliberate and loud: a cache job
-# that silently stopped holding its master closure is the state this input
-# exists to prevent. Pick another name, or have the administrator unpin it.
+# that silently stopped holding its closure is the state this input exists to
+# prevent. Have the administrator unpin it.
 #
 # **It proves what it pushed, where Nix will ask.** For every path the bucket
 # serves (`check.sh`): the narinfo must answer at the SUBSTITUTER URL the bucket
@@ -111,14 +111,19 @@ inputs:
   paths:
     description: >-
       Space- or newline-separated store paths, `result` links, or flake
-      installables (`.#your-package`). Installables are built first.
-    required: true
+      installables (`.#your-package`). Installables are built first. OMIT IT
+      to push the whole flake for this runner's system — every
+      packages.<system>, devShells.<system> and checks.<system> output,
+      enumerated by Nix rather than listed by hand.
+    required: false
+    default: ""
   pin:
     description: >-
-      A pin name, e.g. kolu-master. A push to the repository's default branch
-      re-points it at the closure that push landed, so garbage collection
-      keeps that closure; every other ref and event leaves the pin untouched.
-      Empty never pins.
+      true to keep this push's closure out of garbage collection. The name is
+      derived — <owner>/<repo>@<ref>/<system> — and this action applies no
+      policy of its own about which ref may pin: write
+      `pin: ${{ github.ref_name == github.event.repository.default_branch }}`
+      to hold your default branch. Anything falsy, the default, pins nothing.
     required: false
     default: ""
 

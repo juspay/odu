@@ -429,19 +429,22 @@ old last-access field is gone from a path and from `stats_read` — and added
   When asked to add a cache push to a repository's CI, this is the step — not
   `attic login` + `attic push`, and not a hand-rolled `nix run … odu cache
   push` with a token in `env`.
-- **One more line keeps a repository's default branch out of GC.** The action's
-  optional `pin:` input names a pin in the bucket:
+- **One more line keeps a repository's default branch out of GC.** `pin:` is a
+  BOOLEAN; the workflow holds the policy and the action holds none:
 
   ```yaml
-      # one more line in the step's `with:`, beside origin/bucket/token/paths
-      pin: kolu-master
+      # one more line in the step's `with:`, beside origin/bucket/token
+      pin: ${{ github.ref_name == github.event.repository.default_branch }}
   ```
 
-  A push to the repository's **default branch** re-points that pin at the
-  closure it just pushed; every other ref and every other event leaves the pin
-  exactly where it is, and empty (the default) never pins. odu's own
-  `nix-cache.yml` sets `pin: odu-master`. When a repository asks "how do we
-  stop our master closure being collected", that line is the whole answer.
+  The pin's name is DERIVED — `<owner>/<repo>@<ref>/<system>` — so several
+  repositories can share one bucket and a Linux job and a macOS job of the
+  same push hold their own closures instead of re-pointing each other's pin.
+  Anything falsy pins nothing. When a repository asks "how do we stop our
+  master closure being collected", that line is the whole answer.
+- **Omit `paths:` and the whole flake is pushed** — every
+  `packages.<system>`, `devShells.<system>` and `checks.<system>` output for
+  the runner, enumerated by Nix. Name `paths:` to push exactly those instead.
 
 ### Signing in
 
@@ -635,8 +638,9 @@ declares.
 - The repository ships a GitHub Actions push step
   (`juspay/odu/.github/actions/push@<sha>`), which verifies its own push.
 - `odu cache push --pin NAME` re-points a pin at the closure the push landed
-  (nothing is pinned if a path was refused), and the push action takes the same
-  thing as a `pin:` input, applied only on the default branch.
+  (nothing is pinned if a path was refused). The push action takes `pin: true`
+  instead of a name and derives `<owner>/<repo>@<ref>/<system>`; when to pin is
+  the workflow's own `${{ github.ref_name == … }}` line.
 
 - **The admin CLI is retired.** The CLI is `odu ci <verb>` (every run command
   now carries the `ci` word: `odu ci run`, `odu ci wait`, `odu ci logs`,

@@ -97,17 +97,18 @@ jobs:
           origin: https://cache.kolu.dev
           bucket: kolu
           token: ${{ secrets.ODU_CACHE_TOKEN }}
-          # ODU'S MASTER CLOSURE, HELD. A push to master re-points this pin at
-          # what it just pushed, so collection takes yesterday's build and
-          # never the one every lane and every developer substitutes from; a
-          # pull request pushes and moves nothing. odu is the first repository
-          # to run this, which makes `pin:` a feature this cache tests on
-          # itself.
-          pin: odu-master
-          paths: |
-            .#odu
-            .#odu-runner
-            .#web-ui
+          # ODU'S MASTER CLOSURE, HELD — and the WHEN is this workflow's, not
+          # the action's: a push to master re-points the pin at what it just
+          # pushed, so collection takes yesterday's build and never the one
+          # every lane and every developer substitutes from, while a pull
+          # request pushes and moves nothing. The name is derived
+          # (`juspay/odu@master/<system>`), so the Linux and macOS jobs hold
+          # their own closures instead of evicting each other.
+          pin: ${{ github.ref_name == github.event.repository.default_branch }}
+          # NO `paths:` — the whole flake for this runner's system: every
+          # package, dev shell and check. It covers `.#odu`, `.#odu-runner`
+          # and `.#web-ui` as before, and adds the dev shell a fresh checkout
+          # waits for and the checks CI is about to build anyway.
 
       - name: Bake the declaration the publisher is handed
         run: |
