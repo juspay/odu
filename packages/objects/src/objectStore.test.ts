@@ -8,10 +8,9 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { objectStoreContract } from "../test/objectStore.contract";
+import { objectStoreContract } from "../test/contract";
 import { type Gateway, startGateway } from "../test/versitygw";
 import { createHash } from "node:crypto";
-import { base32 } from "./narinfo";
 import { diskObjectStore, s3ObjectStore, UnrecordedObject } from "./objectStore";
 import { s3Fetch, type S3Target } from "./s3sign";
 
@@ -71,9 +70,11 @@ describe("disk object store details", () => {
     const store = diskObjectStore({ dir: scratch });
     const staged = join(scratch, "staged.nar.zst");
     writeFileSync(staged, "kept bytes");
-    const facts = await store.keep("main/nar/a.nar.zst", staged, { size: 10, sha256: "sha256:x" });
-    expect(facts).toEqual({ ok: true, facts: { size: 10, sha256: "sha256:x" } });
+    const facts = { size: 10, sha256: "0".repeat(64) };
+    expect(await store.link?.("main/nar/a.nar.zst", staged, facts)).toEqual({ ok: true, facts });
     expect(await store.head("main/nar/a.nar.zst")).toBe(10);
+    // THE SOURCE NAME IS GONE: the object never aliases a file its caller holds.
+    expect(existsSync(staged)).toBe(false);
 
     const old = join(scratch, "objects", "main", "nar", ".tmp-old");
     const young = join(scratch, "objects", "main", "nar", ".tmp-young");
@@ -101,7 +102,7 @@ describe("disk object store details", () => {
 /** `bytes`' facts, spelled as a store records them. */
 const factsOf = (bytes: Uint8Array) => ({
   size: bytes.length,
-  sha256: `sha256:${base32(createHash("sha256").update(bytes).digest())}`,
+  sha256: createHash("sha256").update(bytes).digest("hex"),
 });
 
 const once = (stream: Uint8Array) => new Response(stream as Uint8Array<ArrayBuffer>).body as ReadableStream<Uint8Array>;
@@ -160,7 +161,13 @@ describe("s3 object store: a 409 decides nothing", () => {
     writeFileSync(file, large);
     const kept = conflicting(1);
     const keeping = s3ObjectStore({ target, partSize: PART, send: kept.send });
-    expect(await keeping.keep("main/nar/k.nar.zst", file, factsOf(large))).toEqual({ ok: true, facts: factsOf(large) });
+    // NO LOCAL FILES, so no `link`: a caller puts the file, and a Blob body is
+    // what lets a conflicted upload start over from it.
+    expect(keeping.link).toBeUndefined();
+    expect(await keeping.put("main/nar/k.nar.zst", Bun.file(file), factsOf(large))).toEqual({
+      ok: true,
+      facts: factsOf(large),
+    });
     expect(kept.seen.conflicts).toBe(1);
 
     const copied = conflicting(1);

@@ -44,7 +44,7 @@ import {
 } from "@odu/cordis/services";
 import { CACHE_KEY } from "./surface";
 import { cacheRow } from "./server";
-import { diskObjectStore } from "./objectStore";
+import { diskObjectStore } from "@odu/objects";
 import { createCache } from "./cache";
 import { openCacheRepo } from "./db";
 import { asRoot, localStores } from "./testlib";

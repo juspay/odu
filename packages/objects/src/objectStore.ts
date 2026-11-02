@@ -1,25 +1,15 @@
 /**
- * THE OBJECT STORE — the bytes a cache serves, behind an interface.
+ * AN OBJECT STORE — immutable bytes under opaque keys, behind one interface.
  *
- * **The object IS the compressed NAR a pusher uploaded.** A push already sends
- * `nar/<narHash>.nar.zst`, whole or in parts; the write path assembles it and
- * proves it (NarHash over the DECOMPRESSED bytes) before recording the row. The
- * verified file then becomes the object, one `keep` away, and nothing else is
- * stored on the server: no Nix store, no imported closures, no second copy.
- * That is the Cachix/Attic model, and it is what makes the pod's disk budget
- * work — the 166 GB Nix store was upstream closures nobody ever pulled from us.
+ * A store knows keys, bytes, sizes and sha256s, and nothing about what the
+ * bytes mean: the caller chooses the key layout and gives the bytes their
+ * meaning. Two constructors, `diskObjectStore` (files under a directory) and
+ * `s3ObjectStore` (any S3-compatible service: R2, AWS, Garage, versitygw).
  *
- * **Keys are content names under a bucket prefix:**
- * `<bucket>/nar/<narHash base32>.<ext>`, where the extension names the stored
- * compression. A store holds many buckets' objects side by side, and every
- * listing the cache makes is under one bucket's prefix.
- *
- * **A store is a VALUE.** `ObjectStore` is the only thing the cache sees: the
- * cache row builds one per declared store at mount (`./stores`), a bucket names
- * the store it lives in, and from then on a route, staging, GC and the boot
- * sweep speak this interface and nothing else. Nothing outside the two
- * constructors below knows which kind of store it holds — there is no
- * `localPath`, no "is this disk", and no second way to serve.
+ * **A store is a VALUE.** Nothing outside the two constructors below knows
+ * which kind it holds: a caller speaks this interface, and the one capability
+ * only some stores have — `link`, making a local file the object without a
+ * copy — is an optional member it may call, never a kind it asks about.
  *
  * **Objects are immutable, and a put is put-if-absent.** A put onto a key that
  * exists is REFUSED with `exists` and the kept object's facts; of two
@@ -27,45 +17,51 @@
  * into place (`link` fails on an existing name, where `rename` would replace
  * it); S3 sends `If-None-Match: *` on the write that makes the object visible.
  * No half object is ever visible under its final key: disk's temp names and
- * S3's temp keys are `.tmp-*`, which `list` skips and the boot sweep removes.
+ * S3's temp keys are `.tmp-*`, which `list` skips and `sweepTemp` removes.
  *
- * **A put that dies leaves nothing the boot sweep cannot reach.** `close()`
- * joins the puts in flight, but a daemon killed mid-put (eviction, OOM,
- * `kill -9`) leaves its temp name — and, on S3, an INCOMPLETE MULTIPART
- * UPLOAD, which no ListObjects shows and whose parts cost storage until a
- * lifecycle rule aborts them (R2's default is seven days; AWS has none). So
- * `sweepTemp` lists both under the bucket's prefix and removes what began
- * before this boot: temp names by modification time, uploads by `Initiated`
- * (the service's clock). A younger one is a live put. Disk has no uploads.
+ * **A put that dies leaves nothing the sweep cannot reach.** A process killed
+ * mid-put (eviction, OOM, `kill -9`) leaves its temp name — and, on S3, an
+ * INCOMPLETE MULTIPART UPLOAD, which no ListObjects shows and whose parts cost
+ * storage until a lifecycle rule aborts them (R2's default is seven days; AWS
+ * has none). So `sweepTemp` lists both under a prefix and removes what began
+ * before a given moment: temp names by modification time, uploads by
+ * `Initiated` (the service's clock). A younger one is a live put. Disk has no
+ * uploads.
  *
  * **Facts are written once and read back.** `put` hashes while it streams, and
- * the size and sha256 are kept beside the object — a sidecar file on disk,
- * `x-amz-meta-odu-*` on S3 — so `facts` answers without reading the bytes.
+ * the size and sha256 (hex) are kept beside the object — a sidecar file on
+ * disk, `x-amz-meta-odu-*` on S3 — so `facts` answers without reading the
+ * bytes.
  *
  * **Reads take a range.** `get(key, range)` streams exactly the bytes asked
- * for, at constant memory: a file read 64 KiB at a time on disk, a ranged GET
- * on S3. The route does the `Range` arithmetic once and asks every store the
- * same question.
+ * for, at constant memory: a file read 64 KiB at a time on disk, ranged GETs on
+ * S3.
  *
- * The contract suite (`test/objectStore.contract.ts`) runs against both: disk,
- * and an S3 fixture backed by versitygw.
+ * The contract suite (`test/contract.ts`) runs against both: disk, and S3
+ * through versitygw (`test/versitygw.ts`).
  */
 
 import { createHash, randomUUID } from "node:crypto";
 import { open, link, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, normalize, sep } from "node:path";
 import { S3Client } from "bun";
-import { base32 } from "./narinfo";
 import { s3Fetch, type S3Request, type S3Target } from "./s3sign";
 import { newChain, type Chain, serial } from "./serial";
 import { writeAll } from "./sink";
 
-/** What `put` learned while it wrote: the compressed bytes' own facts. */
+/** What `put` learned while it wrote: the stored bytes' own facts. */
 export interface ObjectFacts {
   size: number;
-  /** `sha256:<base32>` of the COMPRESSED bytes — Nix's `FileHash`. */
+  /** The sha256 of the stored bytes, as 64 lowercase hex digits. */
   sha256: string;
 }
+
+/**
+ * WHAT A PUT WRITES. A stream is read once. A `Blob` — a file, `Bun.file(path)`
+ * — can be read again, so a put whose S3 upload must start over (a `409` on
+ * `CompleteMultipartUpload`) restarts it from the beginning itself.
+ */
+export type ObjectBody = ReadableStream<Uint8Array> | Blob;
 
 /** Bytes `start` through `end`, both inclusive — HTTP's own spelling. */
 export interface ByteRange {
@@ -94,14 +90,17 @@ export type ObjectRefusal =
 export type PutOutcome = { ok: true; facts: ObjectFacts } | { ok: false; refusal: ObjectRefusal };
 
 export interface ObjectStore {
-  /** Write `stream` at `key`, unless the key holds an object already. With
-   *  `expected`, the streamed bytes must have those facts or nothing is kept. */
-  put(key: string, stream: ReadableStream<Uint8Array>, expected?: ObjectFacts): Promise<PutOutcome>;
-  /** Make a file on this machine the object at `key`: disk links it into
-   *  place (and drops the source name, so the object never aliases a file
-   *  somebody may write), S3 uploads it. `facts` are the file's, already
-   *  proved by the caller, who removes whatever is left at `file`. */
-  keep(key: string, file: string, facts: ObjectFacts): Promise<PutOutcome>;
+  /** Write `body` at `key`, unless the key holds an object already. With
+   *  `expected`, the bytes must have those facts or nothing is kept. */
+  put(key: string, body: ObjectBody, expected?: ObjectFacts): Promise<PutOutcome>;
+  /**
+   * OPTIONAL — a store whose objects are files offers it: make the file at
+   * `file`, on this machine, the object at `key` WITHOUT copying it, and drop
+   * the source name (so the object never aliases a file somebody may write).
+   * `facts` are the file's, already proved by the caller. Disk links; a store
+   * with no local files (S3) leaves it out, and the caller `put`s the file.
+   */
+  link?(key: string, file: string, facts: ObjectFacts): Promise<PutOutcome>;
   /** The object, or the `range` of it; null when the key is absent. */
   get(key: string, range?: ByteRange): Promise<StoredObject | null>;
   head(key: string): Promise<number | null>;
@@ -111,24 +110,24 @@ export interface ObjectStore {
   facts(key: string): Promise<ObjectFacts | null>;
   /** Idempotent: deleting an absent key is not an error. */
   delete(key: string): Promise<void>;
-  /** Every object under `prefix` (a directory-like prefix: `main/nar`), all
-   *  pages of it. Temp names are not objects and are never listed. */
+  /** Every object under `prefix` (a directory-like prefix: `a/b`), all pages
+   *  of it. Temp names are not objects and are never listed. */
   list(prefix: string): Promise<{ key: string; size: number }[]>;
   /** Remove what a dead put left under `prefix` and began before `current`:
-   *  temp names, and on S3 incomplete multipart uploads — the boot sweep,
-   *  before a mount can be writing. A younger one is a live put. Scoped like
-   *  `list`, because a store may be shared and only a bucket's prefix is ours.
-   *  Answers how many it removed. */
+   *  temp names, and on S3 incomplete multipart uploads — a sweep for a moment
+   *  when the caller knows nothing it owns is writing. A younger one is a live
+   *  put. Scoped like `list`, because a store may be shared and only the
+   *  caller's prefix is its own. Answers how many it removed. */
   sweepTemp(prefix: string, current: number): Promise<number>;
 }
 
-/** A KEY HOLDING BYTES ODU DID NOT RECORD. Nothing but odu writes under a
- *  bucket's prefix, so on S3 this is somebody else's write into it, and the
- *  store names the key rather than guessing the facts by reading the bytes. */
+/** A KEY HOLDING BYTES THIS STORE DID NOT RECORD: an S3 object with no
+ *  `odu-size`/`odu-sha256` metadata, written by something else. The store
+ *  names the key rather than guessing the facts by reading the bytes. */
 export class UnrecordedObject extends Error {
   readonly _tag = "UnrecordedObject";
   constructor(readonly key: string) {
-    super(`${key} holds an object with no odu-size/odu-sha256 metadata — odu did not write it`);
+    super(`${key} holds an object with no odu-size/odu-sha256 metadata — this store did not write it`);
   }
 }
 
@@ -153,14 +152,14 @@ function factsCounter(): { update(chunk: Uint8Array): void; facts(): ObjectFacts
       hash.update(chunk);
       size += chunk.length;
     },
-    facts: () => ({ size, sha256: `sha256:${base32(hash.digest())}` }),
+    facts: () => ({ size, sha256: hash.digest("hex") }),
   };
 }
 
 const sameFacts = (a: ObjectFacts, b: ObjectFacts): boolean => a.size === b.size && a.sha256 === b.sha256;
 
-/** Read a whole stream through a counter: the fallback for an object whose
- *  facts nobody wrote down (one from before they were kept). */
+/** Read a whole stream through a counter: the fallback for a disk object whose
+ *  facts nobody wrote down (one written before they were kept). */
 async function hashStream(stream: ReadableStream<Uint8Array>): Promise<ObjectFacts> {
   const counter = factsCounter();
   for await (const chunk of stream as unknown as AsyncIterable<Uint8Array>) counter.update(chunk);
@@ -170,17 +169,17 @@ async function hashStream(stream: ReadableStream<Uint8Array>): Promise<ObjectFac
 // ── disk ────────────────────────────────────────────────────────────────────
 
 export interface DiskObjectStoreOptions {
-  /** The cache's own directory; keys live under `<dir>/objects`. */
+  /** The store's directory; keys live under `<dir>/objects`. */
   dir: string;
 }
 
 /**
  * A FILE AS A PULL STREAM, 64 KiB per read.
  *
- * NEVER hand a `BunFile` to the HTTP layer: the Node adapter `odu web` runs
- * does not write that body, so the response headers go out and the socket then
- * waits for ever (the pod's post-migration hang). An `open`/`handle.read` loop
- * is a stream the adapter knows, and it reads only the range asked for.
+ * NEVER a `BunFile`'s own stream: a Node HTTP adapter does not write that body,
+ * so the response headers go out and the socket then waits for ever. An
+ * `open`/`handle.read` loop is a stream every consumer knows, and it reads only
+ * the range asked for.
  */
 function fileBody(path: string, start: number, length: number): ReadableStream<Uint8Array> {
   let handle: Awaited<ReturnType<typeof open>> | null = null;
@@ -223,8 +222,8 @@ function fileBody(path: string, start: number, length: number): ReadableStream<U
 
 export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
   const root = join(options.dir, "objects");
-  /** The facts kept beside each object, under a name no bucket can have (a
-   *  bucket name starts with a letter or a digit). */
+  /** The facts kept beside each object, under a name no key's first segment
+   *  can share with an object (a dot-name, which `list` never shows). */
   const factsRoot = join(root, ".facts");
   const pathOf = (key: string): string => join(root, safeKey(key));
   const factsPathOf = (key: string): string => join(factsRoot, safeKey(key));
@@ -249,8 +248,8 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
       .then((text) => JSON.parse(text) as ObjectFacts)
       .catch(() => null);
     if (kept !== null && kept.size === size) return kept;
-    // A PRE-3b OBJECT on the pod really has no sidecar (nor one whose writer
-    // died between link and sidecar): hash it once, and keep the answer.
+    // AN OBJECT WRITTEN BEFORE FACTS WERE KEPT really has no sidecar (nor one
+    // whose writer died between link and sidecar): hash it once, keep the answer.
     const computed = await hashStream(fileBody(pathOf(key), 0, size));
     await writeFacts(key, computed).catch(() => {});
     return computed;
@@ -283,16 +282,12 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     return { ok: true, facts };
   }
 
-  async function put(
-    key: string,
-    stream: ReadableStream<Uint8Array>,
-    expected?: ObjectFacts,
-  ): Promise<PutOutcome> {
+  async function put(key: string, body: ObjectBody, expected?: ObjectFacts): Promise<PutOutcome> {
+    const stream = body instanceof Blob ? body.stream() : body;
     const target = pathOf(key);
     if ((await isFile(target)) !== null) {
-      // THE STREAM'S PRODUCER MUST STOP: a migration twin found an object
-      // another row already wrote, and abandoning the FIFO would leave its
-      // dump process blocked on a full pipe for the life of the daemon.
+      // THE STREAM'S PRODUCER MUST STOP: abandoning a stream a pipe feeds
+      // would leave its writer blocked on the full pipe for ever.
       await stream.cancel().catch(() => {});
       return exists(key);
     }
@@ -324,11 +319,14 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
   return {
     put,
 
-    async keep(key, file, facts) {
+    async link(key, file, facts) {
       const linked = await linkInto(key, file, facts);
-      // A STAGED FILE ON ANOTHER FILESYSTEM cannot be linked; copying it
-      // through `put` is the exception rather than the write path.
-      return linked === "cross-device" ? put(key, Bun.file(file).stream(), facts) : linked;
+      // A FILE ON ANOTHER FILESYSTEM cannot be linked; copying it through
+      // `put` is the exception rather than the write path.
+      if (linked !== "cross-device") return linked;
+      const copied = await put(key, Bun.file(file), facts);
+      if (copied.ok) await unlink(file).catch(() => {});
+      return copied;
     },
 
     async get(key, range) {
@@ -403,8 +401,8 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
 // ── S3 ──────────────────────────────────────────────────────────────────────
 
 export interface S3ObjectStoreOptions {
-  /** Where the bucket is and who may write it — `./stores` reads it from the
-   *  operator's declaration and credentials file. */
+  /** Where the bucket is and who may write it — `./declarations` reads it
+   *  from a declaration and its credentials file. */
   target: S3Target;
   /** One multipart part, buffered while it uploads: the whole of a put's
    *  memory. S3's floor is 5 MiB. */
@@ -423,14 +421,14 @@ const META_SHA256 = "x-amz-meta-odu-sha256";
  * HOW MUCH OF AN OBJECT ONE READ HOLDS. Bun's S3 stream — and `fetch`'s body
  * under it — does NOT apply backpressure: measured with a consumer that pauses
  * 1 ms every four chunks, a 200 MiB object grew RSS by 274 MiB through
- * `S3File.stream()` and 208 MiB through a plain `fetch`. A slow Nix client would
- * hold a whole NAR in the daemon. So `get` reads in WINDOWS, one ranged GET at
- * a time, opened only when the consumer has drained the last.
+ * `S3File.stream()` and 208 MiB through a plain `fetch`. A slow reader would
+ * make the process hold the whole object. So `get` reads in WINDOWS, one ranged
+ * GET at a time, opened only when the consumer has drained the last.
  *
  * 1 MiB, measured in a fresh process on a 300 MiB read by a slow reader: peak
  * growth 52–55 MiB at 1 MiB, 62–66 at 2, 79–82 at 4, 75–87 at 8, and the same
  * at 600 MiB as at 200 — a floor of Bun's own, not the object. The cost is a
- * GET per MiB; reads of a public bucket leave odu entirely in PR 3d.
+ * GET per MiB.
  */
 const READ_WINDOW = 1024 * 1024;
 /** UploadPartCopy's ceiling is 5 GiB a part; 1 GiB keeps a copy's parts few. */
@@ -505,10 +503,8 @@ async function untilDecided<T>(attempt: () => Promise<T | "conflict">): Promise<
  *   succeeding (developers.cloudflare.com/r2/api/s3/api/), and documents NO
  *   conditional header on `CompleteMultipartUpload`. So on R2 an object of one
  *   part (`partSize`, 8 MiB) is put-if-absent across processes, and a larger
- *   one is put-if-absent only within this process: two daemons completing one
- *   key at once could leave the later one's object, its metadata with it.
- *   Keys are prefixed by bucket and a bucket is one daemon's, so that takes two
- *   daemons sharing a bucket's prefix.
+ *   one is put-if-absent only within this process: two processes completing
+ *   one key at once could leave the later one's object, its metadata with it.
  * - versitygw (the suite's gateway) checks the precondition and THEN writes,
  *   so two truly concurrent conditional PUTs can both succeed — the
  *   contract's race case failed on that before `oneWriter`.
@@ -685,7 +681,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     }
   }
 
-  async function put(
+  async function putOnce(
     key: string,
     stream: ReadableStream<Uint8Array>,
     expected?: ObjectFacts,
@@ -774,8 +770,8 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       const decided = await complete(key, uploadId, etags, true);
       if (decided === "won") return { ok: true, facts };
       await abort(key, uploadId);
-      // A CONFLICTED UPLOAD must be started again, and these bytes were a
-      // stream: `keep` re-reads its file, a stream's caller is told.
+      // A CONFLICTED UPLOAD must be started again: `put` does that for a body
+      // it can read again, and tells a stream's caller.
       if (decided === "conflict") return conflicted(key, 1);
       return exists(key);
     }
@@ -831,8 +827,8 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * PAGED BY `key-marker` ALONE: versitygw 1.7.0 refuses the `upload-id-marker`
    * it hands out (400 "Invalid uploadId marker"). The cost: a page that ends
    * part-way through one key's uploads skips that key's remaining ones, which
-   * the next boot's sweep reaches. A key has more than one upload only when
-   * more than one daemon died putting it.
+   * the next sweep reaches. A key has more than one upload only when more than
+   * one process died putting it.
    */
   async function listUploads(prefix: string): Promise<{ key: string; uploadId: string; initiated: number }[]> {
     const out: { key: string; uploadId: string; initiated: number }[] = [];
@@ -878,14 +874,14 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   }
 
   return {
-    put: (key, stream, expected) => oneWriter(key, () => put(key, stream, expected)),
-
-    // A file can be read again, so a conflicted multipart upload is retried
-    // whole — what AWS asks of a `409` on `CompleteMultipartUpload`.
-    keep: (key, file, facts) =>
+    // A BODY THAT CAN BE READ AGAIN (a Blob) restarts a conflicted multipart
+    // upload whole — what AWS asks of a `409` on `CompleteMultipartUpload`. A
+    // stream is read once.
+    put: (key, body, expected) =>
       oneWriter(key, async () => {
+        if (!(body instanceof Blob)) return putOnce(key, body, expected);
         const outcome = await untilDecided(async () => {
-          const once = await put(key, Bun.file(file).stream(), facts);
+          const once = await putOnce(key, body.stream(), expected);
           return !once.ok && once.refusal.kind === "conflict" ? "conflict" : once;
         });
         return outcome === "conflict" ? conflicted(key, CONFLICT_TRIES) : outcome;

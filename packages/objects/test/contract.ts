@@ -2,8 +2,8 @@
  * THE `ObjectStore` CONTRACT — run against every implementation.
  *
  * Disk and S3 (a versitygw fixture) run the SAME suite, which is the point: a
- * route or a GC pass must not learn a second dialect of "put"/"get" when the
- * bytes move off the pod's disk.
+ * caller must not learn a second dialect of "put"/"get" when the bytes move off
+ * a local disk.
  *
  * A factory owns its own temporary backing and answers the store, a dispose
  * that removes it, and `rewriteBehind` — a write to the BACKING that keeps the
@@ -17,7 +17,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
-import { base32 } from "../src/narinfo";
 import type { ObjectFacts, ObjectStore, PutOutcome } from "../src/objectStore";
 import type { StoreSpec } from "./storeMemory";
 
@@ -37,7 +36,7 @@ const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 
 const factsOf = (payload: Uint8Array): ObjectFacts => ({
   size: payload.length,
-  sha256: `sha256:${base32(createHash("sha256").update(payload).digest())}`,
+  sha256: createHash("sha256").update(payload).digest("hex"),
 });
 
 function streamOf(parts: readonly Uint8Array[]): ReadableStream<Uint8Array> {
@@ -242,16 +241,16 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
-    it("keeps a local file as the object, once", async () => {
+    it("puts a local file (a Blob) as the object, once", async () => {
       const { store, dispose } = await make();
-      const scratch = mkdtempSync(join(tmpdir(), "odu-keep-"));
+      const scratch = mkdtempSync(join(tmpdir(), "odu-blob-"));
       try {
         const file = join(scratch, "staged.nar.zst");
         writeFileSync(file, "kept bytes");
         const facts = factsOf(bytes("kept bytes"));
-        expect(await store.keep("main/nar/k.nar.zst", file, facts)).toEqual({ ok: true, facts });
+        expect(await store.put("main/nar/k.nar.zst", Bun.file(file), facts)).toEqual({ ok: true, facts });
         writeFileSync(file, "other byte");
-        expect(await store.keep("main/nar/k.nar.zst", file, factsOf(bytes("other byte")))).toEqual({
+        expect(await store.put("main/nar/k.nar.zst", Bun.file(file), factsOf(bytes("other byte")))).toEqual({
           ok: false,
           refusal: { kind: "exists", key: "main/nar/k.nar.zst", facts },
         });

@@ -22,10 +22,9 @@
  *     The ONE exception is `./cli`, and it is not the engine: a face IS a
  *     process, and a process reads its own environment (which token to present
  *     is the caller's, not the daemon's).
- *   - **its platform is `node:` builtins and two Bun builtins.** `bun:sqlite`
- *     (the database) and `bun` (its `S3Client`, the S3 store's reads) are named
- *     here rather than admitted by a prefix, so the day a third Bun builtin
- *     appears is a day this file changes.
+ *   - **its platform is `node:` builtins and one Bun builtin.** `bun:sqlite` is
+ *     named here rather than admitted by a prefix, so the day a second Bun
+ *     builtin appears is a day this file changes.
  *
  * The walk is a PARSE, not a line scan, and TYPE-ONLY EDGES COUNT — see the
  * `@odu/run-client` twin for both arguments.
@@ -48,7 +47,7 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
  *  cost, and the reason the face is a separate DOOR rather than a module the
  *  server could reach. `@kolu/surface` is HYDRATED from a Nix pin and so is
  *  absent here by design. */
-const EXPECTED_DEPENDENCIES = ["@odu/cordis", "@odu/credentials", "@odu/face", "effect", "solid-js"];
+const EXPECTED_DEPENDENCIES = ["@odu/cordis", "@odu/credentials", "@odu/face", "@odu/objects", "effect", "solid-js"];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed. Four
  *  doors of this package open the framework: the surface (`/define`,
@@ -64,7 +63,7 @@ const HYDRATED = new Set<string>([
 
 /** The non-`node:` builtins this package may reach. Named, never prefix-matched:
  *  a prefix would let `bun:ffi` in with `bun:sqlite`. */
-const BUN_BUILTINS = new Set(["bun:sqlite", "bun"]);
+const BUN_BUILTINS = new Set(["bun:sqlite"]);
 
 /** The walls that run the other way. This package is the BOTTOM of odu's graph:
  *  nothing above it may appear below it. */

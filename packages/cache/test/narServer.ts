@@ -15,7 +15,7 @@ import { NodeHttpServer } from "@effect/platform-node";
 import { nixDump } from "../src/store";
 import { createCache } from "../src/cache";
 import { cacheRoutes } from "../src/routes";
-import { diskObjectStore, type ObjectStore } from "../src/objectStore";
+import { diskObjectStore, type ObjectStore } from "@odu/objects";
 import { LOCAL_STORE } from "../src/surface";
 import { join } from "node:path";
 

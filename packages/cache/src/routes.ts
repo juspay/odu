@@ -44,7 +44,7 @@ import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { ClaimedRoutes } from "@odu/cordis/services";
 import { type Cache, type NarSource } from "./cache";
-import type { ByteRange } from "./objectStore";
+import type { ByteRange } from "@odu/objects";
 import {
   CACHE_MOUNT,
   CACHE_ROUTE_PATHS,

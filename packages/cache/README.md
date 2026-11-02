@@ -58,7 +58,8 @@ on the wire and `cache_bucket_create` to an agent.
 - **Narinfo signatures are computed at READ time.** A stored signature would
   silently survive a rotated key; one ed25519 sign per narinfo GET is nothing.
   The client's own signatures are kept beside the server's.
-- **Blobs are the compressed NAR the pusher sent.** An `ObjectStore` keeps
+- **Blobs are the compressed NAR the pusher sent.** An `ObjectStore`
+  (`@odu/objects`, which knows keys and bytes and nothing of Nix) keeps
   `<bucket>/nar/<narHash>.<ext>` — the disk store under `<state>/cache/objects`,
   an S3 store in its bucket — and each bucket names its store (`local` or one
   declared in `$ODU_OBJECT_STORES`). A put is put-if-absent, a read takes a

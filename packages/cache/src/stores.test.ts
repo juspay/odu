@@ -114,7 +114,7 @@ describe("a bucket's store", () => {
   });
 
   it("refuses the mount when a bucket's store is no longer declared, naming both", async () => {
-    const { diskObjectStore } = await import("./objectStore");
+    const { diskObjectStore } = await import("@odu/objects");
     const declared = createCache({
       stateRoot: scratch,
       rootToken: "root",

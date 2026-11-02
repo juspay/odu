@@ -49,7 +49,8 @@ import {
   type NarinfoOutcome,
   type Upload,
 } from "./staging";
-import { type ByteRange, type ObjectFacts, type ObjectStore } from "./objectStore";
+import { type ByteRange, type ObjectFacts, type ObjectStore } from "@odu/objects";
+import { type KeptFile, keptFileOf } from "./fileHash";
 import { contentAddressOf } from "./storePath";
 import { verifyNarStream } from "./store";
 import { createSlots } from "./slots";
@@ -568,7 +569,7 @@ export function createCache(options: CacheOptions): Cache {
   async function recordNow(
     bucket: BucketRow,
     info: NarInfo,
-    file: { fileHash: string; fileSize: number },
+    file: KeptFile,
     selfHash: string | null,
   ): Promise<boolean> {
     const existing = repo.object(bucket.name, info.storePath);
@@ -642,9 +643,10 @@ export function createCache(options: CacheOptions): Cache {
       if (size === null) return null;
       const row = repo.objectByNarHashCompression(bucket.name, narHash, compression ?? "none");
       if (row !== null && row.fileHash !== null && row.fileSize === size) {
-        return { size, sha256: row.fileHash };
+        return { fileHash: row.fileHash, fileSize: size };
       }
-      return objects.facts(key);
+      const stored = await objects.facts(key);
+      return stored === null ? null : keptFileOf(stored);
     },
   });
   /** THE MIGRATION'S THROTTLE: two old-store dumps at a time, never more. */
@@ -1159,7 +1161,7 @@ export function createCache(options: CacheOptions): Cache {
           // A READ, not an empty put: a put racing a delete would store 0 bytes.
           const stored = await objects.facts(key);
           if (stored !== null) {
-            repo.putObject({ ...row, fileHash: stored.sha256, fileSize: stored.size });
+            repo.putObject({ ...row, ...keptFileOf(stored) });
             migrated += 1;
             return;
           }
@@ -1183,7 +1185,7 @@ export function createCache(options: CacheOptions): Cache {
             }),
           ]);
           if (facts === null || stopping) return;
-          repo.putObject({ ...row, fileHash: facts.sha256, fileSize: facts.size });
+          repo.putObject({ ...row, ...keptFileOf(facts) });
           migrated += 1;
           if (migrated % 100 === 0) {
             options.log?.("cache.migration.progress", {

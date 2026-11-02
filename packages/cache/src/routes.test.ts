@@ -28,8 +28,8 @@ import { CACHE_MOUNT } from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
 import { cacheRoutes } from "./routes";
 import { FakeStore, hashOf } from "../test/fakeStore";
-import { type Gateway, startGateway } from "../test/versitygw";
-import { type ObjectStore, s3ObjectStore } from "./objectStore";
+import { type Gateway, startGateway } from "@odu/objects/testing";
+import { type ObjectStore, s3ObjectStore } from "@odu/objects";
 
 /** THE S3 GATEWAY the NAR-serving cases also run against: one per file. */
 let gateway: Gateway;

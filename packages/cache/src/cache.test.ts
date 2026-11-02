@@ -32,7 +32,7 @@ import { type Cache, createCache } from "./cache";
 import type { NarinfoOutcome } from "./staging";
 import { hashOf } from "../test/fakeStore";
 import { openCacheRepo } from "./db";
-import { diskObjectStore } from "./objectStore";
+import { diskObjectStore } from "@odu/objects";
 
 const ROOT = "root-token";
 const NOW = 1_700_000_000_000;

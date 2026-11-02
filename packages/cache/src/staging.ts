@@ -49,7 +49,8 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { basename, join, relative } from "node:path";
-import type { ObjectFacts, ObjectStore } from "./objectStore";
+import type { ObjectStore } from "@odu/objects";
+import { type KeptFile, keptFileOf, objectFactsOf } from "./fileHash";
 import { writeAll } from "./sink";
 import { verifyNarFile } from "./store";
 import type { BucketRow } from "./db";
@@ -164,7 +165,7 @@ export interface StagingDeps {
   record: (
     bucket: BucketRow,
     info: NarInfo,
-    file: { fileHash: string; fileSize: number },
+    file: KeptFile,
     selfHash: string | null,
   ) => Promise<boolean>;
   /** One line per operational fact; the cache's logger. */
@@ -178,7 +179,7 @@ export interface StagingDeps {
     bucket: BucketRow,
     narHash: string,
     compression: string | null,
-  ) => Promise<ObjectFacts | null>;
+  ) => Promise<KeptFile | null>;
 }
 
 export interface Staging {
@@ -290,7 +291,7 @@ export function createStaging(deps: StagingDeps): Staging {
         );
       }
       return await recordSerially(bucket, info, checked.selfHash, () =>
-        keep(bucket, info, claimed.path, { size: checked.fileSize, sha256: checked.fileHash }),
+        keep(bucket, info, claimed.path, { fileHash: checked.fileHash, fileSize: checked.fileSize }),
       );
     } finally {
       // OURS TO REMOVE: kept, refused, or a duplicate of a kept object. A
@@ -474,8 +475,8 @@ export function createStaging(deps: StagingDeps): Staging {
     bucket: BucketRow,
     info: NarInfo,
     path: string,
-    facts: ObjectFacts,
-  ): Promise<ObjectFacts | Refusal> {
+    file: KeptFile,
+  ): Promise<KeptFile | Refusal> {
     const key = objectKey(bucket.name, info.narHash, info.compression);
     const refused: Refusal = {
       ok: false,
@@ -483,9 +484,13 @@ export function createStaging(deps: StagingDeps): Staging {
       message: `${info.storePath} could not be stored: the object store refused it`,
     };
     try {
-      const outcome = await storeOf(bucket).keep(key, path, facts);
-      if (outcome.ok) return outcome.facts;
-      if (outcome.refusal.kind === "exists") return outcome.refusal.facts;
+      const store = storeOf(bucket);
+      const expected = objectFactsOf(file);
+      // A STORE WHOSE OBJECTS ARE FILES links the proved file into place, no
+      // copy; one with none is handed it as a Blob, which it can read again.
+      const outcome = await (store.link?.(key, path, expected) ?? store.put(key, Bun.file(path), expected));
+      if (outcome.ok) return keptFileOf(outcome.facts);
+      if (outcome.refusal.kind === "exists") return keptFileOf(outcome.refusal.facts);
       // THE STORE KEPT NOTHING — it read other bytes than the verify did, or
       // its conditional write never decided — and its refusal names the facts.
       const { kind, ...named } = outcome.refusal;
@@ -535,12 +540,11 @@ export function createStaging(deps: StagingDeps): Staging {
     bucket: BucketRow,
     info: NarInfo,
     selfHash: string | null,
-    keep: () => Promise<ObjectFacts | Refusal>,
+    keep: () => Promise<KeptFile | Refusal>,
   ): Promise<NarinfoOutcome> {
     return withWriteLock(async () => {
-      const kept = await keep();
-      if ("ok" in kept) return kept;
-      const file = { fileHash: kept.sha256, fileSize: kept.size };
+      const file = await keep();
+      if ("ok" in file) return file;
       await record(bucket, info, file, selfHash);
       log?.("cache.import.recorded", {
         bucket: bucket.name,
