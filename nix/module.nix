@@ -13,9 +13,11 @@
 #     `/mcp` as well, and every caller meets the sign-in page before anything
 #     else. That is server mode, and it is what makes the public board safe.
 #
-# The cache keeps the compressed NAR a pusher sent, as objects under `stateDir`,
-# and never imports into a Nix store: references are names in the narinfo, the
-# server signs at read, and the state lives in one SQLite file plus `objects/`.
+# The cache keeps the compressed NAR a pusher sent, as objects — under
+# `stateDir` (the `local` store), or in an S3-compatible bucket declared in
+# `cache.stores` and chosen per bucket — and never imports into a Nix store:
+# references are names in the narinfo, the server signs at read, and the state
+# lives in one SQLite file plus the objects.
 { self }:
 { config, lib, pkgs, ... }:
 
@@ -129,6 +131,20 @@ let
   # A WEBSOCKET IS NOT A REQUEST. nginx needs the upgrade pair on the location
   # that carries `/rpc/ws`, and `recommendedProxySettings` is what defines
   # `$connection_upgrade` — so this only works with it on, which the vhost sets.
+  # THE DECLARED STORES, as the daemon reads them: one JSON file in the store,
+  # naming each store and the RUNTIME path of its credentials. The credentials
+  # themselves never enter the Nix store — systemd copies each file into the
+  # unit's private credentials directory (`LoadCredential` below), and this
+  # file names that copy.
+  storesFile = pkgs.writeText "odu-cache-stores.json" (builtins.toJSON (
+    lib.mapAttrs
+      (name: store: {
+        inherit (store) kind endpoint bucket region;
+        credentialsFile = "/run/credentials/odu-web.service/store-${name}";
+      })
+      cfg.cache.stores
+  ));
+
   websocketRules = proxyRules + ''
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;
@@ -361,6 +377,82 @@ in
       };
     };
 
+    cache.stores = mkOption {
+      type = types.attrsOf (types.submodule {
+        options = {
+          kind = mkOption {
+            type = types.enum [ "s3" ];
+            default = "s3";
+            description = ''
+              What the store is. `s3` is any S3-compatible service: Cloudflare
+              R2, AWS S3, Garage, versitygw, MinIO.
+            '';
+          };
+          endpoint = mkOption {
+            type = types.str;
+            example = "https://<account>.r2.cloudflarestorage.com";
+            description = ''
+              The service's endpoint URL. Requests are path-style
+              (`<endpoint>/<bucket>/<key>`), which every S3-compatible service
+              accepts and a local gateway needs.
+            '';
+          };
+          bucket = mkOption {
+            type = types.str;
+            example = "odu-cache";
+            description = ''
+              The S3 bucket. odu keeps each of its own buckets under a key
+              prefix of that bucket's name, so one S3 bucket can hold several
+              odu buckets, and odu reads and sweeps nothing outside them.
+            '';
+          };
+          region = mkOption {
+            type = types.str;
+            example = "auto";
+            description = ''
+              The signing region: `auto` for R2, the bucket's region for AWS,
+              whatever the gateway was started with otherwise (`us-east-1` is
+              versitygw's and MinIO's default).
+            '';
+          };
+          credentialsFile = mkOption {
+            type = types.path;
+            example = "/run/secrets/odu-r2";
+            description = ''
+              A file of `AWS_ACCESS_KEY_ID=…` and `AWS_SECRET_ACCESS_KEY=…`
+              lines (and optionally `AWS_SESSION_TOKEN=…`). Loaded as a systemd
+              credential, never copied into the Nix store, never written to the
+              database and never logged. The key needs object read, write,
+              delete and list on the bucket.
+            '';
+          };
+        };
+      });
+      default = { };
+      example = lib.literalExpression ''
+        {
+          r2 = {
+            endpoint = "https://<account>.r2.cloudflarestorage.com";
+            bucket = "odu-cache";
+            region = "auto";
+            credentialsFile = "/run/secrets/odu-r2";
+          };
+        }
+      '';
+      description = ''
+        Object stores a bucket can keep its objects in, by name. `local` — the
+        disk under `stateDir` — is always there and cannot be declared here.
+        A bucket chooses its store when it is created (`odu cache create
+        <bucket> --store r2`, or the store field on the board's create form)
+        and keeps it; every store serves through the same routes, with
+        `Content-Length` and `Range`.
+
+        Removing a store that a bucket still names stops the cache row from
+        mounting, with a message naming the bucket and the store: its objects
+        would otherwise be unreachable, which reads as data loss.
+      '';
+    };
+
     cache.enableACME = mkOption {
       type = types.bool;
       default = true;
@@ -405,6 +497,14 @@ in
           services.odu.github needs clientId, clientSecretFile and allow TOGETHER,
           or none of them. With none, this daemon has no door and every caller is
           its owner; with all three it is a server that asks who you are.
+        '';
+      }
+      {
+        assertion = !(cfg.cache.stores ? local);
+        message = ''
+          services.odu.cache.stores.local is declared, but `local` is the
+          daemon's own disk under services.odu.stateDir and always exists —
+          give the declared store another name.
         '';
       }
       {
@@ -480,11 +580,15 @@ in
           # The credential's runtime path: systemd copies the file into a
           # private directory, and this is the file the daemon reads.
           "ODU_CLOUDFLARE_API_TOKEN_FILE=%d/cloudflare-api-token"
+        ]
+        ++ optionals (cfg.cache.stores != { }) [
+          "ODU_CACHE_STORES=${storesFile}"
         ];
         Restart = "on-failure";
       } // lib.optionalAttrs
         (
           cfg.rootTokenFile != null || serverMode || cfg.cloudflare.apiTokenFile != null
+          || cfg.cache.stores != { }
         )
         {
           # ONE list: two `//` updates would replace each other, and a missing
@@ -495,7 +599,9 @@ in
             "client-secret:${toString cfg.github.clientSecretFile}"
           ] ++ optionals (cfg.cloudflare.apiTokenFile != null) [
             "cloudflare-api-token:${toString cfg.cloudflare.apiTokenFile}"
-          ];
+          ] ++ lib.mapAttrsToList
+            (name: store: "store-${name}:${toString store.credentialsFile}")
+            cfg.cache.stores;
         };
     };
 
