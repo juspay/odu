@@ -227,7 +227,10 @@ on the bucket page (both landed).
   upstream closures, or keep gcroots; references are names in the narinfo.
   That is the Cachix/Attic model, and it is why the pod's 166 GB store of
   upstream closures goes away. `ObjectStore` is the interface
-  (`put`/`keep`/`get`/`head`/`facts`/`delete`/`list`), and a store is a VALUE
+  (`put`/`get`/`head`/`facts`/`delete`/`list`/`sweepTemp`, and disk's optional
+  `link`), in its own package, `@odu/objects` — keys are opaque, facts are a
+  size and a hex sha256, and it imports nothing of odu; the cache owns the key
+  layout and the one hex ↔ `FileHash` conversion. A store is a VALUE
   the cache row holds by name: `local` (disk under the state directory, always
   there) and each S3-compatible store the operator declares
   (`services.odu.cache.stores`, read from `$ODU_OBJECT_STORES`, credentials from
@@ -238,7 +241,8 @@ on the bucket page (both landed).
   objects there, and a `409` is retried rather than read as lost); a read takes a range
   (S3 in 1 MiB windows: Bun's S3 body applies no backpressure); `FileHash` and
   `FileSize` are written at put (a disk sidecar, S3 object metadata) and read
-  back. One contract suite runs against disk and a versitygw fixture.
+  back; the boot sweep also aborts multipart uploads a killed put left. One
+  contract suite (in `@odu/objects`) runs against disk and a versitygw fixture.
 - **CA is proved from the path.** `contentAddressOf` recomputes Nix's
   `fixed:r:sha256` store path from the name, references and bytes — the
   NarHash for an ordinary row, Nix's hash-modulo-self-references for a

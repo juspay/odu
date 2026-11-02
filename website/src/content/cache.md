@@ -341,7 +341,7 @@ On the board, the **Create bucket** form offers the declared stores, and a bucke
 - **One S3 bucket, many odu buckets.** Each odu bucket is a key prefix of its own name; odu lists, sweeps and deletes nothing outside those prefixes, so the S3 bucket may hold other things.
 - **A store a bucket still names cannot be removed.** The cache row refuses to mount, naming the bucket and the store, rather than serve 404 for every path it has.
 - **Moving a bucket between stores** is not in this release; neither are reads straight from the store (PR 3d) or uploads straight to it (PR 3g). Uploads and reads go through odu.
-- **Abandoned multipart uploads** are aborted by the push that started them; one killed mid-upload leaves parts the service keeps until a lifecycle rule (R2 and AWS: "abort incomplete multipart uploads") removes them.
+- **Abandoned multipart uploads** are aborted by the push that started them. One whose daemon was killed mid-upload (eviction, OOM, `kill -9`) is aborted by the next boot, which lists the bucket's incomplete uploads and aborts those begun before it; a lifecycle rule (R2 and AWS: "abort incomplete multipart uploads") is a second net, not the first.
 
 ## Where the data lives
 
