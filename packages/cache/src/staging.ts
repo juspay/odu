@@ -477,22 +477,31 @@ export function createStaging(deps: StagingDeps): Staging {
     facts: ObjectFacts,
   ): Promise<ObjectFacts | Refusal> {
     const key = objectKey(bucket.name, info.narHash, info.compression);
+    const refused: Refusal = {
+      ok: false,
+      status: 400,
+      message: `${info.storePath} could not be stored: the object store refused it`,
+    };
     try {
       const outcome = await objectsOf(bucket).keep(key, path, facts);
       if (outcome.ok) return outcome.facts;
       if (outcome.refusal.kind === "exists") return outcome.refusal.facts;
-      throw new Error(`the bytes are not the ${facts.size} the verify read`);
+      // THE STORE READ OTHER BYTES THAN THE VERIFY DID: its refusal names both.
+      log?.("cache.object.put_failed", {
+        bucket: bucket.name,
+        path: info.storePath,
+        reason: outcome.refusal.kind,
+        expected: outcome.refusal.expected,
+        actual: outcome.refusal.actual,
+      });
+      return refused;
     } catch (err) {
       log?.("cache.object.put_failed", {
         bucket: bucket.name,
         path: info.storePath,
         reason: String((err as Error).message ?? err),
       });
-      return {
-        ok: false,
-        status: 400,
-        message: `${info.storePath} could not be stored: the object store refused it`,
-      };
+      return refused;
     }
   }
 
