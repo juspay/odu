@@ -390,7 +390,7 @@ in
           };
           endpoint = mkOption {
             type = types.str;
-            example = "https://<account>.r2.cloudflarestorage.com";
+            example = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com";
             description = ''
               The service's endpoint URL. Requests are path-style
               (`<endpoint>/<bucket>/<key>`), which every S3-compatible service
@@ -428,6 +428,19 @@ in
               copied into the Nix store, never written to the database and
               never logged. The key needs object read, write, delete and list
               on the bucket.
+
+              For R2, make an Account API token limited to the one bucket,
+              either way (steps: odu's cache docs, "Set up an R2 bucket"):
+
+              - Dashboard: R2 object storage → Manage API Tokens → Create
+                Account API token, **Object Read & Write** on that bucket. It
+                shows the Access Key ID and the Secret Access Key.
+              - `cf` CLI (developers.cloudflare.com/cf/): `cf r2 buckets
+                create`, then `cf accounts tokens create` with the
+                `Workers R2 Storage Bucket Item Write` and `… Item Read`
+                groups on that bucket. The Access Key ID is the token's `id`
+                and the Secret Access Key is the SHA-256 hex of its `value`
+                (developers.cloudflare.com/r2/api/tokens/).
             '';
           };
         };

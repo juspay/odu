@@ -321,7 +321,7 @@ terminal.
 | one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastAccessed`), `next?` — newest first, 100 a page |
 | the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
 | the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits`, `store` — one row per bucket, published as it moves |
-| the stores a bucket can live in | `odu surface get cache stores` | the `stores` resource | *(none)* | `[{ name, kind }]` — `local` (the server's disk) first, then each declared S3 store; never an endpoint or a credential |
+| the stores a bucket can live in | `odu surface get cache stores` | the `stores` resource | *(none)* | `[{ name, kind, default }]` — `local` (the server's disk, `default: true`) first, then each declared S3 store; never an endpoint or a credential |
 | mint a cache token | `odu surface cache token_mint --input '{…}' --json` | `cache_token_mint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
 | list cache tokens | `odu surface cache token_list --input '{…}' --json` | `cache_token_list` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
 | revoke a cache token | `odu surface cache token_revoke --input '{…}' --json` | `cache_token_revoke` | `rootToken`, `id` | `id`, `revoked` |
@@ -346,6 +346,22 @@ store: references are names, so a push records a path even when they are not in
 the bucket. A bucket's objects live in its **store** — `local` disk, or an
 S3-compatible bucket the operator declared (`services.odu.cache.stores`) — chosen
 at `cache_bucket_create` and kept; every store serves through the same routes.
+Setting up R2 for one (the operator's job, either way; full steps in the cache
+docs, "Set up an R2 bucket"):
+
+- **Dashboard:** R2 → create a private bucket; R2 → Manage API Tokens → Create
+  Account API token, **Object Read & Write** scoped to that bucket → Access Key
+  ID and Secret Access Key, plus the Account ID for the endpoint.
+- **`cf` CLI:** `cf auth login`; `cf r2 buckets create --name <bucket>`;
+  `cf accounts tokens create --name … --policies @policy.json` with the
+  `Workers R2 Storage Bucket Item Write`/`Read` groups on
+  `com.cloudflare.edge.r2.bucket.<ACCOUNT_ID>_default_<bucket>`. Access Key ID =
+  the token's `id`; Secret Access Key = SHA-256 hex of its `value`
+  (developers.cloudflare.com/r2/api/tokens/).
+- **Then:** a credentials file of `AWS_ACCESS_KEY_ID=` and
+  `AWS_SECRET_ACCESS_KEY=` lines, and `services.odu.cache.stores.<name> = {
+  endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"; bucket; region =
+  "auto"; credentialsFile; }`.
 The cache row is at contract 3.1 (3.0 removed `held` and `--wait`; 3.1 added
 `store` and the `stores` resource).
 

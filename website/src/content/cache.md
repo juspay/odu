@@ -271,11 +271,57 @@ A bucket keeps its objects in a **store**: `local`, the server's own disk (alway
 
 A put is put-if-absent within one daemon on every store. Between two daemons writing one S3 bucket's prefix it holds where the service honours `If-None-Match` on the write that finishes the object: AWS does on both [`PutObject` and `CompleteMultipartUpload`](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html); R2 documents it [on `PutObject` only](https://developers.cloudflare.com/r2/api/s3/api/), so there it covers objects of one 8 MiB part.
 
+### Set up an R2 bucket
+
+Either way, you end with four facts: the **Account ID**, a private **bucket**, and an **Access Key ID** and **Secret Access Key** that may read and write only that bucket.
+
+**From the Cloudflare dashboard**
+
+1. **R2 object storage → Create bucket**, say `odu-cache`. Leave public access off: every read goes through odu, which checks the bucket's tokens.
+2. **R2 object storage → Account Details → API Tokens → Manage → Create Account API token**. Permissions: **Object Read & Write**; under the bucket scope, pick only `odu-cache`.
+3. Copy the **Access Key ID** and the **Secret Access Key**; the secret is shown once. The page also shows the endpoint, `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`.
+
+**From the [`cf` CLI](https://developers.cloudflare.com/cf/)** (`npx -y cf@latest`, written `cf` below)
+
+```sh
+cf auth login                                   # approve in the browser
+export CLOUDFLARE_ACCOUNT_ID=<ACCOUNT_ID>       # the account cf acts on
+cf r2 buckets create --name odu-cache
+# the ids of the two bucket-scoped permission groups (the name is URL-encoded):
+cf accounts tokens permission-groups list --name 'Workers%20R2%20Storage%20Bucket%20Item%20Write'
+cf accounts tokens permission-groups list --name 'Workers%20R2%20Storage%20Bucket%20Item%20Read'
+cf accounts tokens create --name odu-cache --policies @policy.json
+```
+
+with `policy.json` naming the one bucket (`default` is the jurisdiction of a bucket created without one):
+
+```json
+[{
+  "effect": "allow",
+  "resources": { "com.cloudflare.edge.r2.bucket.<ACCOUNT_ID>_default_odu-cache": "*" },
+  "permission_groups": [{ "id": "<Item Write group id>" }, { "id": "<Item Read group id>" }]
+}]
+```
+
+The new token's answer carries its `id` and its `value` (shown once). R2's S3 credentials are derived from them, [as Cloudflare documents](https://developers.cloudflare.com/r2/api/tokens/): the **Access Key ID** is the token's `id`, and the **Secret Access Key** is the SHA-256 of its `value`, in hex:
+
+```sh
+printf %s '<token value>' | sha256sum | cut -d' ' -f1
+```
+
+**Then, either way**, write the credentials file on the server, readable by root only (an agenix or sops secret is the usual home):
+
+```sh
+# /run/secrets/odu-r2
+AWS_ACCESS_KEY_ID=<Access Key ID>
+AWS_SECRET_ACCESS_KEY=<Secret Access Key>
+```
+
 On NixOS, declare the store and create the bucket on it:
 
 ```nix
 services.odu.cache.stores.r2 = {
-  endpoint = "https://<account>.r2.cloudflarestorage.com";
+  endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com";
   bucket = "odu-cache";
   region = "auto";
   credentialsFile = "/run/secrets/odu-r2"; # AWS_ACCESS_KEY_ID=… / AWS_SECRET_ACCESS_KEY=…
