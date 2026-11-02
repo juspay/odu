@@ -269,6 +269,8 @@ A bucket keeps its objects in a **store**: `local`, the server's own disk (alway
 | A large upload | streamed to a temp file | multipart, 8 MiB parts, constant memory |
 | A read | the file, from any offset | ranged GETs, 1 MiB at a time |
 
+A put is put-if-absent within one daemon on every store. Between two daemons writing one S3 bucket's prefix it holds where the service honours `If-None-Match` on the write that finishes the object: AWS does on both [`PutObject` and `CompleteMultipartUpload`](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html); R2 documents it [on `PutObject` only](https://developers.cloudflare.com/r2/api/s3/api/), so there it covers objects of one 8 MiB part.
+
 On NixOS, declare the store and create the bucket on it:
 
 ```nix
