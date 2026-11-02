@@ -183,9 +183,12 @@ export const UPSTREAM_HINT =
 /**
  * CREATE A BUCKET.
  *
- * A name, and the one creation fact a deployment needs — the upstream switch,
- * on by default — beside the two it is created with (public, ninety days of
- * retention). The button is ENABLED whenever this control is drawn: the name
+ * A name, and the creation facts a deployment needs — the upstream switch, on
+ * by default, and WHERE its objects live when this daemon declared more than
+ * its own disk — beside the two it is created with (public, ninety days of
+ * retention). The stores are the row's `stores` cell, drawn as the row names
+ * them: the face spells no store, not even the default, which is whatever the
+ * row does when none is sent. The button is ENABLED whenever this control is drawn: the name
  * is sent as typed, empty included, and the ROW's refusal is what the person
  * reads — one rule, in one place, rather than a face's copy of it.
  */
@@ -194,6 +197,11 @@ function CreateBucket(
 ): JSX.Element {
   const [name, setName] = createSignal("");
   const [upstream, setUpstream] = createSignal(true);
+  /** The stores this daemon declared; one store is no choice, so no control. */
+  const stores = props.client.cells.stores.use();
+  const offered = createMemo(() => stores.value() ?? []);
+  /** `null` until the person picks one: the row's own default then applies. */
+  const [store, setStore] = createSignal<string | null>(null);
   const control = createControl(props.call);
   const create = (): void => {
     control.run(
@@ -207,6 +215,7 @@ function CreateBucket(
         // ON is the row's own default (nixpkgs' key), so it is left ABSENT;
         // OFF is the empty list, exactly what `--no-upstream` sends.
         ...(upstream() ? {} : { upstreamKeys: [] }),
+        ...(store() === null ? {} : { store: store() as string }),
       }),
       (created) => {
         setName("");
@@ -236,6 +245,25 @@ function CreateBucket(
         Skip upstream paths
       </label>
       <p class="hint">{UPSTREAM_HINT}</p>
+      <Show when={offered().length > 1}>
+        <label class="field-inline">
+          <span>store</span>
+          <select
+            class="input"
+            aria-label="bucket store"
+            value={store() ?? offered()[0]?.name ?? ""}
+            onChange={(event) => setStore(event.currentTarget.value)}
+          >
+            <For each={offered()}>
+              {(one) => (
+                <option value={one.name}>
+                  {one.name} — {one.kind === "local" ? "this server's disk" : "S3"}
+                </option>
+              )}
+            </For>
+          </select>
+        </label>
+      </Show>
       <button type="button" class="btn btn-primary" disabled={control.busy()} onClick={create}>
         {control.busy() ? "creating…" : "Create bucket"}
       </button>
@@ -561,6 +589,8 @@ function BucketPage(
               <Show when={row().retentionDays > 0}>
                 <span>{row().retentionDays}d retention</span>
               </Show>
+              {/* WHERE THE BYTES ARE: the store it was created on. */}
+              <span class="bucket-store">objects on {row().store}</span>
               {/* The creation fact the upstream switch set, said back: a
                   bucket that takes every path is a choice worth seeing. */}
               <span>

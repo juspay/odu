@@ -79,12 +79,15 @@ export interface CacheCliPorts {
 
 export const CACHE_USAGE = `usage: odu cache <create|list|use|domain|token|login|push|pin|gc|stats> [args]
 
-create <bucket> [--private] [--retention-days N] [--upstream-key K]… | --no-upstream
+create <bucket> [--private] [--retention-days N] [--upstream-key K]… | --no-upstream [--store NAME]
                               create a bucket; print its substituter URL and
                               public key. Needs $ODU_ROOT_TOKEN.
                               --no-upstream takes everything, including
                               upstream-signed closures (more disk), for consumers
-                              that cannot reach cache.nixos.org
+                              that cannot reach cache.nixos.org.
+                              --store keeps its objects in a declared store
+                              (an S3 bucket); the default is local, the
+                              daemon's own disk
 list [-o json]                buckets, with sizes. Needs $ODU_ROOT_TOKEN
 use <bucket>                  the nix.conf settings, the nixConfig block and the
                               netrc lines for a bucket. Needs NO token: a
@@ -263,6 +266,7 @@ async function createCommand(rest: string[], ports: CacheCliPorts): Promise<numb
       "retention-days": { type: "string" },
       "upstream-key": { type: "string", multiple: true },
       "no-upstream": { type: "boolean" },
+      store: { type: "string" },
       origin: originOption,
       output: outputOption,
     },
@@ -295,6 +299,7 @@ async function createCommand(rest: string[], ports: CacheCliPorts): Promise<numb
             ? 90
             : wholeNumber("--retention-days", values["retention-days"]),
         ...(upstreamKeys === undefined ? {} : { upstreamKeys }),
+        ...(values.store === undefined ? {} : { store: values.store }),
       }),
     );
     if (!answer.ok) return reportFailure(answer, json, REFUSED);
@@ -306,7 +311,8 @@ async function createCommand(rest: string[], ports: CacheCliPorts): Promise<numb
     process.stdout.write(
       `created bucket "${bucket.name}"\n` +
         `  substituter: ${bucket.url}\n` +
-        `  public key: ${bucket.publicKey}\n\n` +
+        `  public key: ${bucket.publicKey}\n` +
+        `  store: ${bucket.store}\n\n` +
         `run \`odu cache use ${bucket.name}\` for the nix.conf lines.\n`,
     );
     return 0;
@@ -334,7 +340,7 @@ async function listCommand(rest: string[], ports: CacheCliPorts): Promise<number
       process.stdout.write(
         `${bucket.name}${bucket.public ? "" : " (private)"}  ` +
           `${bucket.objects} paths, ${bytes(bucket.bytes)}, ` +
-          `${bucket.retentionDays}d retention  ${bucket.url}\n`,
+          `${bucket.retentionDays}d retention, on ${bucket.store}  ${bucket.url}\n`,
       );
     }
     return 0;

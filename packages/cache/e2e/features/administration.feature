@@ -58,6 +58,9 @@ Feature: An admin administers the cache from the board
     And I press "Create bucket"
     Then the page opens that bucket
     And the cache says "no upstream filter"
+    # WHERE ITS OBJECTS LIVE: this daemon declares no store but its own disk,
+    # so the form offers no choice and the page says the default back.
+    And the cache says "objects on local"
     And there should be no page errors
 
   @signed-in:admin
