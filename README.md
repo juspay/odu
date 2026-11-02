@@ -65,7 +65,7 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 
 | Command | What it does | On the board |
 | --- | --- | --- |
-| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, including upstream-signed closures (more disk) | Cache → **Create bucket** |
+| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, including upstream-signed closures (more disk); `--store r2` keeps its objects in a declared S3 store | Cache → **Create bucket** |
 | `odu cache list` | List buckets, with sizes | Cache |
 | `odu cache use <bucket>` | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | a bucket's page |
 | `odu cache token mint\|list\|revoke` | Scoped, expiring, revocable tokens; the plaintext is shown once | a bucket's **Tokens** |
@@ -77,13 +77,15 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 | `odu cache stats` | Storage and reads | a bucket's **Stats** |
 | `odu cloudflare status` | The tunnel and the names it carries | **Tunnel** |
 
-**Each row versions its own surface.** A client is admitted on the host's major and the majors of the rows it reads, so a cache change never refuses a client that reads only runs. Cache **3.0** removed the deprecated `held` list and `odu cache push --wait`. A chunked push names its parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
+**Keep a bucket on R2, any S3, or local disk.** Declare a store (`services.odu.cache.stores.r2 = { endpoint; bucket; region; credentialsFile; }`), create the bucket on it, and it serves exactly like disk — the [cache page](https://odu.kolu.dev/docs/cache/#keep-a-bucket-on-s3) has the details.
+
+**Each row versions its own surface.** A client is admitted on the host's major and the majors of the rows it reads, so a cache change never refuses a client that reads only runs. Cache **3.0** removed the deprecated `held` list and `odu cache push --wait`; **3.1** adds a bucket's `store`. A chunked push names its parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
 
 | Row | Contract | Who reads it |
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
 | `ci` (runs) | 2.4 | `odu run`/`wait`/`logs`, MCP, the board, kolu |
-| `cache` | **3.0** | `odu cache`, the board |
+| `cache` | **3.1** | `odu cache`, the board |
 | `auth` | 2.4 | `odu auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu cloudflare`, the board when there is a tunnel |
 

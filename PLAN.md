@@ -227,8 +227,16 @@ on the bucket page (both landed).
   upstream closures, or keep gcroots; references are names in the narinfo.
   That is the Cachix/Attic model, and it is why the pod's 166 GB store of
   upstream closures goes away. `ObjectStore` is the interface
-  (`put`/`get`/`head`/`delete`/`list`); disk is its first implementation and
-  the contract suite is shared so S3 can be the second.
+  (`put`/`keep`/`get`/`head`/`facts`/`delete`/`list`), and a store is a VALUE
+  the cache row holds by name: `local` (disk under the state directory, always
+  there) and each S3-compatible store the operator declares
+  (`services.odu.cache.stores`, read from `$ODU_CACHE_STORES`, credentials from
+  a file). A bucket names its store at creation (`bucket.store`). A put is
+  put-if-absent (disk `link`, S3 `If-None-Match: *`, plus a per-key queue in
+  the S3 store because versitygw's check is not atomic); a read takes a range
+  (S3 in 1 MiB windows: Bun's S3 body applies no backpressure); `FileHash` and
+  `FileSize` are written at put (a disk sidecar, S3 object metadata) and read
+  back. One contract suite runs against disk and a versitygw fixture.
 - **CA is proved from the path.** `contentAddressOf` recomputes Nix's
   `fixed:r:sha256` store path from the name, references and bytes — the
   NarHash for an ordinary row, Nix's hash-modulo-self-references for a
@@ -245,14 +253,16 @@ on the bucket page (both landed).
   file hash and size, created, last-accessed), `pin`, `audit`.
 - **On disk:** under odu's state directory (`$ODU_STATE_DIR`, else
   `$XDG_STATE_HOME/odu`, else the platform default `run-history/paths.ts`
-  already resolves): `cache/cache.sqlite`, `cache/objects/`, and
-  `cache/staging/`. Signing keys live in the database; the database and the
-  objects are the backup.
+  already resolves): `cache/cache.sqlite`, `cache/objects/` (the `local`
+  store), and `cache/staging/`. An S3 store's objects are
+  `<s3-bucket>/<bucket>/nar/…`; uploads still stage on the server's disk
+  until PR 3g. Signing keys live in the database; the database and every
+  store's objects are the backup.
 - **GC:** per-bucket retention on last access (PR 3c2 moves the clock to the
   last push that named the path); an object is evicted only when
   nothing retained in the bucket references it and it is not under a pin;
-  the object file is deleted with the row, and an object with no row is swept
-  at boot. Pins are named and hold a closure from the bucket's own rows.
+  the object is deleted with the row, from the bucket's store, and an object
+  with no row is swept at boot under each bucket's own prefix. Pins are named and hold a closure from the bucket's own rows.
 
 ### Tokens and identity
 
