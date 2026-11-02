@@ -28,10 +28,6 @@ export const CLOUDFLARE_KEY = "cloudflare";
  */
 export const CLOUDFLARE_CONTRACT_VERSION = "2.4";
 
-/** THE TUNNEL AND NOTHING ELSE — what `odu cloudflare …` declares, in the shape
- *  `admitService` takes. */
-export const CLOUDFLARE_NEEDS = { [CLOUDFLARE_KEY]: { requires: CLOUDFLARE_CONTRACT_VERSION } } as const;
-
 // ── the facts ───────────────────────────────────────────────────────────────
 
 /**
@@ -157,7 +153,7 @@ export const ODU_CLOUDFLARE_MCP_INSTRUCTIONS = [
   "Cloudflare Tunnel: it makes one tunnel for this server, a route per name, a",
   "proxied DNS record, and runs `cloudflared` as a child of the daemon. It has",
   "no verb that changes a name — the bucket's own domain verb does that, and this",
-  "row reacts. `cloudflare_status` reports the tunnel's state (stopped, running,",
+  "row reacts. `cloudflare_status_read` reports the tunnel's state (stopped, running,",
   "connected or failed) and each name's (wiring, live or failed with the",
   "reason). A route whose bucket is null is the server's own public origin.",
 ].join("\n");

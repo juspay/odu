@@ -10,12 +10,12 @@
  * ## Why it is mounted under a parent of its own
  *
  * `surfaceCommands` claims four subcommand names beside the verbs — `get`,
- * `keys`, `watch`, `list` — and odu's top level already has `logs`, `runs`,
- * `wait` and a dozen more. Mounting the projection at the root would put those
- * four in the same namespace as commands that mean something else here (odu's
- * own `wait` is about a LIVE run in the current checkout; the projection's
- * `get` is about any member of any surface). `odu surface` takes no names from
- * anybody, which is exactly what the framework's own reference recommends.
+ * `keys`, `watch`, `list` — and each sibling row claims its own word. Mounting
+ * the projection at the root would put those in the same namespace as odu's
+ * rows, where `cache` already means the cache's shell-native verbs and `list`
+ * would mean something about any member of any surface. `odu surface` takes no
+ * names from anybody, which is exactly what the framework's own reference
+ * recommends.
  *
  * ## The exits are the framework's, and that is the point
  *
@@ -28,7 +28,7 @@
  *   3   nothing is serving — run `odu web --background`
  *   130 interrupted; the run carries on
  *
- * `odu wait --run`'s own exits are DIFFERENT and deliberately so: that command
+ * `odu ci wait`'s own exits are DIFFERENT and deliberately so: that command
  * answers a question about CI, so it spends its exit codes on CI's answer. This
  * face answers a question about a CALL, so it spends them on the call. Two
  * vocabularies, each internally consistent, and the README says which is which.
@@ -51,9 +51,14 @@ import {
 } from "@kolu/surface-cli";
 import { ODU_VERSION } from "@odu/execution/common/version";
 import { serviceOrigin } from "@odu/service-client/endpoint";
-import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { composedClients } from "@odu/cordis/compose";
-import { connectToService, EVERY_ROW_NEEDS, SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
+import {
+  connectToService,
+  EVERY_ROW_NEEDS,
+  SERVICE_SIBLINGS,
+  SERVICE_WIRE_GROUP,
+  SIBLING_ROWS,
+} from "./wire";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 import { Effect } from "effect";
@@ -155,15 +160,27 @@ const help: SurfaceCliHelp = {
     "service and could not, and says why.",
 };
 
+/**
+ * EVERY SIBLING THE WIRE KNOWS, each under the key the daemon mounts it at —
+ * `odu surface cache bucket_create`, `odu surface auth user_grant`,
+ * `odu surface cloudflare status_read`. The framework names a sibling's
+ * commands from that same key, which is why this word and the MCP tools'
+ * prefix are one word.
+ *
+ * DERIVED FROM `SIBLING_ROWS`, not listed. It used to be the literal
+ * `{ [CACHE_KEY]: CACHE_AGENT }`, so `auth` and `cloudflare` were reachable to
+ * an agent over MCP (whose bridge reads the daemon's roster) and to nobody in
+ * a terminal — which went unnoticed only because both rows still had argv
+ * faces of their own. They do not: administration is the board and this
+ * projection, so a row missing here is a row with no terminal at all.
+ */
+const projectedSiblings = Object.fromEntries(
+  SIBLING_ROWS.flatMap((row) => (row.key === null ? [] : [[row.key, row.agent] as const])),
+);
+
 const projection = {
   core: { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE },
-  // THE CACHE IS A SIBLING, so its verbs mount under its own word
-  // (`odu surface cache bucket_create`) rather than vanishing from this face.
-  // The framework names a sibling's commands from the SAME key the wire mounts
-  // it at, which is why this word and the MCP tools' prefix are one word — and
-  // why the entry is the ROW's own record rather than a second spelling of its
-  // surface, its exposure map and its key.
-  surfaces: { [CACHE_KEY]: CACHE_AGENT },
+  surfaces: projectedSiblings,
   endpoint,
   help,
   info: { name: "odu" },
