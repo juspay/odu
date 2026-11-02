@@ -148,7 +148,7 @@ export function objectKey(
 
 export interface StagingDeps {
   /** The store a bucket's objects live in — the cache's one answer to that. */
-  objectsOf: (bucket: BucketRow) => ObjectStore;
+  storeOf: (bucket: BucketRow) => ObjectStore;
   /** The cache's own directory; staging lives at `<dir>/staging`. */
   dir: string;
   now: () => number;
@@ -205,7 +205,7 @@ export interface Staging {
 }
 
 export function createStaging(deps: StagingDeps): Staging {
-  const { objectsOf, now, record, log, keptFacts, withWriteLock } = deps;
+  const { storeOf, now, record, log, keptFacts, withWriteLock } = deps;
   const stagingRoot = join(deps.dir, "staging");
   const stagedDir = (bucket: string): string => join(stagingRoot, bucket);
 
@@ -483,7 +483,7 @@ export function createStaging(deps: StagingDeps): Staging {
       message: `${info.storePath} could not be stored: the object store refused it`,
     };
     try {
-      const outcome = await objectsOf(bucket).keep(key, path, facts);
+      const outcome = await storeOf(bucket).keep(key, path, facts);
       if (outcome.ok) return outcome.facts;
       if (outcome.refusal.kind === "exists") return outcome.refusal.facts;
       // THE STORE READ OTHER BYTES THAN THE VERIFY DID: its refusal names both.

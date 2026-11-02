@@ -434,15 +434,20 @@ export function createCache(options: CacheOptions): Cache {
   const repo = openCacheRepo(join(dir, "cache.sqlite"));
   const { stores } = options;
   /**
-   * THE ONE PLACE A BUCKET BECOMES ITS STORE. Every bucket's store was proved
-   * declared at boot and at create, so a missing one here is a broken
-   * invariant, not a refusal.
+   * THE ONE PLACE A BUCKET BECOMES ITS STORE, from the row's own `store` fact.
+   * Every bucket's store was proved declared at boot and at create, so a
+   * missing one here is a broken invariant, not a refusal.
    */
-  const objectsOf = (bucket: string): ObjectStore => {
-    const row = repo.bucket(bucket);
-    const store = stores.get(row?.store ?? LOCAL_STORE);
-    if (store === undefined) throw new Error(`bucket "${bucket}" names an undeclared store`);
+  const storeOf = (bucket: Pick<BucketRow, "name" | "store">): ObjectStore => {
+    const store = stores.get(bucket.store);
+    if (store === undefined) throw new Error(`bucket "${bucket.name}" names an undeclared store`);
     return store;
+  };
+  /** The same, for a caller holding only a bucket's NAME (an object row's). */
+  const objectsOf = (name: string): ObjectStore => {
+    const bucket = repo.bucket(name);
+    if (bucket === null) throw new Error(`no bucket "${name}"`);
+    return storeOf(bucket);
   };
 
   /**
@@ -619,7 +624,7 @@ export function createCache(options: CacheOptions): Cache {
   // The write path, wired to the ONE lock: staging keeps an object and records
   // its row under it, so neither a pin nor a collection lands in between.
   const staging = createStaging({
-    objectsOf: (bucket) => objectsOf(bucket.name),
+    storeOf,
     dir,
     now,
     withWriteLock,
@@ -631,7 +636,7 @@ export function createCache(options: CacheOptions): Cache {
     // store, which for S3 is a stored checksum rather than a read of the bytes.
     async keptFacts(bucket, narHash, compression) {
       const key = objectKey(bucket.name, narHash, compression);
-      const objects = objectsOf(bucket.name);
+      const objects = storeOf(bucket);
       const size = await objects.head(key);
       if (size === null) return null;
       const row = repo.objectByNarHashCompression(bucket.name, narHash, compression ?? "none");
@@ -1289,7 +1294,7 @@ export function createCache(options: CacheOptions): Cache {
         })();
       if (row === null) return null;
       const key = objectKey(bucket.name, narHash, row.compression);
-      const objects = objectsOf(bucket.name);
+      const objects = storeOf(bucket);
       const size = await objects.head(key);
       if (size !== null) {
         return {
@@ -1418,7 +1423,7 @@ export function createCache(options: CacheOptions): Cache {
       let tempSwept = 0;
       let orphansSwept = 0;
       for (const bucket of repo.buckets()) {
-        const objects = objectsOf(bucket.name);
+        const objects = storeOf(bucket);
         tempSwept += await objects.sweepTemp(bucket.name, now());
         for (const object of await objects.list(bucket.name)) {
           if (owned.has(object.key)) continue;
