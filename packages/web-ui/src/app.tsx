@@ -57,7 +57,6 @@ import {
   createMemo,
   createRoot,
   createSignal,
-  For,
   on,
   onCleanup,
   Show,
@@ -403,22 +402,32 @@ export function App(props: {
     return null;
   });
 
-  /** THE RAIL'S ROWS, as data. A list rather than six hand-spelled buttons,
-   *  because every one of them is the same control with a different word —
-   *  and because which of them EXIST depends on the daemon (a tunnel without
-   *  a token, a role table without an owner). */
-  const railRows = createMemo(() =>
-    [
-      { label: "Runs", on: atRuns() && !atMachines(), go: (): void => go({ at: "board" }), count: runsCount() },
-      { label: "Cache", on: atCache(), go: (): void => go({ at: "cache", bucket: null }), count: null },
-      { label: "Machines", on: atMachines(), go: (): void => go({ at: "machines" }), count: null },
-      ...(tunnelRow()
-        ? [{ label: "Tunnel", on: atTunnel(), go: (): void => go({ at: "tunnel" }), count: null }]
-        : []),
-      ...(canGrant()
-        ? [{ label: "People", on: atPeople(), go: (): void => go({ at: "people" }), count: null }]
-        : []),
-    ],
+  /** THE RAIL'S ROWS, spelled out rather than mapped.
+   *
+   *  They used to be a `<For>` over a memo that rebuilt its array — and so
+   *  its objects — whenever ANY of its readings moved, the runs' tally
+   *  included. `For` keys on reference, so every tick that changed "2
+   *  failing" tore down all five buttons and built five new ones: the DOM
+   *  node under the pointer replaced, the focus ring dropped, and the
+   *  keyboard sweep in `features/keyboard.feature` unable to find the
+   *  controls it had just stamped.
+   *
+   *  Five static elements is the fix and also the simpler page: each button
+   *  is one node for the life of the tab, and the only thing that re-runs is
+   *  the binding that actually changed. A list was never buying anything —
+   *  the rows are not data, they are this application's five places. */
+  const RailRow = (rail: {
+    label: string;
+    pressed: boolean;
+    count?: { text: string; hue: string } | null;
+    onPick: () => void;
+  }): JSX.Element => (
+    <button type="button" class="nav-item" aria-pressed={rail.pressed} onClick={rail.onPick}>
+      <span>{rail.label}</span>
+      <Show when={rail.count}>
+        {(count) => <span class={`nav-count hue-${count().hue}`}>{count().text}</span>}
+      </Show>
+    </button>
   );
 
   // ── the sign-in page ──
@@ -471,23 +480,39 @@ export function App(props: {
                 arriving with a screen reader hears "Cache, pressed" rather
                 than a navigation menu's worth of ceremony. */}
             <nav class="nav" aria-label="board rows">
-              <For each={railRows()}>
-                {(row) => (
-                  <button
-                    type="button"
-                    class="nav-item"
-                    aria-pressed={row.on}
-                    onClick={row.go}
-                  >
-                    <span>{row.label}</span>
-                    <Show when={row.count}>
-                      {(count) => (
-                        <span class={`nav-count hue-${count().hue}`}>{count().text}</span>
-                      )}
-                    </Show>
-                  </button>
-                )}
-              </For>
+              <RailRow
+                label="Runs"
+                pressed={atRuns() && !atMachines()}
+                count={runsCount()}
+                onPick={() => go({ at: "board" })}
+              />
+              <RailRow
+                label="Cache"
+                pressed={atCache()}
+                onPick={() => go({ at: "cache", bucket: null })}
+              />
+              <RailRow
+                label="Machines"
+                pressed={atMachines()}
+                onPick={() => go({ at: "machines" })}
+              />
+              {/* The tunnel row is mounted only on a daemon with a Cloudflare
+                  token, and the role table is an owner's: a switch for either
+                  where it does not apply is a control that only refuses. */}
+              <Show when={tunnelRow()}>
+                <RailRow
+                  label="Tunnel"
+                  pressed={atTunnel()}
+                  onPick={() => go({ at: "tunnel" })}
+                />
+              </Show>
+              <Show when={canGrant()}>
+                <RailRow
+                  label="People"
+                  pressed={atPeople()}
+                  onPick={() => go({ at: "people" })}
+                />
+              </Show>
             </nav>
           </Show>
           {/* WHO IS SIGNED IN, at the foot of the rail, drawn by the ROW that
