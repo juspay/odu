@@ -182,7 +182,7 @@ Consequences for the split:
 GET  /cache/<bucket>/nix-cache-info        StoreDir, WantMassQuery: 1, Priority: 40
 HEAD /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/<hash>.narinfo
-GET  /cache/<bucket>/nar/<narHash>.<ext>      stream, or 302 to presigned URL (PR 11)
+GET  /cache/<bucket>/nar/<narHash>.<ext>      stream (PR 3d: public buckets read static objects from the store)
 PUT  /cache/<bucket>/nar/<narHash>.<ext>       Bearer or Basic; any ext Nix sends (xz by default, zst with ?compression=zstd)
 PUT  /cache/<bucket>/<hash>.narinfo        server re-signs with the bucket key; URL field kept as sent
 POST /_odu/v1/buckets/<bucket>/missing    batch "which of these are you missing" (odu push client)
@@ -248,7 +248,8 @@ on the bucket page (both landed).
   already resolves): `cache/cache.sqlite`, `cache/objects/`, and
   `cache/staging/`. Signing keys live in the database; the database and the
   objects are the backup.
-- **GC:** per-bucket retention on last access; an object is evicted only when
+- **GC:** per-bucket retention on last access (PR 3c moves the clock to the
+  last push that named the path); an object is evicted only when
   nothing retained in the bucket references it and it is not under a pin;
   the object file is deleted with the row, and an object with no row is swept
   at boot. Pins are named and hold a closure from the bucket's own rows.
@@ -290,7 +291,7 @@ HTTP API, with a token, from the machine that holds the paths.
    netrc or a token in the URL stays for people who want nothing odu-specific
    (see "Credentials on the client"); it buffers each NAR in memory and
    probes paths one at a time. Known gaps against cachix and attic, kept
-   deliberately: uploads go through the server until PR 11 adds presigned
+   deliberately: uploads go through the server until PR 3g adds presigned
    PUT; dedup is per NarHash per bucket, not per chunk; no watch mode until PR 5.
 3. **Run-scoped (PR 6).** `odu run --push <bucket>`: the runner pushes each
    recipe's `result*` closures after the recipe, using a write-only token
@@ -393,26 +394,87 @@ For users: `odu web` serves runs and buckets on one page behind GitHub sign-in;
 agent-distro CI through the domain. The pod (F12) runs master `3d66833` (#140; #141 not yet deployed),
 tailnet-only (Serve), with the cache public through Cloudflare.
 
-### PR 3c: object storage
+### PR 3c: GC and pins in every store
 
-> **Docs:** Point a bucket's objects at an S3-compatible store — Garage or
-> versitygw on the same machine, or a real one — and the same cache serves
-> from it.
+> **Docs:** Every bucket keeps what is still wanted and nothing else, on any
+> store: local disk, any S3-compatible service (R2, Garage, versitygw, AWS), or
+> one added later. A path is wanted while a push names it within the bucket's
+> retention, while a pin holds it, or while a wanted path references it. The
+> bucket page shows what the next collection would delete before it runs.
 
-An S3 implementation of `ObjectStore` on Bun's built-in client, selected by
-the module, with the SAME contract suite run against versitygw/Garage in CI
-so the local fixture exercises real S3 semantics. The cache row only chooses
-the implementation; no route learns a second dialect.
+**Decision: liveness comes from pushes, not reads.** Once public reads leave
+odu (PR 3d), odu sees no downloads, so `lastAccessed` cannot be the signal. A
+push already names every member of its closure in the `missing` query; each
+named row is RENEWED (`lastWanted`), whether it was missing or present. CI
+pushes constantly, so a path in use is renewed constantly; a path nothing has
+pushed for a whole retention window, and no pin holds, expires. No read logs,
+nothing on the read path.
 
-### PR 3d: direct transfer
+What lands:
+- `lastWanted` replaces `lastAccessed` as GC's clock, renewed by the
+  `missing` query and by a stored push; pins (named closures, from the
+  bucket's own rows) and the reference closure unchanged.
+- GC written ONLY against the `ObjectStore` interface (`list`/`delete`, and
+  the live-rows re-check under the bucket write lock from #140), so every
+  store collects the same way. The store contract suite gains GC and pin
+  cases and runs against EVERY implementation: disk, plus an S3 fixture
+  (versitygw or Garage) in CI, which this PR adds as the S3 store's first
+  user. The S3 `ObjectStore` (Bun's built-in client) lands here.
+- Deletion announces the URLs it removed through a cordis port; the
+  cloudflare row provides it and purges them at the CDN; with no CDN the port
+  does nothing. The cache row never names Cloudflare.
+- The bucket page: retention, pins (create, delete, see what each holds), and
+  a dry-run of the next collection (paths, bytes); the run itself as a verb
+  and on a schedule.
 
-> **Docs:** Large pushes and pulls bypass the odu process: the client uploads
-> objects straight to the store with a presigned PUT, and downloads follow a
-> redirect.
+State of master after merge: GC and pinning behave identically on local disk
+and on S3-compatible stores, and stay correct when reads no longer reach odu.
 
-Presigned PUT/GET from the object store; the cache row handles narinfos and
-signing, not bytes. The push client and the NAR route switch to the signed
-URLs when the bucket's store supports them.
+### PR 3d: public reads are static
+
+> **Docs:** A public bucket is a set of plain files: every narinfo (already
+> signed), every NAR, and `nix-cache-info`, written once at push time. On an
+> S3-compatible store with a public URL (R2 behind your domain, or any CDN) Nix
+> reads them straight from there and odu is not on the read path at all: the
+> cache stays up when the odu machine is down. On local disk, odu serves the
+> same files.
+
+**Decision.** odu is the WRITE path and the control plane (auth, verify,
+sign, write, tokens, GC, UI); reads of a public bucket are static objects.
+This is cache.nixos.org's shape (static files behind a CDN). It replaces the
+earlier "edge caching" and presigned-GET ideas: there is nothing to cache at
+the edge that is not already a static object.
+
+What lands:
+- At push time the cache row writes the signed narinfo and the NAR as
+  objects (`<hash>.narinfo`, `nar/<file>`) and `nix-cache-info` per bucket,
+  with `Cache-Control` set on each object: NARs `immutable`, narinfos long
+  with a purge on change (re-push, delete, key rotation), and the store or
+  CDN's 404 short. A key rotation re-signs and rewrites every narinfo.
+- A bucket's substituter URL is its store's public URL when it has one. The
+  cloudflare row binds the bucket domain to the R2 bucket (custom domain)
+  instead of the tunnel, and keeps the purge port from PR 3c.
+- On a store with no public URL (local disk, a private S3), odu serves the
+  same layout byte for byte; switching store changes where reads come from,
+  not what they read. Private buckets stay behind odu's auth.
+- `odu cache migrate` (verb and UI) moves a bucket's objects between stores
+  with no downtime; the pod moves `kolu` to R2.
+- Proof: with the odu pod scaled to zero, a cold `nix build` of kolu
+  substitutes everything from `cache.kolu.dev`.
+
+State of master after merge: a public bucket's reads never touch odu.
+
+### PR 3g: uploads go straight to the store
+
+> **Docs:** Large pushes no longer pass through the odu process or a proxy's
+> body cap: the push client uploads each NAR to the store with a presigned
+> PUT, and odu verifies and signs.
+
+Presigned PUT from S3-compatible stores; odu verifies the uploaded object
+(NarHash, size, `CA:`) by reading it from the store before it writes the
+narinfo, so verification is exactly as strict as today; chunked upload stays
+for stores without presigning (local disk). The push action (PR 3f) gets it
+for free.
 
 ### PR 4: teams
 
@@ -529,16 +591,11 @@ file gets checks and cache pushes on every PR.
 Each is one adapter over the port PR 8 defines: a source event in, a status
 out. Nothing else changes.
 
-### PR 11: object storage
+### PR 11: (folded into PR 3c, 3d and 3g)
 
-> **Docs:** Set `services.odu.cache.storage = "s3"` with a bucket and
-> credentials to keep NARs in any S3-compatible store; clients download
-> straight from it. `odu cache migrate` moves existing data between local
-> disk and S3 without downtime.
-
-The blob store's S3-compatible implementation with presigned GET redirects
-and presigned PUT so uploads bypass the server, selected by the module; a
-migration verb that moves blobs between stores.
+Object storage, store-to-store migration and direct transfer moved earlier:
+GC and the S3 store are PR 3c, static public reads and migration are PR 3d,
+presigned uploads are PR 3g.
 
 ### PR 12: Postgres
 
@@ -573,7 +630,7 @@ a hosted offering needs.
   in; the switch from `serve` to Funnel happens with PR 2's evidence, not
   before it.
 - **One box serving a thousand developers.** nginx `proxy_cache` from PR 3 on
-  the module, presigned S3 redirects in PR 11.
+  the module, static public reads from the store in PR 3d.
 - **Run-scoped push relaxes F6.** Bounded by scope, bucket and run lifetime,
   and the hook is the recommended path.
 - **No chunking.** Deliberate; chutney showed chunking cost more than it saved
