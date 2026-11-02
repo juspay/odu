@@ -5,7 +5,7 @@
  * they must agree about one thing: what a bucket IS. The protocol face is what
  * a Nix client speaks (`./routes`); the admin face is what `odu cache` reaches
  * through the service. Between them sit the rows (`./db`), the tokens
- * (`./tokens`), the collector (`./gc`), the object stores (`./objectStore`,
+ * (`./tokens`), the collector (`./gc`), the object stores (`@odu/objects`,
  * one per declared store, chosen per bucket) and the one-time migration.
  *
  * The WRITE PATH is not here: staging an upload, proving it and keeping the

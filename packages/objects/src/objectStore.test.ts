@@ -11,7 +11,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { objectStoreContract } from "../test/contract";
 import { type Gateway, startGateway } from "../test/versitygw";
 import { createHash } from "node:crypto";
-import { diskObjectStore, s3ObjectStore, UnrecordedObject } from "./objectStore";
+import { diskObjectStore } from "./diskStore";
+import { UnrecordedObject } from "./objectStore";
+import { s3ObjectStore } from "./s3Store";
 import { s3Fetch, type S3Target } from "./s3sign";
 
 let scratch: string;

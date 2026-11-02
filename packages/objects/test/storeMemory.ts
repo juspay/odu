@@ -8,7 +8,9 @@
  * `bun test/storeMemory.ts '<spec json>'` puts 300 MiB, reads it back with a
  * slow reader, and prints `{"put":<bytes>,"get":<bytes>}` of peak RSS growth.
  */
-import { diskObjectStore, type ObjectStore, s3ObjectStore } from "../src/objectStore";
+import { diskObjectStore } from "../src/diskStore";
+import type { ObjectStore } from "../src/objectStore";
+import { s3ObjectStore } from "../src/s3Store";
 import type { S3Target } from "../src/s3sign";
 
 export type StoreSpec =
