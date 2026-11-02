@@ -130,16 +130,7 @@ A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retri
 
 `push` asks the bucket which paths it is missing, then uploads only those, with retries. It talks to the cache's HTTP API directly, so it runs on the machine that holds the paths.
 
-A GitHub Actions step, with the token as a secret:
-
-```yaml
-- run: |
-    paths=$(nix build -L --no-link --print-out-paths .#your-package)
-    nix run --accept-flake-config github:juspay/odu -- \
-      cache push kolu --origin https://cache.kolu.dev $paths
-  env:
-    ODU_CACHE_TOKEN: ${{ secrets.ODU_CACHE_TOKEN }}
-```
+In GitHub Actions there is an action for it, and it pushes with the checkout's own `odu`: see [Push from GitHub Actions](#push-from-github-actions).
 
 Prefer plain Nix? `nix copy --to` works without any odu code on the client:
 
@@ -178,6 +169,76 @@ The server accepts any username and the token as the password.
 | Client to install | cachix | attic | odu itself, or nothing: use `nix copy` with netrc |
 
 Until the hook ships, a CI job pushes only the closures it names. Plain `nix copy --to` compresses each NAR in memory on the CLIENT before uploading and checks the cache one path at a time; the server keeps and serves the bytes exactly as they arrived (`nix copy --to` defaults to xz, `?compression=zstd` asks for zstd). That client-memory limit is why `odu cache push` exists; prefer it for large closures.
+
+## Push from GitHub Actions
+
+One step, in any repository. The action odu ships pushes with **its own `odu`** — built from the revision you pin the action to, so the pin is the pusher. A bucket page fills the revision in with the commit *its* server was built from, so the pusher matches the cache; a build that cannot say which commit it is from leaves the placeholder.
+
+Then it proves the push. For every path the bucket serves, `check.sh` asks `<substituter>/<hash>.narinfo` — the address a Nix client asks, which is the bucket's own domain when it has one — reads the narinfo's `URL:` and `FileSize:`, and requires the NAR to answer `200` with a matching `Content-Length`. Plain HTTP throughout, so no local narinfo cache can answer for the bucket, and an object truncated by a proxy's body cap is caught rather than counted as landed.
+
+```yaml
+# .github/workflows — with Nix installed in an earlier step
+- uses: juspay/odu/.github/actions/push@<odu-revision>
+  with:
+    origin: https://odu.example.com
+    bucket: main
+    token: ${{ secrets.ODU_CACHE_TOKEN }}
+    paths: |
+      .#your-package
+```
+
+`paths` takes store paths, `result` links, or flake installables, space- or newline-separated; installables are built first. A bucket page prints this block filled in with its own origin and name under **Push from GitHub Actions**.
+
+**Nix must already be on the runner.** The action never installs it — the `extra_nix_config` block above is the `nix_conf` of whichever install step you already run.
+
+**Your build is yours.** The installables named in `paths` are built with `--accept-flake-config` and nothing else: your flake's `nixConfig` and the runner's own configuration. The action adds no substituter and no key to a build it does not own. Where *odu itself* comes from is decided by odu's flake, which the pusher build accepts and does not overrule.
+
+The token rides in an input fed from a secret, is never echoed, and is never consulted in an `if`. Leave it empty and the action's answer depends on the event:
+
+| event | no token |
+| --- | --- |
+| `pull_request` | builds the paths, pushes nothing, says so, succeeds |
+| `push` | fails, naming the missing secret — a push is where the job must publish |
+
+The step summary is a table read from the push's own JSON (pushed, already present, skipped upstream, failed), not from its human output.
+
+### From `attic push`
+
+Chutney's workflow, before — a binary to install, a login that reads a JWT, a push:
+
+```yaml
+      - name: attic login
+        run: attic login chutney https://cache.nixos.asia ${{ secrets.ATTIC_LOGIN_TOKEN }}
+      - name: om ci
+        run: om ci run --systems "${{ matrix.system }}"
+      - name: attic push
+        run: attic push chutney:oss result
+```
+
+After — the same three steps, with the first and last replaced by one that carries no credential of its own:
+
+```yaml
+      - name: om ci
+        run: om ci run --systems "${{ matrix.system }}"
+      - uses: juspay/odu/.github/actions/push@<odu-revision>
+        with:
+          origin: https://cache.kolu.dev
+          bucket: chutney
+          token: ${{ secrets.ODU_CACHE_TOKEN }}
+          paths: result
+```
+
+What changes in behaviour, not just in spelling:
+
+| | `attic push` | the odu action |
+| --- | --- | --- |
+| Client to install | the `attic` binary | none: the action builds the pusher from its own pin |
+| Credential | `attic login`, which writes a token to a profile | an input, from a secret |
+| Upstream-signed paths | filtered client-side by config | dropped by the bucket in its `missing` query |
+| Did it land? | trust it, or `nix path-info` against the cache | every served path's narinfo is asked over HTTP; a miss is red and named |
+| What a maintainer reads after a run | attic's log | a table in the step summary, from the push's JSON |
+
+Chutney's `attic` cache is `chutney:oss` — a cache and a sub-cache. An odu bucket is one cache, so the migration is a bucket named for the project (`chutney`), and its upstream filter is what `oss` was for.
 
 ## Private buckets
 

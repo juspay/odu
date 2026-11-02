@@ -861,6 +861,12 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
           // "already there": the bucket is the only side that knows its
           // upstream key names.
           skippedUpstream: answer.skipped,
+          // WHERE A CLIENT SUBSTITUTES THIS BUCKET — a bucket's own domain
+          // when it has one, the mount path otherwise, from the SAME builder
+          // the board's row and `bucket.describe` answer with. A pusher that
+          // then proves its push asks THIS address, which is the one Nix will
+          // ask: `<substituter>/<hash>.narinfo`.
+          substituter: urlFor(admitted.bucket.name),
         });
       }),
     ),

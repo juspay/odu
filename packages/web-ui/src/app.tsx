@@ -274,6 +274,17 @@ export function App(props: {
   // exactly today's.
   const [who, setWho] = createSignal<Who | null>(null);
 
+  // ── which build is serving ──
+  //
+  // THE SERVICE CELL, subscribed HERE because the shell holds the runs' client
+  // and the cache view holds the cache's: a row never reads another row's
+  // client, so the fact it needs is handed down. `build.commit` is the revision
+  // the cache page offers as the push action's ref — the action builds its
+  // pusher from the commit it is pinned to, so the commit a server was built
+  // from is the pusher that matches it. An ACCESSOR travels, not its value: a
+  // service handover changes the answer without reloading the page.
+  const service = props.client.cells.service.use();
+
   // A LIVE WIRE RE-ASKS WHAT AN OUTAGE MADE STALE. Two questions ride the same
   // event, so they are one effect:
   //
@@ -492,6 +503,7 @@ export function App(props: {
           <CacheFace
             client={props.cache}
             bucket={openBucket()}
+            pushActionRef={() => service.value()?.build.commit ?? null}
             canAdminister={holdsFloor("admin")}
             local={principal()?.kind === "local"}
             tunnelRow={tunnelRow()}

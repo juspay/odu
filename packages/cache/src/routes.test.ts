@@ -760,7 +760,13 @@ describe("missing", () => {
       }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ missing: [other], skippedUpstream: [GLIBC] });
+    expect(await response.json()).toEqual({
+      missing: [other],
+      skippedUpstream: [GLIBC],
+      // THE ADDRESS NIX ASKS, from the same builder the board's row uses, so a
+      // pusher proving its push asks what a substituter will be asked.
+      substituter: "/cache/main",
+    });
     await h.dispose();
   });
 
@@ -797,7 +803,11 @@ describe("missing", () => {
       body: JSON.stringify({ paths: [{ path: GLIBC, sigs: ["cache.nixos.org-1:AAAA"] }] }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ missing: [GLIBC], skippedUpstream: [] });
+    expect(await response.json()).toEqual({
+      missing: [GLIBC],
+      skippedUpstream: [],
+      substituter: "/cache/everything",
+    });
     await h.dispose();
   });
 

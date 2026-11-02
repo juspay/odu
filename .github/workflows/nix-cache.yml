@@ -6,7 +6,9 @@
 # pins in `npins/sources.json`).
 #
 # BOTH JOBS PUSH TO THE NAME THE FLAKE ADVERTISES: `https://cache.kolu.dev`.
-# The build job runs the checkout's own `odu`, which chunks. The publish job's
+# The build job pushes with `./.github/actions/push` — the action odu ships for
+# ANY project, which builds its pusher from the checkout it sits in, so this
+# line pushes with this tree's odu, which chunks. The publish job's
 # action is pinned to kolu #2335's head, whose npins odu is this branch's
 # 996f888 — chunked push and the `CA:` line in the pusher. The pin moves to
 # kolu's merge sha when #2335 lands.
@@ -71,42 +73,34 @@ jobs:
             accept-flake-config = true
 
       # ONE step, not a step per branch, so the token is never consulted in an
-      # `if`. A pull request with no token still BUILDS — that is the check this
-      # workflow owes a PR — and pushes nothing. A push with no token FAILS: a
-      # push is where this job is required to publish, and going green having
-      # warmed nothing is precisely the state a cache job exists to make
-      # impossible (kolu's nix-cache.yml states the rule).
+      # `if`. The rule lives in the action's own script: a pull request with no
+      # token still BUILDS — that is the check this workflow owes a PR — and
+      # pushes nothing; a push with no token FAILS, naming the secret. Going
+      # green having warmed nothing is precisely the state a cache job exists to
+      # make impossible.
       #
-      # ODU PUSHES TO ITS OWN CACHE, at the daily name. `odu cache push`
-      # computes each closure, asks the bucket what it is missing in one query,
-      # drops what an upstream key signed (the server fetches those references
-      # itself), and CHUNKS a NAR too large for one request — which is what
-      # makes `cache.kolu.dev` (Cloudflare, 100 MB) safe for this pusher.
+      # THE SAME ACTION ANY PROJECT USES. `uses: ./.github/actions/push` here
+      # and `uses: juspay/odu/.github/actions/push@<sha>` elsewhere are the same
+      # step: the action builds its pusher from its OWN checkout (so this line
+      # pushes with the odu in this tree, and a pinned sha pushes with that
+      # commit's odu), and it proves the push — every path the bucket serves must
+      # answer its narinfo at `cache.kolu.dev`, or the step is red.
+      #
+      # `odu cache push` computes each closure, asks the bucket what it is
+      # missing in one query, drops what an upstream key signed (the server
+      # fetches those references itself), and CHUNKS a NAR too large for one
+      # request — which is what makes `cache.kolu.dev` (Cloudflare, 100 MB) safe
+      # for this pusher.
       - name: Build odu's outputs, and push their closures
-        env:
-          ODU_CACHE_TOKEN: ${{ secrets.ODU_CACHE_TOKEN }}
-          PUSH_ORIGIN: https://cache.kolu.dev
-        run: |
-          set -euo pipefail
-          paths=$(nix build -L --no-link --print-out-paths --accept-flake-config \
-            .#odu .#odu-runner .#web-ui)
-          # A positive assertion, not dressing: a build that produced nothing
-          # would otherwise push nothing and still report success.
-          if [ -z "$paths" ]; then
-            echo "::error::nix build produced no output paths"
-            exit 1
-          fi
-          if [ -z "$ODU_CACHE_TOKEN" ]; then
-            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-              echo "::error::ODU_CACHE_TOKEN is not set on $GITHUB_REPOSITORY — this push would publish no closure. Add a write token for the kolu bucket (a bucket page mints one)."
-              exit 1
-            fi
-            echo "no ODU_CACHE_TOKEN (a pull request) — built, pushed nothing"
-            exit 0
-          fi
-          odu="$(nix build .#odu --no-link --print-out-paths --accept-flake-config)/bin/odu"
-          # shellcheck disable=SC2086 # the out-paths are a list
-          "$odu" cache push kolu --origin "$PUSH_ORIGIN" $paths
+        uses: ./.github/actions/push
+        with:
+          origin: https://cache.kolu.dev
+          bucket: kolu
+          token: ${{ secrets.ODU_CACHE_TOKEN }}
+          paths: |
+            .#odu
+            .#odu-runner
+            .#web-ui
 
       - name: Bake the declaration the publisher is handed
         run: |

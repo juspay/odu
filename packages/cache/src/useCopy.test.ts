@@ -1,11 +1,12 @@
 /**
  * ONE SOURCE FOR THE BLOCKS A PERSON COPIES.
  *
- * A bucket's page prints four paste-blocks (plus netrc on a private bucket),
- * and `odu cache use` prints the same strings; the cache docs quote them. The
- * docs are prose nobody compiles, so the only thing that keeps them from
- * drifting is this: the docs must contain exactly what each function prints
- * for the docs' example bucket, placeholder and all.
+ * A bucket's page prints five paste-blocks (plus netrc on a private bucket) —
+ * four for a Nix client, one for a workflow — and `odu cache use` prints the
+ * same strings; the cache docs quote them. The docs are prose nobody compiles,
+ * so the only thing that keeps them from drifting is this: the docs must
+ * contain exactly what each function prints for the docs' example bucket,
+ * placeholder and all.
  */
 
 import { readFileSync } from "node:fs";
@@ -13,6 +14,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import {
   actionsBlock,
+  actionsPushBlock,
+  ACTION_REF_PLACEHOLDER,
   flakeBlock,
   netrcBlock,
   nixConfBlock,
@@ -48,6 +51,34 @@ describe("the copy a bucket page and the docs share", () => {
   it("the docs quote the push block the page prints", () => {
     expect(DOCS).toContain(
       pushBlock({ origin: "https://odu.example.com", bucket: "main", token: null }).trimEnd(),
+    );
+  });
+
+  it("the docs quote the GitHub Actions push block the page prints", () => {
+    expect(DOCS).toContain(
+      actionsPushBlock({
+        origin: "https://odu.example.com",
+        bucket: "main",
+        ref: ACTION_REF_PLACEHOLDER,
+      }).trimEnd(),
+    );
+  });
+
+  it("names the bucket and the origin in the action's inputs, and the token as a secret", () => {
+    const origin = "https://odu.example.com";
+    const block = actionsPushBlock({ origin, bucket: "main", ref: ACTION_REF_PLACEHOLDER });
+    // The two facts a page knows are filled in; the one it must not know is
+    // not: the token is a `secrets.` reference, never a value.
+    expect(block).toContain(`origin: ${origin}`);
+    expect(block).toContain("bucket: main");
+    expect(block).toContain("token: ${{ secrets.ODU_CACHE_TOKEN }}");
+    expect(block).toContain("uses: juspay/odu/.github/actions/push@");
+    // Pinned by revision, because the action builds the pusher from the commit
+    // it is pinned to. The PLACEHOLDER is what a build that cannot name its
+    // commit offers; a daemon that can offers its own.
+    expect(block).toContain(ACTION_REF_PLACEHOLDER);
+    expect(actionsPushBlock({ origin, bucket: "main", ref: "abc1234" })).toContain(
+      "uses: juspay/odu/.github/actions/push@abc1234",
     );
   });
 

@@ -93,6 +93,9 @@ interface Server {
   narinfoOnlyRefusal: boolean;
   missing: string[];
   skipped: string[];
+  /** The substituter URL the bucket reports — its own domain when it has one.
+   *  `null` answers like a daemon that predates the field. */
+  substituter: string | null;
   stop: () => void;
 }
 
@@ -113,6 +116,7 @@ function startServer(): Server {
     narinfoOnlyRefusal: false,
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
+    substituter: null,
     stop: () => {},
   };
   const server = Bun.serve({
@@ -135,10 +139,16 @@ function startServer(): Server {
       }
       if (url.pathname.endsWith("/missing")) {
         state.missingCalls += 1;
+        const substituter =
+          state.substituter === null ? {} : { substituter: state.substituter };
         if (state.missingOnlyFor !== undefined && state.missingCalls > state.missingOnlyFor) {
-          return Response.json({ missing: [], skippedUpstream: [] });
+          return Response.json({ missing: [], skippedUpstream: [], ...substituter });
         }
-        return Response.json({ missing: state.missing, skippedUpstream: state.skipped });
+        return Response.json({
+          missing: state.missing,
+          skippedUpstream: state.skipped,
+          ...substituter,
+        });
       }
       if (request.method === "PUT" && url.pathname.includes("/parts/")) {
         const index = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
@@ -542,6 +552,33 @@ describe("pushing a closure", () => {
         platform: PLATFORM,
       });
       expect(summary).toMatchObject({ pushed: 1, skippedUpstream: 1, alreadyPresent: 1, failed: 0 });
+      // EVERY PATH THE BUCKET SERVES, and only those: the upstream-signed one
+      // is absent by design, so a caller verifying "served" never asks the
+      // bucket for a path it was right to refuse.
+      expect([...summary.served].sort()).toEqual([GLIBC, HELLO].sort());
+      // A DAEMON THAT DID NOT SAY gets the address this client addressed it
+      // at — the same URL for a bucket with no domain of its own.
+      expect(summary.substituter).toBe(`${server.origin}/cache/main`);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("carries the bucket's own substituter URL when the bucket names one", async () => {
+    // A DOMAIN IS THE WHOLE ADDRESS: a bucket reached at its own name
+    // substitutes from that name, not from `<origin>/cache/<bucket>`, and a
+    // caller proving the push must ask where Nix will ask.
+    const server = startServer();
+    try {
+      server.missing = [];
+      server.substituter = "https://cache.example.org";
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+      });
+      expect(summary.substituter).toBe("https://cache.example.org");
     } finally {
       server.stop();
     }

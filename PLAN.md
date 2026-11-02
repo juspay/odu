@@ -394,6 +394,44 @@ For users: `odu web` serves runs and buckets on one page behind GitHub sign-in;
 agent-distro CI through the domain. The pod (F12) runs master `3d66833` (#140; #141 not yet deployed),
 tailnet-only (Serve), with the cache public through Cloudflare.
 
+### PR 3f: push from GitHub Actions
+
+> **Docs:** `uses: juspay/odu/.github/actions/push@<sha>` in a workflow pushes
+> a closure to your bucket in one step — no `attic login`, no binary to install
+> — and the step goes red if a pushed path does not answer from the bucket.
+
+What lands:
+- **`.github/actions/push`**, a composite action taking `origin`, `bucket`,
+  `token` and `paths` (store paths, `result` links, or flake installables,
+  built first). Its PUSHER is built from the action's own checkout — the repo
+  root derived from `github.action_path` — so a pinned sha pins the pusher and
+  `uses: ./.github/actions/push` in odu's own repository pushes with the
+  checkout's odu. Where odu itself is substitutable from is the flake's
+  `nixConfig`, accepted and not overruled; the caller's own installables build
+  with the caller's configuration and nothing the action chose. It never
+  installs Nix: Nix on PATH is the documented requirement, and its absence is
+  the sentence the step fails with.
+- **The token rule the workflow kept in shell, unchanged**: no token on a pull
+  request builds and pushes nothing (saying so); no token on a `push` event
+  fails, naming the secret; the token is never echoed and never used in an
+  `if`.
+- **A verification pass, at the address Nix asks**: for every path the bucket
+  serves, its narinfo must answer at the bucket's own SUBSTITUTER URL (its
+  domain when it has one), and the NAR that narinfo names must answer `200`
+  with a `Content-Length` equal to `FileSize:` — the truncated object a proxy's
+  body cap produces is exactly what a narinfo alone cannot see. Plain HTTP, so
+  no local narinfo cache answers for the bucket; a failing path reddens the
+  step and is named. The readout is a `$GITHUB_STEP_SUMMARY` table read from
+  `odu cache push --output json`, which gains `served` (the paths the bucket
+  serves, minus the upstream-signed ones it refuses by design) and
+  `substituter` for exactly this.
+- odu's own `nix-cache.yml` dogfoods the action in place of its shell; a bucket
+  page prints the block filled in with its origin and name; the cache docs and
+  the skill carry the migration from `attic push`.
+
+State of master after merge: a project pushes to its bucket with one workflow
+step, and its CI is red when the cache did not take the push.
+
 ### PR 3c: object storage
 
 > **Docs:** Point a bucket's objects at any S3-compatible store — Cloudflare
