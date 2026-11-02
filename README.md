@@ -77,7 +77,15 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 | `odu cache stats` | Storage and reads | a bucket's **Stats** |
 | `odu cloudflare status` | The tunnel and the names it carries | **Tunnel** |
 
-Contract **2.4 is additive**: a 2.x client keeps working — the cache no longer holds references, so `/held` answers an empty list and `--wait` returns at once, both deprecated and removed at the cache row's next major; and `odu cache push` names each chunked upload's parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
+**Each row versions its own surface.** A client is admitted on the host's major and the majors of the rows it reads, so a cache change never refuses a client that reads only runs. Cache **3.0** removed the deprecated `held` list and `odu cache push --wait`. A chunked push names its parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
+
+| Row | Contract | Who reads it |
+| --- | --- | --- |
+| host (control, identity cell, admission) | 2.5 | every client |
+| `ci` (runs) | 2.4 | `odu run`/`wait`/`logs`, MCP, the board, kolu |
+| `cache` | **3.0** | `odu cache`, the board |
+| `auth` | 2.4 | `odu auth`, the board when there is a door |
+| `cloudflare` | 2.4 | `odu cloudflare`, the board when there is a tunnel |
 
 Odu's own builds are served from its own cache. To pull odu and its runners from
 it — and to show a project's own bucket — the flake settings are:

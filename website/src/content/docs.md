@@ -191,7 +191,21 @@ A bucket can also have **a name of its own** — `https://cache.kolu.dev` — se
 4. **Module:** delete the abandoned roots under `<state>/cache/gcroots`, then run `nix-collect-garbage`. **Container:** delete the old store directory. Never delete `/nix/store` itself.
 5. Rows the old store lacks stay objectless and answer 404 until re-pushed: each is named by a `cache.migration.object_failed` line, and `cache.migration.incomplete` carries the counts.
 
-Contract **2.4 remains additive**: `held` answers an empty list and `odu cache push --wait` returns at once, both deprecated and removed at the cache row's next major. A chunked upload that sends `x-odu-upload` owns its parts, so concurrent pushers of one path never mix them; one that does not keeps the shared part names. A 2.x client keeps working; kolu's pinned CI does not need to move with this cache change.
+A chunked upload that sends `x-odu-upload` owns its parts, so concurrent pushers of one path never mix them; one that does not keeps the shared part names.
+
+### Contract versions
+
+Each row versions its own surface. The daemon publishes the host's version and every mounted row's on its identity cell (`rows`). A client is admitted when the host's major and the major of **every row it reads** match. A row it does not read is never consulted, so a cache change never refuses kolu or `odu run`. A refusal names the row, the version the daemon serves and the one the build reads. It also says when a needed row is not mounted.
+
+| Row | Contract | Who reads it |
+| --- | --- | --- |
+| host (control, identity cell, admission) | 2.5 | every client |
+| `ci` (runs) | 2.4 | `odu run`/`wait`/`logs`, MCP, the board, kolu |
+| `cache` | **3.0** | `odu cache`, the board |
+| `auth` | 2.4 | `odu auth`, the board when there is a door |
+| `cloudflare` | 2.4 | `odu cloudflare`, the board when there is a tunnel |
+
+Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
 
 
 ## Server mode
@@ -483,7 +497,7 @@ For `wait`, `rerun`, and `cancel`, omitted `--run` means `latest` in this checko
 | Dirty checkout refused | Commit changes, or use `--no-strict` to ship a working-tree snapshot |
 | Web service already running | Open its URL or use `web --upgrade` |
 | Proxied page refused as cross-origin | Set `ODU_WEB_ALLOWED_ORIGINS` to the browser origin when starting/replacing the server |
-| Service/build mismatch | Replace the service with the desired Nix build |
+| Service/build mismatch (`serves the <row> row at …`) | That row moved a major. Run `odu web --upgrade`, or use a build that reads that version |
 | Retry refused | Read the reason; check snapshot, placement evidence and checkout availability |
 | CI passed but GitHub is waiting | Inspect posting debt and the service's `gh` credentials |
 

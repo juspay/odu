@@ -37,8 +37,10 @@ caught, and `dialServiceSocket` answers `{ kind: "absent" }` for a path nobody i
 serving rather than turning a missing daemon into an error — and
 `{ kind: "refused" }` for a daemon whose contract this build cannot read, so a
 face draws the one as nothing and the other as a sentence. The comparison
-itself is `admitService`, which lives on the surface beside the version it is
-about: no consumer compares contract versions, because the direction of that
+itself is `admitService`, which lives on the surface beside the identity cell
+it reads. It judges the host's major and the major of every row the caller
+reads, passed as `needs`; `dialServiceSocket` passes `CI_NEEDS`, the runs only.
+No consumer compares contract versions, because the direction of that
 comparison is easy to get backwards and a second judge is how it gets got
 backwards.
 
