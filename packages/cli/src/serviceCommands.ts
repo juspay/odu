@@ -1,15 +1,15 @@
 /**
- * THE RUN COMMANDS, AS CLIENTS — `odu run`, `wait`, `rerun`, `cancel`, `logs`,
+ * THE RUN COMMANDS, AS CLIENTS — `odu ci run`, `wait`, `rerun`, `cancel`, `logs`,
  * `history list|show|import|prune`.
  *
- * Every one of these used to hold authority of its own. `odu run` called
- * `runCommand` and WAS the coordinator. `odu rerun --run` bound
- * `packagedLauncher()` and made its own retry decision. `odu wait --run`,
- * `odu logs --run` and `odu history list` read and wrote the catalog directly.
- * `odu cancel` dialled `.ci/odu.sock`. Six commands, and between them a second
- * complete implementation of everything the shared service does — reachable
- * from a terminal, invisible to the board, and free to disagree with the
- * browser and the agent about what had just happened to a run.
+ * Every one of these used to hold authority of its own. `odu ci run` called
+ * `runCommand` and WAS the coordinator. `odu ci rerun --run` bound
+ * `packagedLauncher()` and made its own retry decision. `odu ci wait --run`,
+ * `odu ci logs --run` and `odu ci history list` read and wrote the catalog
+ * directly. `odu ci cancel` dialled `.ci/odu.sock`. Six commands, and between
+ * them a second complete implementation of everything the shared service does
+ * — reachable from a terminal, invisible to the board, and free to disagree
+ * with the browser and the agent about what had just happened to a run.
  *
  * There is one authority now, and this module is how a terminal reaches it.
  * Nothing below decides anything: it resolves what the caller meant, makes one
@@ -35,11 +35,11 @@
  *
  * ## Ctrl-C ends an OBSERVATION
  *
- * `odu run` starts a run and then watches it. Interrupting the watch stops the
+ * `odu ci run` starts a run and then watches it. Interrupting the watch stops the
  * watching: the coordinator is a detached process group of its own, its
  * evidence is in the catalog rather than in this process, and the run appears
  * on the board and in every other face exactly as it did a moment before.
- * Stopping CI is `odu cancel`, which is a different verb because it is a
+ * Stopping CI is `odu ci cancel`, which is a different verb because it is a
  * different act.
  */
 
@@ -87,12 +87,7 @@ import {
   withService,
 } from "./serviceFace";
 
-// Re-exported because they were this module's before the plumbing was shared,
-// and a caller that already names them here should not have to learn which of
-// four sibling faces they moved to.
-export { formatAgo, here, type Here, WAIT_EXITS, waitExitFor } from "./serviceFace";
-
-// ── odu run ─────────────────────────────────────────────────────────────────
+// ── odu ci run ──────────────────────────────────────────────────────────────
 
 export interface RunOpts {
   selectors: readonly string[];
@@ -120,7 +115,7 @@ export interface RunOpts {
 }
 
 /**
- * `odu run` — start a run through the service, then watch it.
+ * `odu ci run` — start a run through the service, then watch it.
  *
  * The command a person types most, and the one whose re-pointing carries the
  * whole consolidation: it no longer runs CI, it asks the service to. What it
@@ -150,7 +145,7 @@ export async function runViaService(opts: RunOpts): Promise<number> {
         // typed in. The service is a singleton somebody else may have
         // started, and `loadHosts` runs in the coordinator it spawns — so a
         // variable that is not carried here is a variable that stopped
-        // working the moment `odu run` became a client.
+        // working the moment `odu ci run` became a client.
         // Made absolute HERE, against the caller's cwd, because that is the
         // only place the relative form has a meaning. `$ODU_HOSTS=hosts.json`
         // has always meant "in the directory I am standing in".
@@ -202,14 +197,14 @@ function renderStart(receipt: StartReceipt, origin: string | undefined): string 
     // wanted. Superseding it is a thing to ask for, never a thing to assume.
     lines.push(
       `odu · a run is already going in this checkout — ${receipt.existing.runId}`,
-      "odu ·   watching it instead; `odu run --supersede` replaces it",
+      "odu ·   watching it instead; `odu ci run --supersede` replaces it",
     );
   } else {
     lines.push(`odu · started ${receipt.runId}`);
   }
   lines.push(`odu · ${where}/runs/${receipt.runId}`);
   if (receipt.lifetime !== undefined) lines.push(`odu · ${receipt.lifetime}`);
-  lines.push("odu · Ctrl-C stops WATCHING; the run keeps going (odu cancel stops it)");
+  lines.push("odu · Ctrl-C stops WATCHING; the run keeps going (odu ci cancel stops it)");
   return `${lines.join("\n")}\n`;
 }
 
@@ -242,7 +237,7 @@ async function observe(
     }
     // TWO ANSWERS, ON TWO STREAMS, because they are for two readers.
     //
-    // The verdict grid on stderr is what `odu run` has always ended with: every
+    // The verdict grid on stderr is what `odu ci run` has always ended with: every
     // node, its status and its duration — which is the only thing that says
     // what a green actually COVERED. It came from the coordinator's own face
     // and was lost when the coordinator became a detached process writing to a
@@ -285,13 +280,13 @@ async function verdictOf(
   });
 }
 
-// ── odu wait ────────────────────────────────────────────────────────────────
+// ── odu ci wait ─────────────────────────────────────────────────────────────
 
 export interface WaitOpts {
   run: string;
   after?: string;
   deadlineMs?: number;
-  /** Refuse unless the run is about this commit. The guard `odu wait` has
+  /** Refuse unless the run is about this commit. The guard `odu ci wait` has
    *  always had: a script that waited on "the run here" after a rebase was
    *  waiting on the wrong commit and could not tell. */
   expectedSha?: string;
@@ -339,7 +334,7 @@ export async function waitViaService(opts: WaitOpts): Promise<number> {
       );
     }
     // WHERE STDOUT POINTS PICKS THE MEDIUM — odu's own rule, and the reason
-    // `odu wait` is not free to be prose by default. It wrote one JSON object
+    // `odu ci wait` is not free to be prose by default. It wrote one JSON object
     // on stdout unconditionally before this rewrite, and it is the command
     // scripts and agents parse; making that opt-in silently fed them a
     // paragraph. A person at a terminal still gets the readable block, because
@@ -373,7 +368,7 @@ export function renderAttention(a: AttentionAnswer): string {
     for (const line of f.excerpt.split("\n").slice(-8)) {
       if (line.trim() !== "") lines.push(`      ${line}`);
     }
-    lines.push(`      odu logs ${f.logKey}`);
+    lines.push(`      odu ci logs ${f.logKey}`);
   }
   if (a.failuresOmitted > 0) {
     lines.push(`  (${a.failuresOmitted} more failures not shown — raise --limit)`);
@@ -388,7 +383,7 @@ export function renderAttention(a: AttentionAnswer): string {
   return `${lines.join("\n")}\n`;
 }
 
-// ── odu rerun ───────────────────────────────────────────────────────────────
+// ── odu ci rerun ────────────────────────────────────────────────────────────
 
 export interface RetryOpts {
   run: string;
@@ -401,7 +396,7 @@ export interface RetryOpts {
 }
 
 /**
- * `odu rerun` — retry, and let odu decide what retrying means.
+ * `odu ci rerun` — retry, and let odu decide what retrying means.
  *
  * The policy is the service's, and the caller does not choose it: a coordinator
  * still up gets a new attempt on the same run, one that is gone gets a fresh
@@ -450,7 +445,7 @@ export function renderRetry(r: RetryReceipt): string {
   return `${lines.join("\n")}\n`;
 }
 
-// ── odu cancel ──────────────────────────────────────────────────────────────
+// ── odu ci cancel ───────────────────────────────────────────────────────────
 
 export interface CancelOpts {
   run: string;
@@ -482,7 +477,7 @@ export async function cancelViaService(opts: CancelOpts): Promise<number> {
       // `effective: "nothing"` is an ANSWER with a reason, never a cheerful ok:
       // a caller asking to cancel a lane on a run whose coordinator has already
       // gone is entitled to know nothing happened.
-      // The sentence `odu cancel` has always printed, with the run named. It
+      // The sentence `odu ci cancel` has always printed, with the run named. It
       // read "odu: run cancelled" before this command was addressed by run id;
       // the id is genuinely new information and the words around it are not
       // this rewrite's to change, since a script grepping them is a script that
@@ -499,7 +494,7 @@ export async function cancelViaService(opts: CancelOpts): Promise<number> {
   });
 }
 
-// ── odu logs ────────────────────────────────────────────────────────────────
+// ── odu ci logs ─────────────────────────────────────────────────────────────
 
 export interface LogsOpts {
   key: string;
@@ -521,7 +516,7 @@ export interface LogsOpts {
 export const FOLLOW_WAIT_MS = 30_000;
 
 /**
- * `odu logs <key>` — one attempt's bytes, addressed by the key a failure
+ * `odu ci logs <key>` — one attempt's bytes, addressed by the key a failure
  * handed you.
  *
  * The key is ECHOED, never reassembled: `run/node/attempt` is a shape this face
@@ -569,7 +564,7 @@ export async function logsViaService(opts: LogsOpts): Promise<number> {
   });
 }
 
-// ── odu history list ────────────────────────────────────────────────────────
+// ── odu ci history list ─────────────────────────────────────────────────────
 
 export interface ListOpts {
   /** Every run this user has, rather than the ones from this checkout. */
@@ -634,7 +629,7 @@ export function renderRows(rows: readonly RunRow[], now: number): string {
   return `${lines.join("\n")}\n`;
 }
 
-// ── odu history show ────────────────────────────────────────────────────────
+// ── odu ci history show ─────────────────────────────────────────────────────
 
 export interface ShowOpts {
   run: string;
@@ -645,9 +640,9 @@ export interface ShowOpts {
 }
 
 /**
- * `odu history show --run R` — one run's attention payload, without waiting.
+ * `odu ci history show --run R` — one run's attention payload, without waiting.
  *
- * The same answer `odu wait` gives, asked of a run that may have finished last
+ * The same answer `odu ci wait` gives, asked of a run that may have finished last
  * week. It used to open the catalog in the caller's own process — `resolveRun`,
  * `resolveCursor`, `readAttention` — which put a second reader beside the
  * daemon that was reading and writing the same directories, and made "what does
@@ -675,7 +670,7 @@ export async function showViaService(opts: ShowOpts): Promise<number> {
   });
 }
 
-// ── odu history import / prune ──────────────────────────────────────────────
+// ── odu ci history import / prune ───────────────────────────────────────────
 
 export interface ImportOpts {
   dryRun: boolean;
@@ -685,7 +680,7 @@ export interface ImportOpts {
 }
 
 /**
- * `odu history import` — bring this checkout's legacy `.ci` records into the
+ * `odu ci history import` — bring this checkout's legacy `.ci` records into the
  * catalog.
  *
  * Through the service because the catalog is the SERVICE's store. Importing
@@ -743,7 +738,7 @@ export interface PruneOpts {
   origin?: string;
 }
 
-/** `odu history prune` — expire finished runs past the retention window. */
+/** `odu ci history prune` — expire finished runs past the retention window. */
 export async function pruneViaService(opts: PruneOpts): Promise<number> {
   return withService(opts.origin, async (client) => {
     const done = await call(
@@ -780,7 +775,7 @@ function renderPrune(report: CatalogPruneReport): string {
 }
 
 /**
- * `odu logs <key> --follow` — every byte, until there can be no more.
+ * `odu ci logs <key> --follow` — every byte, until there can be no more.
  *
  * **The cursor is the caller's, and that is the design.** Each call asks for
  * bytes at an offset and answers with `nextOffset`; nothing on the service side
@@ -880,7 +875,7 @@ export async function followLog(
 }
 
 /**
- * `odu run --progress json` — one NDJSON line per node transition.
+ * `odu ci run --progress json` — one NDJSON line per node transition.
  *
  * A FROZEN contract: `/do` and kolu's CI parse these bytes, and
  * `@odu/execution/common/presentation` owns the projection so this face and the
@@ -890,7 +885,7 @@ export async function followLog(
  *
  * **It was lost, and losing it was the sharpest regression in this whole
  * change.** `--progress json` used to be the coordinator's flag, because
- * `odu run` WAS the coordinator; when the public verb became a service client
+ * `odu ci run` WAS the coordinator; when the public verb became a service client
  * the flag went with the coordinator to `run-coordinator` and nothing put it
  * back. `parseArgs` throws on an unknown option, so every caller passing it —
  * which is every e2e test that drives a run, plus every consumer — got an
@@ -901,7 +896,7 @@ export async function followLog(
  *
  * The events come off `streams.nodes` now rather than the coordinator's own
  * face, which is what makes them available to a client at all — and means a
- * second `odu run --progress json` watching the same run sees the same stream.
+ * second `odu ci run --progress json` watching the same run sees the same stream.
  */
 async function progressStream(
   client: Pick<OduServiceClient, "surface">,

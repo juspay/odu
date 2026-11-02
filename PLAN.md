@@ -151,6 +151,7 @@ the read path wherever it can be, behind a board people want to use.
 | 2.7 | GC and pins on every store | |
 | 2.8 | Reads leave odu | |
 | 2.9 | Uploads go straight to the store | |
+| 2.10 | The admin CLI is retired | |
 
 What each step delivers:
 - **2.1 ✅** `cache.kolu.dev` is live through a Cloudflare tunnel, with no open
@@ -177,6 +178,10 @@ What each step delivers:
     tokens. They are reviewed in the PR.
   - Screens for later features (GC and pins, starting a new run) land inside
     the steps that add those features, built in this design.
+  - **Two parity gaps 2.10's audit found, and handed here:** no face renders
+    `pipeline.mermaid`, though `pipeline_read` carries it; and the board has
+    no "newest run of THIS checkout" selector, which `odu ci status` resolves
+    with git.
 - **2.7 GC and pins on every store.** Liveness comes from pushes, not reads,
   because reads are about to leave odu. GC is written only against
   `ObjectStore`, and deletions purge the CDN.[^gc] The bucket page dry-runs the
@@ -189,11 +194,17 @@ What each step delivers:
     presigned URL that expires in 10 minutes.
   - **Local disk:** odu serves the same layout.
   - `odu cache migrate` moves buckets between stores, and `kolu` moves to R2.
+    It is an API verb and a board control, not a CLI command (2.10).
   - **Proof:** the pod at zero replicas still substitutes kolu.[^reads]
 - **2.9 Uploads go straight to the store.** The client uploads to the store
   through presigned parts. Odu then reads the object back and verifies it
   before signing. That is Cachix's upload, but without Cachix's trust in the
   client's hashes.[^uploads]
+- **2.10 The admin CLI is retired.** The board and the API are the product, so
+  the CLI keeps only what needs a shell on the machine that holds the paths or
+  the checkout: `odu ci …`, `odu cache use|login|push`, `odu auth login`, and
+  the service itself. Every administrative verb is a control on the board and
+  a verb on the API, proved one by one before it is removed.[^retire]
 
 ### Phase 3: teams
 
@@ -300,12 +311,38 @@ Commits and PR bodies use the earlier names.
 [^parity]: Parity is checked by each row's own e2e: one scenario per verb,
     driven through the face.
 
+[^retire]: What 2.10 does, row by row.
+    - **Kept, because a shell is the only place they can run:** `odu ci …`
+      (a run is about THIS checkout), `odu cache push` (it runs where the store
+      paths are), `odu cache login` and `odu auth login` (a credential is a file
+      on this machine), `odu cache use` (it prints lines for this machine's
+      `nix.conf` and netrc), and the service entry points `odu web`,
+      `web-daemon`, `odu surface`, `odu mcp`.
+    - **Retired:** every bucket, token, domain, pin, GC and stats verb under
+      `odu cache`; everything under `odu auth` but `login`; `odu cloudflare`
+      entirely, so that row's `./cli` door is gone.
+    - **The runs move under their row's word.** `odu run` is `odu ci run`,
+      `odu wait` is `odu ci wait`, and so on for all fifteen: a row owns its
+      verbs, and the root names rows. No aliases — two spellings of one verb is
+      the drift this removes.
+    - **Removal needs proof, one command at a time:** a web control AND a verb
+      on the API, listed in the PR against the command they replace. A gap is a
+      refusal to remove, never a silent drop.
+    - `odu surface` had hand-listed the cache as its only sibling, so the
+      `auth` and `cloudflare` verbs were reachable by MCP and from no terminal
+      at all. It now projects every row the wire knows.
+
 [^rows]: Cordis per olai `docs/architecture/cordis.md`. `@odu/cordis` holds the
     shared contract. `packages/host/src/fence.test.ts` proves, with
     `@olai/effect-cordis/fence`, that only roots name rows. Versions: host 2.5,
     `ci` 2.4, `cache` 3.1, `auth` 2.4, `cloudflare` 2.4. Each row is held to an
     append-only fingerprint ledger by `just test`, and `admitService` admits a
-    client on the rows it declares.
+    client on the rows it declares. **A row is a set of packages, not a
+    directory:** the fence reads each manifest's `cordis.row`, so `ci` is
+    `@odu/ci` (the plugin the daemon mounts, and the board's view) plus
+    `@odu/cli` (`odu ci`'s argv grammar and its TUI). The split is the
+    renderer: `@opentui/core` and `@xterm/headless` are a cost the package
+    served inside the daemon must not carry.
 
 [^protocol]: Routes per bucket:
     ```

@@ -1,13 +1,13 @@
 Feature: An admin administers the cache from the board
-  # The board does everything `odu cache` does. Each scenario here is one verb
-  # of the cache row, reached through its control on the page — create (with
-  # the upstream switch), token mint / list / revoke, pin, GC and stats — and
-  # the one arrange step that leaves the page (a push) uses the token the page
-  # minted, which is the proof that the token is real.
+  # The board does everything `odu surface cache …` does. Each scenario here is
+  # one verb of the cache row, reached through its control on the page — create
+  # (with the upstream switch), token mint / list / revoke, pin, GC and stats —
+  # and the one arrange step that leaves the page (a push) uses the token the
+  # page minted, which is the proof that the token is real.
   #
   # @signed-in:admin: the row's floor for administration, on a daemon with a
   # door. A member is drawn none of these controls (auth.feature) and the row
-  # refuses the CLI's call on its own.
+  # refuses the API's call on its own.
 
   # The button is never greyed out: the empty name is SENT, and what the page
   # shows is the ROW's own refusal — the sentence asserted is the cache's.
@@ -35,7 +35,7 @@ Feature: An admin administers the cache from the board
   # anonymous CLI works before anybody signs in, and a cURL sees the key.
   @signed-in:admin
   Scenario: A public bucket's facts are read with no account
-    Given the CLI creates a bucket as this person
+    Given the API creates a bucket as this person
     When the CLI reads the bucket's facts with no account
     Then it prints the bucket's public key
     And an anonymous HTTP GET of the bucket's page shows the key
@@ -45,7 +45,7 @@ Feature: An admin administers the cache from the board
   Scenario: A private bucket's facts need a reader
     Given I open the profile
     And I create a token named "cli"
-    When the CLI creates a private bucket as this person
+    When the API creates a private bucket as this person
     And the CLI reads the bucket's facts with no account
     Then it is refused as private
     And there should be no page errors

@@ -297,7 +297,7 @@ in
         DNS names that belong to BUCKETS, each getting its own virtual host with
         its certificate and exactly the Nix protocol's paths at `/`. The daemon
         answers a name by its `Host`, so the same name must also be set on the
-        bucket itself (`odu cache domain <bucket> <name>`, or the bucket page's
+        bucket itself (`odu surface cache bucket_domain --input '{"bucket":"<bucket>","domain":"<name>"}' --json`, or the bucket page's
         Domain field); this option is what puts nginx and a certificate in
         front of it.
 
@@ -343,7 +343,7 @@ in
         description = ''
           Who may sign in: `org:<name>`, `team:<org>/<slug>`, or a GitHub login.
           Any of them lets the person in, as a `member`; roles are granted
-          afterwards (`odu auth grant <login> owner` with the root token is the
+          afterwards (`odu surface auth user_grant --input '{"login":"<login>","role":"owner","rootToken":"…"}' --json` is the
           bootstrap).
 
           Membership is read with the person's own token in this release, which
@@ -460,8 +460,9 @@ in
       description = ''
         Object stores a bucket can keep its objects in, by name. `local` — the
         disk under `stateDir` — is always there and cannot be declared here.
-        A bucket chooses its store when it is created (`odu cache create
-        <bucket> --store r2`, or the store field on the board's create form)
+        A bucket chooses its store when it is created (`odu surface cache
+        bucket_create --input '{"bucket":"<bucket>","store":"r2"}' --json`,
+        or the store field on the board's create form)
         and keeps it; every store serves through the same routes, with
         `Content-Length` and `Range`.
 

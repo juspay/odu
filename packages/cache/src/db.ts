@@ -97,7 +97,7 @@ export interface ObjectRow {
   fileHash: string | null;
   fileSize: number | null;
   sigs: readonly string[];
-  /** narinfo reads. What `odu cache stats` reports. */
+  /** narinfo reads. What `odu surface cache stats_read` reports. */
   hits: number;
   created: number;
   lastAccessed: number;

@@ -10,17 +10,17 @@
  *
  * The whole answer already exists: PR 1's attention query folds a run's journal
  * into "what is red, is it settled, and where should you resume from", and
- * `odu wait --run` has been serving it from a terminal since. This module does
- * NOT compute a second one. It resolves the caller's run and cursor, hands both
- * to `waitForAttention`, and re-shapes the payload into the service's wire
- * vocabulary — which is a rename, not a derivation.
+ * `odu ci wait --run` has been serving it from a terminal since. This module
+ * does NOT compute a second one. It resolves the caller's run and cursor,
+ * hands both to `waitForAttention`, and re-shapes the payload into the
+ * service's wire vocabulary — which is a rename, not a derivation.
  *
  * That is the point rather than a shortcut. The acceptance gate says the same
  * run must look the same through every face, and the only way that is true is
  * if there is one fold under all of them. A service that re-derived
- * `actionable` would eventually disagree with `odu wait --run` about whether a
- * run had something to act on, and the disagreement would surface as a
- * developer and their agent arguing about a red node.
+ * `actionable` would eventually disagree with `odu ci wait --run` about
+ * whether a run had something to act on, and the disagreement would surface
+ * as a developer and their agent arguing about a red node.
  *
  * **A red CI answer is a SUCCESS.** `reason: "failure"` travels on the output
  * channel, exits 0 through the CLI, and is a normal tool result to an agent.
@@ -88,7 +88,7 @@ export interface WaitDeps extends ReadDeps {
  *
  * Every field is a rename or a re-address; nothing is recomputed. The one thing
  * that IS built here is `logKey`: the attention payload spells its `log_key` as
- * the argv triple `odu logs --run` takes, and this surface addresses a log by
+ * the argv triple `odu ci logs --run` takes, and this surface addresses a log by
  * one token, so the same three facts are re-encoded for the face that will echo
  * them back.
  */
@@ -237,7 +237,7 @@ function queryOf(
  * the call open — the resolution, the fold and the re-shaping are shared, so
  * a run cannot look one way to a reader and another to a follower.
  *
- * This is what `odu history show` is. It used to open the catalog in the
+ * This is what `odu ci history show` is. It used to open the catalog in the
  * caller's own process, beside a daemon reading the same files.
  */
 export function readRun(

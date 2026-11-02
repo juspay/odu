@@ -17,7 +17,7 @@ const attention = await waitForAttention(found.handle, { deadlineMs: 30_000 });
 for (const failure of attention.unresolved_failures) {
   console.error(`${failure.node} exited ${failure.exit_code}`);
   console.error(failure.excerpt);           // the tail of THAT attempt's log
-  console.error(`read it again: odu logs ${failure.log_key}`);
+  console.error(`read it again: odu ci logs ${failure.log_key}`);
 }
 // Feed this back next time; you will not be shown the same events twice.
 console.log(attention.cursor);

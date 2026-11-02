@@ -1,8 +1,8 @@
 /**
  * `catalog.import` and `catalog.prune` — the run store as OPERATIONS.
  *
- * These two used to run in the caller's own process. `odu history import`
- * opened the catalog and wrote run directories into it; `odu history prune`
+ * These two used to run in the caller's own process. `odu ci history import`
+ * opened the catalog and wrote run directories into it; `odu ci history prune`
  * opened the same catalog and expired them — both beside a daemon that reads
  * and writes those exact files on a timer. That is two writers on one store,
  * and the fact that it mostly worked is not the same as it being safe: a prune

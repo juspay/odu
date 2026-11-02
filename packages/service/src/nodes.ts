@@ -198,7 +198,7 @@ export function nodesSource(
         // alone cannot tell them apart. `run.start` answers with a run id the
         // moment the coordinator publishes its manifest, and a caller subscribes
         // with that id immediately — before the next refresh has indexed it. The
-        // empty done frame then told `odu run` its own run had expired: no
+        // empty done frame then told `odu ci run` its own run had expired: no
         // progress events at all, and a verdict computed from zero nodes.
         //
         // The catalog is the authority on existence, so it is what gets asked.

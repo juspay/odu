@@ -1,7 +1,7 @@
 /**
  * End-to-end: odu over a THOUSAND-RUN catalog, through the nix-built binary.
  *
- * juspay/odu#113: on a host with 710 runs, `odu attach` sat blank for minutes.
+ * juspay/odu#113: on a host with 710 runs, `odu ci attach` sat blank for minutes.
  * Two costs compounded — the daemon's poller parsed every run's whole journal
  * on every 250 ms tick, keeping its event loop busy full-time, and the client
  * read the board one row per round trip, each landing behind a tick. Neither
@@ -161,7 +161,7 @@ async function identityReadMs(): Promise<number> {
 beforeAll(async () => {
   odu = buildOduBinary();
   const checkout = fixture("pass");
-  const run = cli(checkout, ["run", "--no-strict", "--no-post", "-o", "json"]);
+  const run = cli(checkout, ["ci", "run", "--no-strict", "--no-post", "-o", "json"]);
   if (run.status !== 0) {
     throw new Error(`seed run exited ${run.status}: ${run.stdout}\n${run.stderr}`);
   }
@@ -208,30 +208,30 @@ afterAll(() => {
 }, 120_000);
 
 describe("a thousand-run catalog", () => {
-  it("answers `odu status` in a checkout with no run", () => {
+  it("answers `odu ci status` in a checkout with no run", () => {
     const empty = fixture("pass");
-    const res = cli(empty, ["status"]);
+    const res = cli(empty, ["ci", "status"]);
     expect(res.status, res.stderr).toBe(0);
     expect(res.stdout).toBe("no run in flight for this checkout\n");
     expect(res.ms).toBeLessThan(BOUND_MS);
   }, TEST_MS);
 
   it("names the seeded checkout's newest run among hundreds of its own", () => {
-    const res = cli(seeded.checkout, ["status", "-o", "json"]);
+    const res = cli(seeded.checkout, ["ci", "status", "-o", "json"]);
     expect(res.status, res.stderr).toBe(0);
     expect((JSON.parse(res.stdout) as { run: { id: string } }).run.id).toBe(seeded.runId);
     expect(res.ms).toBeLessThan(BOUND_MS);
   }, TEST_MS);
 
   it("lists every run in one call", () => {
-    const res = cli(seeded.checkout, ["history", "list", "--all", "-o", "json"]);
+    const res = cli(seeded.checkout, ["ci", "history", "list", "--all", "-o", "json"]);
     expect(res.status, res.stderr).toBe(0);
     expect((JSON.parse(res.stdout) as unknown[]).length).toBeGreaterThanOrEqual(CLONES + 1);
     expect(res.ms).toBeLessThan(BOUND_MS);
   }, TEST_MS);
 
   it("resolves `--run latest`", () => {
-    const res = cli(seeded.checkout, ["wait", "--run", "latest", "-o", "json"]);
+    const res = cli(seeded.checkout, ["ci", "wait", "--run", "latest", "-o", "json"]);
     expect(res.status, res.stderr).toBe(0);
     expect((JSON.parse(res.stdout) as { runId: string }).runId).toBe(seeded.runId);
     expect(res.ms).toBeLessThan(BOUND_MS);
@@ -253,9 +253,9 @@ describe("a thousand-run catalog", () => {
     expect(worst).toBeLessThan(1_000);
   }, TEST_MS);
 
-  it("shows `odu attach` on a live run before it settles", async () => {
+  it("shows `odu ci attach` on a live run before it settles", async () => {
     const dir = fixture("sleep");
-    const runner = spawn(odu, ["run", "--no-strict", "--no-post"], {
+    const runner = spawn(odu, ["ci", "run", "--no-strict", "--no-post"], {
       cwd: dir,
       env: world.env,
       stdio: "ignore",
@@ -265,7 +265,7 @@ describe("a thousand-run catalog", () => {
       const deadline = Date.now() + 120_000;
       let runId: string | null = null;
       while (runId === null) {
-        const res = cli(dir, ["status", "-o", "json"]);
+        const res = cli(dir, ["ci", "status", "-o", "json"]);
         if (res.status === 0) {
           runId = (JSON.parse(res.stdout) as { run: { id: string } | null }).run?.id ?? null;
         }
@@ -276,7 +276,7 @@ describe("a thousand-run catalog", () => {
       }
 
       const began = Date.now();
-      const attach = spawn(odu, ["attach", "-o", "json"], {
+      const attach = spawn(odu, ["ci", "attach", "-o", "json"], {
         cwd: dir,
         env: world.env,
         stdio: ["ignore", "pipe", "pipe"],
@@ -300,7 +300,7 @@ describe("a thousand-run catalog", () => {
       expect(first.run).toBe(runId);
       expect(first.done).toBe(false);
     } finally {
-      cli(dir, ["cancel", "--run", "latest", "-o", "json"], 60_000);
+      cli(dir, ["ci", "cancel", "--run", "latest", "-o", "json"], 60_000);
       runner.kill("SIGTERM");
     }
   }, 300_000);

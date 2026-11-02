@@ -3,7 +3,7 @@
  * serves on `<checkout>/.ci/odu.sock`, and the whole state vocabulary it
  * speaks.
  *
- * The coordinator fans every lane in and serves THIS surface; `odu status` /
+ * The coordinator fans every lane in and serves THIS surface; `odu ci status` /
  * `logs` / `attach`, the `odu mcp` agent face, and an out-of-repo consumer that
  * hydrates this package alone are all the same kind of client of it. The lane
  * primitives, the fan-in-only `header` cell, and the mutations:
@@ -207,7 +207,7 @@ export const EMPTY_POSTING: PostingHealth = { owed: [] };
 
 export const PipelineStateSchema = Schema.Struct({
   name: Schema.String,
-  /** The run's commit, 7 hex chars — `odu run` stamps it from HEAD onto the
+  /** The run's commit, 7 hex chars — `odu ci run` stamps it from HEAD onto the
    *  fan-in surface so a face renders the durable log path (`.ci/<sha7>/…`)
    *  and the sha label from surface state instead of re-deriving the sha from
    *  git and drifting. Empty in the pre-run {@link EMPTY_STATE}. */
@@ -528,7 +528,7 @@ const laneCancelProcedure = {
 /** The fan-in-only run-lifecycle mutation: `run.cancel` tells the live
  *  coordinator to stop — it routes the call into the same teardown path a
  *  SIGINT takes (finalize posted statuses, close lanes, drop the socket,
- *  exit), so a *second* process (`odu cancel`, the MCP `cancel` tool, or a
+ *  exit), so a *second* process (`odu ci cancel`, the MCP `cancel` tool, or a
  *  `--supersede` run) can call off a run it doesn't own without pkill-ing the
  *  coordinator pid. Empty input/`ok` output: cancellation has no parameters,
  *  and the caller confirms teardown by the socket going away, not by this

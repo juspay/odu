@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible terminal evidence for juspay/odu#113 — `odu status` / `attach`
+# Reproducible terminal evidence for juspay/odu#113 — `odu ci status` / `ci attach`
 # against a THOUSAND-RUN catalog, before and after. Recorded with asciinema,
 # rendered to a gif with agg — see dev/skills/pr-evidence/SKILL.md.
 #
@@ -58,7 +58,7 @@ D=$(cd "$D" && pwd -P)
 
 world new 18792
 cd "$D"
-SRC=$("$NEW" run --no-strict --no-post -o json 2>/dev/null | grep -o '"runId": *"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
+SRC=$("$NEW" ci run --no-strict --no-post -o json 2>/dev/null | grep -o '"runId": *"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
 # Clones are OLDER than the real run (ids encode their start instant), so the
 # real one stays this checkout's newest.
 python3 - "$ODU_STATE_DIR/runs" "$SRC" "$CLONES" "$JOURNAL" <<'PY'
@@ -98,8 +98,8 @@ ls "$ROOT/new/state/runs" | wc -l; sleep 1.5
 say "BEFORE — the build this PR is based on. Its poller parses every run, every tick."
 world old 18791
 "$OLD" web --background >/dev/null 2>&1; sleep 3
-cmd "time timeout 30 odu status"
-( time timeout 30 "$OLD" status ) 2>&1 | grep -v '^$' | grep -v '^user\|^sys'
+cmd "time timeout 30 odu ci status"
+( time timeout 30 "$OLD" ci status ) 2>&1 | grep -v '^$' | grep -v '^user\|^sys'
 [ "${PIPESTATUS[0]}" = 124 ] && echo "  → no answer in 30s"
 cmd "cpu <daemon> over 2s idle"
 cpu_now "$(daemon_pid "$OLD")"; sleep 1.5
@@ -107,12 +107,12 @@ cpu_now "$(daemon_pid "$OLD")"; sleep 1.5
 say "AFTER — this PR. A warm tick stats files; status is one run.list call."
 world new 18792
 "$NEW" web --background >/dev/null 2>&1; sleep 3
-cmd "time odu status"
-( time "$NEW" status ) 2>&1 | grep -v '^$' | grep -v '^user\|^sys'
+cmd "time odu ci status"
+( time "$NEW" ci status ) 2>&1 | grep -v '^$' | grep -v '^user\|^sys'
 sleep 1.5
-cmd "odu history list --all | wc -l"
-"$NEW" history list --all | wc -l; sleep 1.2
-cmd "odu attach"
-"$NEW" attach; sleep 1.5
+cmd "odu ci history list --all | wc -l"
+"$NEW" ci history list --all | wc -l; sleep 1.2
+cmd "odu ci attach"
+"$NEW" ci attach; sleep 1.5
 cmd "cpu <daemon> over 2s idle"
 cpu_now "$(daemon_pid "$NEW")"; sleep 3

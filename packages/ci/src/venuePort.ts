@@ -1,11 +1,12 @@
 /**
  * THE VENUES, for the service — the machines, and the holds on them.
  *
- * `odu hosts`, `odu lease` and `odu release` were the last three public
- * commands that reached the fleet from whatever process the operator happened
- * to type in. Through these three ports the DAEMON reaches it, which is what
- * makes the inventory a browser sees and the inventory a terminal sees the same
- * inventory, taken at one place, with one vocabulary for a machine's state.
+ * `odu ci hosts`, `odu ci lease` and `odu ci release` were the last three
+ * public commands that reached the fleet from whatever process the operator
+ * happened to type in. Through these three ports the DAEMON reaches it, which
+ * is what makes the inventory a browser sees and the inventory a terminal sees
+ * the same inventory, taken at one place, with one vocabulary for a machine's
+ * state.
  *
  * The logic is not re-derived here: `./hosts` and `./leaseCmd` already own it
  * and now return it as data. This module is the seam, and the seam is where the
@@ -28,10 +29,10 @@ export const probeVenues: VenueProber = venueInventory;
 /**
  * Take a hold on a venue, for a checkout, that outlives the caller.
  *
- * **NON-BLOCKING, always.** The terminal's `odu lease` polled until the box was
- * its own, printing progress; a service call cannot, because the queue it joins
- * is somebody else's run and that can be an hour long. So a hold that is not
- * immediately available answers `waiting` with `waitingBehind` — a complete
+ * **NON-BLOCKING, always.** The terminal's `odu ci lease` polled until the box
+ * was its own, printing progress; a service call cannot, because the queue it
+ * joins is somebody else's run and that can be an hour long. So a hold that is
+ * not immediately available answers `waiting` with `waitingBehind` — a complete
  * answer, not a partial one: the holder is already spawned and queueing, and
  * `venue.probe` is where the caller watches it land.
  *

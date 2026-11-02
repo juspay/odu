@@ -15,7 +15,7 @@ tests/e2e/
 ├── harness.ts            # nix build, fixture materialization, run + parse
 ├── run.e2e.test.ts       # the run assertions (bun:test)
 ├── cancel.e2e.test.ts    # cancel / supersede / linger, driven from a 2nd process
-├── protect.e2e.test.ts   # `odu protect --dry-run` context enumeration
+├── protect.e2e.test.ts   # `odu ci protect --dry-run` context enumeration
 ├── mcp.e2e.test.ts       # the `odu mcp` agent face over a real MCP client
 ├── logs.e2e.test.ts      # durable node logs: complete to the last line, one run per file
 ├── webHarness.ts         # a real web service in a private world (HOME, state, port)
@@ -116,8 +116,8 @@ browsers fails it with the sentence that gets them.
 - Drive the **MCP agent face** (`odu mcp`) end-to-end as a subprocess.
 - Drive `odu mcp --service` (the stdio bridge to the singleton) as a subprocess;
   the HTTP face of the same projection is covered.
-- Cover `status -o json` and `logs -f` against a live run (they need the
-  `.ci/odu.sock` socket, so the harness would run `odu run` in the background
+- Cover `ci status -o json` and `ci logs -f` against a live run (they need the
+  `.ci/odu.sock` socket, so the harness would run `odu ci run` in the background
   and dial it concurrently).
 - **Multi-platform fanout** once remote lanes are in scope.
 

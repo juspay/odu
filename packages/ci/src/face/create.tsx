@@ -19,10 +19,11 @@
  * sentence with a recovery, and the form shows it rather than clearing itself.
  *
  * **Every option `run.start` takes is a field here**, because the board does
- * everything `odu run` does: selectors, platforms, host pins, the justfile
+ * everything `odu ci run` does: selectors, platforms, host pins, the justfile
  * root, no-deps, no-strict, no-post, supersede, linger and the hosts file. And
- * `pipeline.read` sits beside them as **Preview pipeline** — `odu dump` for the
- * checkout typed above, so a person sees what a start would run before it runs.
+ * `pipeline.read` sits beside them as **Preview pipeline** — `odu ci dump` for
+ * the checkout typed above, so a person sees what a start would run before it
+ * runs.
  */
 
 import { createSignal, For, Show, type JSX } from "solid-js";
@@ -180,7 +181,7 @@ export function Create(props: {
         <Field
           id="hosts"
           label="Host pins"
-          hint="PLATFORM=ADDRESS, space-separated — the same spelling odu run --host takes."
+          hint="PLATFORM=ADDRESS, space-separated — the same spelling odu ci run --host takes."
         >
           <TextInput
             id="hosts"
@@ -192,7 +193,7 @@ export function Create(props: {
         <Field
           id="root"
           label="Justfile root"
-          hint="A module path inside the justfile — the same NAMEPATH odu run --root takes. Empty means the top."
+          hint="A module path inside the justfile — the same NAMEPATH odu ci run --root takes. Empty means the top."
         >
           <TextInput id="root" value={root()} placeholder="ci" onValue={setRoot} />
         </Field>

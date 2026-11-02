@@ -2,7 +2,7 @@
 # almost immediately, beside one that will not finish for two minutes.
 #
 # Before the durable wait, learning about `quick` meant waiting for `slow` —
-# `odu wait --settle` blocks on the run, and fail-fast only helped a caller
+# `odu ci wait --settle` blocks on the run, and fail-fast only helped a caller
 # that was already attached to the socket. A run started in one terminal and
 # asked about from another had no way to be told "this went red four minutes
 # ago" at all.

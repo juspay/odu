@@ -6,7 +6,7 @@
  * bytes on the state cell against a backlog on the log stream. So a run that
  * publishes a status the moment it arrives promises a finished node while its
  * output is still on the wire, and every reader that acts on the promise —
- * `odu wait --settle`, the MCP `wait_for_settle` an agent loops on, the durable
+ * `odu ci wait --settle`, the MCP `wait_for_settle` an agent loops on, the durable
  * record, the commit status pointing at a log path — reads a file that stops
  * mid-recipe with nothing saying so (juspay/odu#87, and the settle-shaped
  * residual left after #88 fixed it at teardown only).

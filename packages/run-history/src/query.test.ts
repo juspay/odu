@@ -244,7 +244,7 @@ describe("resolveCursor", () => {
     if (resolved.ok) return;
     expect(resolved.message).toContain(parent.runId);
     expect(resolved.message).toContain(child.runId);
-    expect(resolved.resync).toBe(`odu wait --run ${child.runId}`);
+    expect(resolved.resync).toBe(`odu ci wait --run ${child.runId}`);
   });
 
   it("REFUSES a cursor ahead of the journal rather than serving nothing", () => {

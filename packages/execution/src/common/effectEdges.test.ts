@@ -113,31 +113,15 @@ const SANCTIONED = new Map<string, string>([
   ],
   [
     "packages/cache/src/cli.ts",
-    "A FACE's edge, and the cache's only one. Every `odu cache` admin command " +
-      "ends with a surface procedure — an `Effect` carrying a declared " +
-      "`CacheRefused` channel — becoming a number for `process.exit`, and the " +
-      "three outcomes a caller must keep apart (answered / refused / dead link) " +
-      "cannot be told apart without running it. The row's own doors take the " +
-      "edge's place in production: `./server` is a handler table, and the " +
-      "daemon runs it.",
-  ],
-  [
-    "packages/auth/src/cli.ts",
-    "The door's ARGV EDGE, exactly as `packages/cache/src/cli.ts` is the " +
-      "cache's: every `odu auth` command ends with a surface procedure — an " +
-      "`Effect` carrying a declared `AuthRefused` channel — becoming a number " +
-      "for `process.exit`, and the three outcomes (answered / refused / dead " +
-      "link) cannot be told apart without running it. `login` runs no Effect at " +
-      "all: it is the one command here that touches no service.",
-  ],
-  [
-    "packages/cloudflare/src/cli.ts",
-    "The tunnel row's ARGV EDGE, exactly as the cache's and the door's: " +
-      "`odu cloudflare status` ends with a surface procedure becoming bytes on " +
-      "a stream and a number for `process.exit`, and a refusal cannot be told " +
-      "from a dead link without running it. The row's own doors take the " +
-      "edge's place in production: `./server` is a handler table, and the " +
-      "daemon runs it.",
+    "A FACE's edge, and the cache's only one. `odu cache use` ends with a " +
+      "surface procedure — an `Effect` carrying a declared `CacheRefused` " +
+      "channel — becoming a number for `process.exit`, and the three outcomes " +
+      "a caller must keep apart (answered / refused / dead link) cannot be " +
+      "told apart without running it. The row's own doors take the edge's " +
+      "place in production: `./server` is a handler table, and the daemon " +
+      "runs it. The admin commands that used to share this edge are gone " +
+      "(PLAN 2.10): a bucket is administered from the board, or through " +
+      "`odu surface cache …`, whose edge is the generated face's.",
   ],
   [
     "packages/auth/src/routes.ts",

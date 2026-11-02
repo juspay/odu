@@ -88,7 +88,7 @@ ownership grace with nothing on disk to say so. Fingerprinting files alone left
 such a row reading `running` for ever. So the fence's own answer is computed
 once per run per tick and folded into the stamp beside the three `stat`s.
 
-**Discovery is the catalog and only the catalog.** A run started by `odu run` in
+**Discovery is the catalog and only the catalog.** A run started by `odu ci run` in
 a terminal, before the service existed, appears on the board the moment the
 service reads the catalog — without scanning arbitrary filesystem paths for
 `.ci` directories, which is the thing a per-user catalog was introduced to stop

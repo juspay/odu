@@ -20,10 +20,10 @@
  * | `grant.list` | an `owner` — who is in, and the role each holds |
  *
  * **`grant` is why the anonymous gate list exists.** A fresh daemon has no
- * owner, so `odu auth grant <login> owner` is made with the operator's root
- * token and NO session at all. The host's gate refuses such a connection every
- * member except the tags in {@link AUTH_ANONYMOUS_TAGS}; the handler then
- * decides on its own.
+ * owner, so `odu surface auth user_grant` names the first owner with the
+ * operator's root token and NO session at all. The host's gate refuses such
+ * a connection every member except the tags in {@link AUTH_ANONYMOUS_TAGS};
+ * the handler then decides on its own.
  */
 
 import { type Principal, PrincipalSchema, RoleSchema } from "@odu/cordis/principal";
@@ -47,10 +47,6 @@ export const AUTH_KEY = "auth";
  * 2.4: where the composed wire stood when each row took a version of its own.
  */
 export const AUTH_CONTRACT_VERSION = "2.4";
-
-/** THE DOOR AND NOTHING ELSE — what `odu auth …` declares, in the shape
- *  `admitService` takes. Required: there is nothing to do without a door. */
-export const AUTH_NEEDS = { [AUTH_KEY]: { requires: AUTH_CONTRACT_VERSION } } as const;
 
 /** THE SIGN-IN PAGE'S WORDS, once — the server-rendered page (`./routes`) and
  *  the browser's own copy (`./face`) say the same three things, and a page an
@@ -218,9 +214,9 @@ const GrantListOutputSchema = Schema.Struct({ people: Schema.Array(AuthPersonSch
  * cannot exist — `auth_whoami` would need a flat procedure the surface model
  * does not have. The nouns chosen here are the SUBJECT: `user` for who you are
  * and what you may do, `token` for a personal token, `session` for a signed-in
- * browser. The argv face keeps the brief's names exactly (`odu auth whoami`,
- * `odu auth token create`, …) because it is hand-written grammar, not a
- * derivation.
+ * browser. The argv face reaches them through `odu surface` (`odu surface auth
+ * user_whoami`, `odu surface auth token_create`, …), which is the same
+ * derivation rather than a hand-written grammar of its own.
  *
  * No collections and no cells: a session list is read when the profile page
  * opens, and a page that kept a live subscription to its own tokens would be a
@@ -295,8 +291,8 @@ export const ODU_AUTH_MCP_INSTRUCTIONS = [
   "on a daemon with a door, which is exactly the daemon that serves them.",
   "`auth_user_whoami` answers who this connection is: a `user` with a role, or",
   "`anonymous` when the connection has no session (that is a page before it",
-  "signs in, not an error). `odu auth whoami` exits 1 on `anonymous` — the",
-  "answer is printed, and the exit code says whether it is a person.",
+  "signs in, not an error). `odu surface auth user_whoami` prints that same",
+  "answer in a terminal, and the profile page shows it in a browser.",
   "`auth_token_create` mints a personal access token and answers it ONCE (only",
   "its hash is kept); `odu auth login <origin>` stores it, and every face then",
   "reaches this server with `--origin`. `auth_token_revoke` and",

@@ -72,7 +72,7 @@ describe("firstFrame", () => {
   it("rejects with a NAMED no-answer when the head misses its deadline", async () => {
     // Three outcomes, three shapes: a frame, `undefined` for a stream that
     // ended empty, and this for a producer that is there and silent. The last
-    // is the hung `odu attach` of juspay/odu#113, which had no way to say so.
+    // is the hung `odu ci attach` of juspay/odu#113, which had no way to say so.
     const silent = Stream.fromEffect(Effect.never) as Stream.Stream<number>;
     const outcome = await firstFrame(silent, { deadlineMs: 20 }).then(
       () => "answered",

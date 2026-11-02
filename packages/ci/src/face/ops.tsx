@@ -1,6 +1,6 @@
 /**
- * THE RUNS' OPERATIONS — what `odu hosts | lease | release`, `odu history
- * import | prune` and `odu protect` do, without a terminal.
+ * THE RUNS' OPERATIONS — what `odu ci hosts | lease | release`, `odu ci
+ * history import | prune` and `odu ci protect` do, without a terminal.
  *
  * Two pages, because they answer two questions:
  *
@@ -275,7 +275,7 @@ function CatalogImport(props: { client: CiClient; call: Call }): JSX.Element {
   return (
     <section class="admin-section" aria-label="import">
       <h3>Import a checkout's records</h3>
-      <p class="hint">Brings a checkout's legacy .ci records into the catalog (odu history import).</p>
+      <p class="hint">Brings a checkout's legacy .ci records into the catalog (odu ci history import).</p>
       <Field id="import-checkout" label="Checkout to import">
         <TextInput id="import-checkout" value={checkout()} placeholder="/code/app" onValue={setCheckout} />
       </Field>
@@ -368,7 +368,7 @@ function Protect(props: { client: CiClient; call: Call }): JSX.Element {
   return (
     <section class="admin-section" aria-label="protect">
       <h3>Require odu's checks on a branch</h3>
-      <p class="hint">Sets the branch's required status checks to exactly the contexts odu posts (odu protect).</p>
+      <p class="hint">Sets the branch's required status checks to exactly the contexts odu posts (odu ci protect).</p>
       <Field id="protect-checkout" label="Checkout to protect">
         <TextInput id="protect-checkout" value={checkout()} placeholder="/code/app" onValue={setCheckout} />
       </Field>

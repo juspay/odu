@@ -107,6 +107,18 @@ function cli(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
+/**
+ * One administrative verb, through `odu surface` — the only face that
+ * administers the cache now. The root token is a FIELD of the input, not an
+ * environment side channel, so each call names the token it is making.
+ *
+ * Exit 0 is an answer, 1 a refusal (as JSON on stderr), 2 a usage error, 3
+ * nothing serving.
+ */
+function surface(verb: string, input: unknown, env: NodeJS.ProcessEnv = {}): Ran {
+  return cli(["surface", "cache", verb, "--input", JSON.stringify(input), "--json"], env);
+}
+
 /** `nix …` against the builder's store — the machine that built the paths. */
 function nix(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
   const res = spawnSync("nix", argv, {
@@ -232,15 +244,12 @@ let evictable: string;
 
 describe("odu serves a Nix binary cache", () => {
   it("creates a bucket and prints what a client has to trust", () => {
-    const created = cli([
-      "cache",
-      "create",
-      "main",
-      "--retention-days",
-      "0",
-      "-o",
-      "json",
-    ]);
+    const created = surface("bucket_create", {
+      rootToken: ROOT_TOKEN,
+      name: "main",
+      public: true,
+      retentionDays: 0,
+    });
     expect(created.stderr).toBe("");
     expect(created.status).toBe(0);
     main = JSON.parse(created.stdout) as Bucket;
@@ -249,7 +258,7 @@ describe("odu serves a Nix binary cache", () => {
     expect(main.keyName).toBe("main-1");
     expect(main.publicKey.startsWith("main-1:")).toBe(true);
 
-    const listed = cli(["cache", "list", "-o", "json"]);
+    const listed = surface("bucket_list", { rootToken: ROOT_TOKEN });
     expect(listed.status).toBe(0);
     expect((JSON.parse(listed.stdout) as { buckets: Bucket[] }).buckets.map((b) => b.name)).toEqual([
       "main",
@@ -277,13 +286,22 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("refuses administration without the root token", () => {
-    const refused = cli(["cache", "create", "other"], { ODU_ROOT_TOKEN: "wrong" });
+    const refused = surface("bucket_create", {
+      rootToken: "wrong",
+      name: "other",
+      public: true,
+      retentionDays: 90,
+    });
     expect(refused.status).toBe(1);
     expect(refused.stderr).toContain("root token");
   });
 
   it("mints a write token, and shows it once", () => {
-    const minted = cli(["cache", "token", "mint", "main", "--write", "-o", "json"]);
+    const minted = surface("token_mint", {
+      rootToken: ROOT_TOKEN,
+      bucket: "main",
+      scope: "write",
+    });
     expect(minted.status).toBe(0);
     const answer = JSON.parse(minted.stdout) as {
       token: string;
@@ -293,7 +311,7 @@ describe("odu serves a Nix binary cache", () => {
     expect(answer.facts.scope).toBe("write");
     writeToken = answer.token;
 
-    const listed = cli(["cache", "token", "list", "-o", "json"]);
+    const listed = surface("token_list", { rootToken: ROOT_TOKEN });
     expect(listed.status).toBe(0);
     // The plaintext is nowhere in the listing — the database holds a hash.
     expect(listed.stdout).not.toContain(writeToken);
@@ -456,11 +474,21 @@ describe("odu serves a Nix binary cache", () => {
     expect(skipped.status).toBe(0);
     expect(skipped.stdout).toContain("skipped-upstream 1");
 
-    const created = cli(["cache", "create", "everything", "--no-upstream", "-o", "json"]);
+    const created = surface("bucket_create", {
+      rootToken: ROOT_TOKEN,
+      name: "everything",
+      public: true,
+      retentionDays: 90,
+      upstreamKeys: [],
+    });
     expect(created.status).toBe(0);
     const everything = JSON.parse(created.stdout) as Bucket;
     expect(everything.upstreamKeys).toEqual([]);
-    const minted = cli(["cache", "token", "mint", "everything", "--write", "-o", "json"]);
+    const minted = surface("token_mint", {
+      rootToken: ROOT_TOKEN,
+      bucket: "everything",
+      scope: "write",
+    });
     expect(minted.status).toBe(0);
     const token = (JSON.parse(minted.stdout) as { token: string }).token;
 
@@ -471,18 +499,22 @@ describe("odu serves a Nix binary cache", () => {
     expect(pushed.status).toBe(0);
     expect(pushed.stdout).toContain("pushed 1");
     expect(pushed.stdout).toContain("skipped-upstream 0");
-
-    // And the flag has an opposite: naming both is refused, not merged.
-    const both = cli(["cache", "create", "nope", "--no-upstream", "--upstream-key", "x-1"]);
-    expect(both.status).toBe(1);
-    expect(both.stderr).toContain("opposites");
   });
 
   it("refuses an unauthenticated read of a private bucket, and serves with netrc", async () => {
-    const created = cli(["cache", "create", "private", "--private", "-o", "json"]);
+    const created = surface("bucket_create", {
+      rootToken: ROOT_TOKEN,
+      name: "private",
+      public: false,
+      retentionDays: 90,
+    });
     expect(created.status).toBe(0);
     const priv = JSON.parse(created.stdout) as Bucket;
-    const minted = cli(["cache", "token", "mint", "private", "--write", "-o", "json"]);
+    const minted = surface("token_mint", {
+      rootToken: ROOT_TOKEN,
+      bucket: "private",
+      scope: "write",
+    });
     const token = (JSON.parse(minted.stdout) as { token: string }).token;
     const secret = build("odu-cache-e2e-private");
     const pushed = cli(["cache", "push", "private", secret], {
@@ -573,10 +605,19 @@ describe("odu serves a Nix binary cache", () => {
   it("refuses an upload with no bytes behind it, and one whose hash disagrees", async () => {
     // THE CROSS-BUCKET HOLE: `private` holds a write token, and `main` holds a
     // path. A narinfo alone must not be enough to publish it.
-    const created = cli(["cache", "create", "thief", "--private", "-o", "json"]);
+    const created = surface("bucket_create", {
+      rootToken: ROOT_TOKEN,
+      name: "thief",
+      public: false,
+      retentionDays: 90,
+    });
     expect(created.status).toBe(0);
     const thief = JSON.parse(created.stdout) as Bucket;
-    const minted = cli(["cache", "token", "mint", "thief", "--write", "-o", "json"]);
+    const minted = surface("token_mint", {
+      rootToken: ROOT_TOKEN,
+      bucket: "thief",
+      scope: "write",
+    });
     const token = (JSON.parse(minted.stdout) as { token: string }).token;
     const hash = hashOf(pinned);
 
@@ -641,11 +682,16 @@ describe("odu serves a Nix binary cache", () => {
   it("keeps a pinned closure and evicts what nothing holds", async () => {
     // Both paths are older than retention 0 the moment they were pushed; the
     // pin is the only thing between `pinned` and the collector.
-    const pin = cli(["cache", "pin", "main", "release-1", pinned, "-o", "json"]);
+    const pin = surface("pin_create", {
+      rootToken: ROOT_TOKEN,
+      bucket: "main",
+      name: "release-1",
+      paths: [pinned],
+    });
     expect({ status: pin.status, stderr: pin.stderr }).toEqual({ status: 0, stderr: "" });
     expect((JSON.parse(pin.stdout) as { rootPaths: string[] }).rootPaths).toContain(pinned);
 
-    const collected = cli(["cache", "gc", "main", "-o", "json"]);
+    const collected = surface("gc_run", { rootToken: ROOT_TOKEN, bucket: "main" });
     expect(collected.status).toBe(0);
     const report = JSON.parse(collected.stdout) as {
       buckets: { bucket: string; evicted: number }[];
@@ -657,7 +703,7 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("reports what it holds", () => {
-    const stats = cli(["cache", "stats", "-o", "json"]);
+    const stats = surface("stats_read", { rootToken: ROOT_TOKEN });
     expect(stats.status).toBe(0);
     const answer = JSON.parse(stats.stdout) as {
       buckets: { name: string; objects: number }[];

@@ -237,7 +237,7 @@ export function operatorLine(text: string): string {
 
 /** `x86_64-linux=kolu-ci-5 · aarch64-darwin=rasam`, or `""` when no lane has a
  *  host yet. Here with the other cross-face projections because three faces
- *  render it — `run`'s plain banner, its lane-resolved line, and `odu status`
+ *  render it — `run`'s plain banner, its lane-resolved line, and `odu ci status`
  *  — and this file is where "the projection every face shares" lives. */
 export function laneText(header: Pick<RunHeader, "lanes">): string {
   return leasedLanes(header)
@@ -251,7 +251,7 @@ export function laneText(header: Pick<RunHeader, "lanes">): string {
  *
  *  A second sentence over the same roster, not a second list: leased and
  *  claiming lanes read as different English ("x=host" vs "x from pool"), and
- *  `odu status` prints them on separate lines. */
+ *  `odu ci status` prints them on separate lines. */
 export function claimingText(header: Pick<RunHeader, "lanes">): string {
   return claimingLanes(header)
     .map((c) => `${c.platform} from ${c.pool.join(", ")}`)
@@ -301,7 +301,7 @@ export function verdictLine(state: PipelineState): string {
  * produces the debt. But it is a pure function of `PostingHealth` with no
  * authority in it at all, and its only caller is a terminal: keeping it there
  * meant the live matrix imported the coordinator's GitHub poster to format one
- * sentence — which is how `odu attach` came to drag the whole engine into a
+ * sentence — which is how `odu ci attach` came to drag the whole engine into a
  * public client, and how the import wall came to refuse it.
  *
  * Rendering belongs with the renderings. What a status MEANS is still
@@ -319,7 +319,7 @@ export function postingWarning(health: PostingHealth): string | null {
   return `⚠ github: ${n} ${noun} unconfirmed (${phase}${err})`;
 }
 
-/** The bucket list and order `odu run`'s final summary has always printed.
+/** The bucket list and order `odu ci run`'s final summary has always printed.
  *  Kept explicit and zero-inclusive: the live faces drop empty buckets (a
  *  status bar has no room for `0 errored`), but this line is the run's durable
  *  verdict and is the kind of output people grep. */
@@ -337,7 +337,7 @@ const VERDICT_BUCKETS = [
  *
  * HERE rather than in `runFace`, because it has two callers now and they are
  * on opposite sides of the authority wall. The coordinator's own face prints
- * it, and so does `odu run` — which is a CLIENT, and may not import a module
+ * it, and so does `odu ci run` — which is a CLIENT, and may not import a module
  * that reaches `coordinator/`. One block, one place, or the two would drift
  * and only one of them would be the one people grep.
  */

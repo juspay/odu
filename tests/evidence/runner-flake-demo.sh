@@ -33,8 +33,8 @@ say "A plain consumer repo — just a justfile, and no flake at all:"
 cmd "ls -A"
 ls -A; sleep 1.6
 say "It re-exports no odu-runner. Before #30 every lane died here at _ci-setup."
-cmd "odu run --no-strict"
-"$ODU" run --no-strict; sleep 2.5
+cmd "odu ci run --no-strict"
+"$ODU" ci run --no-strict; sleep 2.5
 say "Green — the lane runner came from odu's OWN build (the baked agent source),"
 say "not this repo. A consumer configures nothing."
 sleep 2

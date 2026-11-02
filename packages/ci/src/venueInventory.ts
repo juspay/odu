@@ -1,12 +1,12 @@
 /**
- * THE INVENTORY behind `odu hosts` — every configured machine and whether its
- * venue lock is free or held (and by whom). Dials odu-runner on each host
+ * THE INVENTORY behind `odu ci hosts` — every configured machine and whether
+ * its venue lock is free or held (and by whom). Dials odu-runner on each host
  * (surface-remote) and calls `lease.probe`; does not acquire.
  *
  * It RETURNS the inventory rather than printing it, and that is the whole
- * change: `odu hosts` is a public command, so its answer comes from the shared
- * service, and a function whose only output was `process.stdout` could be
- * called by exactly one face. The table an operator reads is now rendered by
+ * change: `odu ci hosts` is a public command, so its answer comes from the
+ * shared service, and a function whose only output was `process.stdout` could
+ * be called by exactly one face. The table an operator reads is now rendered by
  * whichever face asked — `@odu/cli`'s terminal projection, or a browser.
  */
 
@@ -29,9 +29,9 @@ import type {
 /**
  * The wire says `unreachable`; the port says `down`.
  *
- * This rename is not new — `odu hosts` has printed `down` since it had a STATE
- * column, because the column is five characters wide and an operator reading an
- * inventory wants the machine's condition, not the verb for what the probe
+ * This rename is not new — `odu ci hosts` has printed `down` since it had a
+ * STATE column, because the column is five characters wide and an operator
+ * reading an inventory wants the machine's condition, not the verb for what the
  * failed to do. Carrying it here rather than at each face is what keeps the
  * browser, the terminal and an agent from choosing three different words for
  * one state; `error` on the same row is where the probe's own sentence lives,
@@ -70,15 +70,15 @@ function rowFacts(platform: string, probe: ProbeResult): VenueRowFacts {
  * unsliced inventory costs as long as the slowest box in it; an operator asking
  * about one platform should not wait on a datacentre they did not mention. An
  * EMPTY request means every platform, because "tell me everything" is the
- * question `odu hosts` with no argument has always asked.
+ * question `odu ci hosts` with no argument has always asked.
  *
  * Two refusals, and both are the same rule: an empty table cannot say WHY it is
  * empty, and the two whys call for opposite actions.
  *
  *   - Nothing is configured at all — write a hosts file, versus wait.
  *   - Nothing the caller NAMED is configured — fix the name, versus wait. A
- *     face that got zero rows for `odu hosts x86_54-linux` would show an empty
- *     fleet rather than a typo.
+ *     face that got zero rows for `odu ci hosts x86_54-linux` would show an
+ *     empty fleet rather than a typo.
  *
  * A request naming some platforms that exist and some that do not is neither:
  * the ones that exist are probed and the rest are reported as warnings, because
@@ -87,8 +87,9 @@ function rowFacts(platform: string, probe: ProbeResult): VenueRowFacts {
 export async function venueInventory(request: {
   platforms: readonly string[];
   /** WHO the caller is. This runs in the service, whose environment is a fact
-   *  about the shell that started it — so without this, `odu hosts` reported
-   *  the daemon's fleet while `odu run` used the caller's. See {@link Caller}. */
+   *  about the shell that started it — so without this, `odu ci hosts` reported
+   *  the daemon's fleet while `odu ci run` used the caller's. See
+   *  {@link Caller}. */
   caller: Caller;
 }): Promise<VenueProbeOutcome> {
   const config = loadHosts(request.caller.hostsFile ?? undefined);

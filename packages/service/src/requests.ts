@@ -271,7 +271,7 @@ export async function onceOnly<T>(
         message:
           `odu: request "${request.requestId}" was accepted and its outcome is ` +
           "not recorded. Do not re-issue it under a new id — read the current " +
-          "state (`odu hosts`, `odu protect --dry-run`) and decide from there.",
+          "state (`odu ci hosts`, `odu ci protect --dry-run`) and decide from there.",
       }),
     };
   }

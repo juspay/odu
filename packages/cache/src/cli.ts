@@ -1,47 +1,48 @@
 /**
- * `odu cache` — the bucket commands, in the package that owns the buckets.
+ * `odu cache` — the cache's SHELL-NATIVE verbs, in the package that owns the
+ * buckets.
  *
- * Two kinds of client in one command, and the split is the interesting part:
+ * Three commands are left, and what they have in common is a machine:
  *
- *   - **administration** (`create`, `list`, `use`, `token`, `pin`, `gc`,
- *     `stats`) is a client of the cache's own surface — the row served beside
- *     the runs on the same daemon. The buckets, their keys and their tokens
- *     live in the cache's database, and this module reaches them through the
- *     row's contract rather than through `@odu/service`'s.
- *   - **`push` and `login`** are clients of the cache's HTTP API, from the
- *     machine that holds the paths. They import `./push` and nothing else —
- *     no service, no catalog, no engine — which is the argument
- *     `@odu/cli`'s `authority.test.ts` makes for why they are admissible under
- *     a wall that forbids every public client the engine.
+ *   - **`push`** is a client of the cache's HTTP API, run from the machine
+ *     that holds the store paths. It imports `./push` and nothing else — no
+ *     service, no catalog, no engine — which is the argument `@odu/cli`'s
+ *     `authority.test.ts` makes for why it is admissible under a wall that
+ *     forbids every public client the engine.
+ *   - **`login`** writes this machine's token for an origin, which is the
+ *     credential `push` then reads. A credential store is a file on a disk,
+ *     so there is nothing for a browser or an API verb to do here.
+ *   - **`use`** prints the nix.conf, flake `nixConfig` and netrc lines for a
+ *     bucket, for pasting into this machine's configuration. It needs no
+ *     token: a bucket's URL and public key are what it publishes.
+ *
+ * ADMINISTRATION IS NOT HERE ANY MORE. Creating a bucket, minting and revoking
+ * tokens, naming a domain, pinning a closure, collecting garbage and reading
+ * the stats are controls on the bucket page, and verbs on the API — `odu
+ * surface cache bucket_create`, `cache token_mint`, `cache gc_run` … — which
+ * is the same vocabulary `odu mcp` serves an agent. A second argv spelling of
+ * a verb the board already owns was a face that had to be kept in step with
+ * the row for no capability in return.
  *
  * ## The dial is a PORT, bound by the root
  *
- * This module is a FACE, and a face dials the daemon. The bootstrap — "start
- * one if nothing is serving" — belongs to `@odu/host`, and a ROW never names the
- * host: that is the arrow backwards. So the root binds a `connect` here
- * (`src/main.ts`), and the same `SurfaceDispatch` the ci client is built over
- * gives this face its CACHE client — one connection, two views, which is what
- * `ServiceConnection.dispatch` is published for.
- *
- * The root token comes from `$ODU_ROOT_TOKEN` and is passed straight through:
- * the CLI does not decide who may administer a bucket, and neither does the
- * service — the cache does, because it is the one that holds the secret.
+ * This module is a FACE, and `use` dials the daemon when a bucket is not
+ * publicly readable. The bootstrap — "start one if nothing is serving" —
+ * belongs to `@odu/host`, and a ROW never names the host: that is the arrow
+ * backwards. So the root binds a `connect` here (`src/main.ts`), and this
+ * face stays a client that names no host.
  */
 
 import { parseArgs } from "node:util";
-import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceClientOf } from "@kolu/surface/project";
 import { composedClients } from "@odu/cordis/compose";
 import { readDoor } from "@odu/cordis/services";
-import { bytes } from "@odu/cordis/format";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { Effect } from "effect";
 import { CACHE_MOUNT } from "./paths";
 import { normalizeOrigin, pushToCache, saveCredential } from "./push";
 import {
   CACHE_KEY,
-  type CacheScope,
-  type CacheToken,
   CacheRefused,
   oduCacheSurface,
   useBlock,
@@ -77,30 +78,11 @@ export interface CacheCliPorts {
   }>;
 }
 
-export const CACHE_USAGE = `usage: odu cache <create|list|use|domain|token|login|push|pin|gc|stats> [args]
+export const CACHE_USAGE = `usage: odu cache <use|login|push> [args]
 
-create <bucket> [--private] [--retention-days N] [--upstream-key K]… | --no-upstream [--store NAME]
-                              create a bucket; print its substituter URL and
-                              public key. Needs $ODU_ROOT_TOKEN.
-                              --no-upstream takes everything, including
-                              upstream-signed closures (more disk), for consumers
-                              that cannot reach cache.nixos.org.
-                              --store keeps its objects in a declared store
-                              (an S3 bucket); the default is local, the
-                              daemon's own disk
-list [-o json]                buckets, with sizes. Needs $ODU_ROOT_TOKEN
 use <bucket>                  the nix.conf settings, the nixConfig block and the
                               netrc lines for a bucket. Needs NO token: a
                               bucket's URL and public key are public
-domain <bucket> <name>|--none give a bucket a DNS name of its own (the
-                              substituter URL becomes that name), or take it
-                              away. Needs $ODU_ROOT_TOKEN
-token mint <bucket> [--read|--write|--admin] [--expires-days N|--no-expiry] [--buckets GLOB]
-                              mint a token. It is printed ONCE; only its hash
-                              is kept. Expires in 90 days unless --expires-days
-                              says otherwise; --no-expiry is the explicit never
-token list [bucket] [-o json] tokens with scope, expiry and last use
-token revoke <id>             revoke one token, without touching the rest
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
 push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [-o json]
@@ -108,30 +90,24 @@ push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [-o
                               Talks to the cache directly, from HERE. A NAR
                               larger than --part-size (64 MiB) is sent in parts,
                               each retried on its own
-pin <bucket> <name> <path>…   pin a closure against garbage collection
-gc [bucket] [-o json]         evict what retention expired and nothing holds
-stats [-o json]               storage and reads
 
---origin URL is accepted by every admin command (default $ODU_WEB_ORIGIN or
-http://127.0.0.1:18440), and by \`push\`, where it BEATS a stored credential - a
-machine logged in to one cache can still push to a second.
+Buckets, tokens, domains, pins, GC and stats are the bucket page on the board,
+or the API: \`odu surface cache bucket_create --input '{…}' --json\`,
+\`cache token_mint\`, \`cache bucket_domain\`, \`cache pin_create\`, \`cache gc_run\`,
+\`cache stats_read\` — the same verbs \`odu mcp\` serves an agent, each taking the
+server's root token as a field of its input.
+
+--origin URL is accepted by \`use\` and by \`push\`, where it BEATS a stored
+credential - a machine logged in to one cache can still push to a second
+(default $ODU_WEB_ORIGIN or http://127.0.0.1:18440).
 
 Token resolution for \`push\`: --token-file, then $ODU_CACHE_TOKEN, then the
 credentials entry for the bucket's origin.
 `;
 
-/** What every admin command exits with when the service refuses it: 1. The
- *  run-shaped table in `serviceFace` numbers the states of a RUN, and a bucket
- *  is not one. */
+/** What `use` exits with when the service refuses it: 1. The run-shaped table
+ *  in `serviceFace` numbers the states of a RUN, and a bucket is not one. */
 const REFUSED = 1;
-
-const rootToken = (): string => process.env.ODU_ROOT_TOKEN ?? "";
-
-const scopeOf = (values: {
-  read?: boolean;
-  write?: boolean;
-  admin?: boolean;
-}): CacheScope => (values.admin === true ? "admin" : values.read === true ? "read" : "write");
 
 
 // ── the face's plumbing ─────────────────────────────────────────────────────
@@ -206,8 +182,8 @@ function emitJson(value: unknown): void {
 
 /** A flag's whole-number value, or a usage error naming the flag. `Number("")`
  *  is 0 and `Number(" 5 ")` is 5, so a bare `Number` would read a truncated
- *  `--retention-days=` as "keep nothing" — which on a cache is a destructive
- *  reading of a typo. */
+ *  `--part-size=` as "no bytes at all" — which is a destructive reading of a
+ *  typo. */
 function wholeNumber(flag: string, raw: string): number {
   const trimmed = raw.trim();
   if (!/^-?\d+$/.test(trimmed)) {
@@ -225,26 +201,12 @@ export async function cacheCommand(
   ports: CacheCliPorts,
 ): Promise<number> {
   switch (sub) {
-    case "create":
-      return createCommand(rest, ports);
-    case "list":
-      return listCommand(rest, ports);
     case "use":
       return useCommand(rest, ports);
-    case "domain":
-      return domainCommand(rest, ports);
-    case "token":
-      return tokenCommand(rest, ports);
     case "login":
       return loginCommand(rest);
     case "push":
       return pushCommand(rest);
-    case "pin":
-      return pinCommand(rest, ports);
-    case "gc":
-      return gcCommand(rest, ports);
-    case "stats":
-      return statsCommand(rest, ports);
     case undefined:
     case "help":
     case "--help":
@@ -257,95 +219,6 @@ export async function cacheCommand(
   }
 }
 
-async function createCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    allowPositionals: true,
-    options: {
-      private: { type: "boolean" },
-      "retention-days": { type: "string" },
-      "upstream-key": { type: "string", multiple: true },
-      "no-upstream": { type: "boolean" },
-      store: { type: "string" },
-      origin: originOption,
-      output: outputOption,
-    },
-  });
-  const name = positionals[0];
-  if (name === undefined) {
-    process.stderr.write(`odu: cache create needs a bucket name\n${CACHE_USAGE}`);
-    return 1;
-  }
-  const json = values.output === "json";
-  const upstream = values["upstream-key"];
-  // BOTH is a contradiction with a one-sentence answer, not a merge rule: "take
-  // nothing from upstream" and "take what these names signed" cannot both hold.
-  if (values["no-upstream"] === true && upstream !== undefined) {
-    process.stderr.write(
-      "odu: --no-upstream and --upstream-key are opposites — a bucket either " +
-        "takes paths an upstream key signed or it takes everything\n",
-    );
-    return 1;
-  }
-  const upstreamKeys = values["no-upstream"] === true ? [] : upstream;
-  return withService(ports, values.origin, async (client) => {
-    const answer = await call(
-      client.surface.bucket.create({
-        rootToken: rootToken(),
-        name,
-        public: values.private !== true,
-        retentionDays:
-          values["retention-days"] === undefined
-            ? 90
-            : wholeNumber("--retention-days", values["retention-days"]),
-        ...(upstreamKeys === undefined ? {} : { upstreamKeys }),
-        ...(values.store === undefined ? {} : { store: values.store }),
-      }),
-    );
-    if (!answer.ok) return reportFailure(answer, json, REFUSED);
-    const bucket = answer.value;
-    if (json) {
-      emitJson(bucket);
-      return 0;
-    }
-    process.stdout.write(
-      `created bucket "${bucket.name}"\n` +
-        `  substituter: ${bucket.url}\n` +
-        `  public key: ${bucket.publicKey}\n` +
-        `  store: ${bucket.store}\n\n` +
-        `run \`odu cache use ${bucket.name}\` for the nix.conf lines.\n`,
-    );
-    return 0;
-  });
-}
-
-async function listCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
-  const { values } = parseArgs({
-    args: rest,
-    options: { origin: originOption, output: outputOption },
-  });
-  const json = values.output === "json";
-  return withService(ports, values.origin, async (client) => {
-    const answer = await call(client.surface.bucket.list({ rootToken: rootToken() }));
-    if (!answer.ok) return reportFailure(answer, json, REFUSED);
-    if (json) {
-      emitJson(answer.value);
-      return 0;
-    }
-    if (answer.value.buckets.length === 0) {
-      process.stdout.write("no buckets yet — `odu cache create <bucket>`\n");
-      return 0;
-    }
-    for (const bucket of answer.value.buckets) {
-      process.stdout.write(
-        `${bucket.name}${bucket.public ? "" : " (private)"}  ` +
-          `${bucket.objects} paths, ${bytes(bucket.bytes)}, ` +
-          `${bucket.retentionDays}d retention, on ${bucket.store}  ${bucket.url}\n`,
-      );
-    }
-    return 0;
-  });
-}
 
 async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -431,162 +304,6 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
   });
 }
 
-async function domainCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    allowPositionals: true,
-    options: { none: { type: "boolean" }, origin: originOption, output: outputOption },
-  });
-  const [bucket, domain] = positionals;
-  if (bucket === undefined || (values.none === true) === (domain !== undefined)) {
-    process.stderr.write(
-      `odu: cache domain needs a bucket and a name, or --none to clear it\n${CACHE_USAGE}`,
-    );
-    return 1;
-  }
-  const json = values.output === "json";
-  return withService(ports, values.origin, async (client) => {
-    const answer = await call(
-      client.surface.bucket.domain({
-        rootToken: rootToken(),
-        bucket,
-        ...(values.none === true ? {} : { domain }),
-      }),
-    );
-    if (!answer.ok) return reportFailure(answer, json, REFUSED);
-    if (json) {
-      emitJson(answer.value);
-      return 0;
-    }
-    process.stdout.write(
-      answer.value.domain === null
-        ? `cleared the name; ${bucket} is served under /cache/${bucket}\n`
-        : `named ${bucket} ${answer.value.domain}\n  substituter: ${answer.value.url}\n`,
-    );
-    return 0;
-  });
-}
-
-async function tokenCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
-  const [sub, ...args] = rest;
-  switch (sub) {
-    case "mint": {
-      const { values, positionals } = parseArgs({
-        args,
-        allowPositionals: true,
-        options: {
-          read: { type: "boolean" },
-          write: { type: "boolean" },
-          admin: { type: "boolean" },
-          "expires-days": { type: "string" },
-          "no-expiry": { type: "boolean" },
-          buckets: { type: "string" },
-          origin: originOption,
-          output: outputOption,
-        },
-      });
-      const bucket = positionals[0];
-      if (bucket === undefined) {
-        process.stderr.write(`odu: cache token mint needs a bucket name\n${CACHE_USAGE}`);
-        return 1;
-      }
-      if (values["no-expiry"] === true && values["expires-days"] !== undefined) {
-        process.stderr.write(
-          "odu: --no-expiry and --expires-days are opposites — a token either " +
-            "expires or it does not\n",
-        );
-        return 1;
-      }
-      const json = values.output === "json";
-      return withService(ports, values.origin, async (client) => {
-        const answer = await call(
-          client.surface.token.mint({
-            rootToken: rootToken(),
-            bucket,
-            ...(values.buckets === undefined ? {} : { bucketGlob: values.buckets }),
-            scope: scopeOf(values),
-            // NINETY DAYS unless said otherwise. "Never" is a choice a person
-            // types, not what happens when they forget a flag.
-            ...(values["no-expiry"] === true
-              ? {}
-              : {
-                  expiresDays:
-                    values["expires-days"] === undefined
-                      ? 90
-                      : wholeNumber("--expires-days", values["expires-days"]),
-                }),
-          }),
-        );
-        if (!answer.ok) return reportFailure(answer, json, REFUSED);
-        if (json) {
-          emitJson(answer.value);
-          return 0;
-        }
-        process.stdout.write(
-          `${answer.value.token}\n` +
-            `# shown once; scope ${answer.value.facts.scope}, id ${answer.value.facts.id}\n`,
-        );
-        return 0;
-      });
-    }
-    case "list": {
-      const { values, positionals } = parseArgs({
-        args,
-        allowPositionals: true,
-        options: { origin: originOption, output: outputOption },
-      });
-      const bucket = positionals[0];
-      const json = values.output === "json";
-      return withService(ports, values.origin, async (client) => {
-        const answer = await call(
-          client.surface.token.list({
-            rootToken: rootToken(),
-            ...(bucket === undefined ? {} : { bucket }),
-          }),
-        );
-        if (!answer.ok) return reportFailure(answer, json, REFUSED);
-        if (json) {
-          emitJson(answer.value);
-          return 0;
-        }
-        for (const token of answer.value.tokens) printToken(token);
-        if (answer.value.tokens.length === 0) process.stdout.write("no tokens\n");
-        return 0;
-      });
-    }
-    case "revoke": {
-      const { values, positionals } = parseArgs({
-        args,
-        allowPositionals: true,
-        options: { origin: originOption, output: outputOption },
-      });
-      const id = positionals[0];
-      if (id === undefined) {
-        process.stderr.write(`odu: cache token revoke needs a token id\n${CACHE_USAGE}`);
-        return 1;
-      }
-      const json = values.output === "json";
-      return withService(ports, values.origin, async (client) => {
-        const answer = await call(
-          client.surface.token.revoke({ rootToken: rootToken(), id }),
-        );
-        if (!answer.ok) return reportFailure(answer, json, REFUSED);
-        if (json) emitJson(answer.value);
-        else process.stdout.write(`revoked ${id}\n`);
-        return 0;
-      });
-    }
-    case undefined:
-    case "help":
-    case "--help":
-    case "-h":
-      process.stdout.write(CACHE_USAGE);
-      return sub === undefined ? 1 : 0;
-    default:
-      process.stderr.write(`odu: unknown cache token sub-command "${sub}"\n${CACHE_USAGE}`);
-      return 1;
-  }
-}
 
 async function loginCommand(rest: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -676,109 +393,3 @@ async function pushCommand(rest: string[]): Promise<number> {
   }
 }
 
-async function pinCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    allowPositionals: true,
-    options: { origin: originOption, output: outputOption },
-  });
-  const [bucket, name, ...paths] = positionals;
-  if (bucket === undefined || name === undefined || paths.length === 0) {
-    process.stderr.write(
-      `odu: cache pin needs a bucket, a name and at least one path\n${CACHE_USAGE}`,
-    );
-    return 1;
-  }
-  const json = values.output === "json";
-  return withService(ports, values.origin, async (client) => {
-    const answer = await call(
-      client.surface.pin.create({ rootToken: rootToken(), bucket, name, paths }),
-    );
-    if (!answer.ok) return reportFailure(answer, json, REFUSED);
-    if (json) {
-      emitJson(answer.value);
-      return 0;
-    }
-    process.stdout.write(
-      `pinned "${answer.value.name}" in ${answer.value.bucket}: ` +
-        `${answer.value.rootPaths.length} paths\n`,
-    );
-    return 0;
-  });
-}
-
-async function gcCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    allowPositionals: true,
-    options: { origin: originOption, output: outputOption },
-  });
-  const bucket = positionals[0];
-  const json = values.output === "json";
-  return withService(ports, values.origin, async (client) => {
-    const answer = await call(
-      client.surface.gc.run({
-        rootToken: rootToken(),
-        ...(bucket === undefined ? {} : { bucket }),
-      }),
-    );
-    if (!answer.ok) return reportFailure(answer, json, REFUSED);
-    if (json) {
-      emitJson(answer.value);
-      return 0;
-    }
-    for (const entry of answer.value.buckets) {
-      process.stdout.write(
-        `${entry.bucket}: evicted ${entry.evicted}, kept ${entry.kept} ` +
-          `(still rooted elsewhere), ${bytes(entry.bytes)} reclaimed\n`,
-      );
-    }
-    process.stdout.write(
-      `total: ${answer.value.evicted} paths, ${bytes(answer.value.bytes)} reclaimed\n`,
-    );
-    return 0;
-  });
-}
-
-async function statsCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
-  const { values } = parseArgs({
-    args: rest,
-    options: { origin: originOption, output: outputOption },
-  });
-  const json = values.output === "json";
-  return withService(ports, values.origin, async (client) => {
-    const answer = await call(client.surface.stats.read({ rootToken: rootToken() }));
-    if (!answer.ok) return reportFailure(answer, json, REFUSED);
-    if (json) {
-      emitJson(answer.value);
-      return 0;
-    }
-    for (const bucket of answer.value.buckets) {
-      process.stdout.write(
-        `${bucket.name}${bucket.public ? "" : " (private)"}  ` +
-          `${bucket.objects} paths, ${bytes(bucket.bytes)}, ` +
-          `${bucket.retentionDays}d retention\n`,
-      );
-    }
-    process.stdout.write(
-      `total: ${answer.value.objects} paths, ${bytes(answer.value.bytes)}, ` +
-        `${answer.value.hits} reads\n`,
-    );
-    return 0;
-  });
-}
-
-function printToken(token: CacheToken): void {
-  process.stdout.write(
-    `${token.id}  ${token.scope.padEnd(5)}  ${token.bucketGlob}  ` +
-      `${
-        token.revoked
-          ? "revoked"
-          : token.expires === null
-            ? "no expiry"
-            : `expires ${new Date(token.expires).toISOString().slice(0, 10)}`
-      }  ${token.lastUsed === null ? "never used" : `last used ${new Date(token.lastUsed).toISOString().slice(0, 16)}`}\n`,
-  );
-}
-
-/** Bytes as a person reads them. Binary units, because a store is. */

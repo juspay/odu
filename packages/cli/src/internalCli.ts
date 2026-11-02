@@ -19,8 +19,8 @@
  *
  * The other reason is the recursion trap, and it is worth stating because it is
  * not obvious: while the coordinator and the public verb were both spelled
- * `run`, making `odu run` a service client would have meant
- * `run.start → launcher → odu run → run.start`, forever. The launcher types
+ * `run`, making `odu ci run` a service client would have meant
+ * `run.start → launcher → odu ci run → run.start`, forever. The launcher types
  * `run-coordinator`; a person types `run`.
  *
  * `--run-id` in particular lets its caller mint a run identity the catalog will

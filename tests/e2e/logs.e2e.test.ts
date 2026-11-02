@@ -68,7 +68,7 @@ function noisyLog(dir: string): string {
 
 // TWO runs of the fixture, shared by both tests, because the second test's pair
 // already subsumes the first's single run — and a run of this fixture is a cold
-// `odu run` against a fresh git repo, which is tens of seconds of fixed cost for
+// `odu ci run` against a fresh git repo, which is tens of seconds of fixed cost for
 // ~1s of actual 14 MB streaming. The volume is nearly free and buys the
 // anti-flake margin for a race-shaped bug; the RUN COUNT is the expensive axis,
 // so that is the one to spend carefully. The `it`s stay separate: they name two
@@ -156,6 +156,7 @@ describe("a settled run's log", () => {
     try {
       await awaitRunSocket(dir);
       const wait = oduCli(oduBin, dir, [
+        "ci",
         "wait",
         "--settle",
         "--timeout-ms",
@@ -190,7 +191,7 @@ describe("a settled run's log", () => {
         truncationNotice: false,
       });
     } finally {
-      oduCli(oduBin, dir, ["cancel"]);
+      oduCli(oduBin, dir, ["ci", "cancel"]);
       await exited;
     }
   }, RUN_TIMEOUT);

@@ -19,7 +19,7 @@
  *
  * **The registry owns the clock; the surface owns the publish.** A single
  * poller re-projects the catalog and drives `ctx` — so a run started by
- * `odu run` in a terminal appears on every open board within a tick, without
+ * `odu ci run` in a terminal appears on every open board within a tick, without
  * anything having told the service about it. The alternative (re-reading the
  * catalog inside each collection read) would put a disk walk on the path of
  * every subscribe and every publish.
@@ -195,7 +195,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                   ? `odu: protect.apply writes branch protection with this daemon's ` +
                     `credential, so it needs an admin — ${principal.login} is a ${principal.role}`
                   : "odu: protect.apply writes branch protection with this daemon's credential, so it needs an admin",
-              suggestion: ["odu", "auth", "whoami"],
+              suggestion: ["odu", "surface", "auth", "user_whoami"],
             }),
           ),
     );
@@ -342,7 +342,7 @@ export function createOduService(opts: ServiceOptions): OduService {
               retryRun(input, { retry: opts.ports.retry, catalog }),
               () => Effect.sync(refresh),
             ),
-          // THE BOARD, FILTERED, in one call. Before this, `odu status`,
+          // THE BOARD, FILTERED, in one call. Before this, `odu ci status`,
           // `attach`, `--run latest` and `history list` read every row with one
           // round trip each and filtered on their own side — 711 round trips on
           // a 710-run catalog to show one run (juspay/odu#113). The filters
@@ -457,7 +457,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                       new ServiceRefused({
                         code: "no_venue",
                         message: outcome.message,
-                        suggestion: ["odu", "hosts"],
+                        suggestion: ["odu", "ci", "hosts"],
                       }),
                     );
                   }
@@ -469,7 +469,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                   // KEPT, so the next reader — a page opening Machines — reads
                   // this answer rather than dialling every machine again. Only
                   // a probe of the SERVICE'S OWN fleet: a caller's `hostsFile`
-                  // (`odu hosts` forwards its shell's `$ODU_HOSTS`) names that
+                  // (`odu ci hosts` forwards its shell's `$ODU_HOSTS`) names that
                   // person's machines, and keeping it would show every reader
                   // someone else's fleet and someone else's file path.
                   if (input.hostsFile === undefined) {
@@ -536,7 +536,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                       new ServiceRefused({
                         code: "no_venue",
                         message: outcome.message,
-                        suggestion: ["odu", "hosts"],
+                        suggestion: ["odu", "ci", "hosts"],
                       }),
                     );
               },

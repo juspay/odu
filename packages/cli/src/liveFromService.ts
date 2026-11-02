@@ -1,5 +1,5 @@
 /**
- * THE LIVE MATRIX, OVER THE SERVICE — `odu attach`'s dashboard, restored.
+ * THE LIVE MATRIX, OVER THE SERVICE — `odu ci attach`'s dashboard, restored.
  *
  * The matrix was driven by a direct dial into the coordinator's own surface,
  * and that dial is exactly the authority a public command may no longer hold.
@@ -28,7 +28,7 @@
  *   - `RunEnv` → `RunHeader`. Field for field, and better than the original:
  *     `lanes` here survive the coordinator that reported them.
  *   - `log.read` → `NodeLogFrame`. A `snapshot` then `append`s, ending on
- *     `open: false` — which is the same follow `odu logs -f` runs, so the pane
+ *     `open: false` — which is the same follow `odu ci logs -f` runs, so the pane
  *     and the pipe cannot disagree about when a log is finished.
  */
 
@@ -74,7 +74,7 @@ function nodeStateOf(node: NodesFrame["nodes"][number]): NodeState {
  * A frame as the VERDICT reads it — everything `summarize` and `printVerdict`
  * touch, and nothing that needs a board row.
  *
- * Separate from {@link pipelineStateOf} because the caller is: `odu run
+ * Separate from {@link pipelineStateOf} because the caller is: `odu ci run
  * --progress json` has the frame and the sha it was handed by the receipt, and
  * fetching a row it would use two fields of would be a second read for a
  * heading. The verdict is a fold over nodes; that is all this gives it.
@@ -129,7 +129,7 @@ export function headerOf(env: RunEnv, now: number): RunHeader {
  * One node's output as the view's log protocol — a snapshot, then appends,
  * then `end`.
  *
- * Built on `log.read` with `waitMs`, which is the same follow `odu logs -f`
+ * Built on `log.read` with `waitMs`, which is the same follow `odu ci logs -f`
  * runs. That is deliberate: two implementations of "when is a log finished"
  * would eventually disagree, and the pane and the pipe would stop at different
  * bytes on the same attempt.

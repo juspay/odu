@@ -70,7 +70,8 @@ describe("readPipeline", () => {
     ]);
     const beta = outcome.facts.tasks.find((t) => t.id === "beta");
     expect(beta?.needs).toEqual(["alpha"]);
-    // The engine renders the graph, so `odu graph` and a browser cannot drift.
+    // The engine renders the graph, so `odu ci graph` and a browser cannot
+    // drift.
     expect(outcome.facts.mermaid).toContain("flowchart TD");
     expect(outcome.facts.mermaid).toContain("alpha --> beta");
   });

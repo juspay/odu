@@ -2,7 +2,7 @@
  * GitHub **rulesets** — where a repo declares which status checks a branch
  * requires.
  *
- * `odu protect` used to PATCH classic branch protection
+ * `odu ci protect` used to PATCH classic branch protection
  * (`/branches/{b}/protection/required_status_checks`). That endpoint sees only
  * the legacy protection object, so against a branch governed by a ruleset it
  * answers `Branch not protected (HTTP 404)` — even though the branch reports

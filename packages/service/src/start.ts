@@ -302,7 +302,7 @@ async function start(
         `UNKNOWN — ${reconciled.kind === "unresolved" ? reconciled.reason : "no run was recorded"}. ` +
         "Do not repeat it with a fresh id until you have checked whether it " +
         "took effect: a second start would be a second run.",
-      { suggestion: ["odu", "history", "list"] },
+      { suggestion: ["odu", "ci", "history", "list"] },
     );
   }
 

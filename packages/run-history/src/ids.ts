@@ -44,7 +44,7 @@ const RUN_ID_RE = /^[0-9a-z]{8,}-[0-9a-z]{4,}$/;
  *
  * The random tail is what makes it UNIQUE rather than merely ordered: two
  * coordinators can start in the same millisecond on the same machine (a
- * fan-out of `odu run` from a script does exactly this), and the catalog has
+ * fan-out of `odu ci run` from a script does exactly this), and the catalog has
  * no lock to serialize them. Uniqueness is not left to the clock.
  *
  * The commit is deliberately NOT in the id. A run id addresses a run for the

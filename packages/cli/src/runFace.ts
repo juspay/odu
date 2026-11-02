@@ -1,6 +1,6 @@
 /**
  * The terminal's implementation of {@link MakeRunFace} — the only thing that
- * knows `odu run` is being watched by a person or by a pipe.
+ * knows `odu ci run` is being watched by a person or by a pipe.
  *
  * WHICH FACE, decided here and nowhere else. Where stdout points picks the
  * medium: NDJSON for `--progress json` (the byte contract `/do` and kolu's CI
@@ -20,7 +20,7 @@ import { createDisplay } from "./display";
 import type { MakeRunFace } from "@odu/execution/common/presentation";
 import { printVerdict } from "./render";
 
-/** How `odu run` decides which of the three renderings to be. Passed in rather
+/** How `odu ci run` decides which of the three renderings to be. Passed in rather
  *  than probed, so a test states the world instead of the process's tty bits
  *  deciding what a test asserts. */
 export interface FaceEnv {
@@ -63,5 +63,5 @@ export function cliRunFace(env: FaceEnv): MakeRunFace {
 
 // The verdict block moved to `./render`, which is where a terminal
 // projection of a run belongs and — unlike this file — is reachable from a
-// public client. `odu run` is one now, and it has to print the same block.
+// public client. `odu ci run` is one now, and it has to print the same block.
 export { printVerdict } from "./render";

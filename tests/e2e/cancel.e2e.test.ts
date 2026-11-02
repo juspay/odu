@@ -93,7 +93,7 @@ function sha7Of(dir: string): string {
 /**
  * Is a coordinator SERVING this checkout? The socket, and only the socket.
  *
- * It used to be "the socket exists and `odu status` dials it", which was one
+ * It used to be "the socket exists and `odu ci status` dials it", which was one
  * fact twice: `status` reached the coordinator through that socket, so its exit
  * proved the socket was answering. It does not any more — `status` is a catalog
  * read, and it answers about a run whose coordinator has been gone for a week.
@@ -104,7 +104,7 @@ function runIsLive(dir: string): boolean {
   return existsSync(join(dir, ".ci", "odu.sock"));
 }
 
-describe("odu cancel / supersede / linger (black-box)", () => {
+describe("odu ci cancel / supersede / linger (black-box)", () => {
   it(
     "drops one lane and still settles cleanly — no crash, no invented notice",
     async () => {
@@ -123,7 +123,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
       // no truncation line, so the exit code cannot tell them apart. The
       // difference is whether the run reached its verdict block or died with
       // the throw — which only stderr shows.
-      const child = spawn(oduBin, ["run", "--no-strict", "--progress", "json"], {
+      const child = spawn(oduBin, ["ci", "run", "--no-strict", "--progress", "json"], {
         cwd: dir,
         stdio: ["ignore", "ignore", "pipe"],
         env,
@@ -155,7 +155,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
         "the slow node to start producing output",
       );
 
-      execFileSync(oduBin, ["cancel", `@${platform}`], { cwd: dir, env });
+      execFileSync(oduBin, ["ci", "cancel", `@${platform}`], { cwd: dir, env });
 
       // Dropping the only lane leaves nothing left to run, so the run settles
       // on its own. INCOMPLETE — a cancelled node is not a pass.
@@ -177,11 +177,11 @@ describe("odu cancel / supersede / linger (black-box)", () => {
 
   it("cancels a live run from a second process and drops the socket", async () => {
     const dir = fixture("sleep");
-    const { exited } = spawnOdu(dir, ["run", "--no-strict"]);
+    const { exited } = spawnOdu(dir, ["ci", "run", "--no-strict"]);
     await waitUntil(() => runIsLive(dir), 120_000, "the run to come up");
 
     // The cancel is a different process dialing the live socket.
-    const out = execFileSync(oduBin, ["cancel"], { cwd: dir, encoding: "utf-8", env });
+    const out = execFileSync(oduBin, ["ci", "cancel"], { cwd: dir, encoding: "utf-8", env });
     expect(out).toMatch(/run cancelled/);
 
     // The coordinator tore down: its process exits and the socket is gone, so a
@@ -196,9 +196,9 @@ describe("odu cancel / supersede / linger (black-box)", () => {
 
   it("a second run does not start one, but --supersede takes over", async () => {
     const dir = fixture("sleep");
-    const first = spawnOdu(dir, ["run", "--no-strict"]);
+    const first = spawnOdu(dir, ["ci", "run", "--no-strict"]);
     await waitUntil(() => runIsLive(dir), 120_000, "the first run to come up");
-    const firstRun = execFileSync(oduBin, ["history", "list", "-o", "json"], {
+    const firstRun = execFileSync(oduBin, ["ci", "history", "list", "-o", "json"], {
       cwd: dir,
       encoding: "utf-8",
       env,
@@ -210,7 +210,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
     // `accepted: false`, addressed — instead of refusing, because that run is
     // almost always the one the caller wanted. So the property to assert is
     // that no SECOND run came into existence, which is what the lock is for.
-    const second = spawnSync(oduBin, ["run", "--no-strict", "--no-wait"], {
+    const second = spawnSync(oduBin, ["ci", "run", "--no-strict", "--no-wait"], {
       cwd: dir,
       encoding: "utf-8",
       env,
@@ -218,7 +218,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
     expect(second.stderr).toMatch(/a run is already going in this checkout/);
     const after = (
       JSON.parse(
-        execFileSync(oduBin, ["history", "list", "-o", "json"], {
+        execFileSync(oduBin, ["ci", "history", "list", "-o", "json"], {
           cwd: dir,
           encoding: "utf-8",
           env,
@@ -228,7 +228,7 @@ describe("odu cancel / supersede / linger (black-box)", () => {
     expect(after).toBe(before);
 
     // With supersede, the new run cancels the first and binds the lock itself.
-    spawnOdu(dir, ["run", "--no-strict", "--supersede"]);
+    spawnOdu(dir, ["ci", "run", "--no-strict", "--supersede"]);
     const firstCode = await Promise.race([
       first.exited,
       sleep(30_000).then(() => "timeout" as const),
@@ -236,19 +236,19 @@ describe("odu cancel / supersede / linger (black-box)", () => {
     expect(firstCode).not.toBe("timeout"); // the superseded run exited
     await waitUntil(() => runIsLive(dir), 120_000, "the superseding run to serve");
 
-    execFileSync(oduBin, ["cancel"], { cwd: dir, env }); // clean up the live run
+    execFileSync(oduBin, ["ci", "cancel"], { cwd: dir, env }); // clean up the live run
   }, 240_000);
 
   it("--linger keeps the coordinator serving past settle", async () => {
     const dir = fixture("pass");
-    spawnOdu(dir, ["run", "--no-strict", "--linger"]);
+    spawnOdu(dir, ["ci", "run", "--no-strict", "--linger"]);
     await waitUntil(() => runIsLive(dir), 120_000, "the run to come up");
 
     // The `pass` DAG drains in seconds; a non-linger run would exit and drop the
     // socket. With --linger the coordinator stays up, so `status` keeps dialing.
     await waitUntil(() => {
       try {
-        const out = execFileSync(oduBin, ["status", "-o", "json"], {
+        const out = execFileSync(oduBin, ["ci", "status", "-o", "json"], {
           cwd: dir,
           encoding: "utf-8",
           env,
@@ -264,20 +264,20 @@ describe("odu cancel / supersede / linger (black-box)", () => {
     }, 60_000, "the run to drain green");
 
     // Several seconds after settle the socket is *still* there — the linger.
-    // Asserted on the socket rather than on `odu status`, which now answers
+    // Asserted on the socket rather than on `odu ci status`, which now answers
     // from the catalog and would say "settled" just as happily about a
     // coordinator that exited an hour ago. What `--linger` promises is that
     // something is still SERVING, and the socket is where that is visible.
     await sleep(3_000);
     expect(runIsLive(dir)).toBe(true);
 
-    execFileSync(oduBin, ["cancel"], { cwd: dir, env });
+    execFileSync(oduBin, ["ci", "cancel"], { cwd: dir, env });
     await waitUntil(() => !runIsLive(dir), 15_000, "cancel to drop the socket");
   }, 180_000);
 });
 
 /**
- * The run *environment* on `odu status`, read from a second process
+ * The run *environment* on `odu ci status`, read from a second process
  * (juspay/odu#84). A localhost lane claims nothing, so these fixtures can never
  * sit in the `provisioning` phase — what the shipped binary proves here is the
  * contract's other half: the `run` key exists, and a run that reached its lanes
@@ -285,13 +285,13 @@ describe("odu cancel / supersede / linger (black-box)", () => {
  * is covered over the socket in `packages/cli/src/introspect.provisioning.test.ts`,
  * which does not need an ssh host to reach it.
  */
-describe("odu status reports the run environment (black-box)", () => {
+describe("odu ci status reports the run environment (black-box)", () => {
   it("carries phase + lanes on a live localhost run", async () => {
     const dir = fixture("sleep");
-    spawnOdu(dir, ["run", "--no-strict"]);
+    spawnOdu(dir, ["ci", "run", "--no-strict"]);
     await waitUntil(() => runIsLive(dir), 120_000, "the run to come up");
 
-    const out = execFileSync(oduBin, ["status", "-o", "json"], {
+    const out = execFileSync(oduBin, ["ci", "status", "-o", "json"], {
       cwd: dir,
       encoding: "utf-8",
       env,
@@ -313,13 +313,13 @@ describe("odu status reports the run environment (black-box)", () => {
     expect(parsed.nodes.length).toBeGreaterThan(0);
 
     // The plain face says nothing extra once a run has its lanes.
-    const plain = execFileSync(oduBin, ["status"], {
+    const plain = execFileSync(oduBin, ["ci", "status"], {
       cwd: dir,
       encoding: "utf-8",
       env,
     });
     expect(plain).not.toContain("provisioning");
 
-    execFileSync(oduBin, ["cancel"], { cwd: dir, env });
+    execFileSync(oduBin, ["ci", "cancel"], { cwd: dir, env });
   }, 180_000);
 });

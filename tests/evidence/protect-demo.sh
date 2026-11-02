@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible terminal evidence for `odu protect` platform enumeration
+# Reproducible terminal evidence for `odu ci protect` platform enumeration
 # (PR #53, issue #52). Recorded with asciinema, rendered to a gif with agg —
 # see dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a
 # throwaway fixture; protect --dry-run never dials a host, which is the point.
@@ -31,20 +31,20 @@ cmd "cat \$ODU_HOSTS"
 cat "$ODU_HOSTS"; echo; sleep 1.6
 
 say "protect never dials a host, so explicit --platform needs no hosts (#52):"
-cmd "odu protect --dry-run --platform x86_64-linux --platform aarch64-darwin"
-"$ODU" protect --dry-run --platform x86_64-linux --platform aarch64-darwin
+cmd "odu ci protect --dry-run --platform x86_64-linux --platform aarch64-darwin"
+"$ODU" ci protect --dry-run --platform x86_64-linux --platform aarch64-darwin
 sleep 2.6
 
 say "Unsliced, the set derives from the hosts file — and now SAYS so"
 say "(a one-platform machine once silently halved a repo's protection):"
 printf '{"x86_64-linux":"ci-box"}' > "$ODU_HOSTS"
-cmd "odu protect --dry-run"
-"$ODU" protect --dry-run
+cmd "odu ci protect --dry-run"
+"$ODU" ci protect --dry-run
 sleep 3.2
 
 say "A blank --platform value is refused, not fanned out as 'recipe@':"
-cmd "odu protect --dry-run --platform ''"
-"$ODU" protect --dry-run --platform '' || true
+cmd "odu ci protect --dry-run --platform ''"
+"$ODU" ci protect --dry-run --platform '' || true
 sleep 2.6
 
 rm -rf "$D" "$(dirname "$ODU_HOSTS")"

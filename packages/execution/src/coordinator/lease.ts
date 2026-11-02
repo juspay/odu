@@ -1134,7 +1134,7 @@ function assertNoSharedRemoteHosts(
 
 /** Does this pool mix localhost with remotes — the shape the lease seam
  *  refuses? Exported so a read-only face can SURFACE an illegal pool without
- *  refusing over it: `odu hosts` never leases, so refusing there would be
+ *  refusing over it: `odu ci hosts` never leases, so refusing there would be
  *  juspay/odu#66 wearing an inventory hat. But the operator should learn it
  *  from the command whose whole job is showing the inventory, rather than from
  *  the first run that tries to claim that platform. */
@@ -1156,7 +1156,7 @@ export function isMixedPool(pool: HostPool): boolean {
  * `assertPoolsScannable`), over exactly the platforms a run claims — never at
  * parse time and never over the whole resolved map, both of which refuse runs
  * that never touch the offending pool (juspay/odu#66): a resolved map still
- * carries platforms a selector (`odu run fmt@aarch64-darwin`) or an
+ * carries platforms a selector (`odu ci run fmt@aarch64-darwin`) or an
  * OS-disabled recipe drops before any lease.
  */
 function assertPoolLocality(
@@ -1344,7 +1344,7 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   }
 }
 
-/** Probe every host in the config for `odu hosts`. */
+/** Probe every host in the config for `odu ci hosts`. */
 export async function probeAllHosts(
   pools: Record<string, HostPool>,
   opts: {

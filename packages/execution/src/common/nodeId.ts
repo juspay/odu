@@ -46,7 +46,7 @@ export function transitiveDependents(
   return out;
 }
 
-/** Parse `@platform` sugar shared by `odu cancel` and `odu rerun`. Returns the
+/** Parse `@platform` sugar shared by `odu ci cancel` and `odu ci rerun`. Returns the
  *  platform name, or `null` when the token is not a valid `@plat` form
  *  (missing `@`, empty after `@`, or nested `@`). Non-`@` tokens return null
  *  so callers keep their own node/recipe branch. */
@@ -94,7 +94,7 @@ export function resolveNodeId(state: PipelineState, token: string): string {
  *  - `@plat` — recipe nodes on that platform lane (not `_ci-setup`)
  *  - `unit` / `ci::unit` — that recipe on every lane (multi-match is the point)
  *
- *  Mirrors `odu cancel`'s node / `@platform` sugar and adds the bare-recipe
+ *  Mirrors `odu ci cancel`'s node / `@platform` sugar and adds the bare-recipe
  *  form cancel doesn't need (cancel has `lane.cancel`; rerun is only per-node). */
 export function resolveRerunTargets(
   state: PipelineState,

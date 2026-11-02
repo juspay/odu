@@ -1,5 +1,5 @@
 /**
- * `cancelRun` — the shared core behind `odu cancel`, the MCP `cancel` tool, and
+ * `cancelRun` — the shared core behind `odu ci cancel`, the MCP `cancel` tool, and
  * a `--supersede` start. Driven over a real unix-socket `oduSurface` (the
  * `serveTestSurface` harness), so the `run.cancel` call rides the same
  * transport production hits; plus the no-run no-op and the

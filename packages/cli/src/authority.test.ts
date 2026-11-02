@@ -44,7 +44,9 @@
  *
  * Every public capability is a member on the shared surface now. The set this
  * walks is DERIVED from `src/main.ts`'s own imports, so a command cannot be
- * exempted by forgetting to list it.
+ * exempted by forgetting to list it — and it is the CLOSURE of those imports,
+ * which is what keeps `odu ci`'s fifteen verbs policed now that the root
+ * names rows and the row's door (`./ciCli`) is the hop to them.
  *
  * **AND THE WALK LEAVES THIS PACKAGE.** `main.ts` imports `@odu/cache/cli` and
  * `@odu/launch/webLauncher`, and a wall that stopped at this package's
@@ -60,7 +62,7 @@
  * service, and it is admissible here for a reason this wall can check: it
  * imports none of the three authorities above, and it has to be this way
  * because the paths live on the machine that built them — a push cannot go
- * THROUGH the service, which is not where the bytes are. `cacheCmd.ts` is
+ * THROUGH the service, which is not where the bytes are. `@odu/cache/cli` is
  * therefore policed like every other public client, and passes on the same
  * terms.
  *
@@ -75,7 +77,6 @@ import { describe, expect, it } from "bun:test";
 import ts from "typescript";
 
 const packageRoot = join(import.meta.dirname, "..");
-const srcRoot = join(packageRoot, "src");
 
 /**
  * Every `@odu/cli/*` module `src/main.ts` imports — DERIVED, not listed.
@@ -391,8 +392,11 @@ describe("the authority wall", () => {
     expect(closure.size).toBeGreaterThanOrEqual(PUBLIC_CLIENTS.length);
     expect([...closure.keys()]).toContain("packages/cli/src/serviceCommands.ts");
     // And the derivation actually found the tree, rather than reading a
-    // `main.ts` that had moved and quietly policing nothing.
-    expect(reachedFromMain.length).toBeGreaterThan(5);
+    // `main.ts` that had moved and quietly policing nothing. The root names
+    // ROWS now, so the count is small by design and the names are what matter:
+    // the runs' row's door is the one that leads to every run client.
+    expect(reachedFromMain).toContain("ciCli.ts");
+    expect(closure.size).toBeGreaterThan(5);
   });
 
   it("keeps the exempt set exactly this one, and no more", () => {
@@ -435,22 +439,32 @@ describe("the authority wall", () => {
   });
 
   it("walls every command the usage text advertises", () => {
-    // The inventory, from the other side. `main.ts` is the only place a public
-    // verb exists, so a verb whose dispatch does not reach a walled client is a
-    // verb doing its own work — which is exactly the shape the review found
-    // nine times over.
+    // The inventory, from the other side. A verb whose dispatch does not reach
+    // a walled client is a verb doing its own work — which is exactly the shape
+    // the review found nine times over.
+    //
+    // Two lists, because the root names ROWS now (PLAN 2.10): `main.ts`
+    // imports the runs' row's door and the two service projections, and the
+    // row's door is what reaches the four run faces. Policing only the direct
+    // imports would have let the whole of `odu ci` out from under the wall the
+    // day it moved one file away.
+    for (const face of ["ciCli.ts", "serviceCli.ts", "serviceMcp.ts"]) {
+      expect(
+        PUBLIC_CLIENTS,
+        `${face} is a public face and must be reachable from src/main.ts`,
+      ).toContain(face);
+    }
     for (const face of [
       "serviceCommands.ts",
       "serviceStatus.ts",
       "serviceVenue.ts",
       "servicePipeline.ts",
-      "serviceCli.ts",
-      "serviceMcp.ts",
     ]) {
       expect(
-        PUBLIC_CLIENTS,
-        `${face} is a public face and must be reachable from src/main.ts`,
-      ).toContain(face);
+        [...closure.keys()],
+        `${face} is a public face and must be walled — reached through the ` +
+          "runs' row's door (./ciCli), which src/main.ts imports",
+      ).toContain(`packages/cli/src/${face}`);
     }
   });
 

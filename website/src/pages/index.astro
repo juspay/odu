@@ -155,7 +155,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                 </video>
                 <figcaption>
                   <strong>Human face</strong>
-                  <span><code>odu run</code> / <code>odu attach</code> — one live pipeline, late attach with buffer replay.</span>
+                  <span><code>odu ci run</code> / <code>odu ci attach</code> — one live pipeline, late attach with buffer replay.</span>
                 </figcaption>
               </figure>
               <figure class="proof-card">
@@ -194,7 +194,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                 <span class="who">Human</span>
                 <h3>Attach while e2e is still running</h3>
                 <p>
-                  Lint already green, e2e still going. <code>odu attach</code> from
+                  Lint already green, e2e still going. <code>odu ci attach</code> from
                   another terminal: full matrix, focus a node, stream its log — including
                   everything that ran before you connected.
                 </p>
@@ -220,7 +220,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                 <span class="who">Team</span>
                 <h3>Linux + macOS in one command</h3>
                 <p>
-                  A bare <code>odu run</code> covers every configured platform and
+                  A bare <code>odu ci run</code> covers every configured platform and
                   posts a GitHub commit status per <code>recipe@platform</code> — a
                   green matrix on your own machines, no hosted runner rented.
                 </p>
@@ -237,7 +237,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
               <h2 class="section-title">Runs from your machine. Executes anywhere.</h2>
               <p class="section-lead">
                 The shared service runs locally. Each run’s coordinator lives
-                on <strong>your machine</strong> — a bare <code>odu run</code> fans out
+                on <strong>your machine</strong> — a bare <code>odu ci run</code> fans out
                 across every configured platform at once, delegating each lane to a
                 host over plain ssh. The runner travels as a Nix closure, so hosts
                 need only ssh, Nix, and outbound HTTPS. Nothing preinstalled.
@@ -247,7 +247,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
             <div class="topo" aria-label="odu execution topology">
               <div class="topo-node topo-coord">
                 <span class="topo-tag">your machine</span>
-                <strong>odu run</strong>
+                <strong>odu ci run</strong>
                 <span class="topo-sub">coordinator · holds live state · posts GitHub statuses</span>
               </div>
               <div class="topo-arrow" aria-hidden="true">

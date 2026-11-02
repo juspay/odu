@@ -84,7 +84,9 @@ const declaration = {
   // acceptance suite's fixtures, a bucket's class names).
   collisions: {
     cache: {
-      "packages/cli/src/serviceCli.ts": 4,
+      // `serviceCli.ts` is NOT here any more: the argv projection used to
+      // hand-list the cache as its one sibling, and now derives every sibling
+      // from the wire's row records, so it spells no row's word at all.
       // The bridge's one row word: what an UNANSWERED roster offers.
       "packages/cli/src/serviceMcp.ts": 2,
       // The composed wire: the row's own facts, from which its surface, its
@@ -271,14 +273,18 @@ describe("four rows, each reachable only from the roots", () => {
  * every face spells, are one constant.**
  *
  * The mount happens in the row's own `apply` (`bundle.mount(...)`), the roster
- * names it, and four faces build their view of the wire from it: the browser's
- * `connectSurfaces`, the argv projection, the stdio bridge and the cache's own
- * client. A mismatch is the quietest failure the bundle has — the page connects,
- * the health fold is green, and every call into that row answers "unknown
- * member" — and a LITERAL at five sites is how the mismatch happens. So the
- * claim is not "these five strings are equal" (the type system stopped needing
- * that the day the constant existed) but "these five sites use the constant, and
- * it is declared once, behind a door all five may open".
+ * names it, and the faces build their view of the wire from it: the browser's
+ * `connectSurfaces`, the stdio bridge and the cache's own client. A mismatch is
+ * the quietest failure the bundle has — the page connects, the health fold is
+ * green, and every call into that row answers "unknown member" — and a LITERAL
+ * at each site is how the mismatch happens. So the claim is not "these strings
+ * are equal" (the type system stopped needing that the day the constant
+ * existed) but "these sites use the constant, and it is declared once, behind a
+ * door all of them may open".
+ *
+ * `odu surface`'s projection is absent on purpose: it names NO row, deriving
+ * every sibling from `@odu/cli/wire`'s records, which is one better than
+ * spelling the constant (PLAN 2.10).
  */
 describe("the row's word", () => {
   /** The contract, which is the browser-safe door every face can open. */
@@ -289,7 +295,6 @@ describe("the row's word", () => {
   const FACES = [
     "packages/host/src/web.ts",
     "packages/web-ui/src/main.tsx",
-    "packages/cli/src/serviceCli.ts",
     "packages/cli/src/serviceMcp.ts",
     "packages/cli/src/wire.ts",
     "packages/cache/src/cli.ts",

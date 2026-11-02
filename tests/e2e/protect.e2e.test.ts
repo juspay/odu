@@ -1,5 +1,5 @@
 /**
- * End-to-end: `odu protect --dry-run` prints the (recipe × platform) contexts
+ * End-to-end: `odu ci protect --dry-run` prints the (recipe × platform) contexts
  * branch protection would require. `protect` never dials a host, so its
  * platform enumeration must not depend on the machine's hosts config:
  * explicit `--platform` flags work against an EMPTY hosts file
@@ -62,7 +62,7 @@ function fixture(name: string): string {
   return dir;
 }
 
-/** Run `odu protect --dry-run` in `dir` with a throwaway hosts file holding
+/** Run `odu ci protect --dry-run` in `dir` with a throwaway hosts file holding
  *  exactly `hosts` (an object, or a raw string for a deliberately malformed
  *  file) — hermetic against the dev machine's ambient config, like the
  *  harness's `hermeticEnv`, but per-test so a test can name an EMPTY config
@@ -81,7 +81,7 @@ function oduProtect(
     hostsFile,
     typeof hosts === "string" ? hosts : JSON.stringify(hosts),
   );
-  const res = spawnSync(oduBin, ["protect", "--dry-run", ...args], {
+  const res = spawnSync(oduBin, ["ci", "protect", "--dry-run", ...args], {
     cwd: dir,
     encoding: "utf-8",
     maxBuffer: BIG,
@@ -104,7 +104,7 @@ const BOTH_PLATFORMS = [
   "aarch64-darwin",
 ];
 
-describe("odu protect --dry-run (black-box)", () => {
+describe("odu ci protect --dry-run (black-box)", () => {
   it("enumerates explicit --platform flags with an empty hosts config (#52)", () => {
     const { res } = oduProtect(fixture("pass"), {}, BOTH_PLATFORMS);
     // Explicit platforms are the operator's own decision — no provenance
@@ -220,7 +220,7 @@ const RULES_ON_MASTER = FIXTURE_RULESET.rules.map((rule) => ({
 }));
 
 /**
- * Run a real `odu protect` (no `--dry-run`) whose `gh` is a shell script
+ * Run a real `odu ci protect` (no `--dry-run`) whose `gh` is a shell script
  * answering the two reads from canned JSON and capturing the write. Faking at
  * the `$ODU_GH_BIN` seam rather than stubbing a module keeps the test
  * black-box: the argv it records is exactly the argv that would have reached
@@ -270,7 +270,7 @@ esac
 
   const res = spawnSync(
     oduBin,
-    ["protect", ...BOTH_PLATFORMS, ...(opts.args ?? [])],
+    ["ci", "protect", ...BOTH_PLATFORMS, ...(opts.args ?? [])],
     {
       cwd: dir,
       encoding: "utf-8",
@@ -325,7 +325,7 @@ interface Rule {
   parameters?: Record<string, unknown>;
 }
 
-describe("odu protect (ruleset write path)", () => {
+describe("odu ci protect (ruleset write path)", () => {
   it("writes the contexts into the ruleset governing the branch", () => {
     const { res, putBody } = oduProtectWrite({
       branchRules: RULES_ON_MASTER,

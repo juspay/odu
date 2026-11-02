@@ -429,14 +429,14 @@ export function CiFace(props: CiFaceProps): JSX.Element {
           noDeps: current.scope.noDeps,
           // A checkout with no GitHub origin cannot post commit statuses, and
           // the coordinator REFUSES a posting run there rather than quietly
-          // dropping the reporting. That refusal is right for `odu run`, where a
-          // person may simply not have configured a remote yet. It is wrong
-          // HERE: this button repeats a run that already ran in this checkout,
-          // which means it ran with posting off — so asking for it with posting
-          // on is not repeating it, it is asking for something odu will decline
-          // for a reason nobody can act on from this page. `repo` is the row's
-          // own word for "this checkout has a GitHub origin", so the browser
-          // says what it is already holding rather than finding out.
+          // dropping the reporting. That refusal is right for `odu ci run`,
+          // where a person may simply not have configured a remote yet. It is
+          // wrong HERE: this button repeats a run that already ran in this
+          // checkout, which means it ran with posting off — so asking for it
+          // with posting on is not repeating it, it is asking for something odu
+          // will decline for a reason nobody can act on from this page. `repo`
+          // is the row's own word for "this checkout has a GitHub origin", so
+          // the browser says what it is already holding rather than finding out.
           ...(current.repo === null ? { noPost: true } : {}),
         }),
         (receipt) =>
@@ -454,7 +454,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
   };
 
   /**
-   * THE LIVE LOG, FOLLOWED BYTE-EXACTLY — parity with `odu attach`.
+   * THE LIVE LOG, FOLLOWED BYTE-EXACTLY — parity with `odu ci attach`.
    *
    * `logTails` streams, and for a long time that was the whole of the browser's
    * live view. But a tail is the last {@link LOG_TAIL_BYTES} re-sent WHOLE on
@@ -465,7 +465,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
    * application.
    *
    * So the live pane is a CURSORED follow — the same `log.read` + `waitMs` loop
-   * `odu logs -f` and the attach TUI run, holding `nextOffset` and appending.
+   * `odu ci logs -f` and the attach TUI run, holding `nextOffset` and appending.
    * One mechanism, three faces, and no face that quietly sees less.
    *
    * `logTails` stays for the header's `totalBytes` / `complete`, which are

@@ -10,9 +10,9 @@
  * no free row. A face that got an empty list for both would tell an operator to
  * wait for machines that do not exist.
  *
- * The second is the one this PR actually put at risk. `odu lease` used to fork
- * its holder from the operator's shell; through the service the holder is the
- * DAEMON's child, so `holderPid` in `.ci/odu-lease.json` is now a pid in a
+ * The second is the one this PR actually put at risk. `odu ci lease` used to
+ * fork its holder from the operator's shell; through the service the holder is
+ * the DAEMON's child, so `holderPid` in `.ci/odu-lease.json` is now a pid in a
  * different process tree. Three readers depend on that pid — `pidAlive`,
  * `heldHostForPlatform` (which the COORDINATOR consults at run time to consume
  * an agent's hold) and `releaseVenues` — and all three would have failed
@@ -95,8 +95,8 @@ function stranger(): number {
 }
 
 /** Write `.ci/odu-lease.json` by hand, in the format and at the location the
- *  holder, the coordinator and `odu release` all already agree on — which this
- *  change deliberately did not move. */
+ *  holder, the coordinator and `odu ci release` all already agree on — which
+ *  this change deliberately did not move. */
 function writeRecord(
   repoRoot: string,
   record: Record<string, PlatformLeaseRecord>,
@@ -150,7 +150,7 @@ describe("probeVenues", () => {
   });
 
   it("says `down`, not `unreachable`, and keeps the probe's own sentence", async () => {
-    // The rename `odu hosts` has always made, carried into the port rather than
+    // The rename `odu ci hosts` has always made, carried into the port rather
     // repeated at each face — three faces choosing three words for one state is
     // how a vocabulary stops being shared. Nothing is lost by the shorter
     // label: `error` on the same row is where the reason lives.

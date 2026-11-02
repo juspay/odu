@@ -294,7 +294,7 @@ export const RunEventSchema = Schema.Union([
   /** A platform lane changed state. `claiming` is waiting for a venue and has
    *  no host yet; `leased` has one.
    *
-   *  `pool` and `hostsSource` are what `odu status` prints during a provision —
+   *  `pool` and `hostsSource` are what `odu ci status` prints during a provision —
    *  "which boxes is this waiting on, and which file said so" — and they are
    *  here because that question outlives the coordinator that could once be
    *  asked it. Both `optionalKey`: the journal reader SKIPS a line it cannot

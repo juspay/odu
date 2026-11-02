@@ -90,7 +90,7 @@ describe("launchArgv", () => {
         }),
       }),
     );
-    // The INTERNAL verb, not the public one. `odu run` is a service client now,
+    // The INTERNAL verb, not the public one. `odu ci run` is a service client now,
     // and a launcher that invoked it would recurse through `run.start` forever.
     expect(argv.slice(0, 3)).toEqual(["run-coordinator", "unit", "e2e"]);
     expect(argv.filter((a) => a === "--platform")).toHaveLength(2);
@@ -144,7 +144,7 @@ describe("launchArgv", () => {
   });
 
   it("carries --linger, the caller's shape of run", () => {
-    // `odu run --linger` parks the coordinator at settle instead of tearing
+    // `odu ci run --linger` parks the coordinator at settle instead of tearing
     // down, so its socket is still answerable when a caller goes to read the
     // log. Dropping the flag turns that into a race the caller cannot win, and
     // it is the shape an agent's settle-then-read loop actually uses.

@@ -74,7 +74,7 @@ export const ExtendInputSchema = Schema.Struct({
 export type ExtendInput = typeof ExtendInputSchema.Type;
 
 /** Who holds a venue lock (`holder|run|sinceMs` on the agent). Shared by the
- *  lane's `lease.*` procedures and the coordinator's `odu hosts` rendering. */
+ *  lane's `lease.*` procedures and the coordinator's `odu ci hosts` rendering. */
 export const LeaseHolderSchema = Schema.Struct({
   holder: Schema.String,
   run: Schema.NullOr(Schema.String),

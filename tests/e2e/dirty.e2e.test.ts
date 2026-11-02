@@ -79,11 +79,11 @@ it("pins edits locally and over stdio, changes red to green, then proves cache r
   writeFileSync(join(dir, "marker.txt"), "red\n");
   writeFileSync(join(dir, "new.txt"), "new\n");
   rmSync(join(dir, "gone.txt"));
-  const strict = cli(local, dir, ["run", "--no-post", "-o", "json"]);
+  const strict = cli(local, dir, ["ci", "run", "--no-post", "-o", "json"]);
   expect(strict.status).not.toBe(0);
   expect(strict.stdout + strict.stderr).toContain("dirty");
   const run = (world: typeof local, expectedStatus: number) => {
-    const result = cli(world, dir, ["run", "--no-strict", "-o", "json"]);
+    const result = cli(world, dir, ["ci", "run", "--no-strict", "-o", "json"]);
     if (result.status !== expectedStatus)
       throw new Error(
         `run exited ${result.status}: ${result.stdout}\n${result.stderr}`,
@@ -97,6 +97,7 @@ it("pins edits locally and over stdio, changes red to green, then proves cache r
     expect(answer.contentSha).toMatch(/^[0-9a-f]{40}$/);
     expect(answer.contentSha).not.toBe(base);
     const log = cli(world, dir, [
+      "ci",
       "logs",
       formatLogKey({
         runId: answer.runId,
@@ -111,17 +112,17 @@ it("pins edits locally and over stdio, changes red to green, then proves cache r
     for (const path of ["marker.txt", "gone.txt", "new.txt"])
       expect(log.stdout).toContain(path);
     const rows = JSON.parse(
-      cli(world, dir, ["history", "list", "-o", "json"]).stdout,
+      cli(world, dir, ["ci", "history", "list", "-o", "json"]).stdout,
     ) as RunRow[];
     expect(rows.find((r) => r.runId === answer.runId)?.contentSha).toBe(
       answer.contentSha,
     );
     const read = JSON.parse(
-      cli(world, dir, ["history", "show", "--run", answer.runId, "-o", "json"])
+      cli(world, dir, ["ci", "history", "show", "--run", answer.runId, "-o", "json"])
         .stdout,
     ) as AttentionAnswer;
     expect(read.contentSha).toBe(answer.contentSha);
-    expect(cli(world, dir, ["history", "list"]).stdout).toContain(
+    expect(cli(world, dir, ["ci", "history", "list"]).stdout).toContain(
       `+dirty→${answer.contentSha!.slice(0, 7)}`,
     );
     return { answer, log: log.stdout };

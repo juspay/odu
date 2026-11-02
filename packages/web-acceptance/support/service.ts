@@ -233,11 +233,11 @@ export async function startService(
     // worker's gate out of a developer's own.
     ODU_WEB_ORIGIN: origin,
     // THE CACHE NEEDS AN OPERATOR, and this is the one the browser tests get.
-    // `cache.feature` creates a bucket and pushes a path to it THROUGH the CLI
-    // — a person's route — so the token travels in the world both the daemon
-    // and every `odu` call in it are started with. Without one the bucket verbs
-    // refuse `no_root_token` and the substituter still serves, which is the
-    // behaviour `odu cache` documents rather than a mode this suite wants.
+    // `cache.feature` creates a bucket and pushes a path to it from a terminal
+    // — a person's route — so this is the token the DAEMON compares; a verb
+    // call names the same constant in its own input. Without one the bucket
+    // verbs refuse `no_root_token` and the substituter still serves, which is
+    // the behaviour the cache documents rather than a mode this suite wants.
     ODU_ROOT_TOKEN: ROOT_TOKEN,
     // AND THE DOOR, when a caller has one: `ODU_GITHUB_*` plus the public
     // origin a browser reaches this daemon at. Absent (the ordinary loopback

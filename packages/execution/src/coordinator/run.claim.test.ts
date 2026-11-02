@@ -12,7 +12,7 @@
  *   the run is over while the coordinator still holds the box?
  *
  * It did. `cancelPlatform` terminalized the lane's nodes at once, and every
- * out-of-process reader (`odu wait`, the MCP `wait_for_settle`) judges settle by
+ * out-of-process reader (`odu ci wait`, the MCP `wait_for_settle`) judges settle by
  * the `nodes` cell — not by the coordinator's private `checkSettled`. So a
  * single-platform run answered "settled, cancelled" while `claimVenues` was
  * still copying a closure, still holding the checkout's one-run lock, and still
@@ -245,7 +245,7 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
     const dialed = await dialUntilServing(socketPath);
 
     try {
-      // Drop the only platform, the way `odu cancel @plat` / MCP `lane_cancel`
+      // Drop the only platform, the way `odu ci cancel @plat` / MCP `lane_cancel`
       // does — over the socket, from outside, while the claim is still held.
       const ack = await runUnary(
         dialed.client.surface.lane.cancel({ platform: PLATFORM }),
@@ -350,7 +350,7 @@ describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
     ]);
     const dialed = await dialUntilServing(socketPath);
     try {
-      // Attached BEFORE the node is terminalized, the way `odu logs -f` is:
+      // Attached BEFORE the node is terminalized, the way `odu ci logs -f` is:
       // this is the reader whose loop only ends on a terminal frame.
       const kinds: string[] = [];
       const sub = subscribe(
@@ -380,7 +380,7 @@ describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
 
       // THE ASSERTION. The node reached a terminal status, so its log reached
       // its terminal too — on the fan-in socket, not only on a lane's. Without
-      // it `odu logs -f unit@<plat>` against this run never returns.
+      // it `odu ci logs -f unit@<plat>` against this run never returns.
       await waitFor(() => kinds.includes("end"), 20_000);
       void sub.return?.();
       await runOutcome;

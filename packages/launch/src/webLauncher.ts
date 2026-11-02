@@ -31,7 +31,7 @@
  * CALLER NEEDS match, whatever the minors — a minor only ever ADDS members, so
  * the worst a skew costs is one control answering "unknown verb" — and a
  * different major is refused with a sentence naming the row. The caller
- * declares its needs (`odu run` reads the runs, `odu cache` the cache); this
+ * declares its needs (`odu ci run` reads the runs, `odu cache` the cache); this
  * module names no row and never guesses them. `buildId` is MATCH-ONLY — there is
  * no such thing as a newer build — so a differing one is reported and never
  * acted on unless a person asks for an upgrade. That asymmetry is the
@@ -578,9 +578,9 @@ async function untilValue<T>(
  * DIAL THE SERVICE, STARTING ONE IF THERE IS NONE — the seam every thin client
  * bootstraps through.
  *
- * Public odu is now a set of clients: `odu run`, `odu wait`, `odu surface`, the
- * `odu mcp` bridge. None of them owns execution, and on a fresh machine none of
- * them can do anything until a daemon exists. Two ways that could have gone,
+ * Public odu is now a set of clients: `odu ci run`, `odu ci wait`, `odu surface`,
+ * the `odu mcp` bridge. None of them owns execution, and on a fresh machine none
+ * of them can do anything until a daemon exists. Two ways that could have gone,
  * and only one of them is honest:
  *
  *   - **Recover a failed dial by doing the work locally.** Never. That is the
@@ -692,7 +692,7 @@ export async function connectOrStart(
  * ordinary first step of a bootstrap — but on a machine running its own CI, a
  * perfectly healthy daemon can miss that window, and the fall-through then
  * takes a command through a bootstrap it did not need. Under load that path
- * failed outright: `odu wait` exited 3 with an empty stdout and "All fibers
+ * failed outright: `odu ci wait` exited 3 with an empty stdout and "All fibers
  * interrupted without error" on stderr, which is a sentence about this process
  * rather than about the service.
  *
@@ -727,7 +727,7 @@ async function dialExisting(
  *
  * Deliberately shorter than {@link DIAL_READY_MS}'s three seconds: this dial's
  * failure is not an error, it is the ordinary first step of a bootstrap, and
- * every second spent proving it is a second added to `odu run` on a cold
+ * every second spent proving it is a second added to `odu ci run` on a cold
  * machine. Loopback answers in microseconds when anything is listening.
  */
 const ABSENCE_PROBE_MS = 300;

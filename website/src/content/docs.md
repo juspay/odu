@@ -7,7 +7,7 @@ Odu runs a `just` CI pipeline across local or remote machines. One local service
 **Nix is the only supported way to run Odu.** From a repository with a CI-tagged `justfile`:
 
 ```sh
-nix run github:juspay/odu -- run --host x86_64-linux=localhost --no-post
+nix run github:juspay/odu -- ci run --host x86_64-linux=localhost --no-post
 ```
 
 Replace `x86_64-linux` with your Nix system (`nix eval --impure --raw --expr builtins.currentSystem`). This explicitly allows CI on your workstation. The checkout must be clean; `--no-strict` snapshots uncommitted edits and new files for local and remote lanes, excludes ignored files, and never posts to GitHub. Use `--no-snapshot` for in-place localhost runs.
@@ -45,9 +45,9 @@ Hosts are read from the first existing file: `$ODU_HOSTS`, `~/.config/odu/hosts.
 On the board: **Machines** shows the service's last probe of the same inventory and its age — opening the page dials nothing — and **Probe machines** takes a fresh one, narrowed by platform if you name one.
 
 ```sh
-odu hosts
-odu run --platform x86_64-linux
-odu run test@aarch64-darwin
+odu ci hosts
+odu ci run --platform x86_64-linux
+odu ci run test@aarch64-darwin
 ```
 
 The CLI forwards your shell's `$ODU_HOSTS`. A browser or MCP caller can supply `hostsFile`; omitted uses the service's configuration, while `""` bypasses its override. Retries preserve the parent's recorded inventory choice and host pins.
@@ -55,9 +55,9 @@ The CLI forwards your shell's `$ODU_HOSTS`. A browser or MCP caller can supply `
 ### Hold a machine across runs
 
 ```sh
-odu lease x86_64-linux
-odu run
-odu release x86_64-linux
+odu ci lease x86_64-linux
+odu ci run
+odu ci release x86_64-linux
 ```
 
 On the board: **Machines** → **Hold** / **Release**, for a checkout's absolute path. A lease belongs to the checkout and survives the calling shell. `lease` reports `held`, `already`, or `waiting`; use `hosts` to inspect capacity. Release it when finished.
@@ -87,21 +87,22 @@ Foreground `odu web` prints the cache row's operational `info` lines—migration
 
 The board lists runs across repositories. Open a run to inspect nodes, follow logs, select an earlier attempt, retry a failure, or cancel work. CLI and MCP clients use the same run IDs and state.
 
-### The board does everything `odu` does
+### The board and the API do everything the CLI does
 
-Every verb a row serves has a control on the board; the CLI stays where a shell is the natural place — a push from CI, `odu run` in a checkout. An admin creates a bucket from the Cache view — with the upstream switch the CLI's `--no-upstream` stands for — mints, lists and revokes its tokens, pins a closure and runs GC without a terminal; an owner opens a people page, sees who is in, and grants or changes a role.
+The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`login`/`use`, and `odu auth login`. **Cache, people and tunnel administration is the board or the API, not the CLI.** An admin creates a bucket from the Cache view — with the upstream switch that `"upstreamKeys": []` spells on the API — mints, lists and revokes its tokens, pins a closure and runs GC without a terminal; an owner opens a people page, sees who is in, and grants or changes a role. Anything the board does, `odu surface <row> <verb> --input '{…}' --json` does from a shell.
 
-| You want | `odu` | On the board |
-| --- | --- | --- |
-| start a run, every option | `odu run …` | **New run** — recipes, platforms, host pins, justfile root, hosts file, no-deps, no-strict, no-post, supersede, linger |
-| see the pipeline first | `odu dump`, `odu graph` | **New run** → **Preview pipeline** |
-| retry, cancel, read a log | `odu rerun`, `odu cancel`, `odu logs` | a run's page |
-| machines and holds | `odu hosts`, `odu lease`, `odu release` | **Machines** |
-| import or expire history | `odu history import`, `odu history prune` | **Maintenance** (dry run first) |
-| require odu's checks | `odu protect` | **Maintenance** → **Apply protection** (admin; dry run first) |
-| administer the cache | `odu cache create\|token\|pin\|gc\|stats` | **Cache**, and a bucket's page (admin) — see [the cache docs](cache/#the-cache-view) |
-| tokens and sessions | `odu auth token …` | the profile page |
-| roles | `odu auth grant`, `odu auth people` | **People** (owner) |
+| You want | CLI | API verb | On the board |
+| --- | --- | --- | --- |
+| start a run, every option | `odu ci run …` | `run_start` | **New run** — recipes, platforms, host pins, justfile root, hosts file, no-deps, no-strict, no-post, supersede, linger |
+| see the pipeline first | `odu ci dump`, `odu ci graph` | `pipeline_read` | **New run** → **Preview pipeline** |
+| retry, cancel, read a log | `odu ci rerun`, `odu ci cancel`, `odu ci logs` | `run_retry`, `run_cancel`, `log_read` | a run's page |
+| machines and holds | `odu ci hosts`, `odu ci lease`, `odu ci release` | `venue_probe`, `venue_hold`, `venue_release` | **Machines** |
+| import or expire history | `odu ci history import`, `odu ci history prune` | `catalog_import`, `catalog_prune` | **Maintenance** (dry run first) |
+| require odu's checks | `odu ci protect` | `protect_apply` | **Maintenance** → **Apply protection** (admin; dry run first) |
+| administer the cache | — | `odu surface cache bucket_create\|bucket_list\|bucket_domain\|token_mint\|token_list\|token_revoke\|pin_create\|gc_run\|stats_read` | **Cache**, and a bucket's page (admin) — see [the cache docs](cache/#the-cache-view) |
+| tokens and sessions | — | `odu surface auth token_create\|token_list\|token_revoke` | the profile page |
+| roles and who you are | — | `odu surface auth user_grant`, `odu surface auth grant_list`, `odu surface auth user_whoami` | **People** (owner) |
+| the tunnel and its names | — | `odu surface cloudflare status_read` | **Tunnel** |
 
 A control is **drawn** by the role the page reads off your connection and **refused** by the row on its own, so a hidden button is never the only check. An empty field is refused when you press, with the reason, rather than greying the button out.
 
@@ -161,11 +162,12 @@ What that does, in five sentences. The daemon binds loopback and runs as the `od
 Reach the board over a tailnet or an SSH forward to `127.0.0.1:18440`, then create the bucket and mint a token:
 
 ```sh
-odu cache create main
-odu cache token mint main --write
+export ODU_ROOT_TOKEN=...
+odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30}' --json
+odu surface cache token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","scope":"write"}' --json
 ```
 
-On a client, trust the bucket — the key `create` printed:
+On a client, trust the bucket — the key `bucket_create` printed:
 
 ```nix
 {
@@ -187,7 +189,7 @@ services.odu.cache.stores.r2 = {
 };
 ```
 
-then `odu cache create main --store r2`. The credentials are a systemd credential, like the root token; [Keep a bucket on S3](cache/#keep-a-bucket-on-s3) has the rest.
+then add `"store":"r2"` to the `bucket_create` input. The credentials are a systemd credential, like the root token; [Keep a bucket on S3](cache/#keep-a-bucket-on-s3) has the rest.
 
 A bucket can also have **a name of its own** — `https://cache.kolu.dev` — served at the root of that name through a Cloudflare Tunnel, with no port opened. That needs a Cloudflare API token (`services.odu.cloudflare.apiTokenFile`) and the name set on the bucket (`cache.bucketDomains` gives it a vhost and a certificate on a module host); [A domain for a bucket](cache/#a-domain-for-a-bucket) has the whole walk. The same tunnel carries `ODU_PUBLIC_ORIGIN`'s host when the token can edit its zone, which is what lets a Funnel retire — and the App's callback then moves with `publicOrigin`.
 
@@ -208,15 +210,15 @@ A chunked upload that sends `x-odu-upload` owns its parts, so concurrent pushers
 
 ### Contract versions
 
-Each row versions its own surface. The daemon publishes the host's version and every mounted row's on its identity cell (`rows`). A client is admitted when the host's major and the major of **every row it reads** match. A row it does not read is never consulted, so a cache change never refuses kolu or `odu run`. A refusal names the row, the version the daemon serves and the one the build reads. It also says when a needed row is not mounted.
+Each row versions its own surface. The daemon publishes the host's version and every mounted row's on its identity cell (`rows`). A client is admitted when the host's major and the major of **every row it reads** match. A row it does not read is never consulted, so a cache change never refuses kolu or `odu ci run`. A refusal names the row, the version the daemon serves and the one the build reads. It also says when a needed row is not mounted.
 
 | Row | Contract | Who reads it |
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
-| `ci` (runs) | 2.4 | `odu run`/`wait`/`logs`, MCP, the board, kolu |
-| `cache` | **3.1** | `odu cache`, the board |
-| `auth` | 2.4 | `odu auth`, the board when there is a door |
-| `cloudflare` | 2.4 | `odu cloudflare`, the board when there is a tunnel |
+| `ci` (runs) | 2.4 | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
+| `cache` | **3.1** | `odu cache`, `odu surface cache`, the board |
+| `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
+| `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
 
 Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
 
@@ -323,17 +325,19 @@ Everyone starts as a **member**: they see every run and every bucket, may start,
 
 ```sh
 # On the server, with $ODU_ROOT_TOKEN set in its environment.
-odu auth grant srid owner --origin https://odu.example.com
+odu surface auth user_grant --origin https://odu.example.com \
+  --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","login":"srid","role":"owner"}' --json
 ```
 
 After that the root token is spent — a second grant made with it is refused, whatever the role — and every further grant is an owner's, through that owner's own token:
 
 ```sh
 odu auth login https://odu.example.com        # paste the owner's personal token
-odu auth grant alice admin --origin https://odu.example.com   # or People on the board
+odu surface auth user_grant --origin https://odu.example.com \
+  --input '{"login":"alice","role":"admin","rootToken":""}' --json   # or People on the board
 ```
 
-Or from the board: an owner's header has **People**, which lists who is in — every grant, and every login that has ever signed in (signing out does not remove you), with its role — and grants or changes a role from a select. `odu auth people` prints the same list. The row refuses a grant that would leave the daemon with no owner: grant a second owner before stepping down.
+Or from the board: an owner's header has **People**, which lists who is in — every grant, and every login that has ever signed in (signing out does not remove you), with its role — and grants or changes a role from a select. `odu surface auth grant_list` prints the same list. The row refuses a grant that would leave the daemon with no owner: grant a second owner before stepping down.
 
 That is the root token's only job on a daemon with a door: it is not a principal, and it cannot start a run or read a bucket.
 
@@ -343,8 +347,8 @@ The header's name opens the **profile page**: your sessions and your personal ac
 
 ```sh
 odu auth login https://odu.example.com      # paste the token; it is kept at ~/.config/odu/auth/credentials, mode 0600
-odu auth whoami --origin https://odu.example.com
-odu cache list --origin https://odu.example.com
+odu surface auth user_whoami --origin https://odu.example.com --json
+odu surface cache bucket_list --origin https://odu.example.com --json
 
 # or, for an agent or CI, no login step:
 ODU_TOKEN=odu_... odu mcp --origin https://odu.example.com
@@ -363,22 +367,22 @@ One App per odu instance: the callback URL is a single address, and the client s
 ## Daily workflow
 
 ```sh
-odu run                      # configured platforms, clean commit, GitHub statuses
-odu run --no-post            # clean commit, no GitHub writes
-odu run --no-strict          # snapshot working tree on every lane, no GitHub writes
-odu attach                   # interactive terminal view
-odu status -o json
-odu wait --run latest -o json
+odu ci run                      # configured platforms, clean commit, GitHub statuses
+odu ci run --no-post            # clean commit, no GitHub writes
+odu ci run --no-strict          # snapshot working tree on every lane, no GitHub writes
+odu ci attach                   # interactive terminal view
+odu ci status -o json
+odu ci wait --run latest -o json
 ```
 
-`wait` reports an actionable failure before the other jobs settle. Read its `logKey` with `odu logs KEY`; add `-f` to follow. Pages carry `nextOffset`, `eof`, and `open`: keep reading until at EOF and no longer open.
+`ci wait` reports an actionable failure before the other jobs settle. Read its `logKey` with `odu ci logs KEY`; add `-f` to follow. Pages carry `nextOffset`, `eof`, and `open`: keep reading until at EOF and no longer open.
 
 ```sh
-odu rerun --run latest test   # unchanged inputs: retry a flake
-odu cancel --run latest      # explicit cancellation
+odu ci rerun --run latest test   # unchanged inputs: retry a flake
+odu ci cancel --run latest      # explicit cancellation
 ```
 
-A retry uses a new attempt on a live coordinator or creates a linked replay after finalization. `run --linger` keeps the coordinator available after settlement but is not required for replay. Old records without placement evidence and dirty/live snapshots may be refused.
+A retry uses a new attempt on a live coordinator or creates a linked replay after finalization. `ci run --linger` keeps the coordinator available after settlement but is not required for replay. Old records without placement evidence and dirty/live snapshots may be refused.
 
 **A source fix is a new run.** Commit it and run again. Use `--supersede` to cancel a busy checkout's current run and start the replacement. Without it, Odu returns the existing live run.
 
@@ -389,17 +393,17 @@ Before declaring CI green, check the SHA, requested scope, and outstanding GitHu
 On the board: **Maintenance** imports and prunes (each a dry run until you untick it) and applies protection, and the History toggle lists every run.
 
 ```sh
-odu history list --all
-odu history show --run latest
-odu history import --dry-run
-odu history prune --days 30 --dry-run
-odu protect --dry-run
-odu protect
+odu ci history list --all
+odu ci history show --run latest
+odu ci history import --dry-run
+odu ci history prune --days 30 --dry-run
+odu ci protect --dry-run
+odu ci protect
 ```
 
 Logs and attempt evidence outlive the checkout and coordinator, until retention removes them. Imported or expired evidence may not be replayable.
 
-Strict runs post `<recipe>@<platform>` commit statuses using `gh` credentials available to the service. `protect` configures the corresponding required checks; inspect its dry run first. A dry run derives contexts without contacting GitHub, so repository/branch may be null.
+Strict runs post `<recipe>@<platform>` commit statuses using `gh` credentials available to the service. `ci protect` configures the corresponding required checks; inspect its dry run first. A dry run derives contexts without contacting GitHub, so repository/branch may be null.
 
 <span id="coding-agents-mcp"></span>
 
@@ -437,7 +441,7 @@ odu surface log_read --input '{"key":"LOG_KEY","offset":0}' --json
 odu surface run_retry --input '{"runId":"RUN_ID","selector":"test","requestId":"retry-1"}' --json
 ```
 
-Replace placeholders with the previous responses. `odu run`, `wait`, `logs`, and `rerun` are convenience commands over the same service; use `surface` for the shared structured verb interface.
+Replace placeholders with the previous responses. `odu ci run`, `ci wait`, `ci logs`, and `ci rerun` are convenience commands over the same service; use `surface` for the shared structured verb interface. A sibling row's verbs mount under its key: `odu surface cache …`, `odu surface auth …`, `odu surface cloudflare …`.
 
 ### MCP
 
@@ -473,34 +477,45 @@ Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, 
 | `cache_gc` | `cache_gc_run` | yes |
 | `cache_stats` | `cache_stats_read` | yes |
 
-The same rename reaches argv: `odu surface cache_create …` is `odu surface cache bucket_create …`, because a sibling's commands mount under its key. `odu cache …` — the commands a person actually types — is unchanged. A service started without `$ODU_ROOT_TOKEN` refuses the token-taking verbs with `no_root_token` while the substituter keeps serving; `cache_bucket_describe` and `cache_bucket_paths` take no credential at all, because a bucket's URL, its key and its path list are what it publishes to every client that can read it.
+The same rename reaches argv: `odu surface cache_create …` is `odu surface cache bucket_create …`, because a sibling's commands mount under its key — and that argv face is now how a cache is administered from a shell, the CLI's own `cache create`/`list`/`token`/`pin`/`gc`/`stats` having been retired. `odu cache push`/`login`/`use` — the shell-native commands — are unchanged. A service started without `$ODU_ROOT_TOKEN` refuses the token-taking verbs with `no_root_token` while the substituter keeps serving; `cache_bucket_describe` and `cache_bucket_paths` take no credential at all, because a bucket's URL, its key and its path list are what it publishes to every client that can read it.
 
 ## CLI reference
 
+The CLI is `ci`, three cache commands, `auth login`, and the three faces of the service:
+
+```
+odu ci <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect>
+odu ci history <list|show|import|prune>
+odu cache <use|login|push>
+odu auth login <origin> [--token T]
+odu web [--background] [--upgrade]
+odu surface <row> <verb…>
+odu mcp
+```
+
 | Command | Purpose / useful flags | On the board |
 | --- | --- | --- |
-| `run [recipe[@platform]…]` | `--host P=ADDR`, `--platform P`, `--root NAMEPATH`, `--no-deps`, `--no-post`, `--no-strict`, `--no-snapshot`, `--no-wait`, `--linger`, `--supersede` | **New run** |
-| `status`, `attach` | Current checkout's run; `-o json` for machine output | the board's row, a run's page |
-| `wait [--run R]` | `--after CURSOR`, `--deadline-ms N`, `--settle`, `--expected-sha SHA`; `--timeout-ms` aliases the deadline | a run's page, live |
-| `rerun [--run R] SELECTOR` | `--expect-attempt N`, `--request-id ID` | a node's **Retry** |
-| `cancel [--run R] [node\|@platform]` | Whole run by default; `--request-id ID` | a run's, node's or lane's cancel |
-| `logs KEY` | `-f`, `--offset B`, `--limit B`; tail with `--offset=-4096` | a node's log pane |
-| `history list/show/import/prune` | Durable evidence, import and retention | **History**; **Maintenance** |
-| `hosts`, `lease`, `release` | Inspect and manage venue capacity | **Machines** |
-| `dump`, `graph` | Inspect the resolved pipeline | **New run** → **Preview pipeline** |
-| `protect` | Configure GitHub required checks; preview with `--dry-run` | **Maintenance** → **Apply protection** |
-| `cache create/list/use` | Create a bucket, list buckets, print the nix.conf settings for one | **Cache** |
-| `cache token mint/list/revoke` | Mint a scoped token (shown once), list tokens, revoke one | a bucket's **Tokens** |
+| `ci run [recipe[@platform]…]` | `--host P=ADDR`, `--platform P`, `--root NAMEPATH`, `--no-deps`, `--no-post`, `--no-strict`, `--no-snapshot`, `--no-wait`, `--linger`, `--supersede` | **New run** |
+| `ci status`, `ci attach` | Current checkout's run; `-o json` for machine output | the board's row, a run's page |
+| `ci wait [--run R]` | `--after CURSOR`, `--deadline-ms N`, `--settle`, `--expected-sha SHA`; `--timeout-ms` aliases the deadline | a run's page, live |
+| `ci rerun [--run R] SELECTOR` | `--expect-attempt N`, `--request-id ID` | a node's **Retry** |
+| `ci cancel [--run R] [node\|@platform]` | Whole run by default; `--request-id ID` | a run's, node's or lane's cancel |
+| `ci logs KEY` | `-f`, `--offset B`, `--limit B`; tail with `--offset=-4096` | a node's log pane |
+| `ci history list/show/import/prune` | Durable evidence, import and retention | **History**; **Maintenance** |
+| `ci hosts`, `ci lease`, `ci release` | Inspect and manage venue capacity | **Machines** |
+| `ci dump`, `ci graph` | Inspect the resolved pipeline | **New run** → **Preview pipeline** |
+| `ci protect` | Configure GitHub required checks; preview with `--dry-run` | **Maintenance** → **Apply protection** |
+| `cache use <bucket>` | Print the nix.conf settings, a `nixConfig` block and netrc for a bucket | **Cache** |
 | `cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — (a machine's disk) |
 | `cache push <bucket> <path>…` | Upload only what the bucket is missing; talks to the cache directly | — (a build box's job) |
-| `cache pin/gc/stats` | Pin a closure, reclaim what retention allows, show sizes and reads | a bucket's **Pin closure**, **Run GC**, **Stats** |
-| `auth grant/people` | Set a role; list who is in | **People** |
-| `auth token create/list/revoke` | Personal access tokens | the profile page |
+| `auth login <origin>` | Save a personal access token in `~/.config/odu/auth/credentials` | — (a machine's disk) |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport | — |
 
-For `wait`, `rerun`, and `cancel`, omitted `--run` means `latest` in this checkout. Run addresses also accept a run ID or `<sha7>#<seq>`. `odu runs` has been replaced by `history list`.
+Cache, people and tunnel administration is **not** in the CLI: use the board, or `odu surface cache|auth|cloudflare <verb>` — the mapping is in [the board table](#the-board-and-the-api-do-everything-the-cli-does).
 
-`wait` exits: **0** passed, **1** failure to act on, **2** still running, **3** owner lost, **4** unknown run, **5** refused. Surface CLI exits: **0** answered (even when CI failed), **1** refused, **2** usage error, **3** unreachable.
+For `ci wait`, `ci rerun`, and `ci cancel`, omitted `--run` means `latest` in this checkout. Run addresses also accept a run ID or `<sha7>#<seq>`. `ci history list` lists runs.
+
+`ci wait` exits: **0** passed, **1** failure to act on, **2** still running, **3** owner lost, **4** unknown run, **5** refused. Surface CLI exits: **0** answered (even when CI failed), **1** refused, **2** usage error, **3** unreachable.
 
 ## Troubleshooting
 

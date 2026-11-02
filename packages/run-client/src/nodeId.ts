@@ -90,7 +90,7 @@ export const SETUP_NAMEPATH = "_ci-setup";
  *  Beside {@link SETUP_NAMEPATH} because several unrelated policies turn on it
  *  and each was re-deriving the split: `@platform` rerun expansion excludes it
  *  (every task `needs` it, so including it would collapse a multi-rerun into
- *  "re-provision the lane"), `odu status`'s provisioning clock reads its
+ *  "re-provision the lane"), `odu ci status`'s provisioning clock reads its
  *  `startedAt`, and a `node.cancel` on it with no live lane routes to a lane
  *  drop. Splits the id rather than matching a prefix, so a recipe merely NAMED
  *  like the sentinel cannot pass. */

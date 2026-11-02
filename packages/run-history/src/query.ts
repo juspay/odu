@@ -151,14 +151,14 @@ export function resolveCursor(
     return {
       ok: false,
       message: `odu: "${token}" is not a cursor odu issued`,
-      resync: `odu wait --run ${handle.runId}`,
+      resync: `odu ci wait --run ${handle.runId}`,
     };
   }
   if (cursor.runId !== handle.runId) {
     return {
       ok: false,
       message: `odu: that cursor belongs to run ${cursor.runId}, not ${handle.runId}`,
-      resync: `odu wait --run ${handle.runId}`,
+      resync: `odu ci wait --run ${handle.runId}`,
     };
   }
   const journal = readJournal(handle);
@@ -167,7 +167,7 @@ export function resolveCursor(
     return {
       ok: false,
       message: `odu: that cursor is ahead of run ${handle.runId}'s journal (${cursor.seq} > ${highest}) — the run's evidence was pruned or rewritten`,
-      resync: `odu wait --run ${handle.runId}`,
+      resync: `odu ci wait --run ${handle.runId}`,
     };
   }
   return { ok: true, cursor };
@@ -222,7 +222,7 @@ export interface WaitOptions extends AttentionQuery {
   /** How often to look. */
   pollMs?: number;
   /** Return only when the run has fully settled, rather than on the first
-   *  actionable red. The `--settle` half of the existing `odu wait` contract,
+   *  actionable red. The `--settle` half of the existing `odu ci wait` contract,
    *  kept as a flag on one function so the two waits cannot drift. */
   settle?: boolean;
   signal?: AbortSignal;

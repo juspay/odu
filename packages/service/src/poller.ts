@@ -6,7 +6,7 @@
  * clock rather than on completion, so a slow refresh is followed immediately by
  * the next one and the event loop never gets a gap. On a host with seven
  * hundred runs that is what happened (juspay/odu#113) — every RPC waited behind
- * a queue of back-to-back refreshes and `odu attach` looked hung.
+ * a queue of back-to-back refreshes and `odu ci attach` looked hung.
  *
  * Arming the next tick AFTER the current one returns makes the gap a property
  * of the schedule rather than of how fast the disk happens to be: however long

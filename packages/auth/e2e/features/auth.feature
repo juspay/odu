@@ -37,30 +37,30 @@ Feature: The door — sign in, and what a role may do
 
   @signed-in:member
   Scenario: A member may read the board and may not administer buckets
-    When the CLI creates a bucket as this person
-    Then the CLI refuses it as not permitted
-    And the CLI lists buckets as this person
+    When the API creates a bucket as this person
+    Then the API refuses it as not permitted
+    And the API lists buckets as this person
     And I open the cache
     Then the page shows the bucket list
     And the page offers no Create bucket control
     And there should be no page errors
 
   @signed-in:admin
-  Scenario: An admin creates a bucket from the CLI, and is offered the control
-    When the CLI creates a bucket as this person
-    Then the CLI reports the bucket
+  Scenario: An admin creates a bucket from the API, and is offered the control
+    When the API creates a bucket as this person
+    Then the API reports the bucket
     And I open the cache
     Then a bucket row names it
     And the page offers a Create bucket control
     And there should be no page errors
 
   @signed-in:member
-  Scenario: A token created on the profile page drives odu --origin
+  Scenario: A token created on the profile page drives odu surface --origin
     When I open the profile
     And I create a token named "laptop"
     Then the page shows the token once
-    And a CLI with that token answers whoami as this person
-    And the CLI lists buckets with that token
+    And the API with that token answers whoami as this person
+    And the API lists buckets with that token
     And there should be no page errors
 
   @signed-in:member
@@ -81,7 +81,7 @@ Feature: The door — sign in, and what a role may do
 
   # THE PEOPLE PAGE: who is in, and a role granted or changed without a
   # terminal. Drawn for an owner by the shell, refused by the row for anyone
-  # else — so the admin's half asserts the control is not drawn, and the CLI
+  # else — so the admin's half asserts the control is not drawn, and the API
   # refusal is the row's half.
 
   @signed-in:owner
@@ -107,5 +107,5 @@ Feature: The door — sign in, and what a role may do
   Scenario: An admin is offered no people page, and the row refuses the list
     Given I open the board
     Then the header offers no People control
-    And the CLI refuses the people list as not permitted
+    And the API refuses the people list as not permitted
     And there should be no page errors

@@ -29,25 +29,25 @@ cmd() { printf "$P %s\n" "$1"; sleep 0.7; }
 
 clear
 say "A pipeline is running — and there was no way to stop it."
-( "$ODU" run --no-strict >/dev/null 2>&1 & ); sleep 18
+( "$ODU" ci run --no-strict >/dev/null 2>&1 & ); sleep 18
 
-cmd "odu status"
-"$ODU" status; sleep 1.6
+cmd "odu ci status"
+"$ODU" ci status; sleep 1.6
 
 say "Call it off from any other shell — no pkill, no waiting it out:"
-cmd "odu cancel"
-"$ODU" cancel; sleep 1.2
-cmd "odu status"
-"$ODU" status || true; sleep 2
+cmd "odu ci cancel"
+"$ODU" ci cancel; sleep 1.2
+cmd "odu ci status"
+"$ODU" ci status || true; sleep 2
 
 say "'supersede' is cancel + start in one — stop this, run the fixed commit:"
-( "$ODU" run --no-strict >/dev/null 2>&1 & ); sleep 18
-cmd "odu run --no-strict             # the one-run lock refuses a second run"
-"$ODU" run --no-strict 2>&1 | tail -1; sleep 1.8
-cmd "odu run --no-strict --supersede"
-( "$ODU" run --no-strict --supersede >/dev/null 2>&1 & ); sleep 16
-cmd "odu status                       # the new run took over"
-"$ODU" status; sleep 2.2
-"$ODU" cancel >/dev/null 2>&1
+( "$ODU" ci run --no-strict >/dev/null 2>&1 & ); sleep 18
+cmd "odu ci run --no-strict          # the one-run lock refuses a second run"
+"$ODU" ci run --no-strict 2>&1 | tail -1; sleep 1.8
+cmd "odu ci run --no-strict --supersede"
+( "$ODU" ci run --no-strict --supersede >/dev/null 2>&1 & ); sleep 16
+cmd "odu ci status                    # the new run took over"
+"$ODU" ci status; sleep 2.2
+"$ODU" ci cancel >/dev/null 2>&1
 
 rm -rf "$D" "$(dirname "$ODU_HOSTS")"

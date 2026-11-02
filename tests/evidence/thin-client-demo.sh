@@ -59,7 +59,7 @@ cleanup() {
   # through its own surface first; the signal is the fallback for a run that
   # is already gone or never came up.
   if [ -n "$RUN_PID" ] && ! run_gone; then
-    (cd "$FIXTURE" && "$ODU" cancel >/dev/null 2>&1) || true
+    (cd "$FIXTURE" && "$ODU" ci cancel >/dev/null 2>&1) || true
     wait_until 40 run_gone || kill "$RUN_PID" 2>/dev/null || true
   fi
   rm -rf "$SCRATCH"
@@ -214,7 +214,7 @@ SYS="$(nix eval --impure --raw --expr builtins.currentSystem)"
 export ODU_HOSTS="$SCRATCH/hosts.json"
 printf '{"%s":"localhost"}' "$SYS" > "$ODU_HOSTS"
 
-(cd "$FIXTURE" && "$ODU" run --no-strict >"$SCRATCH/run.log" 2>&1) &
+(cd "$FIXTURE" && "$ODU" ci run --no-strict >"$SCRATCH/run.log" 2>&1) &
 RUN_PID=$!
 
 echo "# waiting for the run's socket …"
@@ -238,7 +238,7 @@ echo
 
 echo
 echo "# the run is cancelled; the socket goes away with it"
-(cd "$FIXTURE" && "$ODU" cancel >/dev/null 2>&1) || true
+(cd "$FIXTURE" && "$ODU" ci cancel >/dev/null 2>&1) || true
 wait_until 40 socket_gone || true
 echo
 echo "\$ bun watch.ts $FIXTURE          # same script, no run"

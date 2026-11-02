@@ -486,7 +486,7 @@ describe("LiveView — the terminal comes back even when nothing else runs", () 
 });
 
 describe("LiveView — focus and the log subscription", () => {
-  /** What `odu run` actually starts from: nothing has been scheduled yet. */
+  /** What `odu ci run` actually starts from: nothing has been scheduled yet. */
   const allPending: PipelineState = {
     ...state,
     nodes: Object.fromEntries(

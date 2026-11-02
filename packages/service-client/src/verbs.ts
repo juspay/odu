@@ -25,11 +25,11 @@
  *
  * **The list grew, and that is the point.** It was five, and five was not a
  * design — it was the subset of odu's public capabilities that had been moved
- * so far. `odu status`, `odu hosts`, `odu lease`, `odu history import` and
- * `odu protect` each did their own work in the caller's process, so an agent
- * and a browser simply could not do those things at all, and each command that
- * could was its own small authority. Every public capability now has exactly
- * one implementation and every face can reach it.
+ * so far. `odu ci status`, `odu ci hosts`, `odu ci lease`, `odu ci history
+ * import` and `odu ci protect` each did their own work in the caller's
+ * process, so an agent and a browser simply could not do those things at all,
+ * and each command that could was its own small authority. Every public
+ * capability now has exactly one implementation and every face can reach it.
  *
  * **The follow is a PARAMETER, not a fourteenth verb.** `log_read` takes
  * `waitMs` and answers when the log grows. A stream member would have been the

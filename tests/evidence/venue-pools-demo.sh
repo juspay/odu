@@ -3,7 +3,7 @@
 # issue #54). Recorded with asciinema, rendered to a gif with agg — see
 # dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a throwaway
 # fixture; the "venue" is this machine reached over ssh (not the localhost
-# short-circuit) so flock-over-ssh lease, `odu hosts`, and `--no-wait` are real.
+# short-circuit) so flock-over-ssh lease, `odu ci hosts`, and `--no-wait` are real.
 #
 # Requires: passwordless `ssh $USER@$(hostname -s)` (or bare hostname) and
 # odu's Nix-built odu-runner (lease is an agent surface RPC; flock ships on
@@ -47,7 +47,7 @@ P='\033[1;32m$\033[0m'                                   # green prompt
 say() { printf "\033[2;37m# %s\033[0m\n" "$1"; sleep 1.4; }
 cmd() { printf "$P %s\n" "$1"; sleep 0.7; }
 
-# Hold the remote flock the same way a concurrent odu run would (holder file
+# Hold the remote flock the same way a concurrent odu ci run would (holder file
 # + exclusive flock). Background ssh keeps the fd open until we kill it.
 hold_venue() {
   local since_ms holder_body
@@ -61,7 +61,7 @@ hold_venue() {
   HOLD_PID=$!
   # Wait until the probe sees busy (or give up).
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if "$ODU" hosts 2>/dev/null | grep -q busy; then return 0; fi
+    if "$ODU" ci hosts 2>/dev/null | grep -q busy; then return 0; fi
     sleep 0.3
   done
   return 1
@@ -83,21 +83,21 @@ say "hosts.json can list several machines per platform — a venue pool:"
 cmd "cat \$ODU_HOSTS"
 cat "$ODU_HOSTS"; echo; sleep 1.8
 
-say "odu hosts probes free/busy without acquiring (lock is on the box):"
-cmd "odu hosts"
-"$ODU" hosts; sleep 2.2
+say "odu ci hosts probes free/busy without acquiring (lock is on the box):"
+cmd "odu ci hosts"
+"$ODU" ci hosts; sleep 2.2
 
 say "Another agent is already running CI on that machine — it holds the flock:"
 cmd "# (concurrent run holds /tmp/odu.lease over ssh + heartbeats)"
 hold_venue || true
 sleep 0.8
-cmd "odu hosts"
-"$ODU" hosts; sleep 2.4
+cmd "odu ci hosts"
+"$ODU" ci hosts; sleep 2.4
 
 say "A new run with --no-wait fails immediately instead of queueing:"
-cmd "odu run --no-strict --no-wait"
+cmd "odu ci run --no-strict --no-wait"
 set +e
-"$ODU" run --no-strict --no-wait --no-post
+"$ODU" ci run --no-strict --no-wait --no-post
 set -e
 sleep 2.2
 
@@ -105,8 +105,8 @@ say "When the holder finishes, the lock frees — no daemon, no cleanup race:"
 cmd "# (prior run exits → ssh closes → flock drops)"
 release_venue
 sleep 0.6
-cmd "odu hosts"
-"$ODU" hosts; sleep 2.8
+cmd "odu ci hosts"
+"$ODU" ci hosts; sleep 2.8
 
 say "Pool-of-one string form still works; localhost is never leased."
 sleep 1.6

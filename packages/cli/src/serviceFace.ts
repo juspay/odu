@@ -11,7 +11,7 @@
  * exit table live HERE, once, so a face cannot quietly decide that a refusal
  * means something different to it than to its neighbour.
  *
- * That is not a tidiness argument. Before the consolidation, `odu wait` and the
+ * That is not a tidiness argument. Before the consolidation, `odu ci wait` and the
  * MCP face disagreed about whether a red run was an error, and they disagreed
  * because each had written its own answer. One copy of this file is the
  * structural reason that cannot happen again.
@@ -76,7 +76,7 @@ import { connectToService, SERVICE_WIRE_GROUP } from "./wire";
  * | 1 | there is a failure to act on | read the failures, fix, retry |
  * | 2 | still going, nothing red yet | ask again with the returned cursor |
  * | 3 | its coordinator is gone and it never finalized | start a new run |
- * | 4 | no such run, or its evidence expired | check `odu history list` |
+ * | 4 | no such run, or its evidence expired | check `odu ci history list` |
  * | 5 | the request itself was refused | read the refusal; resync if offered |
  */
 export const WAIT_EXITS = {
@@ -103,7 +103,7 @@ export function waitExitFor(answer: AttentionAnswer): number {
   // INCOMPLETE IS NOT A PASS. `outcome` is the three-way — passed, failed,
   // incomplete — and `passed` is the two-way that cannot express the third. A
   // run whose only non-ok node was CANCELLED has no red node, so `passed` reads
-  // true and the exit was 0: `odu cancel @platform` on the only lane reported
+  // true and the exit was 0: `odu ci cancel @platform` on the only lane reported
   // success for a pipeline that never finished.
   if (answer.settled) {
     return answer.outcome === "passed" ? WAIT_EXITS.passed : WAIT_EXITS.failed;
@@ -260,7 +260,7 @@ export function reportFailure(
    * What a REFUSAL exits with, for a command the run-shaped table is not about.
    *
    * {@link WAIT_EXITS} numbers the states of a RUN — passed, red, still going,
-   * owner lost. `odu protect` and `odu graph` have none of those: they either
+   * owner lost. `odu ci protect` and `odu ci graph` have none of those: they either
    * did the thing or did not, which is `0` and `1`, and that is the contract
    * they shipped with. Routing their refusals through `refusalExit` renumbered
    * "protect found no platforms" from 1 to 5 — a script's error branch, moved
@@ -284,7 +284,7 @@ export function emitJson(value: unknown): void {
  *  answer.
  *
  *  `emitJson` pretty-prints, which is right for a command that emits one object
- *  and wrong for a follow: `odu logs -f -o json` promised NDJSON in its own
+ *  and wrong for a follow: `odu ci logs -f -o json` promised NDJSON in its own
  *  comment, in the usage text and in the docs, and emitted an indented object
  *  spanning many lines per page. An agent reading it line by line got fragments
  *  that do not parse. */
@@ -354,7 +354,7 @@ export function requestId(given: string | undefined): string {
  *
  * Nothing bounded that wait before, and juspay/odu#113 is what that cost: a
  * daemon whose loop was pinned by its own poller accepted the connection and
- * then answered nothing for minutes, and `odu attach` sat on a blank terminal
+ * then answered nothing for minutes, and `odu ci attach` sat on a blank terminal
  * with no way to tell "slow" from "hung". Ten seconds is far beyond any healthy
  * answer, which is a single in-memory scan, and short enough that a person
  * learns something is wrong while they are still looking.
@@ -447,7 +447,7 @@ export type Answered<T> = { ok: true; value: T } | { ok: false; exit: number };
  *
  * This replaced reading the `runs` collection a row at a time (`keys`, then a
  * `get` per key) and filtering here. That was one round trip per run in the
- * catalog to name a single one of them, on every `odu status`, `attach`,
+ * catalog to name a single one of them, on every `odu ci status`, `attach`,
  * `--run latest` and `history list` — 711 of them on the host that reported
  * juspay/odu#113. The filters did not move to the service because it should
  * know where the caller stands (it still does not: `checkout` is a path this
@@ -492,11 +492,11 @@ export async function firstNodesFrame(
 /**
  * THE THREE WAYS TO NAME A RUN, resolved in one place.
  *
- * `odu wait`, `odu rerun`, `odu cancel` and `odu history show` all refuse a
- * missing `--run` with the same sentence: "a run id, `<sha7>#<seq>`, or
- * `latest`". Two of those three spellings did not resolve anywhere — the
+ * `odu ci wait`, `odu ci rerun`, `odu ci cancel` and `odu ci history show` all
+ * refuse a missing `--run` with the same sentence: "a run id, `<sha7>#<seq>`,
+ * or `latest`". Two of those three spellings did not resolve anywhere — the
  * grammar was promised by the error message and implemented by nobody, so
- * `odu wait --run latest` exited 4 with "no run latest in the catalog" against
+ * `odu ci wait --run latest` exited 4 with "no run latest in the catalog" against
  * a run that had just finished in the directory the caller was standing in.
  *
  * A promise made by a refusal is still a promise, and this is where it is kept.
@@ -508,7 +508,7 @@ export async function firstNodesFrame(
  *     repository who types `latest` means the thing they just started, not
  *     whatever another worktree began a second later;
  *   - `<sha7>#<seq>` is the seq-th run recorded at that commit — the spelling
- *     `odu history list` prints, so what is on the screen can be typed back.
+ *     `odu ci history list` prints, so what is on the screen can be typed back.
  *     Global, newest first, like the catalog's own `resolveRunRef`.
  */
 export async function resolveRunAddress(
@@ -526,7 +526,7 @@ export async function resolveRunAddress(
   switch (parsed.kind) {
     // A run id passes through WITHOUT a listing. The service is the authority
     // on whether it exists and refuses it properly; resolving it here would
-    // buy nothing and cost a round trip on every `odu wait`.
+    // buy nothing and cost a round trip on every `odu ci wait`.
     case "id":
       return { ok: true, value: parsed.runId };
     case "latest": {
@@ -543,7 +543,7 @@ export async function resolveRunAddress(
           address,
           `odu: no run recorded for ${checkout ?? cwd}` +
             " — `latest` means the newest run OF THIS CHECKOUT, and this one" +
-            " has none. `odu history list --all` shows every run in your catalog.",
+            " has none. `odu ci history list --all` shows every run in your catalog.",
           p.json,
         ),
       };
@@ -564,7 +564,7 @@ export async function resolveRunAddress(
  * One command that takes `--run <address>`: its patience, its connection and
  * the address resolved, as ONE preamble.
  *
- * `odu wait`, `rerun`, `cancel` and `history show` each spelled these three
+ * `odu ci wait`, `rerun`, `cancel` and `history show` each spelled these three
  * steps out, with the origin passed twice and the waiting line's `notice`
  * threaded to the dial by hand — so a fifth such command could build its
  * patience and forget to hand it to the dial, and nothing would say so.
@@ -592,7 +592,7 @@ function noRunAtRef(address: string, json: boolean): number {
   return unknownRun(
     address,
     `odu: no run ${address} in the catalog — \`<sha7>#<seq>\` addresses` +
-      " the seq-th run recorded at a commit, as `odu history list` prints it.",
+      " the seq-th run recorded at a commit, as `odu ci history list` prints it.",
     json,
   );
 }
@@ -658,7 +658,7 @@ export function formatAgo(deltaMs: number): string {
  *
  * The service is a per-user singleton somebody else may have started, and
  * `loadHosts` runs in the coordinator it spawns — so a variable that is not
- * carried here is a variable that stopped working the moment `odu run` became
+ * carried here is a variable that stopped working the moment `odu ci run` became
  * a client. `""` is an answer, not a gap: it says this shell has none, which
  * is different from an agent's silence.
  */
@@ -678,12 +678,13 @@ export function hostsFileHere(cwd: string | undefined): string {
  * a busy machine, a momentary stall on the socket — does not raise; it ENDS the
  * iteration, and every consumer here reads that as "the stream is over".
  *
- * The three consumers then each reported something false. `odu run --progress
- * json` stopped emitting events for a run that was still going and exited `2`;
- * `odu status` said "the service opened this run's node stream and sent no
- * frame"; `odu attach` closed the matrix on a live run. All three intermittent,
- * all three under load, which is exactly when a fence earns its keep — the e2e
- * suite lost a different one of them on each platform, on the same commit.
+ * The three consumers then each reported something false. `odu ci run
+ * --progress json` stopped emitting events for a run that was still going and
+ * exited `2`; `odu ci status` said "the service opened this run's node stream
+ * and sent no frame"; `odu ci attach` closed the matrix on a live run. All
+ * three intermittent, all three under load, which is exactly when a fence
+ * earns its keep — the e2e suite lost a different one of them on each
+ * platform, on the same commit.
  *
  * `label` is the liveness registry's name for the subscription, spelled in
  * `client.health()`'s vocabulary so a diagnostic snapshot says which run's
@@ -709,8 +710,8 @@ export function nodesStream(
  * live coordinators can miss one; the link's run then ends and the subscription
  * is INTERRUPTED. `endOnInterrupt` turns that into a clean end of iteration —
  * correctly, because an interrupt is not an error — and every consumer here
- * then concluded the run was over. `odu run --progress json` stopped emitting
- * events mid-run and exited 2; `odu attach` closed the matrix on a live run.
+ * then concluded the run was over. `odu ci run --progress json` stopped emitting
+ * events mid-run and exited 2; `odu ci attach` closed the matrix on a live run.
  *
  * The fence (`nodesStream`) handles a retryable FAILURE. It cannot handle this
  * one: `Stream.retry` retries failures, and an interrupt is not one. So the
@@ -726,7 +727,7 @@ export function nodesStream(
  * that is then kept — and rejects with {@link NoAnswerWithin} when it does not
  * come (juspay/odu#113). On THIS stream rather than on a probe beside it: a
  * probe that answered proved nothing about the second subscription the follow
- * then opened, and cost `odu attach` two stream opens on the path it exists to
+ * then opened, and cost `odu ci attach` two stream opens on the path it exists to
  * make cheap. After the first frame the follow is unbounded but for
  * `deadlineMs` — a long run is not a slow one.
  */

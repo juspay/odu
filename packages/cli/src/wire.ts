@@ -34,7 +34,7 @@ import {
 import { CACHE_ROW } from "@odu/cache/surface";
 import { AUTH_ROW } from "@odu/auth/surface";
 import { CLOUDFLARE_ROW } from "@odu/cloudflare/surface";
-import { authorizationHeaders } from "@odu/auth/cli";
+import { authorizationHeaders } from "@odu/auth/credentials";
 import { connectOrStart } from "@odu/launch/webLauncher";
 import type { ServiceConnection } from "@odu/service-client/dial";
 
@@ -66,9 +66,9 @@ export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLIN
  * always, each sibling when it is there (the board draws no control for a row
  * `/_odu/rows` does not list — the cache included).
  *
- * Every other command declares only its own row (`odu run` the runs, `odu cache`
- * the cache — each row's `*_NEEDS`), so a daemon whose cache moved a major is
- * still one `odu run` can drive.
+ * Every other command declares only its own row (`odu ci run` the runs, `odu
+ * cache` the cache — each row's `*_NEEDS`), so a daemon whose cache moved a
+ * major is still one `odu ci run` can drive.
  */
 export const EVERY_ROW_NEEDS: RowNeeds = {
   ...CI_NEEDS,

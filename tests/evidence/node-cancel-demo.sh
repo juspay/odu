@@ -25,13 +25,13 @@ cmd() { printf "$P %s\n" "$1"; sleep 0.6; }
 
 clear
 say "Start a long-running pipeline with --linger (keeps the coordinator up)."
-( "$ODU" run --no-strict --linger >/dev/null 2>&1 & ); sleep 14
+( "$ODU" ci run --no-strict --linger >/dev/null 2>&1 & ); sleep 14
 
-cmd "odu status"
-"$ODU" status 2>&1 || true; sleep 1.4
+cmd "odu ci status"
+"$ODU" ci status 2>&1 || true; sleep 1.4
 
 # Pick the first running node id if any, else the first non-ok id.
-NODE=$("$ODU" status -o json 2>/dev/null | bun -e '
+NODE=$("$ODU" ci status -o json 2>/dev/null | bun -e '
   let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{
     try {
       const j=JSON.parse(s);
@@ -44,19 +44,19 @@ NODE=$("$ODU" status -o json 2>/dev/null | bun -e '
 
 if [ -n "$NODE" ]; then
   say "Cancel one node mid-run — the rest of the run keeps the coordinator alive:"
-  cmd "odu cancel $NODE"
-  "$ODU" cancel "$NODE"; sleep 1.4
-  cmd "odu status"
-  "$ODU" status 2>&1 || true; sleep 1.8
+  cmd "odu ci cancel $NODE"
+  "$ODU" ci cancel "$NODE"; sleep 1.4
+  cmd "odu ci status"
+  "$ODU" ci status 2>&1 || true; sleep 1.8
 else
   say "(no live node id resolved — showing status only)"
-  "$ODU" status 2>&1 || true; sleep 1
+  "$ODU" ci status 2>&1 || true; sleep 1
 fi
 
 say "Full-run cancel still tears the coordinator down when you are done:"
-cmd "odu cancel"
-"$ODU" cancel; sleep 1.2
-cmd "odu status"
-"$ODU" status 2>&1 || true; sleep 1.5
+cmd "odu ci cancel"
+"$ODU" ci cancel; sleep 1.2
+cmd "odu ci status"
+"$ODU" ci status 2>&1 || true; sleep 1.5
 
 rm -rf "$D" "$(dirname "$ODU_HOSTS")"

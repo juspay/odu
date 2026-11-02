@@ -9,7 +9,7 @@
  * keeps working exactly as it did, which is the compatibility half of this
  * release.
  *
- * What is offered instead is an EXPLICIT import: `odu history import` walks a
+ * What is offered instead is an EXPLICIT import: `odu ci history import` walks a
  * checkout's `.ci/` and mints a catalog entry per old record, so a
  * long-running checkout's history follows its owner into the per-user catalog
  * rather than being stranded. Explicit because two properties of the old

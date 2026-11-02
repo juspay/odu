@@ -114,31 +114,51 @@ function cli(argv: string[], env: NodeJS.ProcessEnv = {}) {
   };
 }
 
+/** One API verb through `odu surface <row> <verb>`, with whatever credential
+ *  the caller names. A refusal is JSON on stderr, exit 1. */
+function verb(row: string, name: string, input?: unknown, env: NodeJS.ProcessEnv = {}) {
+  return cli(
+    [
+      "surface",
+      row,
+      name,
+      ...(input === undefined ? [] : ["--input", JSON.stringify(input)]),
+      "--json",
+    ],
+    env,
+  );
+}
+
 describe("$ODU_TOKEN drives a command against a server with a door", () => {
   it("answers whoami as the token's person", () => {
-    const answer = cli(["auth", "whoami", "-o", "json"], { ODU_TOKEN: token });
+    const answer = verb("auth", "user_whoami", undefined, { ODU_TOKEN: token });
     expect(answer.stderr).toBe("");
     expect(answer.status).toBe(0);
-    const who = JSON.parse(answer.stdout) as { kind: string; login: string; role: string };
+    const { who } = JSON.parse(answer.stdout) as {
+      who: { kind: string; login: string; role: string };
+    };
     expect(who).toEqual({ kind: "user", login: LOGIN, role: "owner" });
   });
 
   it("lets an owner administer the cache, which no token-less caller can", () => {
-    const denied = cli(["cache", "list", "-o", "json"]);
+    // An empty `rootToken`: a session is a ROLE authority and the operator's
+    // secret is not compared for it. With no session there is no authority at
+    // all, so the same call is refused.
+    const denied = verb("cache", "bucket_list", { rootToken: "" });
     expect(denied.status).toBe(1);
 
-    const allowed = cli(["cache", "list", "-o", "json"], { ODU_TOKEN: token });
+    const allowed = verb("cache", "bucket_list", { rootToken: "" }, { ODU_TOKEN: token });
     expect(allowed.status, allowed.stderr).toBe(0);
     expect(JSON.parse(allowed.stdout)).toEqual({ buckets: [] });
   });
 
-  it("refuses a token this daemon never minted", () => {
-    const answer = cli(["auth", "whoami", "-o", "json"], { ODU_TOKEN: "odu_not_a_token" });
-    expect(answer.status).toBe(1);
+  it("answers anonymous for a token this daemon never minted", () => {
+    const answer = verb("auth", "user_whoami", undefined, { ODU_TOKEN: "odu_not_a_token" });
     // ANONYMOUS is an ANSWER, not an error: the door says who you are, and this
-    // connection is nobody. A caller that got exit 0 here would believe it had
-    // a session.
-    expect(answer.stdout).toContain("anonymous");
+    // connection is nobody. The verb answers it — what the caller reads is
+    // `kind`, not the exit code.
+    expect(answer.status).toBe(0);
+    expect(JSON.parse(answer.stdout)).toEqual({ who: { kind: "anonymous" } });
   });
 });
 
@@ -160,14 +180,12 @@ describe("odu auth login stores the token, and --origin uses it", () => {
       // NO `ODU_TOKEN`: the credential the login wrote is the only thing this
       // call has, and `--origin` is what picks it.
       const whoami = Bun.spawnSync(
-        [odu, "auth", "whoami", "--origin", world.origin, "-o", "json"],
+        [odu, "surface", "auth", "user_whoami", "--origin", world.origin, "--json"],
         { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe" },
       );
       expect(whoami.exitCode, whoami.stderr.toString()).toBe(0);
       expect(JSON.parse(whoami.stdout.toString())).toEqual({
-        kind: "user",
-        login: LOGIN,
-        role: "owner",
+        who: { kind: "user", login: LOGIN, role: "owner" },
       });
     } finally {
       rmSync(configHome, { recursive: true, force: true });

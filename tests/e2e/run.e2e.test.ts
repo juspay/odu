@@ -23,7 +23,7 @@ import {
 
 let oduBin: string;
 
-// One full `odu run` per test, with the binary already built — generous to
+// One full `odu ci run` per test, with the binary already built — generous to
 // absorb the localhost lane realise/spawn without flaking on a busy machine.
 const RUN_TIMEOUT = 300_000;
 
@@ -50,7 +50,7 @@ const shape = (e: ProgressEvent | undefined): ProgressEvent => {
   return e as ProgressEvent;
 };
 
-describe("odu run (local, black-box)", () => {
+describe("odu ci run (local, black-box)", () => {
   it("runs a passing DAG to success and exits 0", () => {
     const { status, events, stderr } = oduRun(oduBin, fixture("pass"));
 
@@ -107,7 +107,7 @@ describe("odu run (local, black-box)", () => {
 
   it("dump emits the resolved pipeline without a live run", () => {
     const dir = fixture("pass");
-    const out = execFileSync(oduBin, ["dump"], {
+    const out = execFileSync(oduBin, ["ci", "dump"], {
       cwd: dir,
       // The SAME world as `oduRun` above, not the ambient environment:
       // `dump` is a client of the per-user singleton now, and on a persistent

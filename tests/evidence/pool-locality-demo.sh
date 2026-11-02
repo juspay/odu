@@ -43,29 +43,29 @@ cat "$ODU_HOSTS"; echo; sleep 2.0
 
 say "BEFORE #66 this killed EVERY run here at config load, whatever it asked for."
 say "Now a darwin-only run gets past the pool it never leases:"
-cmd "odu run --platform aarch64-darwin --host aarch64-darwin=rasam --no-strict"
-"$ODU" run --platform aarch64-darwin --host aarch64-darwin=rasam --no-strict 2>&1 | head -3
+cmd "odu ci run --platform aarch64-darwin --host aarch64-darwin=rasam --no-strict"
+"$ODU" ci run --platform aarch64-darwin --host aarch64-darwin=rasam --no-strict 2>&1 | head -3
 say "^ that is the NEXT gate talking. Host resolution succeeded."
 sleep 1.6
 
 say "Same for a selector naming one platform — no --platform, no --host at all:"
-cmd "odu run alpha@aarch64-darwin --no-strict"
-"$ODU" run alpha@aarch64-darwin --no-strict 2>&1 | head -3
+cmd "odu ci run alpha@aarch64-darwin --no-strict"
+"$ODU" ci run alpha@aarch64-darwin --no-strict 2>&1 | head -3
 sleep 2.4
 
 say "The rule is NARROWED, not deleted — lease that linux pool and it refuses:"
-cmd "odu run --platform x86_64-linux --no-strict"
-"$ODU" run --platform x86_64-linux --no-strict 2>&1 | head -3
+cmd "odu ci run --platform x86_64-linux --no-strict"
+"$ODU" ci run --platform x86_64-linux --no-strict 2>&1 | head -3
 sleep 2.8
 
 say "A pin stands alone: one host is pure by construction, so it resolves:"
-cmd "odu run --platform x86_64-linux --host x86_64-linux=ci-9 --no-strict"
-"$ODU" run --platform x86_64-linux --host x86_64-linux=ci-9 --no-strict 2>&1 | head -3
+cmd "odu ci run --platform x86_64-linux --host x86_64-linux=ci-9 --no-strict"
+"$ODU" ci run --platform x86_64-linux --host x86_64-linux=ci-9 --no-strict 2>&1 | head -3
 sleep 2.4
 
-say "odu hosts never leases, so it lists rather than refuses — but it WARNS:"
-cmd "odu hosts"
-timeout 10 "$ODU" hosts 2>&1 | head -3
+say "odu ci hosts never leases, so it lists rather than refuses — but it WARNS:"
+cmd "odu ci hosts"
+timeout 10 "$ODU" ci hosts 2>&1 | head -3
 sleep 3.0
 
 rm -rf "$D"
