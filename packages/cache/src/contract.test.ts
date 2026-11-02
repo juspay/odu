@@ -18,6 +18,7 @@ const LEDGER: ContractLedger = {
   "2.4": "ce07c59972729e8e",
   "3.0": "8988b569266ac6a6",
   "3.1": "585f670f12a0d425",
+  "4.0": "b67f558bd20484da",
 };
 
 describe("the cache row's contract", () => {

@@ -24,7 +24,14 @@ import { statfs } from "node:fs/promises";
 import { join } from "node:path";
 import type { BucketRow, BucketTotals, ObjectRow, Scope, TokenRow } from "./db";
 import { cursorFor, openCacheRepo } from "./db";
-import { planGc, runGc, type GcReport } from "./gc";
+import {
+  type GcBucketPlan,
+  type GcPreview,
+  type GcReport,
+  planGc,
+  previewGc,
+  runGc,
+} from "./gc";
 import {
   fingerprintOf,
   formatNarinfo,
@@ -41,7 +48,7 @@ import {
 } from "./narinfo";
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
-import { LOCAL_STORE, PATH_PAGE_SIZE } from "./surface";
+import { GC_PREVIEW_PATHS, LOCAL_STORE, PATH_PAGE_SIZE } from "./surface";
 import {
   createStaging,
   objectKey,
@@ -124,7 +131,8 @@ export interface CacheStats {
   objects: number;
   bytes: number;
   hits: number;
-  lastAccessed: number | null;
+  /** The newest renewal across the whole cache — the clock GC reads. */
+  lastWanted: number | null;
 }
 
 /** Why an admin call was refused. The service maps these onto its own refusal
@@ -212,12 +220,41 @@ export interface CacheAdmin {
   tokenRevoke(input: { authority: Authority;
     id: string;
   }): Promise<CacheOutcome<{ id: string; revoked: boolean }>>;
+  /**
+   * HOW LONG THIS BUCKET KEEPS WHAT NOBODY WANTS, in days from `lastWanted`.
+   * A bucket is created with the default and changes its mind here; zero
+   * expires everything that is not referenced or pinned.
+   */
+  retention(input: {
+    authority: Authority;
+    bucket: string;
+    retentionDays: number;
+  }): Promise<CacheOutcome<BucketFacts>>;
   pin(input: { authority: Authority;
     bucket: string;
     name: string;
     paths: readonly string[];
   }): Promise<CacheOutcome<PinFacts>>;
+  /** Every pin this bucket holds, and WHAT each one holds: the closure it
+   *  resolved at pin time. */
+  pinList(input: {
+    authority: Authority;
+    bucket: string;
+  }): Promise<CacheOutcome<readonly PinFacts[]>>;
+  /** Let a pin go. The paths it held become ordinary rows, collected on the
+   *  next run if retention has passed them. */
+  pinDelete(input: {
+    authority: Authority;
+    bucket: string;
+    name: string;
+  }): Promise<CacheOutcome<{ bucket: string; name: string }>>;
   gc(input: { authority: Authority; bucket: string | null }): Promise<CacheOutcome<GcReport>>;
+  /** THE SAME DECISION, WITHOUT DOING IT — what the next collection would
+   *  evict, path by path, and what it would reclaim. */
+  gcPlan(input: {
+    authority: Authority;
+    bucket: string | null;
+  }): Promise<CacheOutcome<GcPreview>>;
   stats(input: { authority: Authority }): Promise<CacheOutcome<CacheStats>>;
   /**
    * ONE PAGE of a bucket's stored paths, newest first.
@@ -240,7 +277,8 @@ export interface PathPageRow {
   narSize: number;
   created: number;
   hits: number;
-  lastAccessed: number;
+  /** When a push or a `missing` query last said somebody wants it. */
+  lastWanted: number;
 }
 
 /** The verdict on a presented credential. `status` is what the route answers
@@ -370,6 +408,32 @@ export interface Cache {
    * row that publishes `buckets` — so this is a listener and not an emitter.
    */
   onChange(listener: () => void): () => void;
+  /**
+   * COLLECT EVERY BUCKET, with no caller to authorise — the SCHEDULE's entry
+   * point, and nothing else's.
+   *
+   * A timer is not a principal: handing the row a fabricated root token so it
+   * could call its own admin verb would be an authority invented to satisfy a
+   * check. The verb authorises and then calls this; the schedule calls it
+   * directly.
+   */
+  collect(): Promise<GcReport>;
+  /**
+   * PIN A CLOSURE ON A BUCKET'S OWN AUTHORITY — what the protocol route
+   * offers a WRITE token, and the one pin verb that is not administration.
+   *
+   * The scope rule, and why it is write rather than admin: a write token can
+   * already keep any closure alive forever by pushing it again, because a
+   * stored push renews `lastWanted`. A pin it may create or re-point grants it
+   * no retention it lacks — it makes the same promise once instead of nightly
+   * — and it still cannot read a private bucket, delete a pin, or administer
+   * anything. DELETING a pin stays admin's: that is giving up retention
+   * somebody else asked for.
+   */
+  pinAs(
+    bucket: BucketRow,
+    input: { name: string; paths: readonly string[] },
+  ): Promise<CacheOutcome<PinFacts>>;
   /** The admin face. */
   admin: CacheAdmin;
   /** BEFORE MOUNT: prove `CA:`, sweep orphan objects and abandoned temp files.
@@ -617,8 +681,9 @@ export function createCache(options: CacheOptions): Cache {
       sigs,
       hits: existing?.hits ?? 0,
       created: existing?.created ?? at,
-      // A re-push is an access: the pusher wants the path to stay.
-      lastAccessed: at,
+      // A STORED PUSH IS A WANT, and the clock retention reads: the pusher
+      // has just said this path matters to it.
+      lastWanted: at,
     });
     return true;
   }
@@ -869,6 +934,26 @@ export function createCache(options: CacheOptions): Cache {
       return { ok: true, value: { id: input.id, revoked: true } };
     },
 
+    async retention(input) {
+      const root = requireRoot(input);
+      if (!root.ok) return root;
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+      }
+      if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 0) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message: "retention must be a whole number of days, zero or more",
+        };
+      }
+      const next: BucketRow = { ...bucket, retentionDays: input.retentionDays };
+      repo.putBucket(next);
+      notify();
+      return { ok: true, value: factsOf(next) };
+    },
+
     async pin(input) {
       const root = requireRoot(input);
       if (!root.ok) return root;
@@ -876,40 +961,62 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      if (input.name.trim() === "") {
-        return { ok: false, code: "bad_input", message: "a pin needs a name, e.g. release-1.2" };
+      return pinChecked(bucket, input);
+    },
+
+    async pinList(input) {
+      const root = requireRoot(input);
+      if (!root.ok) return root;
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      if (input.paths.length === 0) {
-        return { ok: false, code: "bad_input", message: "a pin needs at least one path" };
+      return { ok: true, value: repo.pins(bucket.name) };
+    },
+
+    async pinDelete(input) {
+      const root = requireRoot(input);
+      if (!root.ok) return root;
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      return withWriteLock(() => pinNow(bucket, input));
+      // UNDER THE WRITE LOCK, like every other change to what is retained: a
+      // collection planning while this pin disappears must see one state or
+      // the other, never a pin half-gone.
+      return withWriteLock(async () => {
+        if (!repo.deletePin(bucket.name, input.name)) {
+          return {
+            ok: false as const,
+            code: "bad_input" as const,
+            message: `no pin "${input.name}" in ${bucket.name}`,
+          };
+        }
+        notify();
+        return { ok: true as const, value: { bucket: bucket.name, name: input.name } };
+      });
     },
 
     async gc(input) {
       const root = requireRoot(input);
       if (!root.ok) return root;
-      const buckets =
-        input.bucket === null
-          ? repo.buckets()
-          : [repo.bucket(input.bucket)].filter((row): row is BucketRow => row !== null);
-      if (input.bucket !== null && buckets.length === 0) {
-        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
-      }
-      // The whole collection — plan, release, delete — under the one write
-      // lock, so a pin or a re-push cannot land between the plan and the
-      // delete and lose a path it had just promised to keep.
-      return withWriteLock(async () => {
-        const plan = planGc({
-          buckets,
-          objects: repo.objects(),
-          pins: repo.pins(),
-          now: now(),
-        });
-        const report = await runGc(repo, plan, objectsOf);
-        // Every bucket the sweep touched answers a different object count now.
-        notify();
-        return { ok: true as const, value: report };
-      });
+      const chosen = bucketsFor(input.bucket);
+      if (!chosen.ok) return chosen;
+      return { ok: true, value: await collectNow(chosen.value) };
+    },
+
+    async gcPlan(input) {
+      const root = requireRoot(input);
+      if (!root.ok) return root;
+      const chosen = bucketsFor(input.bucket);
+      if (!chosen.ok) return chosen;
+      // UNDER THE SAME LOCK as the collection it previews: a dry run taken
+      // while a push was half-recorded would answer about a state that never
+      // existed, and the lock is already how this row reads "what is retained".
+      return withWriteLock(async () => ({
+        ok: true as const,
+        value: previewGc(planFor(chosen.value), GC_PREVIEW_PATHS),
+      }));
     },
 
     async paths(input) {
@@ -931,7 +1038,7 @@ export function createCache(options: CacheOptions): Cache {
             narSize: row.narSize,
             created: row.created,
             hits: row.hits,
-            lastAccessed: row.lastAccessed,
+            lastWanted: row.lastWanted,
           })),
           next: page.more && last !== undefined ? cursorFor(last) : null,
         },
@@ -952,6 +1059,22 @@ export function createCache(options: CacheOptions): Cache {
       };
     },
   };
+
+  /** A pin, checked and taken under the write lock — the body of BOTH doors:
+   *  the administrative verb, and the protocol route a write token reaches
+   *  (see {@link Cache.pinAs}). The sentences a person reads are here once. */
+  async function pinChecked(
+    bucket: BucketRow,
+    input: { name: string; paths: readonly string[] },
+  ): Promise<CacheOutcome<PinFacts>> {
+    if (input.name.trim() === "") {
+      return { ok: false, code: "bad_input", message: "a pin needs a name, e.g. release-1.2" };
+    }
+    if (input.paths.length === 0) {
+      return { ok: false, code: "bad_input", message: "a pin needs at least one path" };
+    }
+    return withWriteLock(() => pinNow(bucket, input));
+  }
 
   async function pinNow(
     bucket: BucketRow,
@@ -996,6 +1119,40 @@ export function createCache(options: CacheOptions): Cache {
       ok: true,
       value: { bucket: bucket.name, name: input.name, rootPaths: [...reached], created },
     };
+  }
+
+  /** The buckets a verb names: one, or every one. An unknown name is the
+   *  refusal; `null` is "all of them" and cannot be unknown. */
+  function bucketsFor(name: string | null): CacheOutcome<readonly BucketRow[]> {
+    if (name === null) return { ok: true, value: repo.buckets() };
+    const bucket = repo.bucket(name);
+    if (bucket === null) {
+      return { ok: false, code: "unknown_bucket", message: `no bucket "${name}"` };
+    }
+    return { ok: true, value: [bucket] };
+  }
+
+  /** THE ONE PLACE A PLAN IS MADE, so the dry run and the collection cannot
+   *  answer differently about the same buckets. */
+  const planFor = (buckets: readonly BucketRow[]): GcBucketPlan[] =>
+    planGc({ buckets, objects: repo.objects(), pins: repo.pins(), now: now() });
+
+  /** The whole collection — plan, delete, sweep — under the one write lock, so
+   *  a pin or a re-push cannot land between the plan and the delete and lose a
+   *  path it had just promised to keep. */
+  async function collectNow(buckets: readonly BucketRow[]): Promise<GcReport> {
+    return withWriteLock(async () => {
+      const report = await runGc(repo, planFor(buckets), objectsOf);
+      // Every bucket the sweep touched answers a different object count now.
+      if (report.evicted > 0 || report.orphans > 0) notify();
+      options.log?.("cache.gc", {
+        evicted: report.evicted,
+        kept: report.kept,
+        orphans: report.orphans,
+        bytes: report.bytes,
+      });
+      return report;
+    });
   }
 
   async function proveSelfNow(): Promise<SelfProofReport> {
@@ -1275,7 +1432,11 @@ export function createCache(options: CacheOptions): Cache {
       if (!isStorePathHash(hash)) return;
       const row = repo.objectByHash(bucket.name, hash);
       if (row === null) return;
-      repo.touchObject(bucket.name, row.storePath, now());
+      // COUNTED, NOT RENEWED. A read moves the hit counter and nothing else:
+      // retention runs on `lastWanted`, which a push and the `missing` query
+      // set, because reads are leaving odu (PLAN 2.8) and a clock that is
+      // about to stop ticking cannot be the one GC reads.
+      repo.countRead(bucket.name, row.storePath);
       notifyReaders();
     },
 
@@ -1355,16 +1516,32 @@ export function createCache(options: CacheOptions): Cache {
     missing(bucket, paths) {
       const missing: string[] = [];
       const skipped: string[] = [];
+      /** The paths this bucket HAS and the asker wants. */
+      const wanted: string[] = [];
       for (const { path, sigs } of paths) {
-        if (repo.object(bucket.name, path) !== null) continue;
+        if (repo.object(bucket.name, path) !== null) {
+          wanted.push(path);
+          continue;
+        }
         const upstream = (sigs ?? []).some((sig) => {
           const key = keyNameOf(sig);
           return key !== null && bucket.upstreamKeys.includes(key);
         });
         (upstream ? skipped : missing).push(path);
       }
+      // THE QUESTION IS THE RENEWAL. A pusher asking "do you have these"
+      // is a build that wants them: the paths it is about to push arrive as
+      // rows with a fresh clock, and the ones already here — the whole point
+      // of a cache hit — have theirs renewed by the asking. Without this, the
+      // paths a CI job hits every day would expire while it kept hitting them,
+      // because the hit is a `missing` answer and never a read.
+      repo.want(bucket.name, wanted, now());
       return { missing, skipped };
     },
+
+    collect: () => collectNow(repo.buckets()),
+
+    pinAs: (bucket, input) => pinChecked(bucket, input),
 
     admin,
 

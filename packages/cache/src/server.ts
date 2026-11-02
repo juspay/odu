@@ -53,6 +53,7 @@ import {
   Bundle,
   BucketDomains,
   type BucketDomains as BucketDomainsFacts,
+  CachePurge,
   Log,
   NixStore,
   PublicOrigin,
@@ -70,6 +71,7 @@ import {
   type Cache,
   type CacheOutcome,
 } from "./cache";
+import type { GcReport } from "./gc";
 import { objectStores, type StoreDeclarations, storeFacts } from "./stores";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
@@ -80,6 +82,7 @@ import {
   CACHE_KEY,
   CacheRefused,
   type CacheStore,
+  DEFAULT_RETENTION_DAYS,
   oduCacheSurface,
 } from "./surface";
 
@@ -108,6 +111,22 @@ export interface CacheServerOptions {
   readonly mount: string;
   /** The stores a bucket may live in, for the `stores` cell. */
   readonly stores: readonly CacheStore[];
+  /**
+   * WHERE A DELETION IS ANNOUNCED — the host's purge broker, or nothing.
+   *
+   * A collection removes narinfos and NARs an edge may still be serving, and
+   * an edge serving a path the origin has forgotten is a client importing
+   * bytes nobody can re-fetch. The row turns what left into URLs (it is the
+   * only thing here that knows where a bucket is reachable) and hands them
+   * over; who purges them, and whether anybody does, is not this row's
+   * business — see `@odu/cordis`'s `CachePurge`.
+   */
+  readonly purge?: CachePurge;
+  /** How often the row collects by itself. Absent is {@link GC_EVERY_MS};
+   *  the suite turns it down. */
+  readonly collectEveryMs?: number;
+  /** One operational line. The row hands the daemon's logger over. */
+  readonly log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
 export interface CacheServer {
@@ -120,12 +139,31 @@ export interface CacheServer {
    *  change notification — never by a verb, because a verb cannot know whether
    *  the row it touched is the one that moved. */
   readonly publish: () => void;
+  /** COLLECT EVERY BUCKET NOW, announcing what left — what the schedule does,
+   *  and what a test drives instead of waiting for a timer. */
+  readonly collect: () => Promise<void>;
+  /** Start collecting on the schedule. Returns the stop, which the row's
+   *  finalizer awaits: a timer that outlived its row would collect into a
+   *  closed database, and a collection in flight is joined rather than
+   *  abandoned between a row's deletion and its object's. */
+  readonly schedule: () => () => Promise<void>;
   /** Stop listening. The activation's cleanup, alongside the cache's own. */
   readonly detach: () => void;
   /** The substituter URL for one bucket, as the cache row publishes it — the
    *  same string the board's row carries, for a route that takes no root token. */
   readonly substituterUrl: (name: string) => string;
 }
+
+/**
+ * HOW OFTEN A CACHE COLLECTS ITSELF.
+ *
+ * Daily. Retention is measured in days, so a collection that ran more often
+ * would find the same answer and delete nothing; one that ran less often would
+ * let a bucket sit over its retention for as long as the gap. The first run is
+ * one interval after the row mounts, not at boot: a daemon restarting in a
+ * crash loop must not spend each boot walking every bucket's object list.
+ */
+export const GC_EVERY_MS = 24 * 60 * 60 * 1000;
 
 export function cacheServer(opts: CacheServerOptions): CacheServer {
   const { cache } = opts;
@@ -196,6 +234,41 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       publisher.buckets.remove(name);
     }
 
+  };
+
+  /**
+   * WHAT A COLLECTION REMOVED, AS URLS — the one place a deleted row becomes
+   * an address, because the row is the one thing here that knows where a
+   * bucket is reachable from (its domain, or the mount under the origin).
+   *
+   * Both spellings of a bucket's address are announced when it has a domain:
+   * an edge may hold `https://cache.example.org/<hash>.narinfo` AND
+   * `https://odu.example.org/cache/<bucket>/<hash>.narinfo`, and purging one
+   * of them leaves the other serving a path the origin has forgotten.
+   */
+  const announce = (report: GcReport): void => {
+    const purge = opts.purge;
+    if (purge === undefined) return;
+    const urls: string[] = [];
+    for (const bucket of report.buckets) {
+      if (bucket.removed.length === 0) continue;
+      const facts = cache.bucket(bucket.bucket);
+      const bases = new Set([pushUrlOf(bucket.bucket)]);
+      if (facts?.domain != null) bases.add(urlOf({ name: bucket.bucket, domain: facts.domain }));
+      for (const base of bases) {
+        for (const removal of bucket.removed) {
+          urls.push(`${base}/${removal.hash}.narinfo`);
+          if (removal.narFile !== null) urls.push(`${base}/nar/${removal.narFile}`);
+        }
+      }
+    }
+    if (urls.length === 0) return;
+    opts.log?.("cache.gc.purge", { urls: urls.length, listening: purge.listening() });
+    purge.announce(urls);
+  };
+
+  const collect = async (): Promise<void> => {
+    announce(await cache.collect());
   };
 
   /** One admin call as a procedure's answer: the outcome mapped onto the
@@ -293,7 +366,9 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 authority,
                 name: input.name,
                 public: input.public,
-                retentionDays: input.retentionDays,
+                // The same rule as the upstream keys below: the DEFAULT lives
+                // beside the fact it defaults, in the contract.
+                retentionDays: input.retentionDays ?? DEFAULT_RETENTION_DAYS,
                 // The default lives where the filter is EXPLAINED, in the
                 // contract's own doc: an absent list means nixpkgs' key, the
                 // filter that keeps an upstream closure out of a bucket.
@@ -342,6 +417,17 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
               ...(page.next === null ? {} : { next: page.next }),
             }),
           ),
+        retention: ({ input }) =>
+          admin(
+            input,
+            (authority) =>
+              cache.admin.retention({
+                authority,
+                bucket: input.bucket,
+                retentionDays: input.retentionDays,
+              }),
+            (facts) => rowOf(facts),
+          ),
       },
       token: {
         mint: ({ input }) =>
@@ -387,6 +473,23 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
               }),
             (facts) => ({ ...facts, rootPaths: [...facts.rootPaths] }),
           ),
+        list: ({ input }) =>
+          admin(
+            input,
+            (authority) => cache.admin.pinList({ authority, bucket: input.bucket }),
+            (pins) => ({ pins: pins.map((pin) => ({ ...pin, rootPaths: [...pin.rootPaths] })) }),
+          ),
+        delete: ({ input }) =>
+          admin(
+            input,
+            (authority) =>
+              cache.admin.pinDelete({
+                authority,
+                bucket: input.bucket,
+                name: input.name,
+              }),
+            (it) => it,
+          ),
       },
       gc: {
         run: ({ input }) =>
@@ -397,7 +500,33 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 authority,
                 bucket: input.bucket ?? null,
               }),
-            (report) => report,
+            // THE COLLECTION IS ALSO AN ANNOUNCEMENT: what left has to reach
+            // whatever is caching it, and the ROW is where a store path
+            // becomes a URL. The wire carries the counts; the port carries
+            // the addresses.
+            (report) => {
+              announce(report);
+              return {
+                ...report,
+                buckets: report.buckets.map(({ removed: _removed, ...counts }) => counts),
+              };
+            },
+          ),
+        plan: ({ input }) =>
+          admin(
+            input,
+            (authority) =>
+              cache.admin.gcPlan({
+                authority,
+                bucket: input.bucket ?? null,
+              }),
+            (preview) => ({
+              ...preview,
+              buckets: preview.buckets.map((bucket) => ({
+                ...bucket,
+                paths: bucket.paths.map((path) => ({ ...path })),
+              })),
+            }),
           ),
       },
       stats: {
@@ -424,6 +553,43 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       publish();
     },
     publish,
+    collect,
+    schedule: () => {
+      // A CHAIN OF TIMEOUTS, not an interval: a collection of a large bucket
+      // can outlast its own period, and an interval would start a second one
+      // on top of it — two collections racing for the write lock, the second
+      // sleeping until the first finishes and then finding nothing to do.
+      // Each run schedules the next when it ENDS.
+      const every = opts.collectEveryMs ?? GC_EVERY_MS;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let running: Promise<void> | null = null;
+      let stopped = false;
+      const again = (): void => {
+        if (stopped) return;
+        timer = setTimeout(() => {
+          running = collect()
+            // A SCHEDULED COLLECTION HAS NOBODY TO REFUSE. Whatever it hit —
+            // a store that is unreachable, a database that is closing — is
+            // one line, and the next one is still scheduled.
+            .catch((err: unknown) => {
+              opts.log?.("cache.gc.failed", { reason: String((err as Error)?.message ?? err) });
+            })
+            .finally(again);
+        }, every);
+        // The daemon must be able to exit with a collection pending.
+        timer.unref?.();
+      };
+      again();
+      return async () => {
+        stopped = true;
+        clearTimeout(timer ?? undefined);
+        timer = null;
+        // THE ONE IN FLIGHT IS JOINED, not abandoned: it holds the write lock
+        // and may be between a row's deletion and its object's, and the
+        // database closes as soon as this resolves.
+        await running;
+      };
+    },
     detach,
     substituterUrl: (name) => {
       const bucket = cache.bucket(name);
@@ -453,7 +619,17 @@ export class CacheMountRefused extends Data.TaggedError("CacheMountRefused")<{
 
 export const cacheRow = (declared: StoreDeclarations) => definePlugin({
   name: CACHE_KEY,
-  needs: [Bundle, Routes, StateDir, RootToken, NixStore, BoundOrigin, PublicOrigin, Log],
+  needs: [
+    Bundle,
+    Routes,
+    StateDir,
+    RootToken,
+    NixStore,
+    BoundOrigin,
+    PublicOrigin,
+    CachePurge,
+    Log,
+  ],
   apply: Effect.gen(function* () {
     const bundle = yield* Bundle;
     const routes = yield* Routes;
@@ -462,6 +638,10 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     const store = yield* NixStore;
     const boundOrigin = yield* BoundOrigin;
     const publicOrigin = yield* PublicOrigin;
+    // WHERE A DELETION IS ANNOUNCED. The host makes one broker per tenure and
+    // every daemon has it; whether a CDN row registered on it is not this
+    // row's business, and with none registered an announcement is a no-op.
+    const purges = yield* CachePurge;
     const log = yield* Log;
 
     const cache = createCache({
@@ -528,6 +708,8 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       publicOrigin: publicOrigin ?? boundOrigin,
       mount: CACHE_MOUNT,
       stores: storeFacts(declared),
+      purge: purges,
+      log: (event, fields) => log.info(fields, `odu cache: ${event}`),
     });
 
     // THE MOUNT, in the activation. The framework walks the arriving surface,
@@ -570,6 +752,11 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       }),
     );
 
+    // THE SCHEDULE, ROW-OWNED LIKE THE MIGRATION: a cache nobody administers
+    // must still stop growing, so the row collects itself daily, and the
+    // operator's button is the same collection asked for sooner.
+    const unschedule = server.schedule();
+
     // FINALIZERS RUN IN REVERSE, so the one registered SECOND runs FIRST, and
     // the safe order is: the mount goes, THEN the database. A publish that
     // landed on a mount still standing while its database had closed would read
@@ -584,6 +771,11 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       }),
     );
     yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
+    // THE SCHEDULE GOES FIRST, which by that rule means registered LAST: a
+    // collection still walking a bucket when the database closed would be an
+    // error logged on the way out, and `unschedule` waits for the one in
+    // flight rather than abandoning it mid-delete.
+    yield* Effect.addFinalizer(() => Effect.promise(unschedule));
 
     log.info(
       { mount: CACHE_MOUNT, buckets: cache.snapshot().length },

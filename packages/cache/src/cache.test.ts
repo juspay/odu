@@ -122,8 +122,12 @@ describe("the root token", () => {
       cache.admin.tokenMint({ ...asRoot(ROOT), bucket: "main", bucketGlob: null, scope: "write", expiresDays: null }),
       cache.admin.tokenList({ ...asRoot(ROOT), bucket: null }),
       cache.admin.tokenRevoke({ ...asRoot(ROOT), id: "x" }),
+      cache.admin.retention({ ...asRoot(ROOT), bucket: "main", retentionDays: 7 }),
       cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "p", paths: ["/nix/store/x"] }),
+      cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" }),
+      cache.admin.pinDelete({ ...asRoot(ROOT), bucket: "main", name: "p" }),
       cache.admin.gc({ ...asRoot(ROOT), bucket: null }),
+      cache.admin.gcPlan({ ...asRoot(ROOT), bucket: null }),
       cache.admin.stats(asRoot(ROOT)),
     ];
     for (const attempt of attempts) {
@@ -386,7 +390,7 @@ describe("stats", () => {
     const stats = await cache.admin.stats(asRoot(ROOT));
     expect(stats).toMatchObject({
       ok: true,
-      value: { objects: 0, bytes: 0, hits: 0, lastAccessed: null },
+      value: { objects: 0, bytes: 0, hits: 0, lastWanted: null },
     });
     await cache.close();
   });
@@ -525,7 +529,7 @@ describe("gc and a concurrent push", () => {
     };
     expect(await push()).toMatchObject({ ok: true });
     const db = new Database(join(scratch, "cache", "cache.sqlite"));
-    db.run("UPDATE object SET last_accessed = 0");
+    db.run("UPDATE object SET last_wanted = 0");
     db.close();
 
     const collecting = cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
@@ -561,7 +565,7 @@ describe("gc and pin", () => {
     }
     expect(await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "keep", paths: [kept] })).toMatchObject({ ok: true });
     const db = new Database(join(scratch, "cache", "cache.sqlite"));
-    db.run("UPDATE object SET last_accessed = 0");
+    db.run("UPDATE object SET last_wanted = 0");
     db.close();
     expect(await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" })).toMatchObject({ ok: true });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(kept))).not.toBeNull();
@@ -572,6 +576,70 @@ describe("gc and pin", () => {
     expect(
       await cache.narSource(cache.bucket("main") as never, `${nar(kept).narHash.slice(7)}.nar`),
     ).toMatchObject({ kind: "object" });
+    await cache.close();
+  });
+
+  it("lists what a pin holds, and lets it go", async () => {
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    const root = "/nix/store/pppppppppppppppppppppppppppppppp-root";
+    const child = "/nix/store/qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq-child";
+    for (const path of [child, root]) {
+      const payload = nar(path);
+      await putNar(cache, "main", payload);
+      await cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(path),
+        stream(narinfoText(path, payload, path === root ? [child] : [])),
+      );
+    }
+    await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "release", paths: [root] });
+
+    const listed = await cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" });
+    expect(listed).toMatchObject({ ok: true });
+    // WHAT IT HOLDS, not merely that it exists: the closure resolved at pin
+    // time, which is the question a person reading a bucket is asking.
+    if (listed.ok) {
+      expect(listed.value).toHaveLength(1);
+      expect([...(listed.value[0]?.rootPaths ?? [])].sort()).toEqual([child, root].sort());
+    }
+
+    expect(
+      await cache.admin.pinDelete({ ...asRoot(ROOT), bucket: "main", name: "release" }),
+    ).toMatchObject({ ok: true, value: { bucket: "main", name: "release" } });
+    expect(await cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" })).toMatchObject({
+      ok: true,
+      value: [],
+    });
+    // A pin that is not there is SAID so, rather than answered as a success
+    // that removed nothing.
+    expect(
+      await cache.admin.pinDelete({ ...asRoot(ROOT), bucket: "main", name: "release" }),
+    ).toMatchObject({ ok: false, code: "bad_input" });
+    await cache.close();
+  });
+});
+
+describe("retention", () => {
+  it("changes a bucket's days, and refuses a number that would be a typo", async () => {
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    const changed = await cache.admin.retention({
+      ...asRoot(ROOT),
+      bucket: "main",
+      retentionDays: 7,
+    });
+    expect(changed).toMatchObject({ ok: true });
+    if (changed.ok) expect(changed.value.retentionDays).toBe(7);
+    expect(cache.bucket("main")?.retentionDays).toBe(7);
+    // The same rule `create` keeps: a negative is a destructive reading of a
+    // typo, and zero is a deliberate "keep only what is referenced or held".
+    expect(
+      await cache.admin.retention({ ...asRoot(ROOT), bucket: "main", retentionDays: -1 }),
+    ).toMatchObject({ ok: false, code: "bad_input" });
+    expect(
+      await cache.admin.retention({ ...asRoot(ROOT), bucket: "nope", retentionDays: 7 }),
+    ).toMatchObject({ ok: false, code: "unknown_bucket" });
     await cache.close();
   });
 });
@@ -888,7 +956,7 @@ describe("CA is proved from the path", () => {
         sigs: [],
         hits: 0,
         created: 0,
-        lastAccessed: 0,
+        lastWanted: 0,
       });
     }
     repo.close();

@@ -96,7 +96,11 @@ const declaration = {
       "packages/execution/src/runner/workspace.ts": 22,
       // `nix-cache-info` — Nix's protocol path, not odu's cache row. The probe
       // URL a tunnel's name is confirmed with is the protocol's own spelling.
-      "packages/cloudflare/src/server.ts": 1,
+      // The other three are the PURGE PORT: this row forgets the URLs a
+      // collection deleted, and `CachePurge` is the shared tag it registers
+      // on. It still never names the cache row's package or its verbs.
+      "packages/cloudflare/src/server.ts": 4,
+      "packages/cloudflare/src/api.ts": 1,
       // The browser suite's Cloudflare stub answers the protocol probe.
       "packages/web-acceptance/support/cloudflareStub.ts": 1,
       // `cache-control` on three responses — an HTTP header, not a bucket.
@@ -104,8 +108,12 @@ const declaration = {
       // The bucket-domain gate: the page rewrite's `/cache/` and its own
       // 404 sentence. The path GRAMMAR moved to the row's `bucketOf` fact.
       "packages/host/src/bucketDomain.ts": 2,
-      // The same header, on the shared door reader's one request.
-      "packages/cordis/src/services.ts": 4,
+      // The same header on the shared door reader's one request — and the
+      // PURGE PORT: the broker's tag, the interface a CDN row registers on,
+      // and the sentence saying what an announcement means. The word is in
+      // the shared vocabulary, which is where a port belongs; `@odu/cordis`
+      // still names no row's package.
+      "packages/cordis/src/services.ts": 11,
       "packages/launch/src/webDaemonLaunch.ts": 1,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,

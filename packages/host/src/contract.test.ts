@@ -78,9 +78,10 @@ describe("the host's contract", () => {
 });
 
 /**
- * THE PROOF, on this build's own numbers: the cache row went to 3.0 and the
- * host stayed on 2.x, so a reader of the runs is adopted and a reader of a 2.x
- * cache is refused — by name.
+ * THE PROOF, on this build's own numbers: the cache row has taken two majors
+ * of its own (3.0 when `held` went, 4.0 when retention moved to `lastWanted`)
+ * while the host stayed on 2.x — so a reader of the runs is adopted and a
+ * reader of an older cache is refused, by name.
  */
 describe("this daemon, after the cache row's own major", () => {
   /** What this build's daemon publishes: the host's version, and each mounted
@@ -95,7 +96,7 @@ describe("this daemon, after the cache row's own major", () => {
   };
 
   it("moved the cache a major and left the host and the runs on 2.x", () => {
-    expect(CACHE_CONTRACT_VERSION.split(".")[0]).toBe("3");
+    expect(CACHE_CONTRACT_VERSION.split(".")[0]).toBe("4");
     expect(HOST_CONTRACT_VERSION.split(".")[0]).toBe("2");
     expect(CI_CONTRACT_VERSION.split(".")[0]).toBe("2");
   });

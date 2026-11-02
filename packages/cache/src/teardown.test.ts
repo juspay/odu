@@ -33,10 +33,12 @@ import { closeHost, definePlugin, mountPlugin, openHost, provide, rowReport, set
 import {
   BoundOrigin,
   Bundle,
+  CachePurge,
   type HttpRoutes,
   Log,
   NixStore,
   PublicOrigin,
+  purgeBroker,
   RootToken,
   type ClaimedRoutes,
   Routes,
@@ -168,7 +170,7 @@ describe("the cache row's teardown", () => {
       sigs: [],
       hits: 0,
       created: 0,
-      lastAccessed: 0,
+      lastWanted: 0,
     });
     repo.close();
     await cache.close();
@@ -181,6 +183,10 @@ describe("the cache row's teardown", () => {
     await run(provide(host, BoundOrigin, () => "http://127.0.0.1:18440"));
     await run(provide(host, PublicOrigin, () => null));
     await run(provide(host, Log, () => silentLog));
+    // THE PURGE BROKER, as the host provides it: nothing registers on it
+    // here, so a collection announces into a daemon with no CDN — which is
+    // most of them.
+    await run(provide(host, CachePurge, () => purgeBroker()));
     await run(provide(host, Routes, () => routesStub));
     await run(
       provide(host, Bundle, () => ({
@@ -224,6 +230,10 @@ describe("the cache row's teardown", () => {
     await run(provide(host, BoundOrigin, () => "http://127.0.0.1:18440"));
     await run(provide(host, PublicOrigin, () => null));
     await run(provide(host, Log, () => silentLog));
+    // THE PURGE BROKER, as the host provides it: nothing registers on it
+    // here, so a collection announces into a daemon with no CDN — which is
+    // most of them.
+    await run(provide(host, CachePurge, () => purgeBroker()));
     await run(provide(host, Routes, () => routesStub));
     await run(provide(host, Bundle, () => ({}) as unknown as RootedSurfacesRuntime<never>));
     await run(mountPlugin(host, cacheRow(new Map())));
@@ -254,6 +264,10 @@ describe("the cache row's teardown", () => {
       await run(provide(host, BoundOrigin, () => "http://127.0.0.1:18440"));
       await run(provide(host, PublicOrigin, () => null));
       await run(provide(host, Log, () => silentLog));
+    // THE PURGE BROKER, as the host provides it: nothing registers on it
+    // here, so a collection announces into a daemon with no CDN — which is
+    // most of them.
+    await run(provide(host, CachePurge, () => purgeBroker()));
       await run(provide(host, Routes, () => routesStub));
       // THE BUNDLE, as far as this row uses it: it mounts, and it hands back the
       // context to publish through. The drop is OURS, which is the whole point —
