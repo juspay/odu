@@ -12,7 +12,7 @@ import { objectStoreContract } from "../test/objectStore.contract";
 import { type Gateway, startGateway } from "../test/versitygw";
 import { createHash } from "node:crypto";
 import { base32 } from "./narinfo";
-import { ConditionalConflict, diskObjectStore, s3ObjectStore, UnrecordedObject } from "./objectStore";
+import { diskObjectStore, s3ObjectStore, UnrecordedObject } from "./objectStore";
 import { s3Fetch, type S3Target } from "./s3sign";
 
 let scratch: string;
@@ -173,11 +173,12 @@ describe("s3 object store: a 409 decides nothing", () => {
     ]);
   });
 
-  it("gives up with a ConditionalConflict naming the key, and keeps nothing", async () => {
+  it("gives up refused with `conflict`, naming the key and the tries, and keeps nothing", async () => {
     const store = s3ObjectStore({ target, partSize: PART, send: conflicting(Number.POSITIVE_INFINITY).send });
-    const put = store.put("main/nar/a.nar.zst", once(small));
-    await expect(put).rejects.toBeInstanceOf(ConditionalConflict);
-    await put.catch((err: ConditionalConflict) => expect(err.key).toBe("main/nar/a.nar.zst"));
+    expect(await store.put("main/nar/a.nar.zst", once(small))).toEqual({
+      ok: false,
+      refusal: { kind: "conflict", key: "main/nar/a.nar.zst", tries: 6 },
+    });
     expect(await store.head("main/nar/a.nar.zst")).toBeNull();
   });
 });

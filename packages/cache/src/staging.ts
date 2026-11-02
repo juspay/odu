@@ -486,14 +486,10 @@ export function createStaging(deps: StagingDeps): Staging {
       const outcome = await storeOf(bucket).keep(key, path, facts);
       if (outcome.ok) return outcome.facts;
       if (outcome.refusal.kind === "exists") return outcome.refusal.facts;
-      // THE STORE READ OTHER BYTES THAN THE VERIFY DID: its refusal names both.
-      log?.("cache.object.put_failed", {
-        bucket: bucket.name,
-        path: info.storePath,
-        reason: outcome.refusal.kind,
-        expected: outcome.refusal.expected,
-        actual: outcome.refusal.actual,
-      });
+      // THE STORE KEPT NOTHING — it read other bytes than the verify did, or
+      // its conditional write never decided — and its refusal names the facts.
+      const { kind, ...named } = outcome.refusal;
+      log?.("cache.object.put_failed", { bucket: bucket.name, path: info.storePath, reason: kind, ...named });
       return refused;
     } catch (err) {
       log?.("cache.object.put_failed", {

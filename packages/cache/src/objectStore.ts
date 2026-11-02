@@ -77,7 +77,10 @@ export type ObjectRefusal =
   | { kind: "exists"; key: string; facts: ObjectFacts }
   /** The caller said what the bytes would be, and they were not. Nothing was
    *  kept. */
-  | { kind: "facts_mismatch"; key: string; expected: ObjectFacts; actual: ObjectFacts };
+  | { kind: "facts_mismatch"; key: string; expected: ObjectFacts; actual: ObjectFacts }
+  /** A conditional write that stayed UNDECIDED: S3 answered `409 Conflict`
+   *  to all `tries`, so nobody is known to have won the key. Nothing was kept. */
+  | { kind: "conflict"; key: string; tries: number };
 
 export type PutOutcome = { ok: true; facts: ObjectFacts } | { ok: false; refusal: ObjectRefusal };
 
@@ -115,18 +118,6 @@ export class UnrecordedObject extends Error {
   readonly _tag = "UnrecordedObject";
   constructor(readonly key: string) {
     super(`${key} holds an object with no odu-size/odu-sha256 metadata — odu did not write it`);
-  }
-}
-
-/** A CONDITIONAL WRITE THAT STAYED UNDECIDED: S3 answered `409` to every try
- *  (see `CONFLICT_BACKOFF_MS`), so nobody is known to have won `key`. */
-export class ConditionalConflict extends Error {
-  readonly _tag = "ConditionalConflict";
-  constructor(
-    readonly key: string,
-    readonly tries: number,
-  ) {
-    super(`${key}: the conditional write was answered 409 Conflict ${tries} times, and nothing was kept`);
   }
 }
 
@@ -458,20 +449,25 @@ const xmlValue = (xml: string, element: string): string | null => {
  * NOTHING — AWS answers it when a concurrent delete (or, on versitygw and R2,
  * another conditional write: `ConditionalRequestConflict`) was in flight, and
  * either may yet fail — so the write is sent again after each of these pauses,
- * and a write still conflicted after the last is a {@link ConditionalConflict}.
+ * and a write still conflicted after the last is refused with `conflict`.
  */
 const CONFLICT_BACKOFF_MS = [50, 100, 200, 400, 800] as const;
+const CONFLICT_TRIES = CONFLICT_BACKOFF_MS.length + 1;
+const conflicted = (key: string, tries: number): PutOutcome => ({
+  ok: false,
+  refusal: { kind: "conflict", key, tries },
+});
 type Decided = "won" | "lost" | "conflict";
 const decidedBy = (response: Response): Decided =>
   response.status === 412 ? "lost" : response.status === 409 ? "conflict" : "won";
 
-/** Run `attempt` until it is not a conflict, pausing between tries. */
-async function untilDecided<T>(key: string, attempt: () => Promise<T | "conflict">): Promise<T> {
+/** Run `attempt` until it is not a conflict, pausing between tries; still
+ *  `"conflict"` after {@link CONFLICT_TRIES} of them. */
+async function untilDecided<T>(attempt: () => Promise<T | "conflict">): Promise<T | "conflict"> {
   for (let tries = 1; ; tries += 1) {
     const outcome = await attempt();
-    if (outcome !== "conflict") return outcome;
     const pause = CONFLICT_BACKOFF_MS[tries - 1];
-    if (pause === undefined) throw new ConditionalConflict(key, tries);
+    if (outcome !== "conflict" || pause === undefined) return outcome;
     await Bun.sleep(pause);
   }
 }
@@ -713,7 +709,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       const refused = mismatch(facts);
       if (refused !== null) return refused;
       // The bytes are in hand, so a `409` is answered by sending them again.
-      const decided = await untilDecided(key, async () => {
+      const decided = await untilDecided(async () => {
         const response = await call("PUT", key, {
           headers: { "if-none-match": "*", "content-length": String(filled), ...metaOf(facts) },
           body: first as Uint8Array<ArrayBuffer>,
@@ -723,6 +719,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         if (decided === "won" && !response.ok) throw new S3Failure(`PUT ${key}`, response, text);
         return decided;
       });
+      if (decided === "conflict") return conflicted(key, CONFLICT_TRIES);
       return decided === "won" ? { ok: true, facts } : exists(key);
     }
 
@@ -768,13 +765,14 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       await abort(key, uploadId);
       // A CONFLICTED UPLOAD must be started again, and these bytes were a
       // stream: `keep` re-reads its file, a stream's caller is told.
-      if (decided === "conflict") throw new ConditionalConflict(key, 1);
+      if (decided === "conflict") return conflicted(key, 1);
       return exists(key);
     }
     await complete(uploadKey, uploadId, etags, false);
     try {
       // The temp object stays put, so a conflicted copy is simply started again.
-      const decided = await untilDecided(key, () => copyInto(key, uploadKey, facts));
+      const decided = await untilDecided(() => copyInto(key, uploadKey, facts));
+      if (decided === "conflict") return conflicted(key, CONFLICT_TRIES);
       return decided === "won" ? { ok: true, facts } : await exists(key);
     } finally {
       await deleteKey(uploadKey).catch(() => {});
@@ -843,14 +841,13 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     // A file can be read again, so a conflicted multipart upload is retried
     // whole — what AWS asks of a `409` on `CompleteMultipartUpload`.
     keep: (key, file, facts) =>
-      oneWriter(key, () =>
-        untilDecided(key, () =>
-          put(key, Bun.file(file).stream(), facts).catch((err: unknown) => {
-            if (err instanceof ConditionalConflict) return "conflict" as const;
-            throw err;
-          }),
-        ),
-      ),
+      oneWriter(key, async () => {
+        const outcome = await untilDecided(async () => {
+          const once = await put(key, Bun.file(file).stream(), facts);
+          return !once.ok && once.refusal.kind === "conflict" ? "conflict" : once;
+        });
+        return outcome === "conflict" ? conflicted(key, CONFLICT_TRIES) : outcome;
+      }),
 
     async get(key, range) {
       const found = await headOf(key);
