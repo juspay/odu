@@ -428,16 +428,23 @@ const META_SHA256 = "x-amz-meta-odu-sha256";
  * `S3File.stream()` and 208 MiB through a plain `fetch`. A slow reader would
  * make the process hold the whole object. So `get` reads in WINDOWS of ranged
  * GETs, at most TWO in flight: the one being read, and the next, fetched while
- * it is (so a window costs no idle round trip). A prefetched body is buffered
- * whole — a window, bounded — and cancelling the read aborts both.
+ * it is (so a window costs no idle round trip). Cancelling the read aborts both.
+ *
+ * THE PREFETCHED WINDOW IS READ INTO ONE BUFFER (`arrayBuffer()`), not left as
+ * an unread body: `fetch` reads a body ahead regardless, and an unread one cost
+ * far more than its MiB. 300 MiB to a slow reader, fresh processes, one idle
+ * machine: 66–84 MiB of growth with an unread body prefetched (99 on CI), 43–62
+ * with no prefetch, 41–59 with the prefetch in one buffer. So a read holds at
+ * most the window being read plus one buffered: 2 × READ_WINDOW of body.
  *
  * 1 MiB, measured in a fresh process on a 300 MiB read by a slow reader: peak
  * growth 52–55 MiB at 1 MiB, 62–66 at 2, 79–82 at 4, 75–87 at 8, and the same
  * at 600 MiB as at 200 — a floor of Bun's own, not the object. The cost is a
- * GET per MiB. With the prefetch, the same slow 300 MiB read measured 46–84
- * MiB against 46–80 without it, interleaved runs on one loaded machine.
+ * GET per MiB.
  */
 const READ_WINDOW = 1024 * 1024;
+/** A buffered window reaches the reader in pieces of this size. */
+const READ_PIECE = 64 * 1024;
 /** UploadPartCopy's ceiling is 5 GiB a part; 1 GiB keeps a copy's parts few. */
 const COPY_PART = 1024 * 1024 * 1024;
 
@@ -861,12 +868,19 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     end: number,
     control: AbortController,
   ): ReadableStream<Uint8Array> {
-    let reader = (first.body as ReadableStream<Uint8Array>).getReader();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = (first.body as ReadableStream<Uint8Array>).getReader();
     let position = from;
-    const open = (): Promise<Response> | null => {
+    let pieces: Uint8Array[] = [];
+    const open = (): Promise<ArrayBuffer> | null => {
       if (position > end) return null;
       const to = Math.min(position + READ_WINDOW, end + 1) - 1;
-      const next = fetchWindow(key, position, to, control.signal);
+      const next = fetchWindow(key, position, to, control.signal).then(async (response) => {
+        if (response.status !== 206) {
+          const body = await response.text().catch(() => "");
+          throw new S3Failure(`GET ${key} (a window)`, response, body);
+        }
+        return response.arrayBuffer();
+      });
       position = to + 1;
       // A REJECTED PREFETCH is read when its turn comes, not reported twice.
       next.catch(() => {});
@@ -876,27 +890,35 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
         for (;;) {
-          const next = await reader.read();
-          if (!next.done) {
-            controller.enqueue(next.value);
+          const piece = pieces.shift();
+          if (piece !== undefined) {
+            controller.enqueue(piece);
             return;
+          }
+          if (reader !== null) {
+            const next = await reader.read();
+            if (!next.done) {
+              controller.enqueue(next.value);
+              return;
+            }
+            reader = null;
           }
           if (prefetched === null) {
             controller.close();
             return;
           }
-          const response = await prefetched;
-          if (response.status !== 206 || response.body === null) {
-            const body = await response.text().catch(() => "");
-            throw new S3Failure(`GET ${key} (a window)`, response, body);
-          }
-          reader = response.body.getReader();
+          const window = await prefetched;
           prefetched = open();
+          // Views of the one buffer, in the chunk size a stream reader expects.
+          pieces = [];
+          for (let at = 0; at < window.byteLength; at += READ_PIECE) {
+            pieces.push(new Uint8Array(window, at, Math.min(READ_PIECE, window.byteLength - at)));
+          }
         }
       },
       async cancel(reason) {
         control.abort(reason);
-        await reader.cancel(reason).catch(() => {});
+        await reader?.cancel(reason).catch(() => {});
       },
     });
   }
@@ -992,7 +1014,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         throw new S3Failure(`GET ${key}`, first, body);
       }
       const end = Math.min(range?.end ?? spans.size - 1, spans.size - 1);
-      return { stream: windowed(key, first, spans.last + 1, end, control), size: spans.size };
+      return { stream: windowed(safeKey(key), first, spans.last + 1, end, control), size: spans.size };
     },
 
     head: async (key) => (await headOf(key))?.size ?? null,
