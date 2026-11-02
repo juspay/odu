@@ -249,6 +249,75 @@ export interface HttpRoutes {
  *  outlive a call. */
 export const Routes = serviceTag<HttpRoutes>("odu:httpRoutes");
 
+/**
+ * WHAT WAS DELETED, FOR WHOEVER IS CACHING IT — the port a collection announces
+ * through, and a CDN row answers on.
+ *
+ * A garbage collection removes narinfos and NARs that an edge may still be
+ * holding, and an edge that keeps serving them is a client importing a path the
+ * origin no longer has. So deletion ANNOUNCES the URLs it removed, and whoever
+ * fronts those URLs purges them.
+ *
+ * **The direction is why this is a broker and not an offer.** The cache row
+ * announces; the CDN row listens — and the CDN row is mounted AFTER the cache
+ * (it reacts to the cache's domains), may fail, and on most deployments does
+ * not exist at all. A row that had to `yield*` its listener's service would be
+ * a cache that cannot collect without a CDN. The host makes ONE broker per
+ * tenure, both rows name it, and with nobody registered `announce` is a no-op:
+ * no CDN, no purge, no refusal.
+ *
+ * Single-owner, like the principal broker: the first purger installs, a second
+ * is refused, and the withdrawal `register` returns removes only its own.
+ */
+export interface CachePurge {
+  /** These URLs no longer exist. Fire-and-forget: a collection is not held up
+   *  by an edge, and a purge that fails is the purger's to log. */
+  announce(urls: readonly string[]): void;
+  /** Install the purger. Returns its withdrawal; throws
+   *  {@link PurgeClaimRefused} when one is already installed. */
+  register(purge: (urls: readonly string[]) => void): () => void;
+  /** Is anything fronting these URLs? A RUNNING fact — what a collection logs
+   *  beside the count, so "purged nothing" and "nothing to purge" are
+   *  distinguishable. */
+  listening(): boolean;
+}
+
+/** A second purger claimed the broker. A distinct class so a row's `apply` can
+ *  fail with a sentence rather than a message match. */
+export class PurgeClaimRefused extends Error {
+  readonly _tag = "PurgeClaimRefused";
+  constructor() {
+    super(
+      "odu: a cache purger is already installed on this daemon — exactly one " +
+        "row may front the cache's URLs",
+    );
+  }
+}
+
+export const CachePurge = serviceTag<CachePurge>("odu:cachePurge");
+
+/** A broker with no purger. ONE per daemon, made by whoever owns the tenure. */
+export function purgeBroker(): CachePurge {
+  // A CLAIM, not the function: two registrations of the same function are two
+  // claims, and a withdrawal that compared values could clear a successor's.
+  let installed: { readonly purge: (urls: readonly string[]) => void } | null = null;
+  return {
+    announce(urls) {
+      if (installed === null || urls.length === 0) return;
+      installed.purge(urls);
+    },
+    register(purge) {
+      if (installed !== null) throw new PurgeClaimRefused();
+      const claim = { purge };
+      installed = claim;
+      return () => {
+        if (installed === claim) installed = null;
+      };
+    },
+    listening: () => installed !== null,
+  };
+}
+
 // ── what a row publishes ────────────────────────────────────────────────────
 
 /** ONE BUCKET'S OWN NAME, as the cache row publishes it. */

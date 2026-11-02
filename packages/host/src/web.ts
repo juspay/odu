@@ -123,6 +123,7 @@ import {
   BucketDomains,
   Build,
   Bundle,
+  CachePurge,
   DaemonHome,
   Log,
   type HttpRoutes,
@@ -132,6 +133,7 @@ import {
   type RowAgent,
   NixStore,
   PublicOrigin,
+  purgeBroker,
   RootToken,
   RowContracts,
   Routes,
@@ -396,7 +398,15 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // the composition root makes it, and the adapter is built once over it. Its
     // FALLBACK is the absent-resolver rule again, for a call outside any request.
     const admissions = admissionStore(hasDoor ? NOBODY_ADMISSION : LOCAL_ADMISSION);
+    // THE PURGE BROKER, the same shape asked of a different question: a
+    // collection announces the URLs it deleted, and whoever fronts those URLs
+    // forgets them. One per tenure, named by both rows and owned by neither —
+    // with no CDN row mounted nothing is registered and `announce` does
+    // nothing, which is how a cache collects on a daemon that has never heard
+    // of an edge.
+    const purges = purgeBroker();
     await run(provide(host, PrincipalBroker, () => principals));
+    await run(provide(host, CachePurge, () => purges));
     await run(provide(host, StateDir, () => stateRoot(process.env)));
     await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));
     await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
