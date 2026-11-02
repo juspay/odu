@@ -5,7 +5,7 @@
  * its tests with it. It is a pure function of `PostingHealth` with no authority
  * in it, and its only caller is a terminal — so keeping it beside the GitHub
  * poster meant the live matrix imported the coordinator's poster to format one
- * sentence, which is how `odu attach` came to drag the engine into a public
+ * sentence, which is how `odu ci attach` came to drag the engine into a public
  * client. The import wall refused it, correctly, and the fix was to put the
  * rendering where the renderings are.
  */

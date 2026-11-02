@@ -6,8 +6,8 @@
  * spawns it (see `@odu/ci/venuePort`), and its output is a log file nobody
  * reads unless a hold went wrong. Everything else this file used to hold —
  * resolving a platform set, spawning holders, releasing them — moved to the
- * daemon with the two commands that now ask it, because `odu lease` and
- * `odu release` are clients of the shared service and their work belongs where
+ * daemon with the two commands that now ask it, because `odu ci lease` and
+ * `odu ci release` are clients of the shared service and their work belongs where
  * the service is.
  *
  * What stays is the one thing that has to be a process: a hold outlives the

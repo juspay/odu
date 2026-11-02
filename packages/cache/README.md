@@ -13,7 +13,7 @@ Part of the odu repo — `"@odu/cache": "workspace:*"`.
 | --- | --- | --- |
 | `./surface` | the CONTRACT: a bucket's shape, the verbs that administer it, the tagged refusal, `useBlock`, and the expose map both the terminal and an agent read | ✅ |
 | `./server` | implements it and exports `cacheRow` — the plugin the daemon mounts, which mounts ITSELF on the runs' bundle and closes its own database | ❌ |
-| `./cli` | `odu cache …`, the argv face: `create`, `list`, `use`, `token`, `login`, `push`, `pin`, `gc`, `stats` | ❌ |
+| `./cli` | `odu cache …`, the argv face: `use`, `login`, `push`; the administering verbs are the board and `odu surface cache <verb>` (`bucket_create`, `bucket_list`, `token_mint`, `pin_create`, `gc_run`, `stats_read`, …) | ❌ |
 | `./face` | the board's Cache view | ✅ (draws) |
 
 That is the whole package: the engine, the protocol route and the mount path are

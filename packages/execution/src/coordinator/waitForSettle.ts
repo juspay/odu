@@ -1,6 +1,6 @@
 /**
  * Face-neutral settle-wait core — shared by the MCP `wait_for_settle` tool and
- * the plain-CLI `odu wait` face (same pattern as `coordinator/cancel.ts`).
+ * the plain-CLI `odu ci wait` face (same pattern as `coordinator/cancel.ts`).
  *
  * A fail-fast single blocking subscription over the agent-projected `nodes`
  * stream: block and return the verdict the instant a node goes red (fail-fast)
@@ -296,7 +296,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     const sock = opts.socketPath ?? SOCKET_PATH;
     // The stream ended with no settle and no abort. If we never observed a
     // LIVE run, there is none in this checkout — refuse LOUD, mirroring the
-    // CLI (`odu status`), rather than an instant empty verdict a caller can't
+    // CLI (`odu ci status`), rather than an instant empty verdict a caller can't
     // tell apart from a real one (juspay/odu#49 ask 1).
     if (lastLive === undefined) {
       // …UNLESS the residue says a run DIED here: the lock/socket residue
@@ -388,7 +388,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     // as unmovable), and a coordinator busy claiming a venue or copying a
     // runner closure goes quiet for that long routinely.
     // The subscription then failed with `SurfaceStdioTransportClosed`, the
-    // catch below read it as end-of-stream, and `odu wait --settle` printed
+    // catch below read it as end-of-stream, and `odu ci wait --settle` printed
     // `{settled:false, passed:false}` with every reason flag false — no
     // fail-fast, no timeout, no cancellation — about fifteen seconds into a run
     // whose lanes were still leased and whose phases were still running. That

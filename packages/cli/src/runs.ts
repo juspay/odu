@@ -8,10 +8,10 @@
  * `-o json` emits the raw records (the row source a service face consumes);
  * the default is a compact table, newest first.
  *
- * THE SPLIT WITH `odu history list`, because there are now two histories and a
+ * THE SPLIT WITH `odu ci history list`, because there are now two histories and a
  * reader should know which one it is looking at. This one is CHECKOUT-scoped
  * and answers in `<sha7>#<seq>` — the ordinal a commit status links to, and the
- * shape every existing consumer of `-o json` already parses. `odu history list`
+ * shape every existing consumer of `-o json` already parses. `odu ci history list`
  * is the PER-USER catalog: it is addressed by run id, it survives the checkout
  * being deleted, it holds per-attempt evidence, and it is what PR 2's service
  * discovers runs from. The coordinator writes both on every run, so a run
@@ -115,7 +115,7 @@ export async function runsCommand(json: boolean): Promise<number> {
   // stdout sees a byte it did not before.
   if (!json && records.length === 0) {
     process.stderr.write(
-      "odu: the per-user catalog may still have runs — try `odu history list --all`\n",
+      "odu: the per-user catalog may still have runs — try `odu ci history list --all`\n",
     );
   }
   return 0;

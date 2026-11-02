@@ -305,7 +305,7 @@ export type CacheStats = typeof StatsOutputSchema.Type;
 const PathsInputSchema = Schema.Struct({
   bucket: Schema.String.check(Schema.isMinLength(1)),
   /** A substring the store path must contain — the board's filter box, and the
-   *  same shape `odu history list`'s search takes. */
+   *  same shape `odu ci history list`'s search takes. */
   filter: Schema.optionalKey(Schema.String),
   /** Absent means the first page. */
   after: Schema.optionalKey(Schema.String),

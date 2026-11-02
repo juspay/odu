@@ -204,7 +204,7 @@ export function Board(props: {
   loading: boolean;
   onOpen: (runId: string) => void;
   onCreate: () => void;
-  /** The machines page — `odu hosts | lease | release`. */
+  /** The machines page — `odu ci hosts | lease | release`. */
   onMachines: () => void;
   /** The maintenance page — the catalog's import and prune, and protect. */
   onMaintain: () => void;
@@ -312,7 +312,7 @@ export function Board(props: {
         </Show>
         <Show when={!props.loading && props.rows.length === 0}>
           <p class="empty">
-            No runs in the catalog yet. Start one with <code>odu run</code> in a
+            No runs in the catalog yet. Start one with <code>odu ci run</code> in a
             checkout, or with the button above.
           </p>
         </Show>

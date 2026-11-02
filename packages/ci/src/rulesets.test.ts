@@ -1,5 +1,5 @@
 /**
- * The ruleset decisions `odu protect` writes through. Every case here is one
+ * The ruleset decisions `odu ci protect` writes through. Every case here is one
  * the classic-protection code could not even express: it had a single endpoint
  * and no notion of *which* protection object owned a branch's checks.
  */
@@ -252,7 +252,7 @@ describe("rulesetId", () => {
 
 describe("updateBody", () => {
   // Verbatim from `GET /repos/juspay/olai/rulesets/20468764`, trimmed to the
-  // fields the write echoes — the shape that made `odu protect` 404.
+  // fields the write echoes — the shape that made `odu ci protect` 404.
   const ruleset = Schema.decodeUnknownSync(RulesetSchema)({
     id: 20468764,
     name: "master: PRs + green CI",

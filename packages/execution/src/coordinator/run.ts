@@ -1,5 +1,5 @@
 /**
- * `odu run` — the coordinator. One process owns the whole run, including the
+ * `odu ci run` — the coordinator. One process owns the whole run, including the
  * venue lease (ssh-held flock per remote host — juspay/odu#54): lock lifetime
  * equals run lifetime, so crash / SIGKILL free the box when the connection
  * drops.
@@ -250,7 +250,7 @@ export async function ensureCheckoutFree(
   if (existing !== null) {
     // Awaited, not dropped: the link owns a scope holding the protocol fibers
     // (`DialedRun.close` is async for that reason), and this probe runs on
-    // every `odu run` — the one path that dials only to find out whether
+    // every `odu ci run` — the one path that dials only to find out whether
     // anyone is home. `runTool.ts`'s identical probe already awaits it.
     await existing.close();
     return refuseLive;
@@ -590,7 +590,7 @@ async function orchestrate(
   // ── DAG + lanes ──
   const spec = loadJustPipeline(specSource, { root: args.root });
   const hostsConfig = loadHosts();
-  // Zero resolved pools means a bare `odu run` with no hosts anywhere — no
+  // Zero resolved pools means a bare `odu ci run` with no hosts anywhere — no
   // config file, no `--host` pin, no `--platform` slice. Defaulting that to a
   // localhost lane silently turned a fanout into a local fork-bomb on a
   // production workstation (juspay/odu#46), so `fanoutPools` refuses it loudly
@@ -790,12 +790,12 @@ async function orchestrate(
   // coordinator is gone — without it the catalog is discoverable only by
   // listing, which is a poor answer to "the one I just started".
   if (history.runId !== null) {
-    info(`odu · run ${history.runId} — evidence: odu logs --run ${history.runId} <node>`);
+    info(`odu · run ${history.runId} — evidence: odu ci logs --run ${history.runId} <node>`);
   }
 
   // ── lane assignment: which machine each platform will run on ──
   // Two layers (juspay/odu#54 CR1):
-  //   1) Agent-held: `odu lease` / MCP lease left a live holder in
+  //   1) Agent-held: `odu ci lease` / MCP lease left a live holder in
   //      `.ci/odu-lease.json` → use that host, skip claim/release entirely
   //      (iterate fix→run without re-queue).
   //   2) Run auto-lease: claim for the rest, release on run exit.
@@ -825,7 +825,7 @@ async function orchestrate(
     if (held === undefined) continue;
     lanesByPlatform[platform] = held;
     info(
-      `${platform}: using agent-held ${held} (odu lease — lock untouched on run exit)`,
+      `${platform}: using agent-held ${held} (odu ci lease — lock untouched on run exit)`,
     );
   }
 
@@ -1012,7 +1012,7 @@ async function orchestrate(
    *  the lanes are closed, from both terminal paths (natural completion and
    *  `shutdown`), so the fan-in's three-frame protocol is TOTAL: every node
    *  that reaches a terminal status gets its log ended by whoever owns that
-   *  outcome, and `odu logs -f <node>` returns on every one of them. */
+   *  outcome, and `odu ci logs -f <node>` returns on every one of them. */
   const endRunLogs = (): void => {
     for (const id of store.get().order) endLocal(id);
   };
@@ -1028,7 +1028,7 @@ async function orchestrate(
    *  when its owner has said its last word, and `append` after `end` THROWS by
    *  design — so a second party stamping a sealed log does not merely repeat
    *  itself, it kills the coordinator. That is not hypothetical: an operator
-   *  `odu cancel @<platform>` ends the dropped lane's node logs with the true
+   *  `odu ci cancel @<platform>` ends the dropped lane's node logs with the true
    *  `cancelled by operator (lane)` line, and the settle that follows found
    *  those same nodes still in the lane's undrained set and stamped them again
    *  — `logTail: append to slow@x86_64-linux after its log ended`, run dead.
@@ -1288,7 +1288,7 @@ async function orchestrate(
       // last word about it: end the log in the same breath as the status, the
       // way the runner does on every path it owns. Without this the fan-in
       // serves a terminal for nodes a LANE finished and none for the ones the
-      // coordinator finished, and `odu logs -f e2e@linux` against a lane that
+      // coordinator finished, and `odu ci logs -f e2e@linux` against a lane that
       // died never returns — the wait an agent cannot afford, on exactly the
       // runs most worth reading.
       //
@@ -1331,7 +1331,7 @@ async function orchestrate(
    *
    *  `_ci-setup@<platform>` with no live lane is the one node the coordinator
    *  can cancel by itself, and since juspay/odu#84 it is reachable: the bracket
-   *  opens at the venue claim, so for the whole provisioning window `odu status`
+   *  opens at the venue claim, so for the whole provisioning window `odu ci status`
    *  shows `_ci-setup@plat` RUNNING while no lane exists to route a cancel to.
    *  Refusing there means the id an operator can see is the one id they cannot
    *  act on. Cancelling that node is by definition dropping the lane it brackets
@@ -1528,8 +1528,8 @@ async function orchestrate(
    *  says so in as many words, as a deliberate fail-fast ("a host that closed
    *  is closed"). Which makes not-closing-while-still-owing-a-frame the host's
    *  job, and this run's last words are exactly that: a node's log terminal and
-   *  its final status, published turns before the close, to an `odu logs -f` or
-   *  `odu attach` that has nowhere else to learn them from.
+   *  its final status, published turns before the close, to an `odu ci logs -f` or
+   *  `odu ci attach` that has nowhere else to learn them from.
    *
    *  A turn of the loop rather than a timer: `setImmediate` runs after the
    *  current turn's I/O callbacks, by which point the frames those publishes
@@ -1585,7 +1585,7 @@ async function orchestrate(
 
   // The single shutdown every interrupt source shares: SIGTERM/SIGINT, the live
   // view's `q` (via `onQuit`), the `run.cancel` surface mutation a second
-  // process drives (`odu cancel`, the MCP `cancel` tool, a `--supersede` start),
+  // process drives (`odu ci cancel`, the MCP `cancel` tool, a `--supersede` start),
   // and venue `lease.lost` (remote hold died — flock already free). An interrupted
   // coordinator must not strand `Running:` contexts as eternally pending checks,
   // and must hand the terminal back. Natural completion does NOT pass through
@@ -1614,13 +1614,13 @@ async function orchestrate(
       for (const lane of createdLanes) lane.close();
       // An interrupted run does not drain — freeing the terminal and the
       // exclusivity fast is the point — but it does stop writing, and a reader
-      // is owed that fact either way: without a terminal here, an `odu logs -f`
+      // is owed that fact either way: without a terminal here, an `odu ci logs -f`
       // attached to a cancelled run's node hangs until its own process is
       // killed. What the log lost is a separate question from whether it ended,
       // so SAY what was lost before saying it ended: a terminal on a silently
       // short log is the very failure this issue is about, and an agent reaches
       // this path by default — `wait_for_settle` returns on STATUS, so the
-      // `run({supersede})` / `odu cancel` / linger-idle that follows a settle
+      // `run({supersede})` / `odu ci cancel` / linger-idle that follows a settle
       // lands here with a just-finished node's summary still on the wire.
       // Stamping is a synchronous append, so unlike draining it costs this path
       // nothing it is trying to protect.
@@ -1694,7 +1694,7 @@ async function orchestrate(
    *  non-empty this run is NOT settleable however terminal its nodes look.
    *
    *  The node states are the run's answer to "is this over" for every reader
-   *  outside this process — `wait_for_settle` and `odu wait` judge the `nodes`
+   *  outside this process — `wait_for_settle` and `odu ci wait` judge the `nodes`
    *  cell, not this module's `checkSettled`. So a `lane.cancel` during the claim
    *  that terminalized its lane at once would, on a single-platform run, make
    *  every node terminal while `claimVenues` is still copying a closure onto a
@@ -1716,7 +1716,7 @@ async function orchestrate(
    *  Both questions are askable, because both are asked. `checkSettled` wants
    *  the whole-run one — a settle is a statement about the run. A platform stop
    *  wants its OWN platform's: deferring darwin's terminalize behind a cold
-   *  linux claim can make `odu cancel @darwin` look like it did nothing for
+   *  linux claim can make `odu ci cancel @darwin` look like it did nothing for
    *  minutes, and nothing about linux's box has any bearing on darwin's
    *  verdict. */
   const claimsInFlight = new Map<string, number>();
@@ -1748,7 +1748,7 @@ async function orchestrate(
   // always the faster: it is a few bytes on the state cell while the output is
   // a backlog on the log stream. juspay/odu#88 joined them at TEARDOWN, so the
   // run's own exit stopped dropping tails. But settle is not teardown. Every
-  // OTHER consumer of a run — `odu wait --settle`, the MCP `wait_for_settle` an
+  // OTHER consumer of a run — `odu ci wait --settle`, the MCP `wait_for_settle` an
   // agent loops on, the durable record, the posted commit status — reads
   // settled-ness off the node statuses on this socket, and a status published
   // ahead of its log promises them a finished run whose output is still on the
@@ -2004,7 +2004,7 @@ async function orchestrate(
    *  `updateNode` has always used for the `nodes` cell. Writing a store directly
    *  left the second publish visible to `get()` and to `display` (told
    *  separately, on the next line) while reaching no attached reader at all: an
-   *  `odu attach` opened during provisioning — the exact operator move
+   *  `odu ci attach` opened during provisioning — the exact operator move
    *  juspay/odu#84 is about — would take the claiming roster as its first frame
    *  and never see the resolved one. */
   const publishHeader = (next: RunHeader): void => {
@@ -2249,7 +2249,7 @@ async function orchestrate(
    * it died, re-claiming localhost changes nothing about why. A sharded
    * platform has several lanes and several leases holding one immutable TOTAL
    * between them; rebuilding one of them is a different feature, not this one.
-   * An agent-held platform (`odu lease`) is excluded by the same rule that
+   * An agent-held platform (`odu ci lease`) is excluded by the same rule that
    * keeps it out of `platformsToClaim`: its box is the operator's pin, held
    * outside this run's roster, and claiming a DIFFERENT one for it would move
    * the work off the machine they are iterating on and strand their lease.
@@ -2961,7 +2961,7 @@ async function orchestrate(
   // signals) is live across an `await` that did not exist before:
   //
   //   - the claim failed, so there is no machine for any lane;
-  //   - the operator dropped THIS platform mid-claim (`odu cancel @plat` / MCP
+  //   - the operator dropped THIS platform mid-claim (`odu ci cancel @plat` / MCP
   //     `lane_cancel`). `cancelPlatform` tombstones the platform execution, so
   //     the lane loop must not register workers for it afterward.
   //
@@ -3010,7 +3010,7 @@ async function orchestrate(
     // beside a claiming header.
     //
     // Scoped by what the failed set actually covered. An agent-held lane has a
-    // real host from `odu lease` and touched no pool, so reporting it as
+    // real host from `odu ci lease` and touched no pool, so reporting it as
     // `errored` with a message about a pool it never saw publishes a node that
     // lies about itself. It is still stopped — the run is fail-closed — but as
     // an abort, not as this failure.

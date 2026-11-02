@@ -6,7 +6,7 @@
  * other. The retry policy (`./recovery`) decides that a finalized run needs a
  * fresh run from its recorded inputs; how a coordinator process comes to exist
  * is a different question with a different answer per environment, and the CLI
- * that types `odu rerun` has no business holding either. So the policy takes a
+ * that types `odu ci rerun` has no business holding either. So the policy takes a
  * launcher, the root supplies one, and a test supplies a stub that records the
  * request instead of starting anything.
  *
@@ -113,9 +113,9 @@ export type RunLauncher = (request: LaunchRequest) => Promise<LaunchReceipt>;
  * The verb a launched coordinator is invoked with — INTERNAL, and that is the
  * point.
  *
- * This used to be `run`, the public command, and once `odu run` became a thin
+ * This used to be `run`, the public command, and once `odu ci run` became a thin
  * client of the service the two could not both be that name: `run.start` calls
- * this launcher, the launcher would invoke `odu run`, and `odu run` would call
+ * this launcher, the launcher would invoke `odu ci run`, and `odu ci run` would call
  * `run.start`. Unbounded recursion, arrived at by a rename rather than by a
  * loop anybody wrote.
  *
@@ -296,7 +296,7 @@ async function attemptLaunch(
 }
 
 /**
- * The packaged launcher: start `odu run` for this request and return once the
+ * The packaged launcher: start `odu ci run` for this request and return once the
  * run it asked for is IN THE CATALOG.
  *
  * Waiting for that is what makes the receipt worth anything. A launcher that

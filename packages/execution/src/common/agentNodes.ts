@@ -86,7 +86,7 @@ export const EMPTY_NODES: AgentNodes = {
 
 /** Project a coordinator `PipelineState` onto the agent `nodes` frame — the
  *  same mapping the live projection applies on every A→B delta. Shared so the
- *  CLI `odu wait` path can feed `waitForSettle` without re-deriving rows or
+ *  CLI `odu ci wait` path can feed `waitForSettle` without re-deriving rows or
  *  drifting from the MCP face. An empty order is the no-run / pre-run value
  *  (`EMPTY_STATE` when no coordinator is live). */
 export function toAgentNodes(state: PipelineState): AgentNodes {

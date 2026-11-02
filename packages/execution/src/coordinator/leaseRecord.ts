@@ -1,9 +1,9 @@
 /**
  * Checkout-local venue lease record (`.ci/odu-lease.json`).
  *
- * Agent-held leases (odu lease / MCP lease) persist across discrete tool
+ * Agent-held leases (odu ci lease / MCP lease) persist across discrete tool
  * calls via a detached holder process. The record maps platform → holder
- * identity so `odu run` can consume a held host without re-claiming, and so
+ * identity so `odu ci run` can consume a held host without re-claiming, and so
  * wait-in-line state is observable (not stderr-only).
  */
 

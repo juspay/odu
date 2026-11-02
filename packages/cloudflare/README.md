@@ -19,7 +19,7 @@ It mounts only when `ODU_CLOUDFLARE_API_TOKEN_FILE` is set
 | Each route's state, zone and record id | the same database |
 | `tunnel` — connector state | a published cell |
 | `routes` — one row per name | a published collection |
-| `cloudflare_status` | the read verb, for `odu cloudflare status` |
+| `cloudflare_status_read` | the read verb — the board's view, `odu surface cloudflare status_read`, the MCP tool |
 
 A route whose `bucket` is `null` is the SERVER's own public origin: the same
 tunnel carries it when its host is in a zone the token can edit, which is what
@@ -61,4 +61,4 @@ Nix protocol's paths are served, and everything else — the board, `/mcp`,
   answers Cloudflare's documented envelope and a real fake `cloudflared`.
 - `e2e/` — the browser world (`@tunnel`): a name becomes live, clearing it
   removes the route and stops the connector, a name in a zone the token cannot
-  see is `failed` with the reason, and `odu cloudflare status` reads it.
+  see is `failed` with the reason, and `cloudflare_status_read` reads it.

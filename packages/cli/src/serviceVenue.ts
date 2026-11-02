@@ -1,17 +1,17 @@
 /**
- * `odu hosts` · `odu lease` · `odu release` — the machines, as clients.
+ * `odu ci hosts` · `odu ci lease` · `odu ci release` — the machines, as clients.
  *
- * All three used to reach the engine directly. `odu hosts` imported
+ * All three used to reach the engine directly. `odu ci hosts` imported
  * `probeAllHosts` and ssh-dialled every configured box from the caller's own
- * process; `odu lease` forked a detached `odu lease-hold` out of the caller's
- * shell and wrote the per-checkout lease record itself; `odu release` sent
+ * process; `odu ci lease` forked a detached `odu lease-hold` out of the caller's
+ * shell and wrote the per-checkout lease record itself; `odu ci release` sent
  * SIGTERM to a pid it read off that record. Between them they were a second
  * venue authority — one that the board could not see, that an agent could not
  * reach at all, and that disagreed with the coordinator's own lease layer about
  * who held what for as long as it took somebody to notice.
  *
  * **A hold's lifetime changed, and it changed for the better.** The holder is
- * now the SERVICE's child rather than the terminal's. `odu lease` always
+ * now the SERVICE's child rather than the terminal's. `odu ci lease` always
  * promised a venue "held across runs", and that promise was quietly false: the
  * hold died with whatever shell took it. Parented by the daemon it is true, and
  * it is the only arrangement under which a browser or an agent can take one —
@@ -48,7 +48,7 @@ export interface HostsOpts {
 }
 
 /**
- * `odu hosts [PLAT…]` — every configured venue and whether it is free.
+ * `odu ci hosts [PLAT…]` — every configured venue and whether it is free.
  *
  * A machine with four slots prints four rows, because a slot is what a run
  * actually takes: collapsing them would make a box with three slots free look
@@ -73,7 +73,7 @@ export async function hostsViaService(opts: HostsOpts): Promise<number> {
       emitJson(answer);
       return 0;
     }
-    // Warnings on stderr, inventory on stdout — so `odu hosts | column -t`
+    // Warnings on stderr, inventory on stdout — so `odu ci hosts | column -t`
     // still works while a misconfigured pool still gets said out loud.
     for (const warning of answer.warnings) {
       process.stderr.write(`odu: warning: ${warning}\n`);
@@ -130,10 +130,10 @@ export interface LeaseOpts {
 }
 
 /**
- * `odu lease [PLAT…]` — hold a venue for this checkout, across runs.
+ * `odu ci lease [PLAT…]` — hold a venue for this checkout, across runs.
  *
  * The exit is 0 for `held` and `already`, and 2 for `waiting` — the same
- * "nothing is wrong and nothing is finished" code `odu wait` uses when a run is
+ * "nothing is wrong and nothing is finished" code `odu ci wait` uses when a run is
  * still going. A caller scripting this branches on it to decide whether to
  * queue behind the incumbent or go away.
  *
@@ -141,7 +141,7 @@ export interface LeaseOpts {
  * the venue is free. Blocking was a property of the old shell-parented holder;
  * through the service it would mean holding a request open for however long
  * somebody else's run takes, on a door a browser and an agent share. A queued
- * platform comes back `waiting` with who it is behind, and `odu hosts` is how
+ * platform comes back `waiting` with who it is behind, and `odu ci hosts` is how
  * you watch for it to clear.
  */
 export async function leaseViaService(opts: LeaseOpts): Promise<number> {
@@ -176,7 +176,7 @@ export interface ReleaseOpts {
   cwd?: string;
 }
 
-/** `odu release [PLAT…]` — drop this checkout's holds. Releasing something
+/** `odu ci release [PLAT…]` — drop this checkout's holds. Releasing something
  *  nobody held is an ANSWER (`nothing`), not an error: it is the state the
  *  caller asked for. */
 export async function releaseViaService(opts: ReleaseOpts): Promise<number> {

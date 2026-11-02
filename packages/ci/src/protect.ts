@@ -1,5 +1,5 @@
 /**
- * `odu protect` — point a branch's required status checks at the
+ * `odu ci protect` — point a branch's required status checks at the
  * (recipe × platform) contexts the canonical DAG produces, justci's `protect`
  * equivalent. `--dry-run` reports the contexts without touching the API. The
  * bookkeeping `_ci-setup@<platform>` context is posted but never required,
@@ -239,12 +239,12 @@ export async function applyProtection(
       code: "bad_input",
       message:
         `odu: protect found no platforms — pass --platform PLAT (repeatable) ${why}`,
-      suggestion: ["odu", "protect", "--platform", "x86_64-linux"],
+      suggestion: ["odu", "ci", "protect", "--platform", "x86_64-linux"],
     };
   }
   const derivedFrom = set.kind === "derived" ? set.source : null;
 
-  // Require exactly the contexts `odu run` posts: each platform's lane after
+  // Require exactly the contexts `odu ci run` posts: each platform's lane after
   // OS-attribute filtering (a [linux]-only recipe is never posted on a darwin
   // lane, so it must not be required there or protection waits forever).
   const contexts = set.platforms.flatMap((platform) =>
@@ -307,7 +307,7 @@ export async function applyProtection(
         ok: false,
         code: "bad_input",
         message: `odu: protect could not resolve the default branch of ${slug} — name one`,
-        suggestion: ["odu", "protect", "--branch", "main"],
+        suggestion: ["odu", "ci", "protect", "--branch", "main"],
       };
     }
   }
@@ -349,7 +349,7 @@ export async function applyProtection(
             "odu requires checks through a repository ruleset; ask for one to " +
             `be created, or create it under Settings → Rules with ${branch} ` +
             "in its ref conditions",
-          suggestion: ["odu", "protect", "--create"],
+          suggestion: ["odu", "ci", "protect", "--create"],
         };
       }
       const made = await forge.createRuleset({

@@ -1,7 +1,7 @@
 /**
  * The TUI's log pane, driven against a scripted service.
  *
- * `odu attach`'s pane and `odu logs -f` read the same verb through the same
+ * `odu ci attach`'s pane and `odu ci logs -f` read the same verb through the same
  * three facts, and for a while they disagreed about what those facts mean. The
  * pane ended on `!open` alone, which is the loss `followLog.test.ts` documents
  * for the CLI, arriving one layer over: a read is bounded, so a producer that

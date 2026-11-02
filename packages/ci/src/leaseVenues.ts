@@ -1,11 +1,11 @@
 /**
- * THE VENUES, TAKEN AND DROPPED — the engine half of `odu lease` / `odu
+ * THE VENUES, TAKEN AND DROPPED — the engine half of `odu ci lease` / `odu ci
  * release`, on the daemon's side of the wall.
  *
- * `odu lease` and `odu release` are clients of the shared service now, so the
- * work they used to do in whatever process the operator typed in belongs to the
- * daemon: resolving a platform set against the CALLER's inventory, spawning a
- * detached holder, and answering as soon as each holder is running.
+ * `odu ci lease` and `odu ci release` are clients of the shared service now, so
+ * the work they used to do in whatever process the operator typed in belongs to
+ * the daemon: resolving a platform set against the CALLER's inventory, spawning
+ * a detached holder, and answering as soon as each holder is running.
  *
  * `lease-hold` itself — the detached worker a holder IS — stayed in `@odu/cli`
  * beside the other argv entry points (`./leaseCmd`), because it is a process a
@@ -140,7 +140,7 @@ export interface LeaseOptions {
  * Ensure platforms are leased, spawning holders as needed.
  *
  * It ANSWERS AS SOON AS EACH HOLDER IS RUNNING and never polls for the box.
- * `odu lease` used to block, printing progress, because it was a terminal
+ * `odu ci lease` used to block, printing progress, because it was a terminal
  * command with a person watching it; through the service the queue it joins is
  * somebody else's run and can be an hour long, so `waiting` — with
  * `waitingBehind` naming who is ahead — is the complete answer, and
@@ -259,8 +259,8 @@ function waitingMessage(
  * Drop this checkout's holds.
  *
  * There is no refusal arm. Releasing what is not held is not an error — it is
- * the outcome `nothing`, and saying so is what makes `odu release` safe to run
- * twice, which is exactly what a caller who lost the first reply will do.
+ * the outcome `nothing`, and saying so is what makes `odu ci release` safe to
+ * run twice, which is exactly what a caller who lost the first reply will do.
  */
 export function releaseVenues(opts: {
   platforms: readonly string[];

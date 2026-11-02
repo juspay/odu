@@ -124,7 +124,7 @@ function pageOf(
     // no expiry, and never seals the attempt it was mid-write on — so
     // `complete` is false, both records are null, and `open` would stay true
     // for ever. A follow of that log issues one deadline-length read after
-    // another until somebody notices, while `odu wait --run` on the same run
+    // another until somebody notices, while `odu ci wait --run` on the same run
     // answers `owner_lost` immediately. Two faces disagreeing about a run that
     // is provably dead is exactly what `open` exists to prevent.
     //
@@ -261,7 +261,7 @@ export function readTail(
     parsed.node,
     parsed.attempt,
     // NEGATIVE offset: a tail, because the end of a failing log is where the
-    // reason is. The same spelling `odu logs --offset=-4096` already takes.
+    // reason is. The same spelling `odu ci logs --offset=-4096` already takes.
     { offset: -LOG_TAIL_BYTES },
   );
   if (slice === null) return null;

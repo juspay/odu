@@ -26,7 +26,7 @@ import { join } from "node:path";
 
 /** One independently leasable execution slot on a host. `slot` is zero-based
  *  and becomes part of the remote flock path; `slots` is retained for display
- *  so `odu hosts` can show the declared capacity without re-grouping config. */
+ *  so `odu ci hosts` can show the declared capacity without re-grouping config. */
 export interface HostSlot {
   host: string;
   slot: number;

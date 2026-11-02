@@ -259,7 +259,7 @@ describe("LogView — search", () => {
  * while the browser may not read anything.
  *
  * A recipe that prints a red FAIL prints the same red whether a person is
- * reading it through `odu attach` or through the board, or this fails.
+ * reading it through `odu ci attach` or through the board, or this fails.
  */
 describe("the browser draws this view's sixteen colours", () => {
   const css = readFileSync(

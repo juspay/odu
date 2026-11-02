@@ -128,7 +128,7 @@ export interface RunHistory {
    *  `pool` and `hostsSource` are carried because "which boxes is this waiting
    *  on, and which file said so" is a question about a run and not about a
    *  process — and while only the live header could answer it, the one face
-   *  that asked (`odu status`) had to be allowed to dial a checkout's socket. */
+   *  that asked (`odu ci status`) had to be allowed to dial a checkout's socket. */
   lane: (
     platform: string,
     state: "claiming" | "leased",

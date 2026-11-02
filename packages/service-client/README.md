@@ -86,7 +86,7 @@ counted against `now` would report how long ago somebody last looked at the
 board, and a run reopened tomorrow would say yesterday's green took a day. Only
 a run still going reads the caller's clock, which is what makes exactly one row
 tick. `duration` is its spelling — `400ms`, `1.5s`, `1m07s` — here rather than in
-a view, because the browser board, `odu history list` and a downstream panel
+a view, because the browser board, `odu ci history list` and a downstream panel
 printing two different durations for one run is the same drift `runStatus`
 exists to prevent. The service used to own this subtraction privately, which is
 why a settled run's duration was unreachable from anywhere but the live view.
@@ -162,8 +162,8 @@ framework's own `<ns>_<verb>` derivation, so an MCP tool and an argv verb are
 one name and cannot drift.
 
 Thirteen, and the growth is the point: five was not a design, it was the subset
-of odu's public capabilities that had been moved at the time. `odu status`,
-`odu hosts`, `odu lease`, `odu history import` and `odu protect` each did their
+of odu's public capabilities that had been moved at the time. `odu ci status`,
+`odu ci hosts`, `odu ci lease`, `odu ci history import` and `odu ci protect` each did their
 own work in the caller's process, so an agent and a browser could not do those
 things at all.
 

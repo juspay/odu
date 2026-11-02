@@ -1,11 +1,11 @@
 /**
  * READING A CHECKOUT'S PIPELINE, for the service.
  *
- * `odu dump` and `odu graph` used to each call `loadJustPipeline` from the
- * process the operator typed in, which made them the only public commands whose
- * answer depended on the machine the terminal was on. Through this port the
- * DAEMON resolves the DAG, so a browser tab, an agent and a terminal are three
- * views of one answer rather than three ingestions that can disagree.
+ * `odu ci dump` and `odu ci graph` used to each call `loadJustPipeline` from
+ * the process the operator typed in, which made them the only public commands
+ * whose answer depended on the machine the terminal was on. Through this port
+ * the DAEMON resolves the DAG, so a browser tab, an agent and a terminal are
+ * three views of one answer rather than three ingestions that can disagree.
  *
  * The Mermaid rendering comes from the engine (`mermaidGraph`) rather than from
  * a face, for the reason `PipelineFacts.mermaid` gives: two renderers of one

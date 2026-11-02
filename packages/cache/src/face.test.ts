@@ -56,7 +56,7 @@ describe("the Solid compiler that builds the Cache view", () => {
 
 /**
  * WHAT AN EMPTY CACHE SAYS DEPENDS ON WHO IS LOOKING — and a mistake here is a
- * sentence pointing a member at a form they cannot see, or an admin at a CLI
+ * sentence pointing a member at a form they cannot see, or an admin at a verb
  * they do not need. Pure, so it is pinned here rather than in a browser.
  */
 describe("the empty state names what this person can do", () => {
@@ -73,10 +73,10 @@ describe("the empty state names what this person can do", () => {
     );
   });
 
-  it("keeps the CLI hint only for a daemon with no door", async () => {
+  it("keeps the API verb only for a daemon with no door", async () => {
     const { emptyBucketsText } = await import("./face");
     expect(emptyBucketsText({ canAdminister: true, local: true })).toContain(
-      "odu cache create",
+      "odu surface cache bucket_create",
     );
   });
 });

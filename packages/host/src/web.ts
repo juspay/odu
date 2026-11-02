@@ -814,10 +814,10 @@ function describe(outcome: Extract<EnsureOutcome, { ok: true }>): string {
  * `posix_spawn '/…/gh'` for a `gh` that is right there, mode 755, executable
  * from any other process on the machine.
  *
- * Found through `odu protect`, which is the shortest path to it: eight
+ * Found through `odu ci protect`, which is the shortest path to it: eight
  * assertions failing with "the $ODU_GH_BIN seam was bypassed" because the
  * daemon had been started from a test fixture that the test then deleted.
- * Nothing about that is specific to tests — a person who runs `odu run` in a
+ * Nothing about that is specific to tests — a person who runs `odu ci run` in a
  * worktree and then removes the worktree gets the same daemon.
  *
  * `/` because it is the one directory that is always there, and because a

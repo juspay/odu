@@ -6,7 +6,7 @@
  * `.ci/odu.sock`, and the only durable trail is the per-node log files
  * (`.ci/<sha7>/<platform>/<node>.log`) + the timing sidecar. So once the
  * coordinator exits, "what runs happened, and how did each end?" has no
- * answer — `odu status` with no live socket exits 1, and the agent face's
+ * answer — `odu ci status` with no live socket exits 1, and the agent face's
  * `nodes` reports `{ run: false }` (its own header says it: *"no durable
  * PipelineState manifest exists on disk"*).
  *

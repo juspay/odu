@@ -116,8 +116,8 @@ export function rootTokenMatches(expected: string | null, presented: string): bo
   return timingSafeEqual(a, b);
 }
 
-/** A token's public half — what `odu cache token list` shows. The hash never
- *  leaves this module's callers. */
+/** A token's public half — what `odu surface cache token_list` shows. The hash
+ *  never leaves this module's callers. */
 export interface TokenFacts {
   id: string;
   bucketGlob: string;

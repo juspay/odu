@@ -6,7 +6,7 @@ describe("socketLogger", () => {
     const lines: string[] = [];
     const log = socketLogger((line) => lines.push(line));
 
-    // Routine: every `odu status` dial ends in a peer close, and bound/closed
+    // Routine: every `odu ci status` dial ends in a peer close, and bound/closed
     // bracket every healthy run. None of it is an operator's business.
     log.debug({ socketPath: ".ci/odu.sock" }, "unix-socket peer error");
     log.info({ socketPath: ".ci/odu.sock" }, "unix-socket listener bound");

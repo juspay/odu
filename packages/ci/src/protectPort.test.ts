@@ -180,6 +180,7 @@ describe("protectBranch refusals", () => {
     expect(outcome.message).toContain(file);
     expect(outcome.suggestion).toEqual([
       "odu",
+      "ci",
       "protect",
       "--platform",
       "x86_64-linux",
@@ -267,7 +268,7 @@ describe("protectBranch refusals", () => {
     // has no ruleset, and bringing merge-blocking policy into existence is a
     // decision, not a recovery.
     expect(outcome.code).toBe("bad_input");
-    expect(outcome.suggestion).toEqual(["odu", "protect", "--create"]);
+    expect(outcome.suggestion).toEqual(["odu", "ci", "protect", "--create"]);
   });
 });
 

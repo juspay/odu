@@ -87,7 +87,7 @@ describe("cancel-before-claim — single-host pool supersede (ordering)", () => 
   /**
    * Models the deadlock the reorder fixes: one remote host, held by the live
    * run until cancel fires. Claim-before-cancel waits forever; cancel-then-claim
-   * succeeds. This is the unit stand-in for CLI `odu run --supersede` on a
+   * succeeds. This is the unit stand-in for CLI `odu ci run --supersede` on a
    * pool of one.
    */
   it("cancels then claims — never waits on the live holder's flock", async () => {

@@ -30,7 +30,7 @@
  * read it — so a member's view asks them without holding anything.
  *
  * Every OTHER verb of the row has a control here too, because the board does
- * everything `odu cache` does: create (with the upstream switch), and per
+ * everything the row's API does: create (with the upstream switch), and per
  * bucket mint / list / revoke a token, pin a closure, run GC, read stats. They
  * are DRAWN for the row's floor (the shell's `canAdminister`) and REFUSED by
  * the row on its own — never one check standing in for the other.
@@ -116,8 +116,8 @@ export interface CacheFaceProps {
   tunnelRow: boolean;
   /** IS THIS PERSON THE DAEMON'S LOCAL OWNER — a daemon with no door? Then the
    *  row's rule for administration is the operator's ROOT TOKEN rather than a
-   *  role, so the page asks for it once (the same secret `odu cache` reads from
-   *  `$ODU_ROOT_TOKEN`), and an empty list points at the CLI as it always has. */
+   *  role, so the page asks for it once (the same secret the daemon reads from
+   *  `$ODU_ROOT_TOKEN`), and an empty list points at the form above it. */
   local: boolean;
   /** THE UI EDGE, supplied by the shell rather than taken here.
    *
@@ -328,10 +328,10 @@ function keepIdentity<T extends { readonly name: string }>(): (row: T) => T {
  * answers are pinned by a unit test rather than by reading JSX.
  */
 export function emptyBucketsText(viewer: { canAdminister: boolean; local: boolean }): string {
-  // No door: the person at this machine owns it, and the CLI is how they have
-  // always done it — the form above works too, with the root token.
+  // No door: the person at this machine owns it, so the form above works with
+  // the root token — and so does the verb behind it, from a shell.
   if (viewer.local) {
-    return "No buckets yet — odu cache create <bucket> makes one, or use the form above.";
+    return "No buckets yet — use the form above, or call odu surface cache bucket_create.";
   }
   if (viewer.canAdminister) return "No buckets yet — name one in the form above to create it.";
   return "There are no buckets yet.";
@@ -810,7 +810,7 @@ function tokenLife(token: CacheToken, now: number): string {
 
 /**
  * EVERYTHING AN ADMIN DOES TO ONE BUCKET without a terminal — the verbs
- * `odu cache token|pin|gc|stats` call, as four sections.
+ * `odu surface cache token_*|pin_create|gc_run|stats_read` call, as four sections.
  *
  * Drawn only for the row's floor (the shell's decision) and refused by the row
  * on its own; each section reads or writes through the shell's edge and owns

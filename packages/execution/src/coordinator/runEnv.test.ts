@@ -103,7 +103,7 @@ describe("claimVenues", () => {
   });
 
   it("holds the observable waiting rows for exactly the claim, on both exits", async () => {
-    // One scope, one `finally`: `odu hosts` sees the run waiting while it
+    // One scope, one `finally`: `odu ci hosts` sees the run waiting while it
     // waits, and never after — including when the claim fails.
     const repoRoot = repo();
     let duringClaim: string[] = [];

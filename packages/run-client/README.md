@@ -76,7 +76,7 @@ directory and reads a live run through it.
 This is the one place the design deliberately departs from its model. padi's
 socket belongs to a per-host **daemon** that is meant to be up, so `connectPadi`
 rejects when it cannot reach one — being down is news. odu's socket belongs to a
-**run**: it appears when `odu run` starts and is gone the moment the run settles.
+**run**: it appears when `odu ci run` starts and is gone the moment the run settles.
 For any given checkout, sock-absent is the ordinary steady state and the great
 majority of the time.
 

@@ -1,6 +1,6 @@
 /**
  * THIS checkout's end of the run rendezvous — the two halves only odu has:
- * SERVING the fan-in surface on `.ci/odu.sock` while `odu run` is live, and
+ * SERVING the fan-in surface on `.ci/odu.sock` while `odu ci run` is live, and
  * REFUSING in odu's own words when a face finds no run there.
  *
  * Reaching a live run is `@odu/run-client/dial`'s, in this repo and out of it;
@@ -70,7 +70,7 @@ export function checkoutPaths(repoRoot: string): {
  *     the lanes run on is exactly the comatose-and-silent shape #2101 was made
  *     of. Straight to the operator feed.
  *   - `info`/`debug` — bound, closed, and a peer dying mid-frame. Routine by
- *     construction: every `odu status` dial ends in a peer close, so routing
+ *     construction: every `odu ci status` dial ends in a peer close, so routing
  *     these to the feed would bury the tier above in noise from healthy runs.
  *
  *  The division of voice matches kaval's wrapper: the transport narrates the
@@ -170,7 +170,7 @@ export function noRunInProgressMessage(path: string): string {
  *  stutter ("…the connection to the run before the run settled") landed in the
  *  operator-facing line of a face that had just lost their terminal. */
 export function feedDroppedMessage(awaited: string): string {
-  return `odu: lost the connection to the run before ${awaited} — it may still be going (check \`odu status\`)\n`;
+  return `odu: lost the connection to the run before ${awaited} — it may still be going (check \`odu ci status\`)\n`;
 }
 
 /** {@link dialRun}, for a face that has nothing to say without a run: exits

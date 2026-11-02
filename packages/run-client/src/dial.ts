@@ -1,7 +1,7 @@
 /**
  * `@odu/run-client/dial` — reach a live odu run over its unix socket.
  *
- * While `odu run` is up, the coordinator serves {@link oduSurface} on
+ * While `odu ci run` is up, the coordinator serves {@link oduSurface} on
  * `<checkout>/.ci/odu.sock`; this is the one way a client reaches it. Transport
  * is `@kolu/surface`'s first-class unix-socket pair, so the framing is the same
  * one every other odu transport speaks and what is served is the same typed
@@ -9,7 +9,7 @@
  *
  * THE CONTRACT A CALLER MUST KNOW: {@link dialRun} answers `null` when NOBODY
  * IS SERVING, and rejects for everything else. A run's socket exists only
- * between `odu run` and settle, so absence is a checkout's ordinary steady
+ * between `odu ci run` and settle, so absence is a checkout's ordinary steady
  * state — a face polling on a timer gets `null` on nearly every tick, and needs
  * an answer for it rather than an error path. The README argues why the package
  * is shaped that way, and how it departs from `@kolu/padi-client` in doing so.

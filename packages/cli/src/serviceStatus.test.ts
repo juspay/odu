@@ -1,10 +1,10 @@
 /**
- * `odu status`, `odu attach` and `--run <address>` — resolved through ONE
+ * `odu ci status`, `odu ci attach` and `--run <address>` — resolved through ONE
  * bounded `run.list`, against a scripted service.
  *
  * These faces used to read the whole board a row per round trip and filter it
  * here, with nothing bounding the wait and nothing on screen while it lasted;
- * on a 710-run catalog `odu attach` sat blank for minutes (juspay/odu#113).
+ * on a 710-run catalog `odu ci attach` sat blank for minutes (juspay/odu#113).
  * What is pinned below is the part a scripted service can state on cue: which
  * query each face sends, what it makes of the one row that comes back, and
  * what it says when the service accepts the call and then answers nothing.
@@ -153,7 +153,7 @@ const quiet = (json = false, deadlineMs?: number) =>
     ...(deadlineMs === undefined ? {} : { deadlineMs }),
   });
 
-describe("odu status through run.list", () => {
+describe("odu ci status through run.list", () => {
   it("asks for exactly this checkout's newest run, in one call", async () => {
     const { client, asked } = scripted({ rows: [row()] });
     const { code, out } = await captured(() => statusWith(client, CHECKOUT, quiet()));
@@ -221,7 +221,7 @@ describe("odu status through run.list", () => {
   });
 });
 
-describe("odu attach through run.list", () => {
+describe("odu ci attach through run.list", () => {
   it("bounds the first frame of the follow, and reports it as exit 3", async () => {
     const { client } = scripted({ rows: [row()], nodes: Stream.never });
     const { code, err } = await captured(() =>

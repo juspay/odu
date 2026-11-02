@@ -40,7 +40,7 @@ afterEach(() => {
 describe("the run registry", () => {
   it("discovers a run nobody told it about", () => {
     // The whole reason the board reads the CATALOG rather than being notified:
-    // a run started by `odu run` in a terminal, before this service existed,
+    // a run started by `odu ci run` in a terminal, before this service existed,
     // appears on the first refresh without anything having announced it.
     const w = open();
     registerFixtureRun(w, { repoRoot: "/code/app", sha: "a".repeat(40) });
@@ -284,10 +284,11 @@ describe("the run registry", () => {
  * The bug this whole section pins is an ABSENCE: the coordinator journalled
  * `lane` and `phase` lines from the beginning and `foldJournal` fell through to
  * `default: break` on both, so nothing on disk could answer "which lane is on
- * which box". That is why `odu status` dialled the checkout's `.ci/odu.sock` —
- * the live coordinator was the only thing that could be asked, so one public
- * command had to keep a run authority of its own. Answered from the journal,
- * the same question outlives the coordinator that once had to be alive for it.
+ * which box". That is why `odu ci status` dialled the checkout's
+ * `.ci/odu.sock` — the live coordinator was the only thing that could be
+ * asked, so one public command had to keep a run authority of its own.
+ * Answered from the journal, the same question outlives the coordinator that
+ * once had to be alive for it.
  */
 describe("the run environment", () => {
   it("folds the lanes and the phase the journal has always carried", () => {

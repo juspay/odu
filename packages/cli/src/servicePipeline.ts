@@ -1,5 +1,5 @@
 /**
- * `odu dump` · `odu graph` · `odu protect` — a checkout's recipes, as clients.
+ * `odu ci dump` · `odu ci graph` · `odu ci protect` — a checkout's recipes, as clients.
  *
  * These three looked like the safe exceptions. `dump` and `graph` read a
  * justfile and touch no run; `protect` writes a GitHub ruleset and spends the
@@ -10,7 +10,7 @@
  * odu will run for a given checkout is a question the service has to answer
  * anyway — `run.start` resolves the same DAG through the same engine — so a
  * face that answered it locally was a second implementation of the one thing a
- * person most needs to be able to trust: `odu graph` and the run it is meant to
+ * person most needs to be able to trust: `odu ci graph` and the run it is meant to
  * predict could disagree, and nothing would notice. It also meant the browser
  * could not draw a pipeline at all and an agent could not ask what a repository
  * even builds.
@@ -43,10 +43,10 @@ export interface PipelineOpts {
 }
 
 /**
- * `odu dump` / `odu graph` — the pipeline this checkout declares.
+ * `odu ci dump` / `odu ci graph` — the pipeline this checkout declares.
  *
  * Two spellings of one read, which is why they are one function: the SERVICE
- * renders the Mermaid, so `odu graph` and a browser drawing the same pipeline
+ * renders the Mermaid, so `odu ci graph` and a browser drawing the same pipeline
  * cannot be two renderers that drift apart.
  */
 export async function pipelineViaService(opts: PipelineOpts): Promise<number> {
@@ -60,7 +60,7 @@ export async function pipelineViaService(opts: PipelineOpts): Promise<number> {
     );
     // `dump` has no non-JSON rendering — its whole output IS the JSON — so a
     // refusal here reports as prose on stderr either way.
-    // Same reasoning as `protect` below: `odu dump` and `odu graph` either
+    // Same reasoning as `protect` below: `odu ci dump` and `odu ci graph` either
     // printed the pipeline or did not.
     if (!read.ok) return reportFailure(read, false, 1);
     const pipeline: Pipeline = read.value;
@@ -73,7 +73,7 @@ export async function pipelineViaService(opts: PipelineOpts): Promise<number> {
   });
 }
 
-/** The shape `odu dump` has always printed: the pipeline's name and its tasks.
+/** The shape `odu ci dump` has always printed: the pipeline's name and its tasks.
  *  Spelled here rather than dumping the wire payload verbatim, because
  *  `checkout` and `mermaid` are answers to different questions and a consumer
  *  parsing this file's output should not have to skip past them. */
@@ -95,7 +95,7 @@ export interface ProtectOpts {
 }
 
 /**
- * `odu protect` — require exactly the status checks odu posts.
+ * `odu ci protect` — require exactly the status checks odu posts.
  *
  * `--dry-run` prints the contexts and writes nothing, which is the honest first
  * move: the contexts are derived from the repository's recipes crossed with a
@@ -110,7 +110,7 @@ export async function protectViaService(opts: ProtectOpts): Promise<number> {
         checkout,
         ...(opts.branch === undefined ? {} : { branch: opts.branch }),
         platforms: opts.platforms,
-        // THIS shell's `$ODU_HOSTS`, for the same reason `odu run` sends it:
+        // THIS shell's `$ODU_HOSTS`, for the same reason `odu ci run` sends it:
         // an unsliced protect derives its platform set from the hosts file,
         // and that derivation happens in a singleton whose environment is a
         // fact about the shell that started it.

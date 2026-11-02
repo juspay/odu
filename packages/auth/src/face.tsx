@@ -394,8 +394,8 @@ export interface PeopleFaceProps {
 }
 
 /**
- * WHO IS IN, AND WHAT EACH MAY DO — the owner's page, and `odu auth people` /
- * `odu auth grant` without a terminal.
+ * WHO IS IN, AND WHAT EACH MAY DO — the owner's page, and what
+ * `odu surface auth grant_list` / `user_grant` answer, without a terminal.
  *
  * Read when it opens and after every grant, for the profile's reason: the role
  * table is not a live fact on the wire. A grant takes effect at the person's

@@ -540,7 +540,7 @@ describe("the live path is attempted, never predicted", () => {
     const out = refused(await retryAgainst(root, undefined, launcher));
     expect(out.message).toContain("could not start the replay run");
     expect(out.message).toContain("the coordinator exited before serving a socket");
-    expect(out.suggestion).toEqual(["odu", "run", "unit"]);
+    expect(out.suggestion).toEqual(["odu", "ci", "run", "unit"]);
   });
 });
 
@@ -794,7 +794,7 @@ describe("a replay runs where its parent was allowed to run", () => {
     // The engine's own sentence, carried through rather than reworded — it
     // knows which platform lost its host and this layer does not.
     expect(out.message).toContain(PLATFORM);
-    expect(out.suggestion).toEqual(["odu", "hosts"]);
+    expect(out.suggestion).toEqual(["odu", "ci", "hosts"]);
     expect(launcher.calls).toEqual([]);
   });
 
@@ -880,7 +880,7 @@ describe("a replay runs where its parent was allowed to run", () => {
 
     expect(out.code).toBe("expired");
     expect(out.message).toContain("expired by retention");
-    expect(out.suggestion).toEqual(["odu", "run", "unit"]);
+    expect(out.suggestion).toEqual(["odu", "ci", "run", "unit"]);
     expect(launcher.calls).toEqual([]);
   });
 
@@ -906,7 +906,7 @@ describe("a replay runs where its parent was allowed to run", () => {
     expect(out.message).toContain("placement evidence");
     expect(out.message).toContain("--host");
     // A recovery the caller can run, as argv.
-    expect(out.suggestion).toEqual(["odu", "run", "unit", "e2e"]);
+    expect(out.suggestion).toEqual(["odu", "ci", "run", "unit", "e2e"]);
     // And above all: nothing was launched anywhere.
     expect(launcher.calls).toEqual([]);
   });
@@ -1054,7 +1054,7 @@ describe("a replay runs where its parent was allowed to run", () => {
 
     expect(out.code).toBe("not_replayable");
     expect(out.message).toContain("inventory evidence");
-    expect(out.suggestion).toEqual(["odu", "run", "unit", "e2e"]);
+    expect(out.suggestion).toEqual(["odu", "ci", "run", "unit", "e2e"]);
     expect(launcher.calls).toEqual([]);
   });
 
@@ -1121,7 +1121,7 @@ describe("a run whose inputs were never committed", () => {
     // A recovery the caller can RUN — argv, never a string to eval.
     expect(Array.isArray(out.suggestion)).toBe(true);
     expect(out.suggestion?.[0]).toBe("odu");
-    expect(out.suggestion).toEqual(["odu", "run", "unit", "e2e"]);
+    expect(out.suggestion).toEqual(["odu", "ci", "run", "unit", "e2e"]);
     // And nothing was started in its place.
     expect(launcher.calls).toEqual([]);
   });
@@ -1174,7 +1174,7 @@ describe("a run whose inputs were never committed", () => {
     expect(out.message).toContain(vanished);
     expect(out.message).toContain("is gone");
     // The evidence is still there, and the suggestion says how to read it.
-    expect(out.suggestion?.slice(0, 2)).toEqual(["odu", "logs"]);
+    expect(out.suggestion?.slice(0, 3)).toEqual(["odu", "ci", "logs"]);
     expect(launcher.calls).toEqual([]);
   });
 });
@@ -1197,7 +1197,7 @@ describe("expectAttempt", () => {
 
     expect(out.message).toContain("attempt 1, not 2");
     expect(out.message).toContain("moved on since you read it");
-    expect(out.suggestion).toEqual(["odu", "history", "show", "--run", PARENT_RUN]);
+    expect(out.suggestion).toEqual(["odu", "ci", "history", "show", "--run", PARENT_RUN]);
     expect(launcher.calls).toEqual([]);
   });
 
@@ -1642,7 +1642,7 @@ describe("a reply that was lost mid-flight", () => {
     expect(out.message).toContain("No run was started under it");
     expect(out.message).toContain("recorded no acceptance for it");
     expect(out.message).toContain("never put on the wire");
-    expect(out.suggestion).toEqual(["odu", "history", "show", "--run", PARENT_RUN]);
+    expect(out.suggestion).toEqual(["odu", "ci", "history", "show", "--run", PARENT_RUN]);
     expect(launcher.calls).toEqual([]);
   });
 

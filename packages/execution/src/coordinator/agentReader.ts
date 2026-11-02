@@ -51,7 +51,7 @@ export type OduSurfaceClient = {
  *  corpse and there is nothing left to re-subscribe TO.
  *
  *  Say that precisely, because it is easy to say backwards. Handing this a
- *  captured link was never what made `odu wait --settle` lie — the lie was the
+ *  captured link was never what made `odu ci wait --settle` lie — the lie was the
  *  settle core answering a dead link as a finished run, and it belonged to both
  *  faces equally. What a captured link does is DISARM the repair: the core now
  *  re-subscribes on a transport-loss end, and a re-subscribe over a captured
@@ -116,7 +116,7 @@ export function dialAFor(socketPath: string): DialA {
  *  own.
  *
  *  WHAT THE TWO FACES ACTUALLY SHARE, stated once here because it is easy to
- *  round up to "one reader" and that is not true. `odu wait` hands this in.
+ *  round up to "one reader" and that is not true. `odu ci wait` hands this in.
  *  `odu mcp` does NOT: `mcpCommand` hands the tool handler the adapter's
  *  projected B-client (`buildSurfaceFace ∘ directDispatch` over the
  *  projection). So the shared parts are the ones that decide a verdict — the

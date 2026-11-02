@@ -128,7 +128,7 @@ export interface RetryInput {
   /** The catalog run to retry. */
   runId: string;
   /** `ci::unit@plat`, `@plat`, or a recipe name — the same grammar
-   *  `odu rerun` has always taken. */
+   *  `odu ci rerun` has always taken. */
   selector: string;
   /** Idempotency key. Absent means the caller accepts that a repeat repeats. */
   requestId?: string;
@@ -197,7 +197,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
         `odu: run ${input.runId} has been expired by retention — its manifest ` +
         "survives but the journal a replay reads does not, so odu cannot " +
         "promise the replay would run where it ran. Start a fresh run.",
-      suggestion: ["odu", "run", ...manifest.scope.selectors],
+      suggestion: ["odu", "ci", "run", ...manifest.scope.selectors],
     };
   }
   if (input.requestId !== undefined && !isRequestId(input.requestId)) {
@@ -234,7 +234,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       message:
         `odu: ${input.expectAttempt.node} is on attempt ${latest}, not ` +
         `${input.expectAttempt.attempt} — this run has moved on since you read it`,
-      suggestion: ["odu", "history", "show", "--run", input.runId],
+      suggestion: ["odu", "ci", "history", "show", "--run", input.runId],
     };
   };
   // No request id means no receipt to replay, so the guard is all there is and
@@ -314,7 +314,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
           ok: false,
           code: "request_unresolved",
           message: reconciled.message,
-          suggestion: ["odu", "history", "show", "--run", input.runId],
+          suggestion: ["odu", "ci", "history", "show", "--run", input.runId],
         };
         completeReceipt(handle, input.requestId, outcome, now());
         return outcome;
@@ -331,7 +331,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
             `odu: request "${input.requestId}" was accepted and its outcome is UNKNOWN — ` +
             `${reconciled.reason}. Do not repeat it with a fresh id until you have ` +
             "checked whether it took effect: a second retry would be a second mutation.",
-          suggestion: ["odu", "history", "show", "--run", input.runId],
+          suggestion: ["odu", "ci", "history", "show", "--run", input.runId],
         };
       }
       return {
@@ -342,7 +342,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
           "No run was started under it, this run's coordinator recorded no acceptance " +
           "for it, and it was never put on the wire — so nothing it asked for happened. " +
           "Retry with a fresh id.",
-        suggestion: ["odu", "history", "show", "--run", input.runId],
+        suggestion: ["odu", "ci", "history", "show", "--run", input.runId],
       };
     }
     // Freshly claimed: this is NEW work, so the precondition applies to it.
@@ -372,7 +372,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
         ok: false,
         code: "partial",
         message: live.partial,
-        suggestion: ["odu", "history", "show", "--run", input.runId],
+        suggestion: ["odu", "ci", "history", "show", "--run", input.runId],
       },
       now,
     );
@@ -693,7 +693,7 @@ async function relaunch(
         (manifest.snapshot.contentSha === undefined
           ? "whose inputs were never committed. Its logs are still readable; start a new run against a commit instead."
           : "which is not replayable. Its logs are still readable; start a new run."),
-      suggestion: ["odu", "run", ...manifest.scope.selectors],
+      suggestion: ["odu", "ci", "run", ...manifest.scope.selectors],
     };
   }
   if (!existsSync(manifest.repoRoot)) {
@@ -703,7 +703,7 @@ async function relaunch(
       message:
         `odu: run ${handle.runId} was started in ${manifest.repoRoot}, which is gone — ` +
         "a replay has to run where the run ran. Its logs are still readable.",
-      suggestion: ["odu", "logs", "--run", handle.runId, input.selector],
+      suggestion: ["odu", "ci", "logs", "--run", handle.runId, input.selector],
     };
   }
   // WHERE the parent was allowed to run, replayed — or refused for want of the
@@ -729,7 +729,7 @@ async function relaunch(
         "not say which hosts it was allowed to run on, so a replay cannot " +
         "promise to run where it ran. Start a fresh run, naming the placement " +
         "you want with --host.",
-      suggestion: ["odu", "run", ...manifest.scope.selectors],
+      suggestion: ["odu", "ci", "run", ...manifest.scope.selectors],
     };
   }
   const hostPins = [...manifest.hostPins];
@@ -749,7 +749,7 @@ async function relaunch(
         `odu: run ${handle.runId} predates inventory evidence — its record does ` +
         "not say which hosts file it resolved placement against, so a replay " +
         "cannot promise to run where it ran. Start a fresh run.",
-      suggestion: ["odu", "run", ...manifest.scope.selectors],
+      suggestion: ["odu", "ci", "run", ...manifest.scope.selectors],
     };
   }
   const hostsFile = manifest.hostsFile;
@@ -801,7 +801,7 @@ async function relaunch(
       message:
         `odu: run ${handle.runId} cannot be replayed where it ran — ` +
         `${(err as Error).message}`,
-      suggestion: ["odu", "hosts"],
+      suggestion: ["odu", "ci", "hosts"],
     };
   }
   const request: LaunchRequest = {
@@ -856,7 +856,7 @@ async function relaunch(
       ok: false,
       code: "launch_failed",
       message: `odu: could not start the replay run — ${receiptOfLaunch.error ?? "unknown error"}`,
-      suggestion: ["odu", "run", ...scope.selectors],
+      suggestion: ["odu", "ci", "run", ...scope.selectors],
     };
   }
   // The child registers itself; read back what it published so the receipt

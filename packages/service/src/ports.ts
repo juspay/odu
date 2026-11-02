@@ -254,7 +254,7 @@ export interface PipelineFacts {
   readonly name: string;
   readonly tasks: readonly TaskFacts[];
   /** The DAG as Mermaid, rendered by the engine that owns the graph — so
-   *  `odu graph` and a browser cannot be two renderers that drift. */
+   *  `odu ci graph` and a browser cannot be two renderers that drift. */
   readonly mermaid: string;
 }
 
@@ -307,7 +307,7 @@ export type VenueProber = (request: {
   platforms: readonly string[];
   /** WHO the caller is. The inventory is resolved HERE, in a per-user singleton
    *  whose environment belongs to whoever started it — so without this,
-   *  `odu hosts` and `odu run` can address different fleets from the same
+   *  `odu ci hosts` and `odu ci run` can address different fleets from the same
    *  shell. See {@link Caller}. */
   caller: Caller;
 }) => Promise<VenueProbeOutcome>;
@@ -328,7 +328,7 @@ export type VenueHoldOutcome =
 /**
  * Take a hold on a venue, for a checkout, that outlives the caller.
  *
- * **The holder is now the SERVICE's child.** `odu lease` used to fork a
+ * **The holder is now the SERVICE's child.** `odu ci lease` used to fork a
  * detached `odu lease-hold` from the caller's own shell, which made a hold's
  * lifetime a property of which terminal took it. Through the service, the
  * holder is parented by the daemon — which is what "held across runs" was
@@ -340,8 +340,8 @@ export type VenueHolder = (request: {
   platforms: readonly string[];
   /** WHO the hold is for. The inventory is resolved HERE, in a per-user
    *  singleton whose environment belongs to whoever started it — so without
-   *  this, `odu hosts` and `odu run` can address different fleets from the same
-   *  shell. See {@link Caller}. */
+   *  this, `odu ci hosts` and `odu ci run` can address different fleets from
+   *  the same shell. See {@link Caller}. */
   caller: Caller;
   noWait: boolean;
 }) => Promise<VenueHoldOutcome>;
@@ -358,8 +358,8 @@ export type VenueReleaser = (request: {
   platforms: readonly string[];
   /** WHO the release is for. The inventory is resolved HERE, in a per-user
    *  singleton whose environment belongs to whoever started it — so without
-   *  this, `odu hosts` and `odu run` can address different fleets from the same
-   *  shell. See {@link Caller}. */
+   *  this, `odu ci hosts` and `odu ci run` can address different fleets from
+   *  the same shell. See {@link Caller}. */
   caller: Caller;
 }) => Promise<{ results: readonly VenueReleaseResult[] }>;
 

@@ -66,7 +66,7 @@ import type {
  * leave the tab unresponsive with no way back. 64 KiB is the compromise the
  * numbers pick out: comfortably more than a screenful, small enough that a page
  * lands in one frame, and a round power of two so the offsets a person reads in
- * the window indicator line up with the ones an `odu logs --offset` would take.
+ * the window indicator line up with the ones an `odu ci logs --offset` takes.
  */
 export const LOG_PAGE_BYTES = 64 * 1024;
 

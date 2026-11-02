@@ -4,7 +4,7 @@
  *
  * `serveSocket` remains the attach surface and a second exclusivity gate, but
  * it cannot be the first one: it comes up after the DAG ingest, the strict-mode
- * gate and the seq reservation. Without this earlier lock, concurrent `odu run`
+ * gate and the seq reservation. Without this earlier lock, concurrent `odu ci run`
  * / MCP `run` starters all see no socket, each reserve a seq, and co-queue on
  * the venue pool (wasted sibling hosts, or accidental serial double-CI on a
  * single-host pool). That window used to also contain the whole unbounded

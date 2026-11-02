@@ -1,5 +1,5 @@
 /**
- * `odu logs -f` — the loop, driven against a scripted service.
+ * `odu ci logs -f` — the loop, driven against a scripted service.
  *
  * The loop is what has a contract, so it is split from the dial and tested
  * without one: a `log.read` that answers from a queue can state "the log grew,

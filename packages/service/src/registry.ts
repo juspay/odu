@@ -61,7 +61,7 @@
  * gap between ticks regardless, so a slow disk degrades freshness, never RPCs.
  *
  * **Discovery is the catalog and only the catalog.** `listRunIds` walks the
- * per-user run directory, so a run started by `odu run` in a terminal before
+ * per-user run directory, so a run started by `odu ci run` in a terminal before
  * this service existed appears on the board the moment the service starts —
  * without scanning arbitrary filesystem paths for `.ci` directories, which is
  * the thing a per-user catalog was introduced to stop anyone having to do.
@@ -552,7 +552,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       }
       // A row without a manifest is barely a row: the run id exists, but
       // nothing can be said about which commit it is or where it ran. Skipped
-      // rather than shown as a row of blanks — `odu history list` over the
+      // rather than shown as a row of blanks — `odu ci history list` over the
       // catalog is the face that reports a torn record as one.
       const manifest = readManifest(handle);
       if (manifest === null) {

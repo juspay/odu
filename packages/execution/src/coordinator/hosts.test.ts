@@ -44,7 +44,7 @@ describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
   const empty = { hosts: {}, source: null };
 
   it("REFUSES a bare run with no hosts config — never a silent localhost lane", () => {
-    // The incident: a bare `odu run` with no config anywhere silently resolved
+    // The incident: a bare `odu ci run` with no config anywhere silently resolved
     // x86_64-linux to `localhost` and fork-bombed a production workstation.
     // The correct behavior is a loud refusal, NOT any localhost lane.
     let thrown: Error | undefined;
@@ -246,7 +246,7 @@ describe("pool locality is judged over what a run resolves (juspay/odu#66)", () 
     // refuse a mixed pool the run actually claims from (see lease.test.ts).
     // Judging here would refuse runs that never lease this platform — a
     // `--platform` slice, a `--host` pin, OR a selector like
-    // `odu run fmt@aarch64-darwin`, which resolution cannot see at all
+    // `odu ci run fmt@aarch64-darwin`, which resolution cannot see at all
     // (juspay/odu#66).
     writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
     const config = loadHosts();

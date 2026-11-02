@@ -1,5 +1,5 @@
 /**
- * `odu run`'s face — three renderings of the same fan-in state, picked by
+ * `odu ci run`'s face — three renderings of the same fan-in state, picked by
  * where stdout points:
  *
  *   - `json`  (`--progress json`): one NDJSON line per node transition — the
@@ -14,8 +14,8 @@
  *     lane inside the frame; the older renderer printed them above the matrix
  *     instead, which is what made the view scroll.
  *
- * The `live` face is the ONE interactive view, shared by `odu run` and `odu
- * attach` through the source-agnostic `LiveOpts` seam re-exported below. What
+ * The `live` face is the ONE interactive view, shared by `odu ci run` and `odu
+ * ci attach` through the source-agnostic `LiveOpts` seam re-exported below. What
  * the frame draws, which keys it binds, and the mount-ordering invariants that
  * hold it together all live in `packages/cli/src/liveView.ts` — restating them here
  * would be a second copy to keep in sync, which is what this file used to be.
@@ -204,7 +204,7 @@ class PlainDisplay implements Display {
  *  The view is imported LAZILY. `cli/main.ts` reaches this module for every
  *  command, and a static import of `liveView` drags in @opentui/core's native
  *  library and @xterm/headless — about 125ms, roughly half the wall time of an
- *  `odu runs` or `odu status` that never draws a frame.
+ *  `odu runs` or `odu ci status` that never draws a frame.
  *
  *  This class also keeps `Display`'s synchronous contract over a view whose
  *  construction is now async: state is recorded regardless, and every entry

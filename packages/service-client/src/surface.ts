@@ -51,8 +51,8 @@
  * the contract. A capability odu offers a person that has no operation here
  * would be a capability the browser and an agent cannot reach, and — worse —
  * one whose implementation lives in whichever face happened to grow it. That
- * is not a hypothetical; it is where `odu status`, `odu hosts` and
- * `odu history import` each held an authority of their own, and each of them
+ * is not a hypothetical; it is where `odu ci status`, `odu ci hosts` and
+ * `odu ci history import` each held an authority of their own, and each of them
  * held a DIFFERENT one.
  *
  * **Three faces, one contract.** The browser dials this over the framework's
@@ -389,7 +389,7 @@ export const ifMounted = (version: string): RowNeed => ({ ifMounted: version });
 
 /**
  * THE RUNS AND NOTHING ELSE — the need of every consumer that reads only the
- * board: kolu's padi, a socket dial, `odu run`/`wait`/`logs`. A daemon is
+ * board: kolu's padi, a socket dial, `odu ci run`/`wait`/`logs`. A daemon is
  * adopted on this however far the cache, the door or the tunnel has moved.
  */
 export const CI_NEEDS: RowNeeds = { [CI_ROW]: requires(CI_CONTRACT_VERSION) };
@@ -758,11 +758,11 @@ export type RunLane = typeof RunLaneSchema.Type;
 /**
  * The run's ENVIRONMENT — where its work is placed, and what it still owes.
  *
- * This is what `odu status` used to dial the checkout's `.ci/odu.sock` for, and
- * dialling was the whole reason a public command still held a run authority of
- * its own. Every field here is folded out of the durable journal, which the
- * service already owns and already reads: the coordinator has written `lane`
- * and `phase` lines all along and no reader read them.
+ * This is what `odu ci status` used to dial the checkout's `.ci/odu.sock` for,
+ * and dialling was the whole reason a public command still held a run
+ * authority of its own. Every field here is folded out of the durable journal,
+ * which the service already owns and already reads: the coordinator has
+ * written `lane` and `phase` lines all along and no reader read them.
  *
  * Reading it from the catalog rather than from a socket is not merely a
  * refactor. It changes what is ANSWERABLE: a run that finished last week, or
@@ -1010,7 +1010,7 @@ const StartInputSchema = Schema.Struct({
    *  DAG. */
   selectors: Schema.optionalKey(Schema.Array(Schema.String)),
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
-  /** `P=ADDR` host pins, the same spelling `odu run --host` takes. */
+  /** `P=ADDR` host pins, the same spelling `odu ci run --host` takes. */
   hostPins: Schema.optionalKey(Schema.Array(Schema.String)),
   /**
    * The CALLER's `$ODU_HOSTS`, forwarded verbatim.
@@ -1118,7 +1118,7 @@ export type WaitInput = typeof WaitInputSchema.Encoded;
  * second shape for the non-blocking case would be a second thing to keep true.
  * The difference is entirely in whether the service holds the call open.
  *
- * This is what `odu history show` is: a bounded read of one run's attention,
+ * This is what `odu ci history show` is: a bounded read of one run's attention,
  * from the catalog, with no deadline. It used to open the catalog in the
  * caller's own process — beside a daemon reading the same files — which is why
  * it is here.
@@ -1133,11 +1133,11 @@ export type ReadInput = typeof ReadInputSchema.Encoded;
 /**
  * The board, filtered on the service's side — one call for "which run".
  *
- * Every face that needed ONE run by where it came from (`odu status`, `attach`,
- * `--run latest`, `<sha7>#<seq>`, `history list`) used to read the whole `runs`
- * collection a row per round trip and filter locally, so the cost of naming one
- * run grew with the catalog (juspay/odu#113). The filters are those faces' own,
- * ANDed, and every one absent is the whole board.
+ * Every face that needed ONE run by where it came from (`odu ci status`,
+ * `attach`, `--run latest`, `<sha7>#<seq>`, `history list`) used to read the
+ * whole `runs` collection a row per round trip and filter locally, so the cost
+ * of naming one run grew with the catalog (juspay/odu#113). The filters are
+ * those faces' own, ANDed, and every one absent is the whole board.
  *
  * `checkout` is the SUBJECT of the query, as an absolute path the caller
  * resolved — the same rule `run.start` keeps. This does not scope the surface
@@ -1177,7 +1177,7 @@ export type ListOutput = typeof ListOutputSchema.Type;
 /** One node whose failure is still unresolved, with the evidence to act on it.
  *  Every field is the attention payload's own — this surface re-publishes the
  *  catalog's answer rather than deriving a second one, so the browser, the CLI
- *  and `odu wait --run` cannot disagree about what is red. */
+ *  and `odu ci wait --run` cannot disagree about what is red. */
 const FailureSchema = Schema.Struct({
   node: Schema.String,
   attempt: Schema.Int,
@@ -1251,7 +1251,7 @@ export type AttentionAnswer = typeof AttentionAnswerSchema.Type;
 const RetryInputSchema = Schema.Struct({
   runId: Schema.String.check(Schema.isMinLength(1)),
   /** `ci::unit@plat`, `@plat`, or a recipe name — the same grammar
-   *  `odu rerun` has always taken. */
+   *  `odu ci rerun` has always taken. */
   selector: Schema.String.check(Schema.isMinLength(1)),
   requestId: RequestId,
   /** Refuse unless the named node is on exactly this attempt — the guard
@@ -1339,7 +1339,7 @@ const LogReadInputSchema = Schema.Struct({
    *  a failure handed it rather than reassembling three fields. */
   key: Schema.String.check(Schema.isMinLength(1)),
   /** Byte offset from the start. NEGATIVE is a tail (`-4096` is the last 4 KiB),
-   *  the same spelling `odu logs --offset` already takes. */
+   *  the same spelling `odu ci logs --offset` already takes. */
   offset: Schema.optionalKey(Schema.Int),
   limit: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
   /**
@@ -1402,11 +1402,12 @@ export type LogPage = typeof LogPageSchema.Type;
 /**
  * The per-user run catalog, as operations rather than as a directory.
  *
- * `odu history import` and `odu history prune` used to open the catalog and
- * mutate it from the caller's own process, beside a daemon that was reading and
- * writing the same files. That is two writers on one store, and the fact that
- * it mostly worked is not the same as it being safe: a prune deleting a run's
- * directory while the service held its journal open is a race with no owner.
+ * `odu ci history import` and `odu ci history prune` used to open the catalog
+ * and mutate it from the caller's own process, beside a daemon that was
+ * reading and writing the same files. That is two writers on one store, and
+ * the fact that it mostly worked is not the same as it being safe: a prune
+ * deleting a run's directory while the service held its journal open is a race
+ * with no owner.
  *
  * These are also the only two verbs on this surface whose SUBJECT is the
  * catalog rather than a run, which is why they get a namespace of their own
@@ -1495,8 +1496,8 @@ const PipelineSchema = Schema.Struct({
   checkout: Schema.String,
   name: Schema.String,
   tasks: Schema.Array(TaskRowSchema),
-  /** The DAG as Mermaid. Rendered ONCE, here, because `odu graph` and a browser
-   *  drawing the same pipeline must not be two renderers that drift. */
+  /** The DAG as Mermaid. Rendered ONCE, here, because `odu ci graph` and a
+   *  browser drawing the same pipeline must not be two renderers that drift. */
   mermaid: Schema.String,
 });
 export type Pipeline = typeof PipelineSchema.Type;
@@ -1507,7 +1508,7 @@ export type Pipeline = typeof PipelineSchema.Type;
 export const VenueHolderSchema = Schema.Struct({
   /** `user@short-hostname`. */
   holder: Schema.String,
-  /** The run holding it, when a run is. Null for a hand-taken `odu lease`. */
+  /** The run holding it, when a run is. Null for a hand-taken `odu ci lease`. */
   run: Schema.NullOr(Schema.String),
   sinceMs: Schema.Number,
 });
@@ -1536,9 +1537,10 @@ export type VenueRow = typeof VenueRowSchema.Type;
 
 /** Which venues to probe. Empty means every configured platform.
  *
- *  A filter and not decoration: a probe SSH-dials each machine, so `odu hosts`
- *  on a big inventory is as slow as the slowest box, and asking about the one
- *  platform you care about should not wait for a datacentre you do not.
+ *  A filter and not decoration: a probe SSH-dials each machine, so
+ *  `odu ci hosts` on a big inventory is as slow as the slowest box, and asking
+ *  about the one platform you care about should not wait for a datacentre you
+ *  do not.
  *
  *  It is also why this input is not `Schema.Struct({})`. An empty struct is
  *  what the verb wanted to say, and `@kolu/surface-cli` cannot project one —
@@ -1553,10 +1555,11 @@ const VenueProbeInputSchema = Schema.Struct({
    *
    * Present on EVERY verb that resolves a host inventory, because the service
    * is a per-user singleton and the ports resolve that inventory in the
-   * SERVICE's process. Without it, `ODU_HOSTS=A odu hosts` and
-   * `ODU_HOSTS=A odu run` addressed different fleets — the first the daemon's,
-   * the second the caller's — which is a disagreement about what machines
-   * exist, reported by two commands a person would reasonably expect to agree.
+   * SERVICE's process. Without it, `ODU_HOSTS=A odu ci hosts` and
+   * `ODU_HOSTS=A odu ci run` addressed different fleets — the first the
+   * daemon's, the second the caller's — which is a disagreement about what
+   * machines exist, reported by two commands a person would reasonably expect
+   * to agree.
    */
   hostsFile: Schema.optionalKey(Schema.String),
 });
@@ -1602,7 +1605,7 @@ export type VenueProbeOutput = typeof VenueProbeOutputSchema.Type;
 
 const VenueHoldInputSchema = Schema.Struct({
   /** The checkout the hold is FOR. A lease is recorded per checkout because
-   *  that is what a subsequent `odu run` there consults. */
+   *  that is what a subsequent `odu ci run` there consults. */
   checkout: CheckoutPath,
   /** Empty means every configured platform. */
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -1613,10 +1616,11 @@ const VenueHoldInputSchema = Schema.Struct({
    *
    * Present on EVERY verb that resolves a host inventory, because the service
    * is a per-user singleton and the ports resolve that inventory in the
-   * SERVICE's process. Without it, `ODU_HOSTS=A odu hosts` and
-   * `ODU_HOSTS=A odu run` addressed different fleets — the first the daemon's,
-   * the second the caller's — which is a disagreement about what machines
-   * exist, reported by two commands a person would reasonably expect to agree.
+   * SERVICE's process. Without it, `ODU_HOSTS=A odu ci hosts` and
+   * `ODU_HOSTS=A odu ci run` addressed different fleets — the first the
+   * daemon's, the second the caller's — which is a disagreement about what
+   * machines exist, reported by two commands a person would reasonably expect
+   * to agree.
    */
   hostsFile: Schema.optionalKey(Schema.String),
   /** Do not queue behind an existing holder — answer `waiting` and return. */
@@ -1723,7 +1727,7 @@ const ProtectOutputSchema = Schema.Struct({
    *  is exactly the repository somebody is most likely to be experimenting in. */
   repo: Schema.NullOr(Schema.String),
   branch: Schema.NullOr(Schema.String),
-  /** Exactly the contexts `odu run` posts for this platform set. */
+  /** Exactly the contexts `odu ci run` posts for this platform set. */
   contexts: Schema.Array(Schema.String),
   /** The ruleset that carries them, once one does. */
   rulesetId: Schema.NullOr(Schema.Int),

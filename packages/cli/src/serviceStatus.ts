@@ -1,5 +1,5 @@
 /**
- * `odu status` · `odu attach` — this checkout's run, as clients.
+ * `odu ci status` · `odu ci attach` — this checkout's run, as clients.
  *
  * These two were the last public commands holding a run authority of their own,
  * and the hardest to move, because what they show — which lane is claiming
@@ -88,23 +88,23 @@ const NOTHING_TO_SHOW = new Set(["expired"]);
  *
  * Filtering by state and sorting the survivors reads the same as this and is
  * not: an `owner_lost` run never leaves that state, so it stayed "current"
- * forever and SHADOWED every run started after it. `odu status` in this very
+ * forever and SHADOWED every run started after it. `odu ci status` in this very
  * checkout spent an hour reporting an abandoned run's nodes as `running` while
  * the run the person had actually just started sat settled in the catalog,
  * with the two disagreeing on screen. A dead run is news only while it is the
  * last thing that happened here.
  *
  * And "has not finished" was the wrong test to begin with. A settled run is
- * the most likely thing somebody typing `odu status` wants — they just ran CI
+ * the most likely thing somebody typing `odu ci status` wants — they just ran CI
  * and want the grid. Excluding it also broke the one feature whose entire
- * purpose is being asked after settlement: `odu run --linger` parks the
+ * purpose is being asked after settlement: `odu ci run --linger` parks the
  * coordinator precisely so a caller can look afterwards, and `status` answered
  * "no run in flight for this checkout".
  *
  * `undefined` when this checkout has never run, or when retention has removed
  * the only run's evidence. That is an ANSWER and not an error — a checkout with
  * no run is the ordinary state of most checkouts most of the time, and exiting
- * non-zero for it would make `odu status` unusable in a prompt.
+ * non-zero for it would make `odu ci status` unusable in a prompt.
  */
 function currentRun(newest: RunRow | undefined): RunRow | undefined {
   return newest === undefined || NOTHING_TO_SHOW.has(newest.state)
@@ -128,10 +128,10 @@ async function resolveHere(
   return row === undefined ? none() : use(row);
 }
 
-// ── odu status ──────────────────────────────────────────────────────────────
+// ── odu ci status ───────────────────────────────────────────────────────────
 
 /**
- * `odu status` — where this checkout's run is right now, once.
+ * `odu ci status` — where this checkout's run is right now, once.
  *
  * The JSON keeps the key names the socket-dialling version published
  * (`nodes` / `posting` / `run`), because scripts read them and re-pointing a
@@ -146,7 +146,7 @@ export async function statusViaService(opts: HereRunOpts): Promise<number> {
   return withService(opts.origin, (client) => statusWith(client, checkout, p), p.notice);
 }
 
-/** `odu status` against a client already in hand — the half a test drives. */
+/** `odu ci status` against a client already in hand — the half a test drives. */
 export async function statusWith(
   client: HereClient,
   checkout: string,
@@ -198,7 +198,7 @@ export async function statusWith(
   );
 }
 
-/** One node, in the shape `odu status -o json` has always used — snake_case,
+/** One node, in the shape `odu ci status -o json` has always used — snake_case,
  *  because that is what the published contract says and a rename would break
  *  every script reading it. */
 function nodeJson(node: RunNode): {
@@ -288,18 +288,18 @@ function envLines(env: RunEnv): string[] {
 function statusExit(row: RunRow): number {
   if (row.state === "owner_lost") return WAIT_EXITS.ownerLost;
   // A run still going is the ORDINARY case, not an outcome — see `frameExit`.
-  // `odu status` reports what is true now; a script shaped `odu status && …`
+  // `odu ci status` reports what is true now; a script shaped `odu ci status && …`
   // must not be told "2" for a run that is simply in progress.
   if (!row.settled) return 0;
   return row.passed ? 0 : 1;
 }
 
-// ── odu attach ──────────────────────────────────────────────────────────────
+// ── odu ci attach ───────────────────────────────────────────────────────────
 
 /**
- * `odu attach` — the same run, followed until it stops moving.
+ * `odu ci attach` — the same run, followed until it stops moving.
  *
- * **The matrix is the same matrix.** `odu attach` in a terminal opens the live
+ * **The matrix is the same matrix.** `odu ci attach` in a terminal opens the live
  * view it always has — the node grid, `r` to rerun the focused node, the log
  * pane beside it — and NOTHING about that is allowed to change here. It used to
  * be fed by a direct dial into the coordinator's own surface, which is the
@@ -315,7 +315,7 @@ function statusExit(row: RunRow): number {
  *
  * Ctrl-C ends the WATCHING. The run is a detached process group with its
  * evidence in the catalog; interrupting here changes nothing about it, which is
- * the same asymmetry `odu run` keeps.
+ * the same asymmetry `odu ci run` keeps.
  */
 export async function attachViaService(opts: HereRunOpts): Promise<number> {
   const checkout = checkoutHere(opts.cwd);
@@ -333,7 +333,7 @@ export async function attachViaService(opts: HereRunOpts): Promise<number> {
   );
 }
 
-/** `odu attach` against a client already in hand — the half a test drives.
+/** `odu ci attach` against a client already in hand — the half a test drives.
  *  `live` is the matrix, or null for the transition stream. */
 export async function attachWith(
   client: HereClient,
@@ -482,9 +482,9 @@ async function attachLive(
  * What `status` and `attach` exit with — and it is NOT the run-shaped table.
  *
  * `WAIT_EXITS` numbers the states of a WAIT: passed, red, still going, owner
- * lost. `odu status` does not wait; it prints what is true now, and a run that
+ * lost. `odu ci status` does not wait; it prints what is true now, and a run that
  * is still going is the ordinary case rather than an outcome. Reporting that as
- * `2` broke every script shaped `odu status && …`, including this repo's own
+ * `2` broke every script shaped `odu ci status && …`, including this repo's own
  * e2e helper, whose "is a run live here?" probe read any non-zero as "no" and
  * then waited two minutes for a run that had been up the whole time.
  *

@@ -307,7 +307,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
    * WHERE the run's work is placed, folded out of the `lane` and `phase` lines.
    *
    * These two arms used to fall through to `default: break` — the journal wrote
-   * them and no reader read them. That absence is what made `odu status` dial
+   * them and no reader read them. That absence is what made `odu ci status` dial
    * the checkout's socket: the only thing that could answer "which lane is on
    * which box" was the coordinator, so the one face that asked had to be
    * allowed to talk to it, and a public command held a run authority of its own

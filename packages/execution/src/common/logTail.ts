@@ -99,7 +99,7 @@ export function createLogTail(): CreateLogTailResult {
   const append = (id: string, text: string): void => {
     const log = logFor(id);
     // Loud, not lenient. `end` told every reader this node had produced all the
-    // output it ever will, and a reader that acted on it (`odu logs -f` breaks
+    // output it ever will, and a reader that acted on it (`odu ci logs -f` breaks
     // out of its loop the moment it lands) is already gone — so bytes published
     // here are bytes nobody will ever see, the exact class of silent loss this
     // protocol exists to remove. A producer with more to say must `reset` and

@@ -1,6 +1,6 @@
 /**
  * Cancel a live run (or a node/lane of it) from a *second* process — the
- * shared core behind the `odu cancel` CLI, the MCP `cancel` / `node_cancel`
+ * shared core behind the `odu ci cancel` CLI, the MCP `cancel` / `node_cancel`
  * tools, and a `--supersede` run.
  *
  * The coordinator owns the run; everyone else only holds a socket to it. Full

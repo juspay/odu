@@ -3,7 +3,7 @@
  *
  * `orchestrate` is a SEQUENCE — serve the socket, seed the reporter, open the
  * provisioning bracket, claim, publish, start lanes. *How* a lane's machine is
- * obtained is a different axis of change entirely (an agent-held `odu lease`
+ * obtained is a different axis of change entirely (an agent-held `odu ci lease`
  * holder, a `--host` pin, a pool claim with rotation and wait-in-line, and
  * whatever comes next), and juspay/odu#84 is the receipt for keeping the two
  * apart: reordering the sequence forced six unrelated activities to be
@@ -55,7 +55,7 @@ export interface PreparedVenue {
 
 export interface BurstRequest {
   platform: string;
-  /** Used only to distinguish the lease holder in `odu hosts`. */
+  /** Used only to distinguish the lease holder in `odu ci hosts`. */
   label: string;
   /** Additional slots; mandatory primary capacity was already claimed. */
   limit: number;
@@ -122,7 +122,7 @@ export interface ClaimVenuesOpts {
 }
 
 /** Run one lease-file bookkeeping write, and never let it decide the claim's
- *  fate. These rows are OBSERVABILITY — they tell `odu hosts` in another
+ *  fate. These rows are OBSERVABILITY — they tell `odu ci hosts` in another
  *  process that this run is queueing — while the claim's result is a real ssh
  *  lease on a real machine.
  *
@@ -146,7 +146,7 @@ function bookkeep(what: string, write: () => void, warn: Warn): void {
 type Warn = (msg: string) => void;
 
 /** Hold the observable "waiting" rows in `.ci/odu-lease.json` for exactly the
- *  duration of `fn`, so the cross-process inventory (`odu hosts`) and this
+ *  duration of `fn`, so the cross-process inventory (`odu ci hosts`) and this
  *  run's own claim cannot disagree about whether it is still waiting. One
  *  scope, one `finally` — not two clear-out paths kept in step by memory. */
 async function withWaitingRecords<T>(

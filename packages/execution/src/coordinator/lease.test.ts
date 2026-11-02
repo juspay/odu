@@ -690,7 +690,7 @@ describe("leaseLanes", () => {
 });
 
 describe("isMixedPool — the shape the lease seam refuses", () => {
-  // Exported so `odu hosts` can WARN about an illegal pool without refusing
+  // Exported so `odu ci hosts` can WARN about an illegal pool without refusing
   // over it: the inventory view never leases, and refusing there would be
   // juspay/odu#66 again — a run stopped over a platform it never touches.
   it("is true only when localhost sits beside a remote", () => {
@@ -707,7 +707,7 @@ describe("isMixedPool — the shape the lease seam refuses", () => {
 /**
  * Waiting in line must KEEP THE PROCESS ALIVE.
  *
- * `odu run --progress=json` exited 0 in the middle of a wait: with a platform
+ * `odu ci run --progress=json` exited 0 in the middle of a wait: with a platform
  * busy, the multi-platform loop releases the holds it already took — and those
  * ssh/runner children were the only ref'd handles keeping the event loop fed —
  * then sleeps until the next poll. Built on an unref'd timer, that sleep is

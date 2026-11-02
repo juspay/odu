@@ -750,7 +750,7 @@ export interface CatalogRow {
    * would report that run as "running" for the rest of the catalog's life.
    * That is precisely the "a killed coordinator is indistinguishable from a
    * slow one" failure this package exists to remove, and it was removed for
-   * `odu wait --run` (which folds the owner record) while surviving here.
+   * `odu ci wait --run` (which folds the owner record) while surviving here.
    *
    * `owner.json` is the live copy: `heartbeat` refreshes it and
    * `releaseOwnership` clears the endpoint. So the listing asks it, and gets

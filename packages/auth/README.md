@@ -13,7 +13,7 @@ Part of the odu repo — `"@odu/auth": "workspace:*"`.
 | --- | --- | --- |
 | `./surface` | the CONTRACT: `whoami`, sessions, personal tokens, `grant`, the tagged refusal, the three HTTP paths, and the tags an anonymous connection may still ask | ✅ |
 | `./server` | implements it and exports `authRow` — the plugin the daemon mounts, which registers its resolver on the host's broker and closes its own database | ❌ |
-| `./cli` | `odu auth …`: `login`, `whoami`, `token create · list · revoke`, `grant`, and the credential file under `~/.config/odu/auth/` | ❌ |
+| `./cli` | `odu auth login` — the sign-in verb and the credential file under `~/.config/odu/auth/`; every other verb of this row is the board or `odu surface auth <verb>` | ❌ |
 | `./face` | the sign-in page, the signed-in header, the profile | ✅ (draws) |
 
 ## The principal is the host's; sign-in is this row's
@@ -33,9 +33,10 @@ principal through the `Caller`, never from input.
 **Names are `row_noun_verb`.** The framework derives an MCP tool name as
 `<sibling>_<namespace>_<verb>`, so the row's verbs are `auth_user_whoami`,
 `auth_user_grant`, `auth_grant_list`, `auth_token_create`, `auth_token_list`,
-`auth_token_revoke`, `auth_session_list` and `auth_session_end`. The argv face keeps the short
-spelling — `odu auth whoami`, `odu auth grant <login> <role>`, `odu auth people` — because it is
-hand-written grammar rather than a derivation.
+`auth_token_revoke`, `auth_session_list` and `auth_session_end`. The argv face is
+`odu auth login` and nothing else: the rest of the row is the board, or
+`odu surface auth user_whoami --input '{}' --json` for a terminal that wants one
+verb without a browser.
 
 ## A GitHub App, and the PR 2 shape
 
@@ -82,14 +83,14 @@ browser; a token's plaintext exists only in the answer that minted it.
 ## The root token, and nothing else
 
 `$ODU_ROOT_TOKEN` is the operator's bootstrap, and it does exactly one thing:
-`odu auth grant <login> owner` on a daemon that has **no owner yet**, and only
+`auth user_grant` with `owner` on a daemon that has **no owner yet**, and only
 for `owner`. Once the first owner exists it is refused, an owner's session
 grants everything after that, and it is never a principal — it cannot start a
 run or read a bucket.
 
 ## Who is in, and what is never pruned
 
-`grant.list` (the People page, `odu auth people`) folds the grants with the
+`grant.list` (the People page, `odu surface auth grant_list`) folds the grants with the
 `person` table — every login that has ever signed in, written at sign-in and
 touched on each session or token use, and never deleted by sign-out or expiry.
 **Nothing prunes it yet**: a login removed from `ODU_GITHUB_ALLOW` can no longer

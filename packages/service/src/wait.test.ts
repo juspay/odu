@@ -144,7 +144,7 @@ describe("run.wait", () => {
 /**
  * `run.read` — the same question, asked without waiting.
  *
- * This is what `odu history show` is. It used to open the catalog in the
+ * This is what `odu ci history show` is. It used to open the catalog in the
  * caller's own process, beside a daemon reading and writing the same files.
  */
 describe("run.read", () => {
