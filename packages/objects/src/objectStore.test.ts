@@ -247,3 +247,63 @@ describe("s3 object store: a put killed mid-upload", () => {
     expect(await uploadsIn(target)).toEqual(["main/nar/live.nar.zst", "other/nar/not-ours.nar.zst"]);
   });
 });
+
+describe("s3 object store: round trips", () => {
+  /** A `send` that records every request (method and signal), then forwards. */
+  const recording = (fail?: (method: string, url: URL) => boolean) => {
+    const seen: { method: string; url: URL; signal: AbortSignal | undefined }[] = [];
+    const send = (async (url: string | URL | Request, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      const parsed = new URL(String(url));
+      seen.push({ method, url: parsed, signal: init?.signal ?? undefined });
+      if (fail?.(method, parsed)) return new Response("<Error><Code>InternalError</Code></Error>", { status: 500 });
+      return fetch(url, init);
+    }) as typeof fetch;
+    return { send, seen };
+  };
+
+  it("reads with no HEAD: one GET answers absent, size and the first bytes", async () => {
+    const target = await gateway.bucket();
+    const bytes = new Uint8Array(3 * 1024 * 1024 + 5).map((_, at) => at % 251);
+    expect((await s3ObjectStore({ target, partSize: PART }).put("main/nar/r", once(bytes))).ok).toBe(true);
+    const { send, seen } = recording();
+    const store = s3ObjectStore({ target, partSize: PART, send });
+
+    expect(await store.get("main/nar/missing")).toBeNull();
+    expect(seen.map((one) => one.method)).toEqual(["GET"]);
+
+    seen.length = 0;
+    const got = await store.get("main/nar/r", { start: 1_000_000, end: 1_000_009 });
+    expect(got?.size).toBe(bytes.length);
+    expect(new Uint8Array(await new Response(got?.stream).arrayBuffer())).toEqual(bytes.subarray(1_000_000, 1_000_010));
+    expect(seen.map((one) => one.method)).toEqual(["GET"]);
+  });
+
+  it("keeps one window prefetched, and a cancel aborts every GET in flight", async () => {
+    const target = await gateway.bucket();
+    const bytes = new Uint8Array(4 * 1024 * 1024).map((_, at) => at % 251);
+    expect((await s3ObjectStore({ target, partSize: PART }).put("main/nar/w", once(bytes))).ok).toBe(true);
+    const { send, seen } = recording();
+    const store = s3ObjectStore({ target, partSize: PART, send });
+    const got = await store.get("main/nar/w");
+    const reader = (got?.stream as ReadableStream<Uint8Array>).getReader();
+    await reader.read();
+    // The first window, and the one prefetched behind it — never a third.
+    expect(seen.filter((one) => one.method === "GET")).toHaveLength(2);
+    await reader.cancel("enough");
+    expect(seen.every((one) => one.signal?.aborted === true)).toBe(true);
+  });
+
+  it("uploads parts in parallel, and one failing part aborts the rest and the upload", async () => {
+    const target = await gateway.bucket();
+    const bytes = new Uint8Array(4 * PART + 1).map((_, at) => at % 251);
+    const { send, seen } = recording((method, url) => method === "PUT" && url.searchParams.get("partNumber") === "2");
+    const store = s3ObjectStore({ target, partSize: PART, parallelParts: 4, send });
+    await expect(store.put("main/nar/p", once(bytes))).rejects.toThrow("UploadPart");
+    expect(await store.head("main/nar/p")).toBeNull();
+    // ABORTED ONCE, and nothing left for a sweep to find.
+    expect(seen.filter((one) => one.method === "DELETE" && one.url.searchParams.has("uploadId"))).toHaveLength(1);
+    const listed = await s3Fetch(target, "GET", "", { query: { uploads: "" } });
+    expect(await listed.text()).not.toContain("<Upload>");
+  });
+});

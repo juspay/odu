@@ -404,9 +404,13 @@ export interface S3ObjectStoreOptions {
   /** Where the bucket is and who may write it — `./declarations` reads it
    *  from a declaration and its credentials file. */
   target: S3Target;
-  /** One multipart part, buffered while it uploads: the whole of a put's
-   *  memory. S3's floor is 5 MiB. */
+  /** One multipart part, buffered while it uploads. S3's floor is 5 MiB. */
   partSize?: number;
+  /** Parts uploaded at once (default 4). A put holds this many part buffers,
+   *  reused, and reads a part only when one is free; `fetch` keeps its own
+   *  copy of a body while sending it, so a 300 MiB put measured 51–56 MiB of
+   *  growth at 4 × 5 MiB, against 20–24 MiB one part at a time. */
+  parallelParts?: number;
   /** Keys per LIST request; `list` pages through all of them. */
   listPageSize?: number;
   /** How the signed requests are sent — `fetch`, unless a suite stages an
@@ -422,13 +426,16 @@ const META_SHA256 = "x-amz-meta-odu-sha256";
  * under it — does NOT apply backpressure: measured with a consumer that pauses
  * 1 ms every four chunks, a 200 MiB object grew RSS by 274 MiB through
  * `S3File.stream()` and 208 MiB through a plain `fetch`. A slow reader would
- * make the process hold the whole object. So `get` reads in WINDOWS, one ranged
- * GET at a time, opened only when the consumer has drained the last.
+ * make the process hold the whole object. So `get` reads in WINDOWS of ranged
+ * GETs, at most TWO in flight: the one being read, and the next, fetched while
+ * it is (so a window costs no idle round trip). A prefetched body is buffered
+ * whole — a window, bounded — and cancelling the read aborts both.
  *
  * 1 MiB, measured in a fresh process on a 300 MiB read by a slow reader: peak
  * growth 52–55 MiB at 1 MiB, 62–66 at 2, 79–82 at 4, 75–87 at 8, and the same
  * at 600 MiB as at 200 — a floor of Bun's own, not the object. The cost is a
- * GET per MiB.
+ * GET per MiB. With the prefetch, the same slow 300 MiB read measured 46–84
+ * MiB against 46–80 without it, interleaved runs on one loaded machine.
  */
 const READ_WINDOW = 1024 * 1024;
 /** UploadPartCopy's ceiling is 5 GiB a part; 1 GiB keeps a copy's parts few. */
@@ -484,11 +491,15 @@ async function untilDecided<T>(attempt: () => Promise<T | "conflict">): Promise<
 /**
  * AN S3-COMPATIBLE STORE: R2, AWS, Garage, versitygw.
  *
- * Reads, ranges, lists and deletes go through Bun's `S3Client`. The writes and
- * the metadata HEAD are signed by `./s3sign`, because Bun's client sends
- * neither `If-None-Match` nor `x-amz-meta-*`, and those carry this store's two
- * promises. Multipart is this store's business: a put buffers one part at a
- * time, so its memory is `partSize` whatever the object's length.
+ * Lists go through Bun's `S3Client`. Everything else is signed by `./s3sign`:
+ * the writes and the metadata HEAD, because Bun's client sends neither
+ * `If-None-Match` nor `x-amz-meta-*`, and those carry this store's two
+ * promises; and the reads, because a read learns the object's size from its
+ * first GET's `Content-Range`, which Bun's `S3File` does not show.
+ *
+ * Multipart is this store's business: a put uploads up to `parallelParts` (4)
+ * parts at once and buffers only those, so its memory is bounded by them (see
+ * `parallelParts`) whatever the object's length.
  *
  * **Exactly one writer per key — what holds, and where.** In this process,
  * writes of one key queue behind each other (`oneWriter`) after a HEAD, so the
@@ -516,6 +527,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     s3Fetch(target, method, key, request, send);
   const partSize = Math.max(options.partSize ?? 8 * 1024 * 1024, 5 * 1024 * 1024);
   const pageSize = options.listPageSize ?? 1000;
+  const parallel = Math.max(1, options.parallelParts ?? 4);
   const client = new S3Client({
     endpoint: target.endpoint.href,
     bucket: target.bucket,
@@ -736,26 +748,65 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     const direct = expected !== undefined;
     const uploadKey = direct ? key : `${key.slice(0, key.lastIndexOf("/") + 1)}${TEMP}${randomUUID()}`;
     const uploadId = await createUpload(uploadKey, direct ? metaOf(expected) : {});
+    // PARTS IN PARALLEL, `parallel` at a time. The stream is read in order —
+    // the hash needs that — and a part is read only once a slot is free, into
+    // one of `parallel` buffers that are REUSED (a fresh buffer per part left
+    // RSS waiting on the collector), so a put holds `parallel` parts. The
+    // first failure aborts its siblings' requests and, below, the upload once.
+    // `etags` is by number, so Complete lists the parts in order whichever
+    // finished first.
     const etags: string[] = [];
-    try {
-      let part: Uint8Array = first;
-      for (;;) {
+    const control = new AbortController();
+    const inFlight = new Set<Promise<void>>();
+    const free: Uint8Array<ArrayBuffer>[] = [];
+    let failed: { error: unknown } | null = null;
+    const send = (number: number, bytes: Uint8Array, owner: Uint8Array<ArrayBuffer>): void => {
+      const tracked: Promise<void> = (async () => {
         const response = await call("PUT", uploadKey, {
-          query: { partNumber: String(etags.length + 1), uploadId },
-          headers: { "content-length": String(part.length) },
-          body: part as Uint8Array<ArrayBuffer>,
+          query: { partNumber: String(number), uploadId },
+          headers: { "content-length": String(bytes.length) },
+          body: bytes as Uint8Array<ArrayBuffer>,
+          signal: control.signal,
         });
         const text = await response.text();
         const etag = response.headers.get("etag");
         if (!response.ok || etag === null) throw new S3Failure(`UploadPart ${uploadKey}`, response, text);
-        etags.push(etag);
+        etags[number - 1] = etag;
+      })().then(
+        () => {
+          inFlight.delete(tracked);
+          free.push(owner);
+        },
+        (error: unknown) => {
+          inFlight.delete(tracked);
+          free.push(owner);
+          if (failed === null) {
+            failed = { error };
+            control.abort(error);
+          }
+        },
+      );
+      inFlight.add(tracked);
+    };
+    try {
+      let part: Uint8Array = first;
+      let owner = buffer;
+      for (let number = 1; ; number += 1) {
+        send(number, part, owner);
         if (part.length < partSize) break;
-        const next = await parts.fill(buffer);
-        if (next === 0) break;
-        part = buffer.subarray(0, next);
+        while (inFlight.size >= parallel && failed === null) await Promise.race(inFlight);
+        if (failed !== null) break;
+        owner = free.pop() ?? new Uint8Array(partSize);
+        const read = await parts.fill(owner);
+        if (read === 0) break;
+        part = owner.subarray(0, read);
         counter.update(part);
       }
+      await Promise.all(inFlight);
+      if (failed !== null) throw (failed as { error: unknown }).error;
     } catch (err) {
+      control.abort(err);
+      await Promise.allSettled(inFlight);
       await parts.cancel(err);
       await abort(uploadKey, uploadId);
       throw err;
@@ -786,36 +837,66 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     }
   }
 
-  /** Bytes `start`..`end` of `key` as a pull stream, one READ_WINDOW per
-   *  ranged GET, the next opened only on demand (see READ_WINDOW). */
-  function windowed(key: string, start: number, end: number): ReadableStream<Uint8Array> {
-    const file = client.file(safeKey(key));
-    let position = start;
-    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  /** One window: a ranged GET of bytes `from`..`to` (inclusive). */
+  const fetchWindow = (key: string, from: number, to: number, signal: AbortSignal): Promise<Response> =>
+    call("GET", key, { headers: { range: `bytes=${from}-${to}` }, signal });
+
+  /** `bytes <first>-<last>/<size>` (a 206), or `bytes *\/<size>` (a 416). */
+  const contentRange = (response: Response): { last: number | null; size: number } | null => {
+    const found = /^bytes (?:(\d+)-(\d+)|\*)\/(\d+)$/.exec(response.headers.get("content-range") ?? "");
+    if (found === null) return null;
+    return { last: found[2] === undefined ? null : Number(found[2]), size: Number(found[3]) };
+  };
+
+  /**
+   * The bytes after the first window up to `end`, as a pull stream: ONE window
+   * being read and ONE prefetched, never more (see READ_WINDOW). The first
+   * window's response is `get`'s, already in hand; `control` aborts every GET
+   * in flight when the reader cancels.
+   */
+  function windowed(
+    key: string,
+    first: Response,
+    from: number,
+    end: number,
+    control: AbortController,
+  ): ReadableStream<Uint8Array> {
+    let reader = (first.body as ReadableStream<Uint8Array>).getReader();
+    let position = from;
+    const open = (): Promise<Response> | null => {
+      if (position > end) return null;
+      const to = Math.min(position + READ_WINDOW, end + 1) - 1;
+      const next = fetchWindow(key, position, to, control.signal);
+      position = to + 1;
+      // A REJECTED PREFETCH is read when its turn comes, not reported twice.
+      next.catch(() => {});
+      return next;
+    };
+    let prefetched = open();
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
         for (;;) {
-          if (reader === null) {
-            if (position > end) {
-              controller.close();
-              return;
-            }
-            const until = Math.min(position + READ_WINDOW, end + 1);
-            reader = file.slice(position, until).stream().getReader();
-          }
           const next = await reader.read();
-          if (next.done) {
-            reader = null;
-            continue;
+          if (!next.done) {
+            controller.enqueue(next.value);
+            return;
           }
-          position += next.value.length;
-          controller.enqueue(next.value);
-          return;
+          if (prefetched === null) {
+            controller.close();
+            return;
+          }
+          const response = await prefetched;
+          if (response.status !== 206 || response.body === null) {
+            const body = await response.text().catch(() => "");
+            throw new S3Failure(`GET ${key} (a window)`, response, body);
+          }
+          reader = response.body.getReader();
+          prefetched = open();
         }
       },
       async cancel(reason) {
-        await reader?.cancel(reason).catch(() => {});
-        reader = null;
+        control.abort(reason);
+        await reader.cancel(reason).catch(() => {});
       },
     });
   }
@@ -887,13 +968,31 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         return outcome === "conflict" ? conflicted(key, CONFLICT_TRIES) : outcome;
       }),
 
+    // NO HEAD: the first window's GET answers whether the object is there
+    // (404), how big it is (`Content-Range`), and its first bytes, in one round
+    // trip — the only way `get` learns a size, whether or not the caller knew it.
     async get(key, range) {
-      const found = await headOf(key);
-      if (found === null) return null;
-      return {
-        stream: windowed(key, range?.start ?? 0, range?.end ?? found.size - 1),
-        size: found.size,
-      };
+      const start = range?.start ?? 0;
+      const control = new AbortController();
+      const firstTo = Math.min(start + READ_WINDOW, range === undefined ? Infinity : range.end + 1) - 1;
+      const first = await fetchWindow(safeKey(key), start, firstTo, control.signal);
+      if (first.status === 404) {
+        await first.body?.cancel().catch(() => {});
+        return null;
+      }
+      const spans = contentRange(first);
+      // `416` with `bytes */N`: nothing at or after `start`, an empty object
+      // included. The size is still the answer's.
+      if (first.status === 416 && spans !== null) {
+        await first.body?.cancel().catch(() => {});
+        return { stream: new Response(new Uint8Array(0)).body as ReadableStream<Uint8Array>, size: spans.size };
+      }
+      if (first.status !== 206 || spans === null || spans.last === null) {
+        const body = await first.text().catch(() => "");
+        throw new S3Failure(`GET ${key}`, first, body);
+      }
+      const end = Math.min(range?.end ?? spans.size - 1, spans.size - 1);
+      return { stream: windowed(key, first, spans.last + 1, end, control), size: spans.size };
     },
 
     head: async (key) => (await headOf(key))?.size ?? null,

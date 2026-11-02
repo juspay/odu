@@ -107,6 +107,8 @@ export interface S3Request {
   query?: Record<string, string>;
   headers?: Record<string, string>;
   body?: BodyInit;
+  /** Aborts the request, and its body if it is being read. */
+  signal?: AbortSignal;
 }
 
 /** One signed request, sent by `send`. `body` is a stream or bytes; a stream
@@ -123,5 +125,6 @@ export function s3Fetch(
     method,
     headers: signedHeaders(target, method, url, init.headers ?? {}),
     ...(init.body === undefined ? {} : { body: init.body, duplex: "half" }),
+    ...(init.signal === undefined ? {} : { signal: init.signal }),
   } as RequestInit);
 }

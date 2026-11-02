@@ -1296,20 +1296,23 @@ export function createCache(options: CacheOptions): Cache {
           return twins.length === 1 ? (twins[0] as ObjectRow) : null;
         })();
       if (row === null) return null;
-      const key = objectKey(bucket.name, narHash, row.compression);
-      const objects = storeOf(bucket);
-      const size = await objects.head(key);
-      if (size !== null) {
+      // A KEPT ROW ALREADY KNOWS ITS OBJECT'S SIZE (`FileSize`, written when
+      // the object was kept), so nothing is asked of the store before the
+      // read: no HEAD, one round trip to the first byte on S3. An object that
+      // is gone after all is the read's answer — null, a 404 — decided once.
+      if (row.fileHash !== null && row.fileSize !== null) {
+        const key = objectKey(bucket.name, narHash, row.compression);
+        const objects = storeOf(bucket);
         return {
           kind: "object",
           storePath: row.storePath,
-          size,
+          size: row.fileSize,
           read: async (range) => (await objects.get(key, range))?.stream ?? null,
         };
       }
       // THE ONE-TIME TRANSITION. A row from before objects were kept has no
-      // object yet; the old Nix store serves it until the boot migration lands
-      // it. When that store is gone this branch is unreachable and the route
+      // object yet (no `FileHash`); the old Nix store serves it until the boot
+      // migration lands it. When that store is gone this branch is unreachable and the route
       // is a 404, not a silent dump.
       const legacy = options.legacyStore;
       if (legacy === undefined || legacy === null) return null;

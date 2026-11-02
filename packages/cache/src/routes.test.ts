@@ -24,6 +24,7 @@ import { HttpRouter } from "effect/http";
 import { base32, storePathHash } from "./narinfo";
 import { base32Bytes, storePathHashOf } from "./storePath";
 import { type Cache, createCache } from "./cache";
+import { openCacheRepo } from "./db";
 import { CACHE_MOUNT } from "./paths";
 import { NIX_CACHE_INFO } from "./staging";
 import { cacheRoutes } from "./routes";
@@ -181,6 +182,20 @@ async function harness(
     fetch: fetchIt,
     dispose,
   };
+}
+
+/**
+ * MAKE A KEPT ROW A ROW FROM BEFORE OBJECTS WERE KEPT: no object file, and no
+ * `FileHash` — the state the one-time migration has not reached yet, which is
+ * the only state the old store's FIFO dump serves.
+ */
+function asPreObjectRow(storePath: string, file: string): void {
+  rmSync(join(scratch, "cache", "objects", "main", "nar", file), { force: true });
+  const repo = openCacheRepo(join(scratch, "cache", "cache.sqlite"));
+  const row = repo.object("main", storePath);
+  if (row === null) throw new Error(`no row for ${storePath}`);
+  repo.putObject({ ...row, fileHash: null, fileSize: null });
+  repo.close();
 }
 
 /** One complete upload: the NAR, then the narinfo that names it. */
@@ -770,7 +785,7 @@ describe("the NAR before its object", () => {
     const h = await harness(true);
     const hello = nar("a NAR, in pieces");
     const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
-    rmSync(join(scratch, "cache", "objects", "main", "nar", `${hello.narHash.slice(7)}.nar`), { force: true });
+    asPreObjectRow(HELLO, `${hello.narHash.slice(7)}.nar`);
     const response = await h.fetch(`/main/nar/${name}`);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("a NAR, in pieces");
@@ -1338,9 +1353,9 @@ describe("a large NAR stays off the heap", () => {
     const size = 1_500_000;
     h.store.dump = () => bigStream(chunks, size);
     const file = `${hello.narHash.replace(/^sha256:/, "")}.nar`;
-    // The FIFO FALLBACK's fixed point: the kept file is removed, so the route
-    // has no length and must stream the dump without buffering.
-    rmSync(join(scratch, "cache", "objects", "main", "nar", file), { force: true });
+    // The FIFO FALLBACK's fixed point: a row from before objects were kept, so
+    // the route has no length and must stream the dump without buffering.
+    asPreObjectRow(HELLO, file);
     const growth = await rssGrowth(async () => {
       const response = await h.fetch(`/main/nar/${file}`);
       expect(response.status).toBe(200);
