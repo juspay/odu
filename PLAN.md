@@ -178,6 +178,10 @@ What each step delivers:
     tokens. They are reviewed in the PR.
   - Screens for later features (GC and pins, starting a new run) land inside
     the steps that add those features, built in this design.
+  - **Two parity gaps 2.10's audit found, and handed here:** no face renders
+    `pipeline.mermaid`, though `pipeline_read` carries it; and the board has
+    no "newest run of THIS checkout" selector, which `odu ci status` resolves
+    with git.
 - **2.7 GC and pins on every store.** Liveness comes from pushes, not reads,
   because reads are about to leave odu. GC is written only against
   `ObjectStore`, and deletions purge the CDN.[^gc] The bucket page dry-runs the
@@ -333,7 +337,12 @@ Commits and PR bodies use the earlier names.
     `@olai/effect-cordis/fence`, that only roots name rows. Versions: host 2.5,
     `ci` 2.4, `cache` 3.1, `auth` 2.4, `cloudflare` 2.4. Each row is held to an
     append-only fingerprint ledger by `just test`, and `admitService` admits a
-    client on the rows it declares.
+    client on the rows it declares. **A row is a set of packages, not a
+    directory:** the fence reads each manifest's `cordis.row`, so `ci` is
+    `@odu/ci` (the plugin the daemon mounts, and the board's view) plus
+    `@odu/cli` (`odu ci`'s argv grammar and its TUI). The split is the
+    renderer: `@opentui/core` and `@xterm/headless` are a cost the package
+    served inside the daemon must not carry.
 
 [^protocol]: Routes per bucket:
     ```

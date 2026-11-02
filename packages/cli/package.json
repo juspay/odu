@@ -4,7 +4,7 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//cordis": "THE ROW this package belongs to, read by the fence. A row is a capability the daemon serves — `ci` for the runs, `cache` for the buckets — and a package says which one it is behind so that nobody has to keep a second list.",
+  "//cordis": "THE ROW this package belongs to, read by the fence. A row is a capability the daemon serves — `ci` for the runs, `cache` for the buckets — and a package says which one it is behind so that nobody has to keep a second list. THE `ci` ROW IS TWO PACKAGES, and this is the second: `@odu/ci` is what the daemon mounts (`./row`) and draws (`./face`), and this one is the row's CLI (`./ciCli`, the `odu ci` grammar) plus its TUI. F13's 'a row owns its surface, server, CLI and face' is satisfied by the ROW, which is the fence's unit, not by one directory — and the split is forced from the other side: the renderer and terminal emulator below are a cost `@odu/ci` must not carry, because the daemon mounts it. Folding `./ciCli` into `@odu/ci` would add `@opentui/core`, `@xterm/headless` and `@odu/launch` (the host's own bootstrap, which a row may not name) to the package served inside the daemon — more coupling, not less.",
   "cordis": {
     "row": "ci"
   },
