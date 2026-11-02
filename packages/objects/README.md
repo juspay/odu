@@ -7,8 +7,8 @@ Object stores: immutable bytes under opaque keys, on a local disk or in any S3-c
 | Objects at | `<dir>/objects/<key>` | `<bucket>/<key>`, path-style |
 | A put onto an existing key | refused with `exists` (`link` fails on an existing name) | refused with `exists` (`If-None-Match: *`; `412` lost, `409` retried) |
 | Facts (`size`, hex `sha256`) | a sidecar under `objects/.facts/` | `x-amz-meta-odu-size` / `-sha256` |
-| A large put | streamed to a temp file, then linked | multipart, `partSize` (8 MiB) parts, constant memory |
-| A read | the file from any offset, 64 KiB pulls | ranged GETs, 1 MiB windows (Bun's S3 body has no backpressure) |
+| A large put | streamed to a temp file, then linked | multipart, `partSize` (8 MiB) parts, `parallelParts` (4) at once, bounded memory |
+| A read | the file from any offset, 64 KiB pulls | ranged GETs, 1 MiB windows, one prefetched; no HEAD — the first GET gives the size |
 | `link(key, file, facts)` | yes: the file becomes the object, no copy | absent: put `Bun.file(file)` instead |
 | `sweepTemp(prefix, before)` | `.tmp-*` files | `.tmp-*` keys and incomplete multipart uploads |
 

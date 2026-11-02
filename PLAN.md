@@ -239,7 +239,9 @@ on the bucket page (both landed).
   the S3 store because versitygw's check is not atomic; R2 documents the
   precondition on `PutObject` only, so across daemons it covers one-part
   objects there, and a `409` is retried rather than read as lost); a read takes a range
-  (S3 in 1 MiB windows: Bun's S3 body applies no backpressure); `FileHash` and
+  (S3 in 1 MiB windows, one prefetched, and no HEAD — the row knows the size
+  and the first GET answers absence: Bun's S3 body applies no backpressure;
+  parts upload four at a time); `FileHash` and
   `FileSize` are written at put (a disk sidecar, S3 object metadata) and read
   back; the boot sweep also aborts multipart uploads a killed put left. One
   contract suite (in `@odu/objects`) runs against disk and a versitygw fixture.

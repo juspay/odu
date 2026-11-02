@@ -266,8 +266,8 @@ A bucket keeps its objects in a **store**: `local`, the server's own disk (alway
 | Objects at | `<state>/cache/objects/<bucket>/nar/` | `<s3-bucket>/<bucket>/nar/` |
 | A put that finds the key | refused, first kept wins (`link`) | refused, first kept wins (`If-None-Match: *`) |
 | `FileHash`/`FileSize` kept | beside the object (`objects/.facts/`) | as object metadata (`x-amz-meta-odu-*`) |
-| A large upload | streamed to a temp file | multipart, 8 MiB parts, constant memory |
-| A read | the file, from any offset | ranged GETs, 1 MiB at a time |
+| A large upload | streamed to a temp file | multipart, 8 MiB parts, four at a time, bounded memory |
+| A read | the file, from any offset | ranged GETs, 1 MiB at a time with the next one prefetched; no HEAD first |
 
 A put is put-if-absent within one daemon on every store. Between two daemons writing one S3 bucket's prefix it holds where the service honours `If-None-Match` on the write that finishes the object: AWS does on both [`PutObject` and `CompleteMultipartUpload`](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html); R2 documents it [on `PutObject` only](https://developers.cloudflare.com/r2/api/s3/api/), so there it covers objects of one 8 MiB part.
 
