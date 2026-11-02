@@ -131,6 +131,92 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
+    it("answers the survivors of a collection, with their sizes still right", async () => {
+      // THE SHAPE OF A COLLECTION: walk a bucket's prefix, delete the keys that
+      // walk answered and nothing else, and walk again. What comes back is
+      // exactly what was kept, and each survivor still answers its own size —
+      // the number the next dry run adds up.
+      const { store, dispose } = await make();
+      const payloads: [string, Uint8Array][] = [
+        ["main/nar/keep1.nar.zst", bytes("k")],
+        ["main/nar/evict1.nar.zst", bytes("ee")],
+        ["main/nar/keep2.nar.zst", bytes("kkk")],
+        ["main/nar/evict2.nar.zst", bytes("eeee")],
+      ];
+      for (const [key, payload] of payloads) await store.put(key, streamOf([payload]));
+      const walked = await store.list("main");
+      expect(walked.map((entry) => entry.key).sort()).toEqual(payloads.map(([key]) => key).sort());
+      for (const entry of walked.filter((entry) => entry.key.includes("evict"))) await store.delete(entry.key);
+      const left = await store.list("main");
+      expect(left.map((entry) => ({ key: entry.key, size: entry.size })).sort((a, b) => a.key.localeCompare(b.key))).toEqual([
+        { key: "main/nar/keep1.nar.zst", size: 1 },
+        { key: "main/nar/keep2.nar.zst", size: 3 },
+      ]);
+      expect(new TextDecoder().decode((await read(store, "main/nar/keep2.nar.zst")) as Uint8Array)).toBe("kkk");
+      await dispose();
+    });
+
+    it("empties one prefix and leaves the others whole: a collection is one bucket's", async () => {
+      // A COLLECTION THAT EVICTS EVERYTHING a bucket holds says nothing about
+      // the bucket next to it, not even the one whose prefix begins with this
+      // one's name.
+      const { store, dispose } = await make();
+      await store.put("main/nar/one.nar.zst", streamOf([bytes("1")]));
+      await store.put("main/nar/two.nar.zst", streamOf([bytes("22")]));
+      await store.put("main2/nar/four.nar.zst", streamOf([bytes("4444")]));
+      await store.put("other/nar/three.nar.zst", streamOf([bytes("333")]));
+      for (const entry of await store.list("main")) await store.delete(entry.key);
+      expect(await store.list("main")).toEqual([]);
+      expect((await store.list("main2")).map((entry) => entry.key)).toEqual(["main2/nar/four.nar.zst"]);
+      expect((await store.list("other")).map((entry) => entry.key)).toEqual(["other/nar/three.nar.zst"]);
+      expect(new TextDecoder().decode((await read(store, "other/nar/three.nar.zst")) as Uint8Array)).toBe("333");
+      await dispose();
+    });
+
+    it("lists the whole object's size, for a stream and for a file", async () => {
+      // A DRY RUN NEVER OPENS AN OBJECT: it adds up what `list` answered, so
+      // that number is the stored object's own length — a multipart upload's
+      // whole length rather than a part's, and a file's rather than whatever
+      // the store staged on the way in.
+      const { store, partSize, dispose } = await make();
+      const streamed = patterned((partSize ?? 5 * 1024 * 1024) + 1024, 9);
+      await store.put("main/nar/streamed.nar.zst", streamOf(pieces(streamed)));
+      const scratch = mkdtempSync(join(tmpdir(), "odu-gc-size-"));
+      try {
+        const file = join(scratch, "staged.nar.zst");
+        writeFileSync(file, "a file's own bytes");
+        const facts = factsOf(bytes("a file's own bytes"));
+        kept(await store.put("main/nar/filed.nar.zst", Bun.file(file), facts));
+        const listed = (await store.list("main")).sort((a, b) => a.key.localeCompare(b.key));
+        expect(listed).toEqual([
+          { key: "main/nar/filed.nar.zst", size: facts.size },
+          { key: "main/nar/streamed.nar.zst", size: streamed.length },
+        ]);
+        expect(listed.reduce((sum, entry) => sum + entry.size, 0)).toBe(streamed.length + facts.size);
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+      await dispose();
+    });
+
+    it("takes a second delete of a key, and a delete while another prefix is being walked", async () => {
+      // A COLLECTION DELETES WHILE IT WALKS, and two rows may name the same
+      // bytes, so it evicts one key twice and does so with the next bucket's
+      // walk — several pages of it — still in flight. Neither is an error, and
+      // the walk answers the prefix it was given.
+      const { store, dispose } = await make();
+      const walked = Array.from({ length: 7 }, (_, at) => `main/nar/w${at}.nar.zst`);
+      for (const key of walked) await store.put(key, streamOf([bytes(key)]));
+      await store.put("other/nar/doomed.nar.zst", streamOf([bytes("doomed")]));
+      await store.put("other/nar/spared.nar.zst", streamOf([bytes("spared")]));
+      const walking = store.list("main");
+      await store.delete("other/nar/doomed.nar.zst");
+      await store.delete("other/nar/doomed.nar.zst");
+      expect((await walking).map((entry) => entry.key).sort()).toEqual(walked.slice().sort());
+      expect((await store.list("other")).map((entry) => entry.key)).toEqual(["other/nar/spared.nar.zst"]);
+      await dispose();
+    });
+
     it("reads a byte range, and reports the whole size", async () => {
       const { store, dispose } = await make();
       const payload = bytes("0123456789abcdef");

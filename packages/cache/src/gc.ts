@@ -2,18 +2,27 @@
  * GARBAGE COLLECTION — retention, references and pins, and nothing else.
  *
  * The rule is one sentence and it is the whole answer to "why did my cache eat
- * my build": an object is expired when it has not been read within its bucket's
+ * my build": an object is expired when nobody has WANTED it within its bucket's
  * retention AND nothing the bucket still keeps references it AND no pin holds
  * it. Expired means "delete its object, forget the row". Nothing is evicted
  * because it is old; it is evicted because it is old AND unreachable AND
  * unpinned.
+ *
+ * **Wanted, not read** ({@link ObjectRow.lastWanted}). A push renews it and the
+ * `missing` query renews it; a READ does not. That is not an oversight: reads
+ * are leaving odu (PLAN 2.8), so the busiest paths in a bucket are precisely
+ * the ones whose reads the daemon will stop seeing, and a collector on the read
+ * clock would evict them first. What a cache is for is answering a build, and
+ * the thing that says a build still wants a path is the build asking whether
+ * the path is there.
  *
  * **The decision is a pure function.** {@link planGc} takes rows and a clock
  * and answers what to evict; {@link runGc} deletes rows and object keys. That
  * split is what lets the suite state a fixture graph — a retained object, a
  * reference to it, a pin over a third — and assert the decision without a
  * filesystem, and it is why a "did GC keep the closure?" question has one place
- * to look.
+ * to look. It is also the DRY RUN: the plan is what the bucket page shows
+ * before anybody presses the button.
  *
  * **Two closures, because a pin is a promise.** A pin's closure is resolved at
  * pin time and stored, so a path that was in the closure then stays protected
@@ -26,6 +35,12 @@
  * and therefore one object key; the file is deleted only when no remaining row
  * in the bucket names that NarHash.
  *
+ * **ONLY `ObjectStore`.** Deleting is `delete`, and the orphan sweep is `list`.
+ * Nothing here opens a file, names a directory or signs an S3 request, so a
+ * bucket on R2 collects exactly as a bucket on disk does — which is what
+ * `@odu/objects`' contract suite and the cache's own GC suite prove by running
+ * the same cases against both.
+ *
  * **And nothing can land in between.** The cache holds ONE async mutex over
  * keep-and-record, `pin` and `gc`: a collection plans and deletes with no
  * writer able to interleave, and a pin that arrived first is already in the
@@ -35,6 +50,7 @@
  * what keeps a writer added outside it from costing bytes.
  */
 
+import type { ObjectStore } from "@odu/objects";
 import type { BucketRow, CacheRepo, ObjectRow, PinRow } from "./db";
 import { objectKey } from "./staging";
 
@@ -49,9 +65,15 @@ export interface GcBucketPlan {
   bucket: string;
   evict: readonly ObjectRow[];
   remaining: number;
+  /** What evicting them would reclaim, by the kept object's own size. */
+  bytes: number;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** What one evicted row costs: the compressed object when the row knows its
+ *  size, the NAR's otherwise (a row from before objects were kept). */
+const sizeOf = (row: ObjectRow): number => row.fileSize ?? row.narSize;
 
 /** Every path reachable from `roots` by following `references`, including the
  *  roots themselves. Iterative, because a store closure is a graph and a
@@ -73,7 +95,7 @@ export function planGc(input: GcInput): GcBucketPlan[] {
     const objects = input.objects.filter((row) => row.bucket === bucket.name);
     const byPath = new Map(objects.map((row) => [row.storePath, row]));
     const expired = (row: ObjectRow): boolean =>
-      input.now - row.lastAccessed > bucket.retentionDays * DAY_MS;
+      input.now - row.lastWanted > bucket.retentionDays * DAY_MS;
 
     // Everything a LIVE object keeps alive: the live objects themselves, and
     // whatever they reference inside this bucket.
@@ -93,18 +115,81 @@ export function planGc(input: GcInput): GcBucketPlan[] {
         !protectedByReference.has(row.storePath) &&
         !protectedByPin.has(row.storePath),
     );
-    return { bucket: bucket.name, evict, remaining: objects.length - evict.length };
+    return {
+      bucket: bucket.name,
+      evict,
+      remaining: objects.length - evict.length,
+      bytes: evict.reduce((sum, row) => sum + sizeOf(row), 0),
+    };
   });
+}
+
+/** What the next collection would do to one bucket. */
+export interface GcBucketPreview {
+  bucket: string;
+  /** How many paths it would evict, and what that would reclaim — the WHOLE
+   *  count, whatever `paths` was truncated to. */
+  evicted: number;
+  bytes: number;
+  remaining: number;
+  /** The first `limit` of them, oldest want first: a person reading a dry run
+   *  wants to recognise what is about to go, not to page a million rows. */
+  paths: readonly { storePath: string; bytes: number; lastWanted: number }[];
+}
+
+export interface GcPreview {
+  buckets: readonly GcBucketPreview[];
+  evicted: number;
+  bytes: number;
+}
+
+/** The plan, as a person reads it. Pure: this is the dry run. */
+export function previewGc(plan: readonly GcBucketPlan[], limit: number): GcPreview {
+  const buckets = plan.map((entry) => ({
+    bucket: entry.bucket,
+    evicted: entry.evict.length,
+    bytes: entry.bytes,
+    remaining: entry.remaining,
+    paths: [...entry.evict]
+      .sort((one, two) => one.lastWanted - two.lastWanted)
+      .slice(0, limit)
+      .map((row) => ({
+        storePath: row.storePath,
+        bytes: sizeOf(row),
+        lastWanted: row.lastWanted,
+      })),
+  }));
+  return {
+    buckets,
+    evicted: buckets.reduce((sum, bucket) => sum + bucket.evicted, 0),
+    bytes: buckets.reduce((sum, bucket) => sum + bucket.bytes, 0),
+  };
+}
+
+/** ONE PATH THAT LEFT, as the row announces it to whatever was caching it.
+ *  `narFile` is null when a twin row still names the bytes: the narinfo is
+ *  gone, the NAR is not. */
+export interface GcRemoval {
+  storePath: string;
+  /** The store path's hash — the narinfo's own name. */
+  hash: string;
+  /** `<narHash>.<ext>`, the NAR's name under `nar/`, or null. */
+  narFile: string | null;
 }
 
 export interface GcBucketReport {
   bucket: string;
   /** Rows dropped and paths deleted from the store. */
   evicted: number;
-  /** Kept for the report's shape: the object store deletes unconditionally. */
+  /** Rows dropped whose bytes a TWIN row still names — the object stayed. */
   kept: number;
-  /** Nar bytes reclaimed, by the narinfo's own `NarSize`. */
+  /** Bytes reclaimed, by the kept object's own size. */
   bytes: number;
+  /** Object keys the store held that no row named — a crash between keeping
+   *  an object and recording it. Found with `list`, deleted with `delete`. */
+  orphans: number;
+  /** What left, for the purge announcement. */
+  removed: readonly GcRemoval[];
 }
 
 export interface GcReport {
@@ -112,46 +197,78 @@ export interface GcReport {
   evicted: number;
   kept: number;
   bytes: number;
+  orphans: number;
 }
 
 /**
  * Do the plan. An object leaves with its row; the bytes are the object store's,
  * deleted by key, so nothing on this machine's Nix store is touched (the
  * server does not have one).
+ *
+ * Then the ORPHAN SWEEP, with the same two members: every key under the
+ * bucket's prefix that no surviving row names is a put whose record never
+ * landed, and the write lock is held, so nothing in flight owns one. The boot
+ * sweep does this once at startup; a collection is the other moment a daemon
+ * knows it is safe, and without it a crashed push's bytes waited for a
+ * restart.
  */
 export async function runGc(
   repo: CacheRepo,
   plan: readonly GcBucketPlan[],
   /** The store each bucket's objects live in. */
-  objectsOf: (bucket: string) => { delete(key: string): Promise<void> },
+  objectsOf: (bucket: string) => ObjectStore,
 ): Promise<GcReport> {
-  const planned = plan.flatMap((entry) =>
-    entry.evict.map((row) => ({ ...row, bucket: entry.bucket })),
-  );
   const perBucket = new Map<string, GcBucketReport>(
-    plan.map((entry) => [entry.bucket, { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0 }]),
+    plan.map((entry) => [
+      entry.bucket,
+      { bucket: entry.bucket, evicted: 0, kept: 0, bytes: 0, orphans: 0, removed: [] },
+    ]),
   );
-  for (const row of planned) {
-    repo.deleteObject(row.bucket, row.storePath);
-    // TWINS: two rows can carry the same NarHash (different store paths, one
-    // object). The bytes go only when no row in the bucket names them NOW —
-    // asked of the database right before the delete (an indexed lookup), not
-    // of the plan's snapshot, so a row that appeared mid-run keeps its object.
-    const twin = repo.objectsByNarHash(row.bucket, row.narHash).length > 0;
-    if (!twin) {
-      await objectsOf(row.bucket).delete(objectKey(row.bucket, row.narHash, row.compression));
-    }
-    const report = perBucket.get(row.bucket);
-    if (report !== undefined) {
+  for (const entry of plan) {
+    const report = perBucket.get(entry.bucket) as GcBucketReport;
+    const removed: GcRemoval[] = [];
+    const objects = objectsOf(entry.bucket);
+    for (const row of entry.evict) {
+      repo.deleteObject(entry.bucket, row.storePath);
+      // TWINS: two rows can carry the same NarHash (different store paths, one
+      // object). The bytes go only when no row in the bucket names them NOW —
+      // asked of the database right before the delete (an indexed lookup), not
+      // of the plan's snapshot, so a row that appeared mid-run keeps its object.
+      const twin = repo.objectsByNarHash(entry.bucket, row.narHash).length > 0;
+      const key = objectKey(entry.bucket, row.narHash, row.compression);
+      if (!twin) await objects.delete(key);
+      removed.push({
+        storePath: row.storePath,
+        hash: row.hash,
+        narFile: twin ? null : (key.split("/").at(-1) as string),
+      });
       report.evicted += 1;
-      report.bytes += row.fileSize ?? row.narSize;
+      if (twin) report.kept += 1;
+      else report.bytes += sizeOf(row);
+    }
+    report.removed = removed;
+
+    // THE ORPHANS, from the store itself: `list` is the only way to learn of a
+    // key no row remembers, and the rows are re-read here rather than taken
+    // from the plan so a path recorded during this run keeps its object.
+    const named = new Set(
+      repo
+        .objects(entry.bucket)
+        .map((row) => objectKey(entry.bucket, row.narHash, row.compression)),
+    );
+    for (const object of await objects.list(entry.bucket)) {
+      if (named.has(object.key)) continue;
+      await objects.delete(object.key);
+      report.orphans += 1;
+      report.bytes += object.size;
     }
   }
   const buckets = [...perBucket.values()];
   return {
     buckets,
     evicted: buckets.reduce((sum, bucket) => sum + bucket.evicted, 0),
-    kept: 0,
+    kept: buckets.reduce((sum, bucket) => sum + bucket.kept, 0),
     bytes: buckets.reduce((sum, bucket) => sum + bucket.bytes, 0),
+    orphans: buckets.reduce((sum, bucket) => sum + bucket.orphans, 0),
   };
 }
