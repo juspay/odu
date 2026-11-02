@@ -15,9 +15,9 @@
 #     with:
 #       origin: <your bucket's substituter URL>
 #       bucket: <bucket>
-#       token: ${{ secrets.ODU_CACHE_TOKEN }}
-#       paths: |
-#         .#my-package
+#       token: <your ODU_CACHE_TOKEN secret, as a workflow expression>
+#       pin: <true on the ref you want held — the README spells the one-line
+#             GitHub expression; it cannot be written in this file>
 #
 # **The pusher is this action's own `odu`.** It is built from the checkout the
 # action itself runs out of — `$GITHUB_ACTION_PATH/../../..` — so pinning the
@@ -45,10 +45,13 @@
 #   - the token is never echoed, and never appears in a command line
 #
 # **`pin: true` keeps this closure out of garbage collection.** A boolean,
-# not a name, and the action holds no policy about WHEN. The documented line,
-# which odu's own workflow uses:
-#
-#       pin: ${{ github.ref_name == github.event.repository.default_branch }}
+# not a name, and the action holds no policy about WHEN: the CALLING WORKFLOW
+# compares `github.ref_name` with `github.event.repository.default_branch` and
+# passes the result, which is what odu's own `nix-cache.yml` does. The literal
+# expression is in the README and in that workflow and CANNOT be written here
+# — GitHub evaluates workflow expressions while PARSING an action file, where
+# the `github` context does not exist, and one in any string refuses the whole
+# action with "Unrecognized named-value: github".
 #
 # THE NAME IS DERIVED and never typed: `<owner>/<repo>@<ref>/<system>`, e.g.
 # `juspay/kolu@master/x86_64-linux`. Four repositories share one bucket, so
@@ -121,9 +124,10 @@ inputs:
     description: >-
       true to keep this push's closure out of garbage collection. The name is
       derived — <owner>/<repo>@<ref>/<system> — and this action applies no
-      policy of its own about which ref may pin: write
-      `pin: ${{ github.ref_name == github.event.repository.default_branch }}`
-      to hold your default branch. Anything falsy, the default, pins nothing.
+      policy of its own about which ref may pin: pass the comparison of
+      github.ref_name with github.event.repository.default_branch from your
+      workflow (the README has the line; an expression cannot appear in this
+      file). Anything falsy, the default, pins nothing.
     required: false
     default: ""
 
