@@ -198,3 +198,45 @@ describe("s3 object store: an object odu did not write", () => {
     await facts.catch((err: UnrecordedObject) => expect(err.key).toBe("main/nar/x.nar.zst"));
   });
 });
+
+describe("s3 object store: a put killed mid-upload", () => {
+  /** The keys of every incomplete multipart upload in the bucket. */
+  const uploadsIn = async (target: S3Target): Promise<string[]> => {
+    const response = await s3Fetch(target, "GET", "", { query: { uploads: "" } });
+    expect(response.ok).toBe(true);
+    return [...(await response.text()).matchAll(/<Key>([^<]*)<\/Key>/g)].map((found) => found[1] as string).sort();
+  };
+  /** What a daemon killed mid-put leaves: an upload with a part, never
+   *  completed and never aborted. */
+  const abandon = async (target: S3Target, key: string): Promise<void> => {
+    const created = await s3Fetch(target, "POST", key, { query: { uploads: "" } });
+    const uploadId = /<UploadId>([^<]*)<\/UploadId>/.exec(await created.text())?.[1];
+    if (uploadId === undefined) throw new Error(`CreateMultipartUpload ${key}: ${created.status}`);
+    const part = new Uint8Array(PART).fill(7);
+    const put = await s3Fetch(target, "PUT", key, {
+      query: { partNumber: "1", uploadId },
+      headers: { "content-length": String(part.length) },
+      body: part as Uint8Array<ArrayBuffer>,
+    });
+    expect(put.ok).toBe(true);
+    await put.text();
+  };
+
+  it("is aborted by the boot sweep when it began before the boot, and a live one is left", async () => {
+    const target = await gateway.bucket();
+    await abandon(target, "main/nar/dead.nar.zst");
+    await abandon(target, "other/nar/not-ours.nar.zst");
+    // `Initiated` is the service's clock, to the second: the boot is placed
+    // strictly between the dead upload and the live one.
+    await Bun.sleep(1_100);
+    const boot = Date.now();
+    await Bun.sleep(1_100);
+    await abandon(target, "main/nar/live.nar.zst");
+    expect(await uploadsIn(target)).toEqual(["main/nar/dead.nar.zst", "main/nar/live.nar.zst", "other/nar/not-ours.nar.zst"]);
+
+    const store = s3ObjectStore({ target, partSize: PART, listPageSize: 1 });
+    expect(await store.sweepTemp("main", boot)).toBe(1);
+    // Only the bucket's own prefix, and only what began before the boot.
+    expect(await uploadsIn(target)).toEqual(["main/nar/live.nar.zst", "other/nar/not-ours.nar.zst"]);
+  });
+});

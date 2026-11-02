@@ -46,9 +46,10 @@ const encode = (text: string): string =>
 export function objectUrl(target: S3Target, key: string, query: Record<string, string> = {}): URL {
   const url = new URL(target.endpoint);
   // JOINED BY SEGMENT under whatever path the endpoint has: the bucket, then
-  // the key's own segments, each encoded once.
+  // the key's own segments, each encoded once. The empty key is the bucket.
   const base = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
-  url.pathname = `${base}${[target.bucket, ...key.split("/")].map(encode).join("/")}`;
+  const segments = key === "" ? [target.bucket] : [target.bucket, ...key.split("/")];
+  url.pathname = `${base}${segments.map(encode).join("/")}`;
   for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
   return url;
 }

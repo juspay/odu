@@ -284,7 +284,8 @@ export interface BootReport {
   caProved: number;
   /** Object files with no row (a crash between put and record). */
   orphansSwept: number;
-  /** Abandoned `.tmp-*` files older than this boot. */
+  /** What dead puts left from before this boot: `.tmp-*` names, and on S3
+   *  incomplete multipart uploads. */
   tempSwept: number;
 }
 

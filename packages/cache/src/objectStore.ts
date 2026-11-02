@@ -29,6 +29,15 @@
  * No half object is ever visible under its final key: disk's temp names and
  * S3's temp keys are `.tmp-*`, which `list` skips and the boot sweep removes.
  *
+ * **A put that dies leaves nothing the boot sweep cannot reach.** `close()`
+ * joins the puts in flight, but a daemon killed mid-put (eviction, OOM,
+ * `kill -9`) leaves its temp name — and, on S3, an INCOMPLETE MULTIPART
+ * UPLOAD, which no ListObjects shows and whose parts cost storage until a
+ * lifecycle rule aborts them (R2's default is seven days; AWS has none). So
+ * `sweepTemp` lists both under the bucket's prefix and removes what began
+ * before this boot: temp names by modification time, uploads by `Initiated`
+ * (the service's clock). A younger one is a live put. Disk has no uploads.
+ *
  * **Facts are written once and read back.** `put` hashes while it streams, and
  * the size and sha256 are kept beside the object — a sidecar file on disk,
  * `x-amz-meta-odu-*` on S3 — so `facts` answers without reading the bytes.
@@ -105,9 +114,11 @@ export interface ObjectStore {
   /** Every object under `prefix` (a directory-like prefix: `main/nar`), all
    *  pages of it. Temp names are not objects and are never listed. */
   list(prefix: string): Promise<{ key: string; size: number }[]>;
-  /** Remove temp names under `prefix` older than `current` — the boot sweep,
-   *  before a mount can be writing. A younger temp is a live put. Scoped like
-   *  `list`, because a store may be shared and only a bucket's prefix is ours. */
+  /** Remove what a dead put left under `prefix` and began before `current`:
+   *  temp names, and on S3 incomplete multipart uploads — the boot sweep,
+   *  before a mount can be writing. A younger one is a live put. Scoped like
+   *  `list`, because a store may be shared and only a bucket's prefix is ours.
+   *  Answers how many it removed. */
   sweepTemp(prefix: string, current: number): Promise<number>;
 }
 
@@ -813,6 +824,37 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     });
   }
 
+  /**
+   * Every INCOMPLETE multipart upload under `prefix` — what ListObjects never
+   * shows. `initiated` is the service's clock.
+   *
+   * PAGED BY `key-marker` ALONE: versitygw 1.7.0 refuses the `upload-id-marker`
+   * it hands out (400 "Invalid uploadId marker"). The cost: a page that ends
+   * part-way through one key's uploads skips that key's remaining ones, which
+   * the next boot's sweep reaches. A key has more than one upload only when
+   * more than one daemon died putting it.
+   */
+  async function listUploads(prefix: string): Promise<{ key: string; uploadId: string; initiated: number }[]> {
+    const out: { key: string; uploadId: string; initiated: number }[] = [];
+    let marker: Record<string, string> = {};
+    for (;;) {
+      const response = await call("GET", "", {
+        query: { uploads: "", "max-uploads": String(pageSize), ...(prefix === "" ? {} : { prefix }), ...marker },
+      });
+      const body = await response.text();
+      if (!response.ok) throw new S3Failure(`ListMultipartUploads ${prefix}`, response, body);
+      for (const [, upload] of body.matchAll(/<Upload>([\s\S]*?)<\/Upload>/g)) {
+        const key = xmlValue(upload as string, "Key");
+        const uploadId = xmlValue(upload as string, "UploadId");
+        const initiated = Date.parse(xmlValue(upload as string, "Initiated") ?? "");
+        if (key !== null && uploadId !== null && !Number.isNaN(initiated)) out.push({ key, uploadId, initiated });
+      }
+      const next = xmlValue(body, "NextKeyMarker");
+      if (xmlValue(body, "IsTruncated") !== "true" || next === null || next === "") return out;
+      marker = { "key-marker": next };
+    }
+  }
+
   /** Every key under `prefix`, temp names included, every page of them. */
   async function listAll(prefix: string): Promise<{ key: string; size: number; lastModified: number }[]> {
     const out: { key: string; size: number; lastModified: number }[] = [];
@@ -877,10 +919,17 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     },
 
     async sweepTemp(prefix, current) {
+      const scoped = prefix === "" ? "" : `${safeKey(prefix)}/`;
       let removed = 0;
-      for (const entry of await listAll(prefix === "" ? "" : `${safeKey(prefix)}/`)) {
+      for (const entry of await listAll(scoped)) {
         if (!isTemp(entry.key) || entry.lastModified > current) continue;
         await deleteKey(entry.key).catch(() => {});
+        removed += 1;
+      }
+      // A DEAD PUT'S UPLOAD — under a final key or a temp one alike.
+      for (const upload of await listUploads(scoped)) {
+        if (upload.initiated > current) continue;
+        await abort(upload.key, upload.uploadId);
         removed += 1;
       }
       return removed;
