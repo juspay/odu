@@ -625,20 +625,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     // answers both requests.
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket`, consumerFacts),
 
-    /**
-     * DEPRECATED, ALWAYS EMPTY. The cache no longer holds an upload for a
-     * reference; a 2.x `--wait`/client reads the list it always did and sees
-     * nothing waiting. REMOVED AT THE CACHE ROW'S NEXT MAJOR.
-     */
-    HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/held`, (request) =>
-      Effect.gen(function* () {
-        const bucket = yield* param("bucket");
-        const admitted = admit(cache, request, bucket, "read");
-        if (!admitted.ok) return admitted.response;
-        return HttpServerResponse.jsonUnsafe({ held: [] });
-      }),
-    ),
-
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {
         const bucket = yield* param("bucket");

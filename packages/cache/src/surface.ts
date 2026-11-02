@@ -130,40 +130,6 @@ export const CachePathSchema = Schema.Struct({
 });
 export type CachePath = typeof CachePathSchema.Type;
 
-/**
- * ONE UPLOAD A BUCKET ONCE HELD FOR A MISSING REFERENCE.
- *
- * DEPRECATED, AND ALWAYS EMPTY IN THIS RELEASE. The cache keeps what it was
- * pushed, so references are names and nothing is held; the collection and the
- * `/held` endpoint remain so a 2.x client keeps working. REMOVED IN THE NEXT
- * MAJOR. Every 2.3 client must tolerate an empty list today.
- */
-export const CacheHeldSchema = Schema.Struct({
-  bucket: Schema.String,
-  storePath: Schema.String,
-  reason: Schema.String,
-  missing: Schema.Array(Schema.String),
-  fetching: Schema.Int,
-  fetched: Schema.Array(Schema.String),
-  since: Schema.Number,
-});
-export type CacheHeld = typeof CacheHeldSchema.Type;
-
-export const heldKey = (held: { bucket: string; storePath: string }): string =>
-  `${held.bucket}|${held.storePath}`;
-
-/** Deprecated with the collection: retained for a 2.x caller's types. */
-export function heldReason(missing: readonly string[] | null, fetching = 0): string {
-  if (fetching > 0) {
-    return `fetching ${fetching} upstream reference${fetching === 1 ? "" : "s"}`;
-  }
-  if (missing === null) return "waiting for a reference that is neither here nor upstream";
-  const n = missing.length;
-  return `waiting for ${n} reference${n === 1 ? "" : "s"} that ${
-    n === 1 ? "is" : "are"
-  } neither here nor upstream`;
-}
-
 // ── the refusal ─────────────────────────────────────────────────────────────
 
 /**
@@ -501,16 +467,6 @@ export const oduCacheSurface = defineSurface({
       // not a wire member.
       verbs: ["keys", "get", "deltas"],
     },
-    /**
-     * DEPRECATED: the uploads a bucket is holding for references. Always
-     * empty in 2.3 — kept so a 2.x reader sees the same collection it always
-     * subscribed to. REMOVED AT THE CACHE ROW'S NEXT MAJOR.
-     */
-    held: {
-      keySchema: Schema.String,
-      schema: CacheHeldSchema,
-      verbs: ["keys", "get", "deltas"],
-    },
   },
   procedures: {
     bucket: {
@@ -571,8 +527,6 @@ export type OduCacheSurface = typeof oduCacheSurface;
  */
 export const ODU_CACHE_EXPOSE = {
   buckets: "resource",
-  /** DEPRECATED and always empty; removed at the cache row's next major. */
-  held: "resource",
   "bucket.create": { tool: { mutates: true } },
   "bucket.list": { tool: { mutates: false } },
   "bucket.describe": { tool: { mutates: false } },
@@ -631,8 +585,13 @@ export const CACHE_KEY = "cache";
  * surface only grows, the MAJOR when something a reader uses changes.
  *
  * 2.4: where the composed wire stood when each row took a version of its own.
+ *
+ * 3.0: the deprecated `held` collection (always empty since the cache kept what
+ * it was pushed), its `/held` route and `odu cache push --wait` are gone. A
+ * MAJOR, because a 2.x reader could subscribe to `held`; the host and the other
+ * rows stay where they were, so a runs-only client never notices.
  */
-export const CACHE_CONTRACT_VERSION = "2.4";
+export const CACHE_CONTRACT_VERSION = "3.0";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

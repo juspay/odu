@@ -92,9 +92,6 @@ interface Server {
   /** Answer a narinfo PUT that carries no preceding NAR with a 400 saying the
    *  bytes are gone — what a restarted server says. */
   narinfoOnlyRefusal: boolean;
-  /** `--wait` reads THIS endpoint; `null` keeps every hold forever. */
-  heldLandAfter: number | null;
-  heldPolls: number;
   missing: string[];
   skipped: string[];
   stop: () => void;
@@ -116,8 +113,6 @@ function startServer(): Server {
     missingCalls: 0,
     missingOnlyFor: undefined,
     narinfoOnlyRefusal: false,
-    heldLandAfter: null,
-    heldPolls: 0,
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
     stop: () => {},
@@ -139,23 +134,6 @@ function startServer(): Server {
         // THE BUCKET'S CONSUMER FACTS: the push asks where THIS INSTANCE is,
         // rather than guessing from its own environment.
         return Response.json({ board: state.board });
-      }
-      if (request.method === "GET" && url.pathname === "/cache/main/held") {
-        state.heldPolls += 1;
-        const keep = state.heldLandAfter === null || state.heldPolls <= state.heldLandAfter;
-        return Response.json({
-          held: keep
-            ? [
-                {
-                  storePath: LIBC,
-                  reason: `fetching 1 upstream reference`,
-                  missing: [LIBC],
-                  fetching: 1,
-                  fetched: [],
-                },
-              ]
-            : [],
-        });
       }
       if (url.pathname.endsWith("/missing")) {
         state.missingCalls += 1;

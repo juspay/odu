@@ -12,7 +12,7 @@ import { describe, expect, it } from "bun:test";
 import { contractPinMismatch, rowShape, surfaceFingerprint } from "@odu/cordis/contract";
 import { CACHE_CONTRACT_VERSION, ODU_CACHE_EXPOSE, oduCacheSurface } from "./surface";
 
-const PIN = { version: "2.4", fingerprint: "ce07c59972729e8e" };
+const PIN = { version: "3.0", fingerprint: "8988b569266ac6a6" };
 
 describe("the cache row's contract", () => {
   it("is pinned to the surface its version describes", () => {

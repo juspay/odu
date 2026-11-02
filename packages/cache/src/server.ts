@@ -61,7 +61,6 @@ import { cacheRoutes } from "./routes";
 import { nixDump, nixPathInfo } from "./store";
 import {
   type CacheBucket,
-  type CacheHeld,
   CACHE_KEY,
   CacheRefused,
   oduCacheSurface,
@@ -75,15 +74,10 @@ const DEFAULT_UPSTREAM_KEY = "cache.nixos.org-1";
 export type CacheSurfaceDeps = ImplementSurfaceDeps<CacheSpec>;
 
 /** The sibling's publishing half, as the composed bundle hands it over — the
- *  two collections this row owns, each with its own key type. */
+ *  collection this row owns. */
 export interface CachePublisher {
   readonly buckets: {
     upsert(key: string, row: CacheBucket): void;
-    remove(key: string): void;
-  };
-  /** DEPRECATED, always empty in 2.3. */
-  readonly held: {
-    upsert(key: string, row: CacheHeld): void;
     remove(key: string): void;
   };
 }
@@ -122,8 +116,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    *  filled by the framework from the same `upsert`s a publish performs, so the
    *  two cannot disagree. */
   const rows = new Map<string, CacheBucket>();
-  /** DEPRECATED: retained so a 2.x subscriber's readAll still exists. */
-  const rowsHeld = new Map<string, CacheHeld>();
   let publisher: CachePublisher | null = null;
 
   /** A bucket's row: the cache's own facts plus the one thing the cache cannot
@@ -265,15 +257,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         },
         remove: (key) => {
           rows.delete(key);
-        },
-      },
-      held: {
-        readAll: () => rowsHeld,
-        upsert: (key, row) => {
-          rowsHeld.set(key, row);
-        },
-        remove: (key) => {
-          rowsHeld.delete(key);
         },
       },
     },
@@ -510,10 +493,6 @@ export const cacheRow = definePlugin({
       buckets: {
         upsert: (key, row) => mounted.ctx.collections.buckets.upsert(key, row),
         remove: (key) => mounted.ctx.collections.buckets.remove(key),
-      },
-      held: {
-        upsert: (key, row) => mounted.ctx.collections.held.upsert(key, row),
-        remove: (key) => mounted.ctx.collections.held.remove(key),
       },
     });
 

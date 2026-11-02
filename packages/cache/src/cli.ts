@@ -100,13 +100,11 @@ token list [bucket] [-o json] tokens with scope, expiry and last use
 token revoke <id>             revoke one token, without touching the rest
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
-push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--wait] [-o json]
+push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [-o json]
                               upload only the paths the bucket is missing.
                               Talks to the cache directly, from HERE. A NAR
                               larger than --part-size (64 MiB) is sent in parts,
-                              each retried on its own. --wait is DEPRECATED and
-                              returns at once (nothing is held; removed at the
-                              cache row's next major)
+                              each retried on its own
 pin <bucket> <name> <path>…   pin a closure against garbage collection
 gc [bucket] [-o json]         evict what retention expired and nothing holds
 stats [-o json]               storage and reads
@@ -622,7 +620,6 @@ async function pushCommand(rest: string[]): Promise<number> {
       "token-file": { type: "string" },
       concurrency: { type: "string" },
       "part-size": { type: "string" },
-      wait: { type: "boolean" },
       origin: originOption,
       output: outputOption,
     },

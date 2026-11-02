@@ -604,16 +604,6 @@ describe("operational lines", () => {
   });
 });
 
-describe("the deprecated held endpoint", () => {
-  it("answers an empty list, so a 2.x client waits for nothing", async () => {
-    const h = await harness(true);
-    const response = await h.fetch("/main/held");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ held: [] });
-    await h.dispose();
-  });
-});
-
 describe("the NAR", () => {
   it("serves the KEPT file with a length and the file's own hash", async () => {
     const h = await harness(true);
