@@ -1510,12 +1510,54 @@ export interface PinName {
   readonly system: string | null;
 }
 
+/**
+ * SPLIT, NEVER MATCHED — and that is a security property, not a style.
+ *
+ * This was one regex with `.+` between the `@` and the last `/`. A pin name
+ * arrives from the API, so it is input; CodeQL's `js/polynomial-redos` is
+ * right that `!/!/!/!/…` makes that pattern backtrack quadratically, and a
+ * bucket holding one hostile pin would hang the tab that listed it.
+ *
+ * A regex was buying nothing here. Three index scans answer the same
+ * question in one pass of the string, and each shape check below is a
+ * bounded test on a slice:
+ *
+ *   - the repo is everything before the FIRST `@`, and must be
+ *     `<owner>/<name>` — exactly one slash, neither half empty;
+ *   - the system is everything after the LAST `/` of the rest, and must look
+ *     like a Nix double (`x86_64-linux`): hyphenated, no whitespace;
+ *   - the ref is what is left between them, and MAY contain slashes
+ *     (`release/2.0`), which is why the system is taken from the end.
+ *
+ * A name that fails any of them is somebody's own and keeps all of itself:
+ * inventing a repository for `release-1.2` would be a guess printed as a
+ * fact.
+ */
 function pinName(name: string): PinName {
-  const shaped = /^(?<repo>[^@\s]+\/[^@\s]+)@(?<ref>.+)\/(?<system>[^/\s]+-[^/\s]+)$/.exec(name);
-  const groups = shaped?.groups;
-  return groups === undefined
-    ? { repo: null, ref: name, system: null }
-    : { repo: groups["repo"] ?? null, ref: groups["ref"] ?? name, system: groups["system"] ?? null };
+  const whole: PinName = { repo: null, ref: name, system: null };
+  const at = name.indexOf("@");
+  if (at <= 0) return whole;
+
+  const repo = name.slice(0, at);
+  const slash = repo.indexOf("/");
+  if (slash <= 0 || slash === repo.length - 1) return whole;
+  if (repo.indexOf("/", slash + 1) !== -1) return whole;
+  if (hasSpace(repo)) return whole;
+
+  const rest = name.slice(at + 1);
+  const last = rest.lastIndexOf("/");
+  if (last <= 0 || last === rest.length - 1) return whole;
+  const system = rest.slice(last + 1);
+  if (!system.includes("-") || hasSpace(system)) return whole;
+
+  return { repo, ref: rest.slice(0, last), system };
+}
+
+/** Whitespace, without a pattern: every check in {@link pinName} is a single
+ *  pass, and a `\s` test is the one place a regex could creep back in. */
+function hasSpace(text: string): boolean {
+  for (const ch of text) if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") return true;
+  return false;
 }
 
 /** The pins of one repository, in the order the row answered. */

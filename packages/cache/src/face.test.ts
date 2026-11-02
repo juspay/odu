@@ -139,3 +139,42 @@ describe("pins are grouped by the repository their name derives from", () => {
     expect(groups[1]?.pins[0]?.parsed).toEqual({ repo: null, ref: "release-1.2", system: null });
   });
 });
+
+/**
+ * A HOSTILE NAME IS JUST A NAME — bounded, whatever it looks like.
+ *
+ * The parse used to be a regex with `.+` between the `@` and the last `/`,
+ * and CodeQL was right about it: `a/b@!/!/!/…` is quadratic backtracking,
+ * and a pin name comes off the API, so a bucket with one of these in it
+ * would hang the tab that listed it. The parse is three index scans now, so
+ * the claim is a BUDGET rather than a shape — ten thousand slashes, answered
+ * at once, and still answered correctly.
+ */
+describe("a pin name is parsed in one pass", () => {
+  it("answers a pathological name promptly, and reads it as nobody's repository", async () => {
+    const { pinGroups } = await import("./face");
+    const hostile = `a/b@${"!/".repeat(10_000)}`;
+    const started = performance.now();
+    const groups = pinGroups([
+      { bucket: "kolu", name: hostile, rootPaths: [], created: 0, createdBy: "admin" as const },
+    ]);
+    const took = performance.now() - started;
+    // A trailing `/` means no system, so the whole string is the name.
+    expect(groups[0]?.repo).toBe("Pinned by hand");
+    expect(groups[0]?.pins[0]?.parsed).toEqual({ repo: null, ref: hostile, system: null });
+    expect(took, `the parse took ${took}ms on a 20k-character name`).toBeLessThan(100);
+  });
+
+  it("still finds the system when a hostile ref ends in one", async () => {
+    const { pinGroups } = await import("./face");
+    const name = `a/b@${"!/".repeat(10_000)}x86_64-linux`;
+    const started = performance.now();
+    const groups = pinGroups([
+      { bucket: "kolu", name, rootPaths: [], created: 0, createdBy: "admin" as const },
+    ]);
+    const took = performance.now() - started;
+    expect(groups[0]?.repo).toBe("a/b");
+    expect(groups[0]?.pins[0]?.parsed.system).toBe("x86_64-linux");
+    expect(took, `the parse took ${took}ms on a 20k-character name`).toBeLessThan(100);
+  });
+});
