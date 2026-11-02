@@ -69,6 +69,12 @@
 # asked for) answers 403 rather than being dropped by a typo in the `pin:`
 # above. Deleting a pin is an administrator's either way.
 #
+# ONE CONSEQUENCE WORTH KNOWING: if an administrator re-points THIS pin from
+# the board, it becomes an administrator's pin — and the next push here is
+# refused and this step goes red. That is deliberate and loud: a cache job
+# that silently stopped holding its master closure is the state this input
+# exists to prevent. Pick another name, or have the administrator unpin it.
+#
 # **It proves what it pushed, where Nix will ask.** For every path the bucket
 # serves (`check.sh`): the narinfo must answer at the SUBSTITUTER URL the bucket
 # publishes — its own domain when it has one — and the NAR that narinfo names
