@@ -36,6 +36,22 @@ import { Schema } from "effect";
  *  subcommand in argv, and the word the browser folds its health under. */
 export const AUTH_KEY = "auth";
 
+/**
+ * THIS ROW'S OWN CONTRACT VERSION, `major.minor` — the door's surface below and
+ * nothing served beside it. The host publishes it on the identity cell's `rows`
+ * and a client that reads the door is admitted against it; one that does not is
+ * never refused because it moved. The rule is the host's: the MINOR when the
+ * surface only grows, the MAJOR when something a reader uses changes.
+ * `contract.test.ts` pins it to a fingerprint of the surface.
+ *
+ * 2.4: where the composed wire stood when each row took a version of its own.
+ */
+export const AUTH_CONTRACT_VERSION = "2.4";
+
+/** THE DOOR AND NOTHING ELSE — what `odu auth …` declares, in the shape
+ *  `admitService` takes. Required: there is nothing to do without a door. */
+export const AUTH_NEEDS = { [AUTH_KEY]: AUTH_CONTRACT_VERSION } as const;
+
 /** THE SIGN-IN PAGE'S WORDS, once — the server-rendered page (`./routes`) and
  *  the browser's own copy (`./face`) say the same three things, and a page an
  *  operator meets before JavaScript must not read differently from the one a

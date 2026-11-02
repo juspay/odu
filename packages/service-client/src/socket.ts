@@ -42,6 +42,7 @@ import { readServiceCell } from "./dial";
 import { DEFAULT_SERVICE_ORIGIN, SERVICE_APP, serviceOrigin } from "./endpoint";
 import {
   admitService,
+  CI_NEEDS,
   handshakeTimedOut,
   oduServiceClientOver,
   type OduServiceClient,
@@ -224,6 +225,9 @@ export async function dialServiceSocket(
         }),
       ),
       socketPath,
+      // THE RUNS AND NOTHING ELSE: this dial's link carries only the runs'
+      // group, so the rows served beside them are not this caller's to need.
+      CI_NEEDS,
     );
   } catch (err) {
     // A link nobody will use still holds the dial, ping and response fibers.

@@ -24,10 +24,15 @@
  */
 
 import { composedWire } from "@odu/cordis/compose";
-import { oduServiceSurface } from "@odu/service-client/surface";
-import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
-import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
-import { CLOUDFLARE_KEY, oduCloudflareSurface } from "@odu/cloudflare/surface";
+import {
+  CI_NEEDS,
+  ifMountedAll,
+  oduServiceSurface,
+  type RowNeeds,
+} from "@odu/service-client/surface";
+import { CACHE_KEY, CACHE_NEEDS, oduCacheSurface } from "@odu/cache/surface";
+import { AUTH_KEY, AUTH_NEEDS, oduAuthSurface } from "@odu/auth/surface";
+import { CLOUDFLARE_KEY, CLOUDFLARE_NEEDS, oduCloudflareSurface } from "@odu/cloudflare/surface";
 import { authorizationHeaders } from "@odu/auth/cli";
 import { connectOrStart } from "@odu/launch/webLauncher";
 import type { ServiceConnection } from "@odu/service-client/dial";
@@ -51,6 +56,19 @@ export const SERVICE_SIBLINGS = {
 export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLINGS);
 
 /**
+ * WHAT THE COMPOSED FACES READ — `odu surface` and the `odu mcp` bridge project
+ * every row the daemon mounts: the runs always, each sibling when it is there.
+ *
+ * Every other command declares only its own row (`odu run` the runs, `odu cache`
+ * the cache — each row's `*_NEEDS`), so a daemon whose cache moved a major is
+ * still one `odu run` can drive.
+ */
+export const EVERY_ROW_NEEDS: RowNeeds = {
+  ...CI_NEEDS,
+  ...ifMountedAll({ ...CACHE_NEEDS, ...AUTH_NEEDS, ...CLOUDFLARE_NEEDS }),
+};
+
+/**
  * REACH THE SERVICE AS THE CREDENTIAL THIS MACHINE HOLDS FOR IT.
  *
  * The one way a public command should dial, so nobody has to remember it: a
@@ -58,10 +76,13 @@ export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLIN
  * nothing else, and a face that forgot the token would look like a board with
  * no data rather than like a refusal. `$ODU_TOKEN` first, then the entry
  * `odu auth login` wrote for that origin — the same order the docs promise.
+ *
+ * `needs` is what the calling command reads; a daemon is adopted on those rows
+ * and no others.
  */
 export function connectToService(
-  origin?: string,
-  opts: { warned?: Set<string> } = {},
+  origin: string | undefined,
+  opts: { needs: RowNeeds; warned?: Set<string> },
 ): Promise<ServiceConnection> {
   return connectOrStart(origin, {
     group: SERVICE_WIRE_GROUP,

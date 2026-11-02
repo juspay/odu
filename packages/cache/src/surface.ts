@@ -483,14 +483,11 @@ odu cache push ${input.bucket} <paths> --origin ${input.origin.replace(/\/$/, ""
  * No cells: a bucket is not a singleton fact, and nothing else about the cache
  * is a value on the wire.
  *
- * **AND NO VERSION OF ITS OWN.** This surface used to carry a
- * `CACHE_CONTRACT_VERSION` that nothing read; the version it belongs to is
- * `@odu/service-client/surface`'s `SERVICE_CONTRACT_VERSION`, which covers the
- * COMPOSED WIRE — the runs' root surface and every row served beside it, over
- * one connection, admitted once. So **any change to this file bumps that
- * number**: adding a verb is a minor bump, changing a shape is a major one. A
- * row-local version would be a promise nothing enforces, and the failure it
- * would hide is a stale tab calling a member the daemon no longer serves.
+ * **AND A VERSION OF ITS OWN** — {@link CACHE_CONTRACT_VERSION}, which any
+ * change to this surface bumps: adding a verb is a minor bump, changing a shape
+ * is a major one. It is enforced, which is what an earlier row-local version
+ * was not: `contract.test.ts` pins it to a fingerprint of this surface, and the
+ * host publishes it so a client is admitted against the rows it reads.
  */
 export const oduCacheSurface = defineSurface({
   collections: {
@@ -625,6 +622,21 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
  * they each retype, which is how a page connects to a row nothing serves.
  */
 export const CACHE_KEY = "cache";
+
+/**
+ * THIS ROW'S OWN CONTRACT VERSION, `major.minor` — the cache's surface above and
+ * nothing served beside it. The host publishes it on the identity cell's `rows`;
+ * a client that reads the cache is admitted against it, and one that reads only
+ * the runs (kolu) never consults it. The rule is the host's: the MINOR when the
+ * surface only grows, the MAJOR when something a reader uses changes.
+ *
+ * 2.4: where the composed wire stood when each row took a version of its own.
+ */
+export const CACHE_CONTRACT_VERSION = "2.4";
+
+/** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
+ *  (`odu cache …`), in the shape `admitService` takes. */
+export const CACHE_NEEDS = { [CACHE_KEY]: CACHE_CONTRACT_VERSION } as const;
 
 /**
  * WHAT AN AGENT IS TOLD about the cache: its surface, its exposure policy and

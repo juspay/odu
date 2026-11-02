@@ -49,7 +49,7 @@ import {
 import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
-import { connectToService, SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
+import { connectToService, EVERY_ROW_NEEDS, SERVICE_SIBLINGS, SERVICE_WIRE_GROUP } from "./wire";
 import type { ServiceConnection } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { oduServiceSurface } from "@odu/service-client/surface";
@@ -167,7 +167,8 @@ export async function serveServiceMcpOverStdio(opts: {
     surfaces: surfacesOf(mountedRows(door, rows)),
     client: async () => {
       // ONE skew note per daemon for the bridge's life, not one per redial.
-      const connection = await connectToService(origin, { warned });
+      // Every row it projects: the runs always, each sibling when mounted.
+      const connection = await connectToService(origin, { needs: EVERY_ROW_NEEDS, warned });
       opened.add(connection);
       // ASKED PER DIAL, AND NOT INSIDE IT. The dial is the one thing that
       // guarantees there is a daemon to ask — but `reroster` from inside this

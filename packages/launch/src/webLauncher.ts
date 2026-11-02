@@ -25,11 +25,14 @@
  *
  * ## Compatibility is TWO axes, and only one of them is ordered
  *
- * `protocolVersion` is `major.minor`, and the rule is ADDITIVE
- * (`admitService`'s): a running service at the same major is adopted whatever
- * the minors — a minor only ever ADDS members, so the worst a skew costs is one
- * control answering "unknown verb" — and a different major is refused with the
- * upgrade sentence. `buildId` is MATCH-ONLY — there is
+ * The contract is `major.minor` — the host's, and each mounted row's on the
+ * identity cell — and the rule is ADDITIVE (`admitService`'s): a running
+ * service is adopted when the host's major and the major of every row THE
+ * CALLER NEEDS match, whatever the minors — a minor only ever ADDS members, so
+ * the worst a skew costs is one control answering "unknown verb" — and a
+ * different major is refused with a sentence naming the row. The caller
+ * declares its needs (`odu run` reads the runs, `odu cache` the cache); this
+ * module names no row and never guesses them. `buildId` is MATCH-ONLY — there is
  * no such thing as a newer build — so a differing one is reported and never
  * acted on unless a person asks for an upgrade. That asymmetry is the
  * framework's (`admitService` has no `buildIsNewer` beside it) and it
@@ -72,6 +75,7 @@ import {
   skewNote,
   handshakeTimedOut,
   SERVICE_HANDSHAKE_MS,
+  type RowNeeds,
   type ServiceBuild,
   type ServiceCell,
 } from "@odu/service-client/surface";
@@ -113,6 +117,10 @@ export interface EnsureOptions {
   /** THIS build's identity, so the comparison is against a value rather than
    *  against the environment a launcher happens to be running in. */
   baked: ServiceBuild;
+  /** THE ROWS THE CALLER READS, and at which version — what a running daemon
+   *  is adopted or refused on. Declared by the face, never defaulted here: this
+   *  module names no row. */
+  needs: RowNeeds;
   upgrade: boolean;
   /** Start the daemon so it outlives this process. */
   spawn: () => Effect.Effect<void, Error>;
@@ -162,9 +170,10 @@ export async function readService(
 export function contractVerdict(
   cell: ServiceCell,
   origin: string,
-  build?: string,
+  needs: RowNeeds,
+  host?: string,
 ): string | null {
-  const verdict = admitService(cell, origin, build);
+  const verdict = admitService(cell, origin, needs, host);
   return verdict.kind === "adopt" ? null : verdict.message;
 }
 
@@ -180,15 +189,17 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
   connection: C,
   origin: string,
   opts: {
+    /** The rows this caller reads — see {@link EnsureOptions.needs}. */
+    needs: RowNeeds;
     handshakeMs?: number;
     warn?: (line: string) => void;
     /** Daemon instances this caller already warned about — owned by a caller
      *  that dials more than once (the stdio bridge redials per connection), so
      *  the skew note is said once per daemon rather than once per redial. */
     warned?: Set<string>;
-    /** The version this build reads — a test seam for a build ahead of 3.0. */
-    build?: string;
-  } = {},
+    /** The host version this build reads — a test seam for a build ahead. */
+    host?: string;
+  },
 ): Promise<C> {
   const handshakeMs = opts.handshakeMs ?? SERVICE_HANDSHAKE_MS;
   let cell: ServiceCell | undefined;
@@ -215,7 +226,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
         "(the cell stream ended empty) — not an odu service this build can use",
     );
   }
-  const refusal = contractVerdict(cell, origin, opts.build);
+  const refusal = contractVerdict(cell, origin, opts.needs, opts.host);
   if (refusal !== null) {
     // Disposed HERE, on the only path that refuses: the caller never sees this
     // connection, so nothing can leak the link's dial, ping and response fibers.
@@ -225,7 +236,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
   // ADOPTED BEHIND: said once, on stderr, so stdout and `-o json` are the
   // command's alone — and the "unknown" a newer verb would meet is explained
   // before it arrives.
-  const note = skewNote(cell, origin, opts.build);
+  const note = skewNote(cell, origin, opts.needs, opts.host);
   const instance = `${cell.identity.pid}:${cell.identity.startedAt}`;
   if (note !== null && opts.warned?.has(instance) !== true) {
     opts.warned?.add(instance);
@@ -313,7 +324,7 @@ export async function ensureService(
     // upgrade. Two UNKNOWN identities never match — an off-nix daemon and an
     // off-nix client are not the same build, they are two builds nobody can
     // name — which is why the null case answers false rather than true.
-    const verdict = contractVerdict(running, opts.origin);
+    const verdict = contractVerdict(running, opts.origin, opts.needs);
     const compatible = verdict === null;
     const mine = opts.baked;
     const sameBuild =
@@ -360,7 +371,7 @@ export async function ensureService(
       // gate is still a daemon this build may not be able to speak to, and
       // adopting it here is how an `Unknown request tag` reaches a caller
       // that never got the upgrade sentence.
-      const refusal = contractVerdict(cell, opts.origin);
+      const refusal = contractVerdict(cell, opts.origin, opts.needs);
       if (refusal !== null) return { ok: false, message: refusal };
       return {
         ok: true,
@@ -612,6 +623,10 @@ async function untilValue<T>(
 export async function connectOrStart(
   origin: string = serviceOrigin(),
   opts: {
+    /** THE ROWS THIS CALLER READS — what an existing daemon is adopted or
+     *  refused on. Required: a face that reads only the runs must be able to
+     *  say so, and one that reads the cache must not be admitted without it. */
+    needs: RowNeeds;
     allowStart?: boolean;
     /**
      * EVERY TAG THIS CLIENT MAY SEND — the composed wire, when the daemon
@@ -637,22 +652,24 @@ export async function connectOrStart(
     authorization?: (origin: string) => Promise<Record<string, string>>;
     /** See {@link adoptOrRefuse}: the daemons already warned about. */
     warned?: Set<string>;
-    /** The version this build reads — a test seam for a build ahead of 3.0. */
-    build?: string;
-  } = {},
+    /** The host version this build reads — a test seam for a build ahead. */
+    host?: string;
+  },
 ): Promise<ServiceConnection> {
   const allowStart = opts.allowStart ?? origin === serviceOrigin();
   const headers = opts.authorization === undefined ? {} : await opts.authorization(origin);
   const existing = await dialExisting(origin, allowStart, opts.group, headers);
   const adopt = {
+    needs: opts.needs,
     ...(opts.warned === undefined ? {} : { warned: opts.warned }),
-    ...(opts.build === undefined ? {} : { build: opts.build }),
+    ...(opts.host === undefined ? {} : { host: opts.host }),
   };
   if (existing !== null) return adoptOrRefuse(existing, origin, adopt);
   const outcome = await ensureService({
     origin,
     home: webHome(origin),
     baked: bakedBuild(),
+    needs: opts.needs,
     upgrade: false,
     spawn: spawnWebDaemon,
   });

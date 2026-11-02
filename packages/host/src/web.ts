@@ -96,8 +96,17 @@ import {
 } from "@odu/cordis/principal";
 import { authRow, readGithubConfig, signInPageHtml } from "@odu/auth/server";
 import { cloudflareRow, readCloudflareConfig } from "@odu/cloudflare/server";
-import { CLOUDFLARE_AGENT, CLOUDFLARE_KEY } from "@odu/cloudflare/surface";
-import { AUTH_AGENT, AUTH_ANONYMOUS_TAGS, AUTH_KEY } from "@odu/auth/surface";
+import {
+  CLOUDFLARE_AGENT,
+  CLOUDFLARE_CONTRACT_VERSION,
+  CLOUDFLARE_KEY,
+} from "@odu/cloudflare/surface";
+import {
+  AUTH_AGENT,
+  AUTH_ANONYMOUS_TAGS,
+  AUTH_CONTRACT_VERSION,
+  AUTH_KEY,
+} from "@odu/auth/surface";
 import {
   admissionDispatch,
   admissionStore,
@@ -116,7 +125,8 @@ import { reservedPaths } from "./reserved";
 import { servingOptions } from "./serving";
 import { CI_AGENT, ciRow, CI_KEY } from "@odu/ci/row";
 import { cacheRow } from "@odu/cache/server";
-import { CACHE_AGENT, CACHE_KEY } from "@odu/cache/surface";
+import { CACHE_AGENT, CACHE_CONTRACT_VERSION, CACHE_KEY } from "@odu/cache/surface";
+import { CI_CONTRACT_VERSION, ifMounted, type RowNeeds } from "@odu/service-client/surface";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import {
   BoundOrigin,
@@ -133,6 +143,7 @@ import {
   NixStore,
   PublicOrigin,
   RootToken,
+  RowContracts,
   Routes,
   Shutdown,
   StateDir,
@@ -306,13 +317,16 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   // about it. The runs' row is a plugin like any other — `ciRow` builds the
   // rooted bundle in its own `apply` and OFFERS it, which is why `key` is null
   // (its members keep the bare `surface/runs/...` tags) while `plugin` is not.
+  // `contract` is the row's OWN version, read off its own surface module; the
+  // host gathers them onto the identity cell and reads none of them.
   const ROWS: ReadonlyArray<Row> = [
-    { name: CI_KEY, key: null, plugin: ciRow, agent: CI_AGENT },
+    { name: CI_KEY, key: null, plugin: ciRow, agent: CI_AGENT, contract: CI_CONTRACT_VERSION },
     {
       name: CACHE_KEY,
       key: CACHE_KEY,
       plugin: cacheRow,
       agent: CACHE_AGENT,
+      contract: CACHE_CONTRACT_VERSION,
     },
     // THE DOOR, when this daemon has one. A GitHub App configured means the row
     // is mounted, and with none configured nothing asks who is calling — which
@@ -324,6 +338,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             key: AUTH_KEY,
             plugin: authRow(github.config),
             agent: AUTH_AGENT,
+            contract: AUTH_CONTRACT_VERSION,
           },
         ]
       : []),
@@ -345,6 +360,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
                 : { probeBase: cloudflare.config.probeBase }),
             }),
             agent: CLOUDFLARE_AGENT,
+            contract: CLOUDFLARE_CONTRACT_VERSION,
           },
         ]
       : []),
@@ -418,6 +434,13 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await run(provide(host, Log, () => log));
     await run(provide(host, Shutdown, () => () => controller.abort()));
     await run(provide(host, Routes, () => routes));
+    // EVERY ROW'S OWN VERSION, by name, for the identity cell — the roster's
+    // fields copied, and nothing about them understood here.
+    await run(
+      provide(host, RowContracts, () =>
+        Object.fromEntries(ROWS.map((row) => [row.name, row.contract])),
+      ),
+    );
 
     // EVERY ROW IS A PLUGIN, and the runs' row OWNS ITS BUNDLE: its `apply`
     // builds the runtime and `offer`s it, the cache row is held PENDING on that
@@ -751,6 +774,21 @@ async function foregroundWeb(opts: {
  * in `./webLauncher`, because that is the part a test has to be able to drive
  * without a terminal.
  */
+/**
+ * WHAT THE BOARD `odu web` HANDS OUT READS — the runs and the cache always, the
+ * door and the tunnel when the daemon mounts them. The browser declares the same
+ * rows for itself (`packages/web-ui/src/main.tsx`); this is the launcher's copy,
+ * so a daemon a major behind on any of them is refused with the upgrade sentence
+ * here, at the command a person runs to open it, rather than met as a broken
+ * control later.
+ */
+const BOARD_NEEDS: RowNeeds = {
+  [CI_KEY]: CI_CONTRACT_VERSION,
+  [CACHE_KEY]: CACHE_CONTRACT_VERSION,
+  [AUTH_KEY]: ifMounted(AUTH_CONTRACT_VERSION),
+  [CLOUDFLARE_KEY]: ifMounted(CLOUDFLARE_CONTRACT_VERSION),
+};
+
 async function backgroundWeb(opts: {
   upgrade: boolean;
   json: boolean;
@@ -760,6 +798,7 @@ async function backgroundWeb(opts: {
     origin,
     home: webHome(origin),
     baked: bakedBuild(),
+    needs: BOARD_NEEDS,
     upgrade: opts.upgrade,
     spawn: spawnWebDaemon,
   });

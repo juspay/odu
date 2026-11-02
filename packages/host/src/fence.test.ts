@@ -86,7 +86,9 @@ const declaration = {
     cache: {
       "packages/cli/src/serviceCli.ts": 4,
       "packages/cli/src/serviceMcp.ts": 4,
-      "packages/cli/src/wire.ts": 2,
+      // The composed wire, and the composed faces' needs: the row's key and
+      // surface, and its `CACHE_NEEDS` read only when mounted.
+      "packages/cli/src/wire.ts": 4,
       "packages/execution/src/coordinator/spawn.ts": 1,
       "packages/execution/src/runner/workspace.ts": 22,
       // `nix-cache-info` — Nix's protocol path, not odu's cache row. The probe
@@ -119,7 +121,7 @@ const declaration = {
       "packages/cache/src/cli.ts": 2,
       "packages/ci/src/protect.ts": 2,
       "packages/cli/src/serviceMcp.ts": 4,
-      "packages/cli/src/wire.ts": 2,
+      "packages/cli/src/wire.ts": 4,
       "packages/service/src/service.ts": 1,
       // The 401's sentence names the command a person runs to fix it.
       "packages/host/src/principal.ts": 1,
@@ -137,8 +139,9 @@ const declaration = {
       "packages/web-acceptance/support/cloudflareStub.ts": 2,
       "packages/web-acceptance/support/hooks.ts": 15,
       // The composed wires that speak the sibling's key — the tunnel's argv
-      // face and the MCP bridge beside the cache's and the door's.
-      "packages/cli/src/wire.ts": 2,
+      // face and the MCP bridge beside the cache's and the door's — and the
+      // row's own needs, read when mounted.
+      "packages/cli/src/wire.ts": 4,
       "packages/cli/src/serviceMcp.ts": 5,
     },
   },

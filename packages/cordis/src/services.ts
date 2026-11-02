@@ -67,6 +67,17 @@ export const Build = serviceTag<{
   readonly self: string | null;
 }>("odu:build");
 
+/**
+ * EVERY MOUNTED ROW'S CONTRACT VERSION, by row name — the roster's `contract`
+ * fields, gathered by the host and published on the identity cell's `rows`.
+ *
+ * The host COPIES these and reads none of them: each number is its row's own
+ * constant, declared beside that row's surface, and what a major or a minor
+ * means for it is the row's business. The judge that compares them against what
+ * a client reads is `admitService`, which lives with the cell it reads.
+ */
+export const RowContracts = serviceTag<Readonly<Record<string, string>>>("odu:rowContracts");
+
 /** Where a daemon narrates itself. */
 export const Log = serviceTag<Logger>("odu:log");
 
@@ -234,7 +245,7 @@ export interface HttpRoutes {
 /** ONE PER TENURE, made by whoever owns the tenure — `@odu/host`'s `web.ts`, and
  *  nothing else. The INTERFACE is the vocabulary a row needs (it is what a row
  *  registers into); the FACTORY is a bag of live state, and this package is a
- *  contract: eleven tags, four types and two pure helpers, with no state to
+ *  contract: twelve tags, four types and two pure helpers, with no state to
  *  outlive a call. */
 export const Routes = serviceTag<HttpRoutes>("odu:httpRoutes");
 
@@ -302,10 +313,17 @@ export interface RowAgent {
  *  including the runs': a plugin can build a rooted bundle inside its own
  *  `apply` and `offer` it, so the runs' row owns its runtime and closes it.
  *  `key` null means "the wire's ROOT": the row that offers `Bundle`, which the
- *  siblings mount on. */
+ *  siblings mount on.
+ *
+ *  `contract` is the row's OWN version, `major.minor` — the constant its surface
+ *  module declares beside the surface it versions. A row's surface changing is
+ *  that row's bump and no other's: a client that reads only the runs is never
+ *  refused because the cache moved. The host gathers these into
+ *  {@link RowContracts} and knows nothing of what they mean. */
 export interface Row {
   readonly name: string;
   readonly key: string | null;
   readonly plugin: Plugin;
   readonly agent: RowAgent;
+  readonly contract: string;
 }

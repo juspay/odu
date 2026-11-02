@@ -50,7 +50,7 @@ import {
 } from "@odu/run-history/store";
 import {
   oduServiceSurface,
-  SERVICE_CONTRACT_VERSION,
+  HOST_CONTRACT_VERSION,
   type ServiceBuild,
   type ServiceCell,
   type ServiceIdentity,
@@ -95,6 +95,10 @@ export interface ServiceOptions {
   /** The daemon's on-disk home (gate + control socket live under it). */
   home: string;
   build: ServiceBuild;
+  /** EVERY MOUNTED ROW'S OWN CONTRACT VERSION, by row name — the host's
+   *  composition, published on the identity cell as it was handed in. This
+   *  service reads none of it; the judge is `admitService`. */
+  rows: Readonly<Record<string, string>>;
   catalog?: CatalogOptions;
   /** The service's own state root (request receipts). Injected for tests. */
   requestsRoot?: string;
@@ -217,8 +221,9 @@ export function createOduService(opts: ServiceOptions): OduService {
     home: opts.home,
     origin: opts.origin,
     catalog: registry.catalog,
-    protocolVersion: SERVICE_CONTRACT_VERSION,
+    protocolVersion: HOST_CONTRACT_VERSION,
     storageVersion: RUN_RECORD_FORMAT,
+    rows: { ...opts.rows },
   };
   const serviceStore = inMemoryStore<ServiceCell>({
     ...UNKNOWN_SERVICE,
@@ -668,15 +673,17 @@ export function createOduService(opts: ServiceOptions): OduService {
   );
 
   // The daemon spine's frozen identity/drain fragment, mounted as the sibling
-  // the supervisor's probe looks for. `surfaceVersion` is THIS surface's
-  // contract version, which is what a converging supervisor compares — so a
-  // daemon speaking an older contract is recycled rather than adopted.
+  // the supervisor's probe looks for. `surfaceVersion` is the HOST's contract —
+  // the fragment and the identity cell are the host's surface, not the runs'.
+  // Nothing in odu compares it: whether a running daemon is adopted or recycled
+  // is `admitService`'s verdict on the identity cell, per row, and a second
+  // comparison here would be a second judge.
   runtime.mount(
     "control",
     controlCoreSurface,
     controlCoreFragment({
       stateRoot: opts.home,
-      surfaceVersion: SERVICE_CONTRACT_VERSION,
+      surfaceVersion: HOST_CONTRACT_VERSION,
       startedAt,
       commit: opts.build.commit ?? "",
       buildId: opts.build.buildId ?? "",

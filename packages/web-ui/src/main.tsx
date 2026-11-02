@@ -19,11 +19,24 @@
 
 import { reloadForUpdate } from "@kolu/surface-app/lifecycle";
 import { connectSurfaces } from "@kolu/surface-app/solid";
-import { AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
-import { CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
-import { CLOUDFLARE_KEY, oduCloudflareSurface } from "@odu/cloudflare/surface";
+import { AUTH_CONTRACT_VERSION, AUTH_KEY, oduAuthSurface } from "@odu/auth/surface";
+import { CACHE_CONTRACT_VERSION, CACHE_KEY, oduCacheSurface } from "@odu/cache/surface";
+import {
+  CLOUDFLARE_CONTRACT_VERSION,
+  CLOUDFLARE_KEY,
+  oduCloudflareSurface,
+} from "@odu/cloudflare/surface";
 import { readDoor, readRows } from "@odu/cordis/services";
-import { oduServiceSurface } from "@odu/service-client/surface";
+import { readServiceCell } from "@odu/service-client/dial";
+import {
+  admitService,
+  CI_NEEDS,
+  ifMounted,
+  type OduServiceClient,
+  oduServiceSurface,
+  type RowNeeds,
+} from "@odu/service-client/surface";
+import { Effect } from "effect";
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { App, doorAfterAnswer, type DoorState } from "./app";
@@ -65,6 +78,43 @@ const connection = await connectSurfaces({
   core: { surface: oduServiceSurface, name: "ci" },
   retired: reloadForUpdate,
 });
+
+/**
+ * WHAT THIS PAGE READS — the runs and the cache always, the door and the tunnel
+ * when the daemon mounts them. Declared like every other face's needs and judged
+ * by the same `admitService`.
+ *
+ * A page is normally the daemon's own build, so this admits. The case it is for
+ * is a tab left open across an upgrade to a daemon at ANOTHER major on a row it
+ * draws: that tab reloads onto the build serving now rather than drawing
+ * controls whose members are gone. Once per daemon instance, so a refusal the
+ * reload cannot cure is said in the console rather than looped on.
+ */
+const BROWSER_NEEDS: RowNeeds = {
+  ...CI_NEEDS,
+  [CACHE_KEY]: CACHE_CONTRACT_VERSION,
+  [AUTH_KEY]: ifMounted(AUTH_CONTRACT_VERSION),
+  [CLOUDFLARE_KEY]: ifMounted(CLOUDFLARE_CONTRACT_VERSION),
+};
+void Effect.runPromise(
+  readServiceCell(connection.core as unknown as OduServiceClient),
+).then(
+  (cell) => {
+    const verdict = admitService(cell, window.location.origin, BROWSER_NEEDS);
+    if (verdict.kind === "adopt") return;
+    console.error(`odu: ${verdict.message}`);
+    const instance = `odu:refused:${cell.identity.pid}:${cell.identity.startedAt}`;
+    try {
+      if (sessionStorage.getItem(instance) !== null) return;
+      sessionStorage.setItem(instance, "1");
+    } catch {
+      return;
+    }
+    reloadForUpdate();
+  },
+  // An unread cell is the wire indicator's news, not this check's.
+  () => {},
+);
 
 render(
   () => (

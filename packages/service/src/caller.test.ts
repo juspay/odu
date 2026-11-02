@@ -32,6 +32,8 @@ import {
 import {
   oduServiceSurface,
   type OduServiceClient,
+  CI_CONTRACT_VERSION,
+  CI_ROW,
 } from "@odu/service-client/surface";
 import type { Caller } from "./caller";
 import { createOduService } from "./service";
@@ -73,6 +75,7 @@ function serve(ports: RecordingPorts, principal?: Principal) {
     origin: "http://127.0.0.1:0",
     home: world.requestsRoot,
     build: { oduVersion: "0.1.0", buildId: "test", commit: "", self: null },
+    rows: { [CI_ROW]: CI_CONTRACT_VERSION },
     catalog: { root: world.catalogRoot },
     requestsRoot: world.requestsRoot,
     onDrain: () => {},

@@ -88,6 +88,13 @@ const SANCTIONED = new Map<string, string>([
       "one that may open and close the listener's scope.",
   ],
   [
+    "packages/web-ui/src/main.tsx",
+    "The BROWSER's BOOT edge, and one run only: the page reads the identity " +
+      "cell once to admit ITSELF against the rows it declares it reads, the " +
+      "same `admitService` every other face is judged by. It happens before " +
+      "any control exists, so `app.tsx`'s click edge is not there to carry it.",
+  ],
+  [
     "packages/web-ui/src/app.tsx",
     "The BROWSER's UI edge. A surface procedure is an `Effect` — a description — " +
       "and a click is the moment one becomes execution, so this file's `run` " +

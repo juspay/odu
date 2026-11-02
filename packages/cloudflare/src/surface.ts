@@ -18,6 +18,20 @@ import type { ExposeMap } from "@kolu/surface/expose";
 
 export const CLOUDFLARE_KEY = "cloudflare";
 
+/**
+ * THIS ROW'S OWN CONTRACT VERSION, `major.minor` — the tunnel's surface below
+ * and nothing served beside it. The host publishes it on the identity cell's
+ * `rows`; the rule is the host's (MINOR grows, MAJOR changes what a reader
+ * uses), and `contract.test.ts` pins it to a fingerprint of the surface.
+ *
+ * 2.4: where the composed wire stood when each row took a version of its own.
+ */
+export const CLOUDFLARE_CONTRACT_VERSION = "2.4";
+
+/** THE TUNNEL AND NOTHING ELSE — what `odu cloudflare …` declares, in the shape
+ *  `admitService` takes. */
+export const CLOUDFLARE_NEEDS = { [CLOUDFLARE_KEY]: CLOUDFLARE_CONTRACT_VERSION } as const;
+
 // ── the facts ───────────────────────────────────────────────────────────────
 
 /**

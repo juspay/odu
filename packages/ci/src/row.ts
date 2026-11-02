@@ -29,18 +29,27 @@ import { Effect } from "effect";
 import { definePlugin, offer } from "@olai/effect-cordis";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import { createOduService, type OduService } from "@odu/service/service";
-import { oduServiceSurface } from "@odu/service-client/surface";
+import { CI_ROW, oduServiceSurface } from "@odu/service-client/surface";
 import {
   ODU_SERVICE_EXPOSE,
   ODU_SERVICE_MCP_INSTRUCTIONS,
 } from "@odu/service-client/verbs";
-import { BoundOrigin, Build, Bundle, DaemonHome, Log, type RowAgent, Shutdown } from "@odu/cordis/services";
+import {
+  BoundOrigin,
+  Build,
+  Bundle,
+  DaemonHome,
+  Log,
+  type RowAgent,
+  RowContracts,
+  Shutdown,
+} from "@odu/cordis/services";
 import { webPorts } from "./webPorts";
 
 /** The word this row is mounted under. It is the wire's ROOT, so it has no
  *  sibling segment; the name is what the runtime binds its fibre under and what
  *  `settled()` waits on. */
-export const CI_KEY = "ci";
+export const CI_KEY = CI_ROW;
 
 /** WHAT AN AGENT IS TOLD about the runs — the row's own words, beside the row. */
 export const CI_AGENT: RowAgent = {
@@ -51,13 +60,16 @@ export const CI_AGENT: RowAgent = {
 
 export const ciRow = definePlugin({
   name: CI_KEY,
-  needs: [DaemonHome, BoundOrigin, Build, Log, Shutdown],
+  needs: [DaemonHome, BoundOrigin, Build, Log, Shutdown, RowContracts],
   apply: Effect.gen(function* () {
     const home = yield* DaemonHome;
     const origin = yield* BoundOrigin;
     const build = yield* Build;
     const log = yield* Log;
     const shutdown = yield* Shutdown;
+    // Every mounted row's own version, published on the identity cell as the
+    // host composed it. The runs carry it; they do not read it.
+    const rows = yield* RowContracts;
 
     // THE COMPOSITION, bound: the ports to the engine. Everything the runs must
     // CAUSE — launch, retry, cancel, the checkout probe, the pipeline, the
@@ -68,6 +80,7 @@ export const ciRow = definePlugin({
       origin,
       home,
       build,
+      rows,
       log,
       // The frozen control fragment's `drain`, wired to the process's own stop.
       onDrain: shutdown,

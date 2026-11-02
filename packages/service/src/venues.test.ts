@@ -11,7 +11,12 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { directDispatch } from "@kolu/surface/links/direct";
-import { oduServiceSurface, type OduServiceClient } from "@odu/service-client/surface";
+import {
+  CI_CONTRACT_VERSION,
+  CI_ROW,
+  oduServiceSurface,
+  type OduServiceClient,
+} from "@odu/service-client/surface";
 import { createOduService } from "./service";
 import { makeWorld, recordingPorts, type World } from "./fixture.testlib";
 
@@ -45,6 +50,7 @@ function serve() {
     origin: "http://127.0.0.1:0",
     home: world.requestsRoot,
     build: { oduVersion: "0.1.0", buildId: "test", commit: "", self: null },
+    rows: { [CI_ROW]: CI_CONTRACT_VERSION },
     catalog: { root: world.catalogRoot },
     requestsRoot: world.requestsRoot,
     onDrain: () => {},
