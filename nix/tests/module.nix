@@ -12,6 +12,9 @@
 #   * a token pushed over HTTP and a path built on the server lands in the
 #     bucket, and the client substitutes it back through the proxy with the
 #     bucket's own key;
+#   * a bucket on an S3 STORE — a versitygw on the same machine, declared in
+#     `cache.stores` — takes a push into the S3 bucket (not the local disk)
+#     and the client substitutes it back through the same proxy;
 #   * the board does NOT answer from outside — `/` is 404 and `/mcp` is not 200,
 #     because the virtual host has no `location /`. That is the module's whole
 #     security story and it is asserted, not asserted-in-a-comment.
@@ -34,6 +37,33 @@
       # protocol at `/`, and the daemon decides which bucket from the `Host`.
       cache.bucketDomains = [ "main.test" ];
       cache.enableACME = false;
+      # AN S3 STORE, on this machine: versitygw over a directory (below). The
+      # credentials file is a systemd credential, exactly as a real R2 key.
+      cache.stores.s3 = {
+        endpoint = "http://127.0.0.1:7070";
+        bucket = "odu-objects";
+        region = "us-east-1";
+        credentialsFile = "/etc/odu-s3-credentials";
+      };
+    };
+
+    environment.etc."odu-s3-credentials".text = ''
+      AWS_ACCESS_KEY_ID=odu
+      AWS_SECRET_ACCESS_KEY=odu-s3-secret
+    '';
+
+    # THE S3 SERVICE the store points at: a real gateway (signed requests,
+    # conditional writes, multipart, ranges) over a plain directory. The test
+    # creates its bucket before the first push.
+    systemd.services.versitygw = {
+      wantedBy = [ "multi-user.target" ];
+      before = [ "odu-web.service" ];
+      serviceConfig = {
+        StateDirectory = "versitygw";
+        ExecStart =
+          "${pkgs.versitygw}/bin/versitygw --access odu --secret odu-s3-secret"
+          + " --port 127.0.0.1:7070 --quiet posix /var/lib/versitygw";
+      };
     };
 
     # A test token. It is `environment.etc` rather than `LoadCredential`'s usual
@@ -259,6 +289,48 @@
     assert root_code == "404", f"the board answered {root_code} from outside: {body!r}"
     mcp_code = client.succeed("curl -sS -o /dev/null -w '%{http_code}' http://cache.test/mcp").strip()
     assert mcp_code != "200", f"/mcp answered {mcp_code} from outside"
+
+    # ── A BUCKET ON S3: pushed into the S3 bucket, served the same way ──────
+    server.wait_for_unit("versitygw.service")
+    server.wait_until_succeeds("curl -sS -o /dev/null http://127.0.0.1:7070/")
+    s3 = "--aws-sigv4 aws:amz:us-east-1:s3 --user odu:odu-s3-secret"
+    server.succeed(f"curl -sSf {s3} -X PUT http://127.0.0.1:7070/odu-objects")
+    far = json.loads(server.succeed(f"{admin} {odu} cache create far --store s3 -o json"))
+    assert far["store"] == "s3", far
+    far_key = far["publicKey"]
+    far_token = json.loads(
+        server.succeed(f"{admin} {odu} cache token mint far --write -o json")
+    )["token"]
+    server.succeed(
+        f"runuser -u odu -- env ODU_WEB_ORIGIN=http://127.0.0.1:18440"
+        f" ODU_CACHE_TOKEN={far_token} {odu} cache push far {path}"
+    )
+    # THE BYTES ARE IN THE S3 BUCKET, under the odu bucket's prefix — and not
+    # on the daemon's disk.
+    listed = server.succeed(f"curl -sSf {s3} 'http://127.0.0.1:7070/odu-objects?list-type=2&prefix=far/'")
+    assert "<Key>far/nar/" in listed, listed
+    server.fail("ls /var/lib/odu/cache/objects/far")
+    # A RANGE, answered from S3 through the same route.
+    far_file = client.succeed(
+        "curl -sS http://cache.test/cache/far/%s.narinfo | sed -n 's|^URL: nar/||p'"
+        % path.split("/")[-1][:32]
+    ).strip()
+    ranged = server.succeed(
+        f"curl -sS -D - -o /dev/null -H 'Range: bytes=0-3'"
+        f" http://127.0.0.1:18440/cache/far/nar/{far_file}"
+    )
+    assert "206 partial content" in ranged.lower() and "content-length: 4" in ranged.lower(), ranged
+    # AND THE CLIENT SUBSTITUTES IT, trusting only that bucket's key.
+    from_s3 = client.execute(
+        f"nix copy --from http://cache.test/cache/far --to local?root=/tmp/sub-s3"
+        f" --option trusted-public-keys '{far_key}' {path}"
+    )
+    print(from_s3)
+    assert from_s3[0] == 0, from_s3
+    client.succeed(
+        f"NIX_REMOTE=local?root=/tmp/sub-s3 nix store verify {path}"
+        f" --option trusted-public-keys '{far_key}'"
+    )
 
     # ── administration works, and collection does not eat the bucket ────────
     server.succeed(f"{admin} {odu} cache stats")
