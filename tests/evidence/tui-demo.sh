@@ -72,10 +72,10 @@ ls; sleep 1.8
 
 say "Now a live run. It takes the terminal: matrix, events, and the focused log."
 say "The log pane is a real VT — watch the progress bar redraw in place."
-cmd "odu run --no-strict"
+cmd "odu ci run --no-strict"
 # The fixture ends red on purpose — that is the point of the demo — so a
 # non-zero exit here is success, not a failure to swallow.
-"$ODU" run --no-strict || true
+"$ODU" ci run --no-strict || true
 sleep 1
 
 say "Back in the shell — and the history above is exactly where it was."

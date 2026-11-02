@@ -16,7 +16,7 @@ default: build test lint
 From a clean checkout, explicitly select a host:
 
 ```sh
-nix run github:juspay/odu -- run --host x86_64-linux=localhost --no-post
+nix run github:juspay/odu -- ci run --host x86_64-linux=localhost --no-post
 ```
 
 Use your Nix system in place of `x86_64-linux`. `--no-post` disables GitHub writes; `--no-strict` snapshots your working tree (uncommitted edits and new files included, ignored files excluded) and ships it to remote lanes, with no GitHub writes. `--no-snapshot` runs in place on localhost only.
@@ -33,22 +33,32 @@ nix run github:juspay/odu -- web --upgrade     # replace it, serve here
 
 ## Work with a run
 
-Below, `odu` abbreviates `nix run github:juspay/odu --`:
+Below, `odu` abbreviates `nix run github:juspay/odu --`. The whole CLI is:
+
+```
+odu ci <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect>
+odu ci history <list|show|import|prune>
+odu cache <use|login|push>
+odu auth login <origin> [--token T]
+odu web [--background] [--upgrade]
+odu surface <row> <verb…>
+odu mcp
+```
 
 ```sh
-odu attach
-odu wait --run latest -o json
-odu logs LOG_KEY -f
-odu rerun --run latest test
-odu cancel --run latest
-odu history list --all
+odu ci attach
+odu ci wait --run latest -o json
+odu ci logs LOG_KEY -f
+odu ci rerun --run latest test
+odu ci cancel --run latest
+odu ci history list --all
 ```
 
 Retry unchanged inputs to investigate a flake. Commit a source fix and start a new run. Check the final SHA, scope, verdict, and GitHub posting debt before declaring success.
 
-A live retry creates a new attempt; a finalized retry creates a linked replay. `run --linger` is supported but is not required for replay.
+A live retry creates a new attempt; a finalized retry creates a linked replay. `ci run --linger` is supported but is not required for replay.
 
-**The board does everything `odu` does.** Every command above has a control at **http://127.0.0.1:18440** — a run's page, **New run** (every option, and **Preview pipeline**), **Machines** (`hosts`/`lease`/`release`), **Maintenance** (`history import`/`prune`, `protect`), the Cache view, and an owner's **People**. The [docs](https://odu.kolu.dev/docs/#the-board-does-everything-odu-does) map each command to its control.
+**The board and the API do everything the CLI does — and more.** The CLI keeps only what is shell-native: the `ci` commands, `cache push`/`login`/`use`, and `auth login`. Cache, people and tunnel administration is the board at **http://127.0.0.1:18440** or the API (`odu surface <row> <verb>`), never the CLI. Every `ci` command above has a control too — a run's page, **New run** (every option, and **Preview pipeline**), **Machines** (`ci hosts`/`ci lease`/`ci release`), **Maintenance** (`ci history import`/`prune`, `ci protect`), the Cache view, and an owner's **People**. The [docs](https://odu.kolu.dev/docs/#the-board-and-the-api-do-everything-the-cli-does) map each command to its control.
 
 ## Serve a Nix binary cache
 
@@ -57,25 +67,27 @@ ed25519 key, and the server signs every path on ingest.
 
 ```sh
 export ODU_ROOT_TOKEN=...            # administration needs it; reads do not
-odu cache create main                # prints the substituter and the public key
+odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30}' --json
 odu cache use main                   # the nix.conf lines, a nixConfig block, netrc
-odu cache token mint main --write    # printed once; save it with `odu cache login`
+odu surface cache token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","scope":"write"}' --json
 ODU_CACHE_TOKEN=... odu cache push main ./result
 ```
 
-| Command | What it does | On the board |
+The token's plaintext is printed once; save it with `odu cache login`. Check each verb's input schema in `packages/cache/src/surface.ts`.
+
+| What | How | On the board |
 | --- | --- | --- |
-| `odu cache create <bucket>` | Create a bucket; print its substituter URL and public key. `--no-upstream` takes everything, including upstream-signed closures (more disk); `--store r2` keeps its objects in a declared S3 store | Cache → **Create bucket** |
-| `odu cache list` | List buckets, with sizes | Cache |
-| `odu cache use <bucket>` | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | a bucket's page |
-| `odu cache token mint\|list\|revoke` | Scoped, expiring, revocable tokens; the plaintext is shown once | a bucket's **Tokens** |
-| `odu cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — |
-| `odu cache push <bucket> <path>…` | Upload only the paths the bucket is missing; long NARs are chunked | — |
-| `odu cache domain <bucket> <name>\|--none` | Give a bucket a DNS name of its own through a Cloudflare tunnel | bucket → **Domain** |
-| `odu cache pin <bucket> <name> <path>…` | Keep a closure out of garbage collection | a bucket's **Pin closure** |
-| `odu cache gc [bucket]` | Evict what retention expired and nothing references or pins | a bucket's **Run GC** |
-| `odu cache stats` | Storage and reads | a bucket's **Stats** |
-| `odu cloudflare status` | The tunnel and the names it carries | **Tunnel** |
+| Create a bucket; print its substituter URL and public key. `"upstreamKeys": []` takes everything, including upstream-signed closures (more disk); `"store": "r2"` keeps its objects in a declared S3 store | `odu surface cache bucket_create` | Cache → **Create bucket** |
+| List buckets, with sizes | `odu surface cache bucket_list` | Cache |
+| Print the substituter and key settings, a `nixConfig` block, and the netrc lines | `odu cache use <bucket>` | a bucket's page |
+| Scoped, expiring, revocable tokens; the plaintext is shown once | `odu surface cache token_mint\|token_list\|token_revoke` | a bucket's **Tokens** |
+| Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — |
+| Upload only the paths the bucket is missing; long NARs are chunked | `odu cache push <bucket> <path>…` | — |
+| Give a bucket a DNS name of its own through a Cloudflare tunnel | `odu surface cache bucket_domain` | bucket → **Domain** |
+| Keep a closure out of garbage collection | `odu surface cache pin_create` | a bucket's **Pin closure** |
+| Evict what retention expired and nothing references or pins | `odu surface cache gc_run` | a bucket's **Run GC** |
+| Storage and reads | `odu surface cache stats_read` | a bucket's **Stats** |
+| The tunnel and the names it carries | `odu surface cloudflare status_read` | **Tunnel** |
 
 **Keep a bucket on R2, any S3, or local disk.** Declare a store (`services.odu.cache.stores.r2 = { endpoint; bucket; region; credentialsFile; }`), create the bucket on it, and it serves exactly like disk — the [cache page](https://odu.kolu.dev/docs/cache/#keep-a-bucket-on-s3) has the details.
 
@@ -84,10 +96,10 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 | Row | Contract | Who reads it |
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
-| `ci` (runs) | 2.4 | `odu run`/`wait`/`logs`, MCP, the board, kolu |
-| `cache` | **3.1** | `odu cache`, the board |
-| `auth` | 2.4 | `odu auth`, the board when there is a door |
-| `cloudflare` | 2.4 | `odu cloudflare`, the board when there is a tunnel |
+| `ci` (runs) | 2.4 | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
+| `cache` | **3.1** | `odu cache`, `odu surface cache`, the board |
+| `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
+| `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
 
 Odu's own builds are served from its own cache. To pull odu and its runners from
 it — and to show a project's own bucket — the flake settings are:

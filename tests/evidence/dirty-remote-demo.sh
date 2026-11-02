@@ -31,17 +31,17 @@ say() { printf '\n\033[1;36m# %s\033[0m\n' "$*"; }
 cmd() { printf '\033[1;32m$ %s\033[0m\n' "$*"; }
 run_case() {
   expected="$1"
-  cmd 'odu run --no-strict -o json'
+  cmd 'odu ci run --no-strict -o json'
   code=0
-  "$odu" run --no-strict -o json > "$world/answer.json" || code=$?
+  "$odu" ci run --no-strict -o json > "$world/answer.json" || code=$?
   test "$code" = "$expected"
   jq '{runId,sha,contentSha,dirty,settled,passed}' "$world/answer.json"
   run_id=$(jq -r .runId "$world/answer.json")
   rg 'captured in' "$ODU_STATE_DIR/runs/$run_id/coordinator.log"
   # This fixture runs each node exactly once; the public CLI takes ONE log key.
   key="$run_id/_ci-setup~40$system/1"
-  cmd "odu logs $key"
-  "$odu" logs "$key" > "$world/setup.log"
+  cmd "odu ci logs $key"
+  "$odu" ci logs "$key" > "$world/setup.log"
   sed -n '/uploading snapshot/p;/snapshot .*uploaded/p;/already on /p;/fetched from bundle/p;/already in object cache/p;/snapshot .* = HEAD /p;/^[[:space:]]*[ADM][[:space:]]/p' "$world/setup.log"
 }
 say 'Uncommitted edit, new file and deletion; real bundle wire on localhost'
@@ -60,8 +60,8 @@ say 'Repeat without edits: identical contentSha, cache hit'
 run_case 0
 test "$(jq -r .contentSha "$world/answer.json")" = "$green"
 rg 'already in object cache' "$world/setup.log"
-cmd 'odu history list'
-"$odu" history list
+cmd 'odu ci history list'
+"$odu" ci history list
 test "$(git rev-parse HEAD)" = "$base"
 test -z "$(git diff --cached --name-only)"
 say 'HEAD and index unchanged; nothing committed or pushed by odu'

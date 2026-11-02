@@ -3,10 +3,10 @@
 # (PR #85, issue #84). Recorded with asciinema, rendered to a gif with agg —
 # see dev/skills/pr-evidence/SKILL.md.
 #
-# The window under demonstration is the one between `odu run` starting and its
+# The window under demonstration is the one between `odu ci run` starting and its
 # first lane existing: the coordinator holds the checkout and is claiming a
 # machine, which on a cold host is minutes of `nix copy`. Before #84 the socket
-# came up only after the claim resolved, so for all of it `odu status` said
+# came up only after the claim resolved, so for all of it `odu ci status` said
 # "no run in progress in this checkout" — the same words it uses for a run that
 # died or never started.
 #
@@ -35,7 +35,7 @@ export ODU_HOSTS="$(mktemp -d)/hosts.json"
 printf '{"%s":["%s"]}' "$SYS" "$VENUE" > "$ODU_HOSTS"
 
 # The venue lock is the AGENT's, not this shell's: odu-runner resolves it from
-# its own `ODU_LEASE_LOCK`/default on the box being claimed, and `odu run`
+# its own `ODU_LEASE_LOCK`/default on the box being claimed, and `odu ci run`
 # passes no override. So a private path here would be a lock nobody contends
 # for, and the run would sail straight past the hold this demo is built on.
 # Hold the real one. Safe because this is the same machine, the hold is seconds,
@@ -76,7 +76,7 @@ hold_venue() {
      sleep 300" >/dev/null 2>&1 &
   HOLD_PID=$!
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if "$ODU" hosts 2>/dev/null | grep -q busy; then return 0; fi
+    if "$ODU" ci hosts 2>/dev/null | grep -q busy; then return 0; fi
     sleep 0.3
   done
   return 1
@@ -102,39 +102,39 @@ clear
 say "A machine has to be claimed before a run has any lane to put work on."
 say "Something else is holding this one right now:"
 hold_venue || true
-cmd "odu hosts"
-"$ODU" hosts; sleep 2.4
+cmd "odu ci hosts"
+"$ODU" ci hosts; sleep 2.4
 
 say "Start a run anyway. It queues in the claim — no lane exists yet."
-cmd "odu run --no-strict --no-post --linger &"
-"$ODU" run --no-strict --no-post --linger >/dev/null 2>&1 &
+cmd "odu ci run --no-strict --no-post --linger &"
+"$ODU" ci run --no-strict --no-post --linger >/dev/null 2>&1 &
 RUN_PID=$!
 # The socket now comes up BEFORE the claim, so it is dialable within a moment.
 for _ in $(seq 1 40); do
-  "$ODU" status >/dev/null 2>&1 && break
+  "$ODU" ci status >/dev/null 2>&1 && break
   sleep 0.25
 done
 sleep 1.6
 
-say "Before #84 this is where 'odu status' said: no run in progress."
+say "Before #84 this is where 'odu ci status' said: no run in progress."
 say "Now it says what the run is actually doing:"
-cmd "odu status"
-"$ODU" status; sleep 3.4
+cmd "odu ci status"
+"$ODU" ci status; sleep 3.4
 
 say "…and again a few seconds later — the clock is the claim's own:"
 sleep 4
-cmd "odu status"
-"$ODU" status; sleep 3.2
+cmd "odu ci status"
+"$ODU" ci status; sleep 3.2
 
 say "Machine-readable, for an agent driving the run:"
-cmd "odu status -o json | jq .run"
-"$ODU" status -o json | jq .run; sleep 3.4
+cmd "odu ci status -o json | jq .run"
+"$ODU" ci status -o json | jq .run; sleep 3.4
 
 say "The claim narrates itself into the lane's _ci-setup log:"
-cmd "odu logs _ci-setup@$SYS"
-"$ODU" logs "_ci-setup@$SYS" | tail -6; sleep 3.2
+cmd "odu ci logs _ci-setup@$SYS"
+"$ODU" ci logs "_ci-setup@$SYS" | tail -6; sleep 3.2
 
-say "'odu wait' blocks on it too, instead of reporting nothing to wait for."
+say "'odu ci wait' blocks on it too, instead of reporting nothing to wait for."
 say "Now the other holder finishes and the lock frees:"
 release_venue
 sleep 0.6
@@ -142,17 +142,17 @@ cmd "# (holder exits → ssh closes → flock drops)"
 
 # The queued claim polls every 5s; give it a poll plus the lane handshake.
 for _ in $(seq 1 60); do
-  "$ODU" status -o json 2>/dev/null | jq -e '.run.phase == "lanes"' >/dev/null 2>&1 && break
+  "$ODU" ci status -o json 2>/dev/null | jq -e '.run.phase == "lanes"' >/dev/null 2>&1 && break
   sleep 0.5
 done
 sleep 0.8
 
 say "The roster resolves, and the same command now reports the lane:"
-cmd "odu status -o json | jq .run"
-"$ODU" status -o json | jq .run; sleep 3.6
+cmd "odu ci status -o json | jq .run"
+"$ODU" ci status -o json | jq .run; sleep 3.6
 
 say "One socket, live from the moment the run existed."
 sleep 1.8
 
-"$ODU" cancel >/dev/null 2>&1 || true
+"$ODU" ci cancel >/dev/null 2>&1 || true
 sleep 0.8

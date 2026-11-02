@@ -7,10 +7,10 @@ A bucket is one cache: one substituter URL under the service's origin and one ed
 ## Create a bucket
 
 ```sh
-odu cache create main
+odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30}' --json
 ```
 
-On the board: the Cache view's **Create bucket** form, with the same upstream switch. `create` prints the substituter URL and the bucket's public key. Behind a proxy that URL is the address you published the service at, not the loopback one — `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it. On a server with a door that is a PROTOCOL read, not a session: `GET /cache/<bucket>/` answers a public bucket's facts with no account (a small page for `curl`, add `Accept: application/json` for a terminal). A private bucket's facts need a reader, and `odu cache use` says so:
+The CLI does not create buckets: a bucket is made on the board's Cache view — the **Create bucket** form, with the same upstream switch — or with the API verb above, whose input is `packages/cache/src/surface.ts`'s `bucket_create` (`upstreamKeys: []` is the old `--no-upstream`; `store` names a declared S3 store). `bucket_create` answers the substituter URL and the bucket's public key. Behind a proxy that URL is the address you published the service at, not the loopback one — `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it. On a server with a door that is a PROTOCOL read, not a session: `GET /cache/<bucket>/` answers a public bucket's facts with no account (a small page for `curl`, add `Accept: application/json` for a terminal). A private bucket's facts need a reader, and `odu cache use` says so:
 
 ## Use it
 
@@ -66,32 +66,32 @@ Or let a terminal print them: `odu cache use main`.
 ## Tokens
 
 ```sh
-odu cache token mint main --write
-odu cache token mint main --write --buckets 'team-*'   # one token, several buckets
+odu surface cache token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","scope":"write"}' --json
+odu surface cache token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","bucketGlob":"team-*","scope":"write"}' --json
 ```
 
-On the board: a bucket page's **Tokens** section mints one (write or read scope), lists them, and revokes one. The token is printed once; the server keeps only its hash, in the database described under [Where the data lives](#where-the-data-lives). A token carries a bucket glob, a scope (`--read`, `--write` or `--admin`), an expiry, and its last use. It expires in **ninety days** unless `--expires-days` says otherwise; `--no-expiry` is the explicit never, and both pages' forms default to ninety days with **never** a visible choice. An expired token's refusal names the date it expired. Revoke one without touching the rest:
+On the board: a bucket page's **Tokens** section mints one (write or read scope), lists them, and revokes one. The token is printed once; the server keeps only its hash, in the database described under [Where the data lives](#where-the-data-lives). A token carries a bucket glob, a scope (`read`, `write` or `admin`), an expiry, and its last use. The board's forms default to **ninety days**, with **never** a visible choice; the verb takes `expiresDays` and an absent one is the explicit never — the shape a CI secret wants. An expired token's refusal names the date it expired. Revoke one without touching the rest:
 
 ```sh
-odu cache token list
-odu cache token revoke <id>
+odu surface cache token_list --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main"}' --json
+odu surface cache token_revoke --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","id":"<id>"}' --json
 ```
 
-Administration — creating buckets, minting and revoking tokens, pinning and collecting — needs the root token, which the service reads from `$ODU_ROOT_TOKEN`:
+Administration — creating buckets, minting and revoking tokens, pinning and collecting — is the board or these verbs, never the CLI, and needs the root token, which the service reads from `$ODU_ROOT_TOKEN` and each verb takes as a field of its input:
 
 ```sh
 export ODU_ROOT_TOKEN=...
-odu cache create main
+odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30}' --json
 ```
 
 **On a server with a door, the rule is your role.** Once [server mode](../docs/#server-mode) is configured, the root token is not an administrator — it exists to grant the first owner — and administration needs an `admin` or an `owner`:
 
 ```sh
-odu auth whoami                    # who this machine's token belongs to, and its role
-odu cache create main              # as an admin, through the token odu auth login stored
+odu surface auth user_whoami --json   # who this machine's token belongs to, and its role
+odu surface cache bucket_create --input '{"rootToken":"","name":"main","public":true,"retentionDays":30}' --json   # as an admin, through the token odu auth login stored
 ```
 
-A `member` sees every bucket and may read a bucket's URL, key and paths, but `create`, `token mint` and `gc` are refused with `not_permitted` — and the board draws them none of those controls. On a daemon with no door the Cache view asks for the root token once per visit (kept in the page, never stored), because that is what this daemon's administration checks. Pushing does not change: a write token from `odu cache token mint` is what a pusher carries, whoever minted it.
+A `member` sees every bucket and may read a bucket's URL, key and paths, but `bucket_create`, `token_mint` and `gc_run` are refused with `not_permitted` — and the board draws them none of those controls. On a daemon with no door the Cache view asks for the root token once per visit (kept in the page, never stored), because that is what this daemon's administration checks. Pushing does not change: a write token from `cache token_mint` is what a pusher carries, whoever minted it.
 
 ## Push
 
@@ -249,12 +249,12 @@ An unauthenticated read of a private bucket answers **404**, not 401: "you need 
 ## Keep and reclaim
 
 ```sh
-odu cache pin main release-1.2 ./result
-odu cache gc main
-odu cache stats
+odu surface cache pin_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","name":"release-1.2","paths":["./result"]}' --json
+odu surface cache gc_run --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main"}' --json
+odu surface cache stats_read --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'"}' --json
 ```
 
-On the board: a bucket page's **Pin a closure**, **Run GC** and **Stats** sections. Pins are named and root a closure. Garbage collection applies per-bucket retention on last access: an object is evicted only when nothing retained in the bucket references it and it is not under a pin. `odu cache stats` reports the objects, their bytes on disk and hit counts.
+On the board: a bucket page's **Pin a closure**, **Run GC** and **Stats** sections — the same three verbs, with no terminal. Pins are named and root a closure. Garbage collection applies per-bucket retention on last access: an object is evicted only when nothing retained in the bucket references it and it is not under a pin. `stats_read` reports the objects, their bytes on disk and hit counts.
 
 ## Keep a bucket on S3
 
@@ -333,7 +333,7 @@ services.odu.cache.stores.r2 = {
 ```
 
 ```sh
-odu cache create main --store r2
+odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30,"store":"r2"}' --json
 ```
 
 On the board, the **Create bucket** form offers the declared stores, and a bucket's page says where its objects are (`objects on r2`). The credentials file is a systemd credential: never in the Nix store, never in the database, never logged; the key needs object read, write, delete and list. Without the module, point `$ODU_OBJECT_STORES` at a JSON file of the same shape — `{"r2": {"kind": "s3", "endpoint": …, "bucket": …, "region": …, "credentialsFile": …}}` — before `odu web` starts.
@@ -399,7 +399,8 @@ With the NixOS module, `services.odu.cloudflare.apiTokenFile`. The token is veri
 On the bucket's page, under **Domain**, type `cache.kolu.dev` and save. Or, for parity:
 
 ```sh
-odu cache domain kolu cache.kolu.dev --origin https://odu.example.com
+odu surface cache bucket_domain --origin https://odu.example.com \
+  --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"kolu","domain":"cache.kolu.dev"}' --json
 ```
 
 Odu then:
@@ -409,7 +410,7 @@ Odu then:
 3. creates each proxied DNS record;
 4. starts the `cloudflared` connector as a child of the daemon (as it does `nix` only during a migration).
 
-A name is **wiring** while that happens, **live** once `https://<name>/nix-cache-info` answers, or **failed** with Cloudflare's reason (a token without the DNS permission; a zone the token cannot see). The bucket page's route strip and the board's **Tunnel** page show it, and `odu cloudflare status` asks from a terminal. The tunnel page also shows the connector: running, connected, stopped, or failed with the last words `cloudflared` said.
+A name is **wiring** while that happens, **live** once `https://<name>/nix-cache-info` answers, or **failed** with Cloudflare's reason (a token without the DNS permission; a zone the token cannot see). The bucket page's route strip and the board's **Tunnel** page show it, and `odu surface cloudflare status_read --json` asks from a terminal. The tunnel page also shows the connector: running, connected, stopped, or failed with the last words `cloudflared` said.
 
 Once live, the bucket's **Use it** block and `odu cache use kolu` print the new URL; the old `/cache/kolu` URL keeps working. Pushes are unchanged: `odu cache push kolu` finds the bucket by name.
 
@@ -419,7 +420,7 @@ Once live, the bucket's **Use it** block and `odu cache use kolu` print the new 
 
 ### Remove it
 
-Clear the **Domain** field, or `odu cache domain kolu --none`. Odu removes the route and the DNS record. The tunnel itself is this server's and stays; the connector stops when the last name goes.
+Clear the **Domain** field, or send `bucket_domain` with no `domain` (`'{"rootToken":"…","bucket":"kolu"}'`). Odu removes the route and the DNS record. The tunnel itself is this server's and stays; the connector stops when the last name goes.
 
 ### What it does not do
 
@@ -431,7 +432,7 @@ The connector needs outbound HTTPS from the server and nothing inbound: no port 
 
 `odu web`'s page has **Runs** and **Cache** in the header. `#/cache` lists the buckets — name, public or private, how many paths, how much space, when it last took a push, how many reads — and `#/cache/<bucket>` is one bucket: its substituter URL, its public key, the `nix.conf` / netrc block above ready to copy, and its paths newest first with a filter box.
 
-**The view does everything `odu cache` does**, except push, which is a build box's job. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `--no-upstream`) on the list, and on a bucket page **Tokens** (mint write or read, shown once; list; revoke), **Pin a closure**, **Run GC** and **Stats**. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
+**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page **Tokens** (mint write or read, shown once; list; revoke), **Pin a closure**, **Run GC** and **Stats**. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
 
 The rows arrive over the wire the page already holds, so a path pushed from a build box appears without a reload; reads are folded into a bucket's counters at most once a second rather than once per NAR.
 
@@ -471,19 +472,21 @@ shadow the page's own JavaScript. A bucket called `cache` lives at
 
 Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or HTTP Basic with any username and the token as the password. Nix uses the second through curl on every request, uploads included. The `missing` route backs `odu cache push`; it is not part of the Nix protocol. It answers `missing` — the paths to send — and `skippedUpstream`, the paths the bucket will never take because an upstream key signed them, so a push can report the two as different things.
 
-## CLI reference
+## Command reference
 
-| Command | What it does | On the board |
-| --- | --- | --- |
-| `odu cache create <bucket> [--no-upstream] [--store NAME]` | Create a bucket; print its substituter URL, public key and store. `--no-upstream` takes everything, including upstream-signed closures (costs disk; for consumers that cannot reach cache.nixos.org). `--store` keeps its objects in a declared store (default `local`) | Cache → **Create bucket**, **Skip upstream paths** off, the **store** field |
-| `odu cache list` | List buckets | Cache |
-| `odu cache use <bucket>` | Print the substituter and key settings, the `nixConfig` block, and the netrc lines. No account for a public bucket | a bucket page's block |
-| `odu cache domain <bucket> <name>\|--none` | Give a bucket a DNS name of its own, or take it away | bucket → **Domain** |
-| `odu cache token mint <bucket> --write\|--read\|--admin` | Mint a token, printed once | bucket → **Mint token** (write or read) |
-| `odu cache token list` | List tokens with scope, expiry and last use | bucket → Tokens |
-| `odu cache token revoke <id>` | Revoke one token | bucket → Tokens → **revoke** |
-| `odu cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — (a machine's disk) |
-| `odu cache push <bucket> <paths…> [--part-size MiB]` | Upload only the paths the bucket is missing; the bucket keeps what it takes | — (a build box's job) |
-| `odu cache pin <bucket> <name> <paths…>` | Pin a closure against garbage collection | bucket → **Pin closure** |
-| `odu cache gc [bucket]` | Evict objects past retention that nothing references and no pin holds | bucket → **Run GC** |
-| `odu cache stats` | Show storage and hit counts | bucket → Stats |
+The CLI keeps the three cache commands a shell is the natural place for. Everything else is the board or the API verb — `odu surface cache <verb> --input '{…}' --json`, with `rootToken` a field of the input.
+
+| What it does | CLI | API verb | On the board |
+| --- | --- | --- | --- |
+| Print the substituter and key settings, the `nixConfig` block, and the netrc lines. No account for a public bucket | `odu cache use <bucket>` | `bucket_describe` | a bucket page's block |
+| Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — | — (a machine's disk) |
+| Upload only the paths the bucket is missing; the bucket keeps what it takes | `odu cache push <bucket> <paths…> [--part-size MiB]` | — | — (a build box's job) |
+| Create a bucket; answer its substituter URL, public key and store. `upstreamKeys: []` takes everything, including upstream-signed closures (costs disk; for consumers that cannot reach cache.nixos.org). `store` keeps its objects in a declared store (default `local`) | — | `bucket_create` | Cache → **Create bucket**, **Skip upstream paths** off, the **store** field |
+| List buckets | — | `bucket_list` | Cache |
+| Give a bucket a DNS name of its own, or take it away (omit `domain`) | — | `bucket_domain` | bucket → **Domain** |
+| Mint a token, answered once (`scope`: `read`, `write` or `admin`) | — | `token_mint` | bucket → **Mint token** (write or read) |
+| List tokens with scope, expiry and last use | — | `token_list` | bucket → Tokens |
+| Revoke one token | — | `token_revoke` | bucket → Tokens → **revoke** |
+| Pin a closure against garbage collection | — | `pin_create` | bucket → **Pin closure** |
+| Evict objects past retention that nothing references and no pin holds | — | `gc_run` | bucket → **Run GC** |
+| Show storage and hit counts | — | `stats_read` | bucket → Stats |

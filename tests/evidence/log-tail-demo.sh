@@ -36,8 +36,8 @@ tail -3 justfile; sleep 2.2
 
 say "The last two lines are the only ones anybody actually reads."
 say "Run it under odu:"
-cmd "odu run --no-strict"
-"$ODU" run --no-strict 2>&1 | tail -6; sleep 2
+cmd "odu ci run --no-strict"
+"$ODU" ci run --no-strict 2>&1 | tail -6; sleep 2
 
 SHA=$(git rev-parse --short=7 HEAD)
 LOG=".ci/$SHA/$PLAT/noisy.log"

@@ -10,7 +10,7 @@
 #   agg --speed 1.3 --theme asciinema --font-size 22 /tmp/settled.cast settled.gif
 #
 # The shape under test is the agent's own loop, not a human's: start a run that
-# LINGERS (so nothing depends on racing a teardown), block on `odu wait
+# LINGERS (so nothing depends on racing a teardown), block on `odu ci wait
 # --settle`, and read the node's log the instant the verdict lands. Before this
 # change the log stopped a quarter of the way through the recipe, with no
 # summary and no `[odu] log truncated` notice to say so.
@@ -40,14 +40,14 @@ tail -2 justfile; sleep 2.2
 
 say "Start it, and let the coordinator LINGER past settle — an agent's own run"
 say "shape, and the one where nothing tears down to force the logs through."
-cmd "odu run --no-strict --linger &"
-"$ODU" run --no-strict --linger --progress json >/dev/null 2>&1 &
+cmd "odu ci run --no-strict --linger &"
+"$ODU" ci run --no-strict --linger --progress json >/dev/null 2>&1 &
 while [ ! -S .ci/odu.sock ]; do sleep 0.2; done
 sleep 1.5
 
 say "Block until the run reports itself settled, the way wait_for_settle does:"
-cmd "odu wait --settle"
-"$ODU" wait --settle --timeout-ms 300000
+cmd "odu ci wait --settle"
+"$ODU" ci wait --settle --timeout-ms 300000
 sleep 2
 
 SHA=$(git rev-parse --short=7 HEAD)
@@ -67,5 +67,5 @@ say "was lost here, so there is nothing to say:"
 cmd "grep -c 'log truncated' $LOG"
 grep -c 'log truncated' "$LOG" || true; sleep 2.4
 
-"$ODU" cancel >/dev/null 2>&1
+"$ODU" ci cancel >/dev/null 2>&1
 wait 2>/dev/null

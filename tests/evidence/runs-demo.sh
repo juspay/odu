@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible terminal evidence for `odu runs` — the durable run ledger
+# Reproducible terminal evidence for `odu ci history list` — the durable run ledger
 # (PR #28). Recorded with asciinema, rendered to a gif with agg — see
 # dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a throwaway
 # fixture, pinned to a localhost lane; the run output is hidden so the gif stays
@@ -32,34 +32,34 @@ say() { printf "\033[2;37m# %s\033[0m\n" "$1"; sleep 1.4; }
 cmd() { printf "$P %s\n" "$1"; sleep 0.7; }
 
 clear
-say "odu runs reads the durable ledger off disk — it answers with no run live:"
-cmd "odu runs"
-"$ODU" runs; sleep 1.8
+say "odu ci history list reads the durable ledger off disk — it answers with no run live:"
+cmd "odu ci history list"
+"$ODU" ci history list; sleep 1.8
 
 say "Run CI on this commit (localhost, a fast passing pipeline):"
-cmd "odu run --no-strict"
-"$ODU" run --no-strict >/dev/null 2>&1; echo "  → green"; sleep 1
+cmd "odu ci run --no-strict"
+"$ODU" ci run --no-strict >/dev/null 2>&1; echo "  → green"; sleep 1
 
 say "Run it again — same commit, but a NEW run, not an overwrite:"
-cmd "odu run --no-strict"
-"$ODU" run --no-strict >/dev/null 2>&1; echo "  → green"; sleep 1
+cmd "odu ci run --no-strict"
+"$ODU" ci run --no-strict >/dev/null 2>&1; echo "  → green"; sleep 1
 
 say "Each run is its own record — note the #1 / #2 seq, newest first:"
-cmd "odu runs"
-"$ODU" runs; sleep 2.6
+cmd "odu ci history list"
+"$ODU" ci history list; sleep 2.6
 
 say "Break the build and commit — a new commit is a new sha:"
 cp "$WT/tests/e2e/fixtures/fail/justfile" "$D/justfile"
 $GIT commit -aqm fail
-cmd "odu run --no-strict          # this one goes red"
-"$ODU" run --no-strict >/dev/null 2>&1 || true; echo "  → failed"; sleep 1
+cmd "odu ci run --no-strict          # this one goes red"
+"$ODU" ci run --no-strict >/dev/null 2>&1 || true; echo "  → failed"; sleep 1
 
 say "The ledger spans commits, newest first — sha#seq and outcome:"
-cmd "odu runs"
-"$ODU" runs; sleep 2.8
+cmd "odu ci history list"
+"$ODU" ci history list; sleep 2.8
 
 say "And as JSON — the rows odu-web and the runs MCP tool consume:"
-cmd "odu runs -o json | head -n 24"
-"$ODU" runs -o json | head -n 24; sleep 3
+cmd "odu ci history list -o json | head -n 24"
+"$ODU" ci history list -o json | head -n 24; sleep 3
 
 rm -rf "$D" "$(dirname "$ODU_HOSTS")"

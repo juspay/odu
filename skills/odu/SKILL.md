@@ -22,7 +22,7 @@ cache_bucket_create · cache_bucket_list · cache_bucket_describe · cache_bucke
 cache_bucket_domain
 cache_token_mint · cache_token_list · cache_token_revoke
 cache_pin_create · cache_gc_run · cache_stats_read
-cloudflare_status
+cloudflare_status_read
 auth_user_whoami · auth_user_grant · auth_grant_list
 auth_token_create · auth_token_list · auth_token_revoke
 auth_session_list · auth_session_end
@@ -211,7 +211,7 @@ odu surface log_read --input '{"key":"'"$LOG_KEY"'","offset":-4096}' --json
   `nextOffset` back as `offset` — that is the cursor, and YOU hold it, so a call
   that dies is re-issued rather than resumed. Stop when `open` is false. A
   `size` smaller than the offset you asked for means that attempt was re-run and
-  its log rewritten: start again from 0. `odu logs -f` / `--wait-ms` is the same
+  its log rewritten: start again from 0. `odu ci logs -f` / `--wait-ms` is the same
   follow from a terminal.
 - Watching a live node instead of reading evidence? Subscribe to the
   `logTails` resource — `surface://collections/logTails/<key>` as MCP, or
@@ -328,15 +328,15 @@ terminal.
 | pin a closure | `odu surface cache pin_create --input '{…}' --json` | `cache_pin_create` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created` |
 | reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `kept`, `bytes`), `evicted`, `kept`, `bytes` |
 | cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastAccessed` |
-| the tunnel and its names | `odu cloudflare status -o json` | `cloudflare_status` | *(none)* | `tunnel` (`state`, `name`, `id`, `reason`) and `routes[]` (`domain`, `bucket`, `state` `wiring`/`live`/`failed`, `reason`, `updated`) — a route with `bucket: null` is the server's own public origin |
-| who am I | `odu auth whoami -o json` | `auth_user_whoami` | *(none)* | `who` — a `user` with a `login` and `role`, or `anonymous`. Exits **1** when the answer is `anonymous`, even though the answer is printed: exit 0 would read as "you have a session" |
+| the tunnel and its names | `odu surface cloudflare status_read --json` | `cloudflare_status_read` | *(none)* | `tunnel` (`state`, `name`, `id`, `reason`) and `routes[]` (`domain`, `bucket`, `state` `wiring`/`live`/`failed`, `reason`, `updated`) — a route with `bucket: null` is the server's own public origin |
+| who am I | `odu surface auth user_whoami --json` | `auth_user_whoami` | *(none)* | `who` — a `user` with a `login` and `role`, or `anonymous` |
 | mint a personal token | `odu surface auth token_create --input '{…}' --json` | `auth_token_create` | `name`, `expiresDays?` (absent = never; the profile form defaults to 90) | `token` (plaintext, ONCE), `facts` |
-| my tokens | `odu auth token list -o json` | `auth_token_list` | *(none)* | `tokens[]` — never a plaintext |
-| revoke a token | `odu auth token revoke <id>` | `auth_token_revoke` | `id` | `id`, `revoked` |
-| my sessions | `odu surface auth session_list --input '{}' --json` | `auth_session_list` | *(none)* | `sessions[]` (`id`, `created`, `lastSeen`, `expires`, `agent`) |
+| my tokens | `odu surface auth token_list --json` | `auth_token_list` | *(none)* | `tokens[]` — never a plaintext |
+| revoke a token | `odu surface auth token_revoke --input '{…}' --json` | `auth_token_revoke` | `id` | `id`, `revoked` |
+| my sessions | `odu surface auth session_list --json` | `auth_session_list` | *(none)* | `sessions[]` (`id`, `created`, `lastSeen`, `expires`, `agent`) |
 | end a session | `odu surface auth session_end --input '{…}' --json` | `auth_session_end` | `id` | `id`, `ended` |
-| set a role | `odu auth grant <login> <owner\|admin\|member>` | `auth_user_grant` | `login`, `role`, `rootToken` (only when no session authorises it) | `login`, `role` |
-| who is in | `odu auth people -o json` | `auth_grant_list` | *(none)* — an owner's verb | `people[]` (`login`, `role`, `granted`, `lastSeen`) |
+| set a role | `odu surface auth user_grant --input '{…}' --json` | `auth_user_grant` | `login`, `role` (`owner`/`admin`/`member`), `rootToken` (checked only when no session authorises it; `""` when one does) | `login`, `role` |
+| who is in | `odu surface auth grant_list --json` | `auth_grant_list` | *(none)* — an owner's verb | `people[]` (`login`, `role`, `granted`, `lastSeen`) |
 
 ### Cache verbs
 
@@ -416,11 +416,12 @@ told because two things change for an agent.
 - **Your role bounds what you may do.** `member` starts, retries and cancels
   runs; `admin` also administers cache buckets; `owner` grants roles. On a
   daemon with a door the ROOT TOKEN is not an administrator — it bootstraps the
-  first owner (`odu auth grant <login> owner`) and nothing else.
+  first owner and nothing else:
+  `odu surface auth user_grant --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","login":"<login>","role":"owner"}' --json`.
 
 **The `auth_*` verbs exist only on a daemon with a door.** With no
-`ODU_GITHUB_*` configured the auth row is not mounted: `odu auth whoami` has no
-verb to call, and the MCP bridge does not advertise the seven. That is the
+`ODU_GITHUB_*` configured the auth row is not mounted: `odu surface auth
+user_whoami` has no verb to call, and the MCP bridge does not advertise the seven. That is the
 loopback shape and it is unchanged — the daemon is nobody's to authenticate,
 every caller is its local owner, and the runs answer without a credential.
 
@@ -432,13 +433,13 @@ odu surface get runs "$RUN"      # one row (state, sha, scope, passed, reporting
 odu surface get service          # who is serving, which build, is it ready
 odu surface watch runs           # follow the board
 odu surface --help               # the whole projection
-odu history list [--all] [--limit N] [-o json]   # the catalog from a terminal
+odu ci history list [--all] [--limit N] [-o json]   # the catalog from a terminal
 ```
 
 MCP resources: `surface://cells/service`, `surface://collections/runs`,
 `surface://collections/logTails/{key}`.
 
-`odu run` is the human's one-shot spelling of the same thing: it calls
+`odu ci run` is the human's one-shot spelling of the same thing: it calls
 `run_start` for the checkout you are standing in and then observes. Its options
 are `run_start`'s inputs plus four of its own — `--no-wait` (start and return
 without observing), `--request-id`, `--origin` and `-o json`. Ctrl-C stops
@@ -479,7 +480,7 @@ error. `code` is what you branch on; `message` is for the human; `resync` and
 | 3 | Nothing serving (and, at the default origin, odu tried to start it and says why). |
 | 130 | Interrupted — the observation ended, the run carries on. |
 
-**`odu run` / `odu wait` exits are about CI**, because that is what they answer:
+**`odu ci run` / `odu ci wait` exits are about CI**, because that is what they answer:
 
 | Exit | Meaning |
 | --- | --- |
@@ -491,7 +492,7 @@ error. `code` is what you branch on; `message` is for the human; `resync` and
 | 5 | The request itself was refused. |
 
 Read that difference carefully before you branch on a number: exit 1 from
-`odu surface` is odu refusing you, and exit 1 from `odu run` is your tests
+`odu surface` is odu refusing you, and exit 1 from `odu ci run` is your tests
 failing. An agent that conflates them reports a broken test as a broken tool.
 
 ## Wiring the MCP face
@@ -524,8 +525,8 @@ holds no run authority, so a harness restarting it kills nothing.
 
 ## Nothing stays local
 
-Every public command goes through the service, including `odu dump` and
-`odu graph` — both are `pipeline_read`, and an agent can call that verb
+Every public command goes through the service, including `odu ci dump` and
+`odu ci graph` — both are `pipeline_read`, and an agent can call that verb
 directly. They used to be listed here as a deliberate exception on the grounds
 that a `justfile` read touches no run. That was wrong: what odu will run for a
 checkout is a question `run_start` answers through the same engine, so a face
@@ -543,7 +544,7 @@ Lanes need machines. `$ODU_HOSTS` (a file path) → `~/.config/odu/hosts.json`:
 Keys are Nix system tuples; values are anything ssh dials, a list of them (a
 pool), or `localhost`. A run that resolves **zero** lanes is refused, never
 defaulted to `localhost`. `hostPins` (`"P=ADDR"`) pins one box for one run;
-`venue_probe` shows the inventory from any face; `odu hosts [platform…]` is its
+`venue_probe` shows the inventory from any face; `odu ci hosts [platform…]` is its
 terminal spelling.
 
 **`$ODU_HOSTS` belongs to the caller, and travels with the request.** The
@@ -585,9 +586,17 @@ declares.
 - The repository ships a GitHub Actions push step
   (`juspay/odu/.github/actions/push@<sha>`), which verifies its own push.
 
-- `odu runs` is gone. Use `odu history list` (or the `runs` resource); the JSON
-  shape differs.
-- `odu run --linger` is gone from the public verb — it only meant something when
+- **The admin CLI is retired.** The CLI is `odu ci <verb>` (every run command
+  now carries the `ci` word: `odu ci run`, `odu ci wait`, `odu ci logs`,
+  `odu ci history list`, `odu ci status`, `odu ci protect`, …), plus
+  `odu cache use|login|push`, `odu auth login`, `odu web`, `odu surface`,
+  `odu mcp`. Cache, people and tunnel administration is the board or
+  `odu surface <row> <verb>`; the old `odu cache create|list|domain|token|pin|gc|stats`,
+  `odu auth whoami|grant|people|token` and `odu cloudflare status` are unknown
+  commands now, with no aliases.
+- `odu runs` is gone. Use `odu ci history list` (or the `runs` resource); the
+  JSON shape differs.
+- `ci run --linger` is gone from the public verb — it only meant something when
   a human attached to a coordinator directly.
 - There is one MCP face. Bare `odu mcp` **is** the shared-service bridge; the
   old per-checkout tools (`run`, `node_rerun`, `wait_for_settle`, `cancel`,
