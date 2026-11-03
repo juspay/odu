@@ -195,33 +195,36 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * One HEAD: the object's length and the facts its put wrote, or null.
    *
    * TWO NUMBERS, FROM TWO PLACES. `x-amz-meta-odu-size` is what this store
-   * RECORDED beside the bytes; `content-length` is what the ANSWER measured,
-   * and an edge in front of the service may re-encode that answer. R2 sits
-   * behind Cloudflare, which compresses a compressible content type
-   * (`text/plain` — a bucket's `nix-cache-info`) for a client that accepts an
-   * encoding, as Bun's `fetch` does by default: the HEAD then carries
+   * RECORDED beside the bytes; `content-length` is what the ANSWER MEASURED,
+   * and an answer an intermediary re-encoded measured its own body rather
+   * than the object. Every request asks for `identity` (`s3Fetch`), so this
+   * is the case an edge that ignores the ask leaves behind: R2 sits behind
+   * Cloudflare, which compresses a compressible content type (`text/plain` —
+   * a bucket's `nix-cache-info`) and answers the HEAD with
    * `content-encoding` and NO `content-length` at all. Checking the record
    * against that header read the object as one no odu wrote
    * (`UnrecordedObject`), and the backfill refused to rewrite its own
    * `nix-cache-info` on every boot (#151), while the narinfos beside it —
    * `text/x-nix-narinfo`, which no edge compresses — round-tripped.
    *
-   * So the record answers, and an answer that measured the object itself
-   * still CHECKS it: bytes replaced behind the store's back, under the
-   * metadata it wrote, are an {@link UnrecordedObject} as they always were.
-   * Only an encoded answer, which measured its own body and not the object,
-   * is not asked.
+   * So the record answers, and an answer that measured the OBJECT still
+   * checks it: bytes replaced behind the store's back, under the metadata it
+   * wrote, are an {@link UnrecordedObject} as they always were.
    */
   async function headOf(key: string): Promise<{ size: number; facts: ObjectFacts | null } | null> {
     const response = await call("HEAD", safeKey(key));
     if (response.status === 404) return null;
     if (!response.ok) throw new S3Failure(`HEAD ${key}`, response, "");
-    const length = response.headers.get("content-length");
-    const encoded = response.headers.get("content-encoding") !== null;
-    const measured = encoded || length === null ? null : Number(length);
+    /** A count a header states, or null when it states none this can use. */
+    const counted = (header: string): number | null => {
+      const value = Number(response.headers.get(header) ?? Number.NaN);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    };
+    // WHAT THE ANSWER MEASURED OF THE OBJECT: nothing, if it was re-encoded.
+    const measured = response.headers.get("content-encoding") === null ? counted("content-length") : null;
     const sha256 = response.headers.get(META_SHA256);
-    const size = Number(response.headers.get(META_SIZE) ?? Number.NaN);
-    const recorded = sha256 !== null && Number.isSafeInteger(size) && size >= 0 ? { size, sha256 } : null;
+    const size = counted(META_SIZE);
+    const recorded = sha256 !== null && size !== null ? { size, sha256 } : null;
     if (recorded !== null && (measured === null || measured === recorded.size)) {
       return { size: recorded.size, facts: recorded };
     }
