@@ -103,6 +103,7 @@ export const SHARED_TOOLS = [
   "cache_bucket_describe",
   "cache_bucket_domain",
   "cache_bucket_list",
+  "cache_bucket_migrate",
   "cache_bucket_paths",
   "cache_bucket_retention",
   "cache_gc_plan",
