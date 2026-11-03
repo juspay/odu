@@ -1994,7 +1994,7 @@ export function createCache(options: CacheOptions): Cache {
       return row === null ? null : narinfoFor(bucket, row);
     },
 
-    cacheInfoText: (bucket) => cacheInfoText(bucket),
+    cacheInfoText,
 
     log: (event, fields) => options.log?.(event, fields),
 

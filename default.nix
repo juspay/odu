@@ -65,17 +65,21 @@ let
         # THE DECLARATION NAMES ITS PUSHER, so the publish job pushes to odu's
         # OWN cache: the bucket is `kolu-r2`, whose substituter is R2 itself
         # (`https://cache.kolu.dev/kolu-r2`, static files nothing can push to),
-        # so a pusher needs an odu origin that is not the read address.
+        # so the push needs an odu `origin` that is NOT the read address. The
+        # pinned publisher used to derive one from the substituter, which a
+        # path-form R2 URL has nothing to give.
         #
-        # IT IS NOT SPELLED HERE, AND THE BUCKET ONLY IS BECAUSE KOLU STILL
-        # ASKS FOR IT. The cache states both in `nix-cache-info`
-        # (`Odu-Origin`/`Odu-Bucket`), which is how
+        # BOTH FIELDS ARE TEMPORARY. The cache states them itself in
+        # `nix-cache-info` (`Odu-Origin`/`Odu-Bucket`) — which is what
         # `odu cache push --cache <substituter>` and this repository's push
-        # action find them — but kolu's pinned `binary-cache.nix` asserts the
-        # pusher is EXACTLY `{ kind, bucket }` (an `origin` is refused at
-        # evaluation), so this stays until kolu's follow-up PR drops the field
-        # and this becomes `pusher = { kind = "odu"; };`.
-        pusher = { kind = "odu"; bucket = "kolu-r2"; };
+        # action read — and kolu's follow-up teaches `publish-closure` to read
+        # them too, after which this is `pusher = { kind = "odu"; };` and the
+        # substituter is again the only address anybody spells.
+        pusher = {
+          kind = "odu";
+          bucket = "kolu-r2";
+          origin = "https://odu-k3s.rooster-blues.ts.net";
+        };
         extraFiles = { "commit-hash" = commitHash; };
       };
 

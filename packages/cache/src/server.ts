@@ -1054,12 +1054,14 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // BACKFILL (2.8) sits between them for the same reason: a row whose object
     // the migration has not landed yet has no `FileHash` to put in a narinfo.
     //
-    // AND THE PUBLIC-URL PROBE IS LAST, in this fibre rather than beside it:
-    // it compares what the store serves with what the cache renders NOW, and
-    // after a `$ODU_PUBLIC_ORIGIN` move the object carries the old origin
-    // until the backfill rewrites it. Asked in parallel, the probe would read
-    // the stale copy and log a healthy store as unreachable, once, with
-    // nothing after it to correct the claim.
+    // AND THE PUBLIC-URL PROBE IS LAST OF ALL, after the self pass: it has to
+    // come after the BACKFILL because it compares what the store serves with
+    // what the cache renders now, and a `$ODU_PUBLIC_ORIGIN` move leaves the
+    // stale object there until the backfill rewrites it — a healthy store
+    // logged unreachable once, with nothing after it to correct the claim.
+    // It goes after the self pass because it DIALS a name: a domain still
+    // propagating keeps a request open for curl's own patience, and nothing
+    // waiting on it should be work this daemon could have finished.
     const say = (event: string, fields: Record<string, unknown>): void =>
       log.info(fields, `odu cache: ${event}`);
     yield* Effect.forkScoped(
@@ -1072,13 +1074,13 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
             "odu cache: narinfo objects backfilled",
           );
         }
+        await cache.proveSelf();
         await probePublicStores({
           stores,
           buckets: cache.snapshot(),
-          info: (bucket) => cache.cacheInfoText(bucket),
+          info: cache.cacheInfoText,
           log: say,
         });
-        await cache.proveSelf();
       }),
     );
 

@@ -13,16 +13,16 @@
 # declaration's.
 # The build job pushes with `./.github/actions/push` — the action odu ships for
 # ANY project, which builds its pusher from the checkout it sits in, so this
-# line pushes with this tree's odu, which chunks. The publish job's
-# action is pinned to kolu #2335's head, whose npins odu is this branch's
-# 996f888 — chunked push and the `CA:` line in the pusher. The pin moves to
-# kolu's merge sha when #2335 lands.
+# line pushes with this tree's odu, which chunks. The publish job's action is
+# pinned to kolu MASTER (`1516ad2`), the publisher that takes the declared
+# `pusher.origin` rather than deriving one from the substituter — which a
+# path-form R2 URL cannot give.
 #
 # Two jobs, because they are two halves of one question with one ordering:
 # `build-and-push` warms the input-addressed cache a lane host substitutes from
 # (odu's own, with `odu cache push`), and `publish-closures` then rewrites from
 # that same tree and pushes to the SAME bucket: the agent source bakes
-# `pusher = { kind = "odu"; bucket = "kolu-r2"; }` (kolu#2334), so
+# `pusher = { kind = "odu"; bucket = "kolu-r2"; origin = "…"; }`, so
 # the action runs `odu cache push` under `ODU_CACHE_TOKEN` and the checkout's
 # own odu, which chunks. It must be its OWN job: the action installs the Nix it
 # rewrites with (2.34.8 — see its `action.yml`), which has to be the job's only
@@ -124,10 +124,12 @@ jobs:
           set -euo pipefail
           # THE DECLARATION AS THE FLAKE WRITES IT. Its first substituter is
           # `https://cache.kolu.dev/kolu-r2` — the R2 URL the `kolu-r2` bucket
-          # is read from — and its pusher names the odu origin to push to, so a
-          # rewrite would be a no-op. The pusher is kolu #2335's pinned odu
-          # (this branch's 996f888): chunked push and the `CA:` line; verify
-          # imports the same URL.
+          # is read from, which takes no push — so `default.nix`'s pusher adds
+          # the odu `origin` the publisher pushes to. An earlier publisher
+          # DERIVED that origin from the substituter and refused a path-form
+          # one; the pin below reads the declared field instead, and kolu's
+          # follow-up reads `Odu-Origin` off the cache so nothing names it.
+          # Either way a rewrite here would be a no-op.
           source=$(nix build .#agent-flake-source --no-link --print-out-paths --accept-flake-config)
           mkdir -p "$RUNNER_TEMP/declaration"
           cp "$source/binary-cache.json" "$RUNNER_TEMP/declaration/binary-cache.json"
@@ -175,12 +177,13 @@ jobs:
       # whole module graph and exits 0 without needing stdin, which `--stdio`
       # would (it serves until the pipe closes).
       #
-      # The pin is kolu's merged head, which carries the `pusher` field the
-      # declaration bakes (kolu#2334): the action pushes with
-      # `odu cache push kolu-r2` when the declaration says `{ kind = "odu"; … }`.
-      # WITH `sidecar`, installables are full flake installables, and the
-      # revision the entries are keyed under defaults to the published commit.
-      - uses: juspay/kolu/.github/actions/publish-closure@37b45f616ae4d7ef0cf3e160efefb7cb67b2bc85
+      # The pin carries the publisher that reads the declaration's `pusher`
+      # ORIGIN (kolu master): it pushes with `odu cache push kolu-r2` at
+      # `https://odu-k3s.rooster-blues.ts.net` instead of deriving an origin
+      # from a substituter that is now an R2 path. WITH `sidecar`, installables
+      # are full flake installables, and the revision the entries are keyed
+      # under defaults to the published commit.
+      - uses: juspay/kolu/.github/actions/publish-closure@1516ad211dbeac1c400f9fe45b8de620caa32b8a
         with:
           sidecar: ${{ runner.temp }}/declaration/binary-cache.json
           installables: .#odu-runner

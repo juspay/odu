@@ -187,17 +187,15 @@ export async function describeCache(
   if (!response.ok) {
     // A PRIVATE BUCKET IS A 404 TO A READER WITHOUT A TOKEN, and a 403 to one
     // whose token cannot read it, so the status alone cannot tell "no such
-    // cache" from "not yours". The sentence names both, and whether a token
-    // was sent at all — which is the fact that decides what to do next.
-    throw new Error(
-      `${url} answered ${response.status}${
-        token === null
-          ? " and no token was sent — a PRIVATE bucket answers its nix-cache-info to " +
-            "nobody. Set $ODU_CACHE_TOKEN (or --token-file), or check the URL"
-          : " for the token this machine holds — check the URL, and that the token " +
-            "may read this bucket"
-      }`,
-    );
+    // cache" from "not yours". What decides the next move is whether a token
+    // was sent at all, so that is what the sentence says.
+    const why =
+      token === null
+        ? "and no token was sent — a PRIVATE bucket answers its nix-cache-info to " +
+          "nobody. Set $ODU_CACHE_TOKEN (or --token-file), or check the URL"
+        : "for the token this machine holds — check the URL, and that the token " +
+          "may read this bucket";
+    throw new Error(`${url} answered ${response.status} ${why}`);
   }
   const text = await response.text();
   const origin = infoField(text, ODU_ORIGIN_FIELD);
@@ -214,14 +212,15 @@ export async function describeCache(
 }
 
 /**
- * THE TOKEN DISCOVERY CARRIES, from the push's own three sources.
+ * THE TOKEN DISCOVERY CARRIES — the push's own resolution, asked one origin
+ * earlier.
  *
- * `--token-file` and `$ODU_CACHE_TOKEN` are origin-free and answer directly.
- * The credentials file is keyed by ORIGIN, and the push's origin is the thing
- * being discovered — so the key asked for here is the SUBSTITUTER's own
- * origin, which is where this request is going. For a private bucket that is
- * odu itself (a private bucket is never served from a store), so a machine
- * that ran `odu cache login` against the cache it reads is already able to
+ * `resolveToken` already is that order (`--token-file`, `$ODU_CACHE_TOKEN`,
+ * then the credential for an ORIGIN), and the only thing discovery has to
+ * decide is WHICH origin, because the push's own is the fact being
+ * discovered. It is the substituter's — where this request is going, and for
+ * a private bucket odu itself, since a private bucket is never store-fronted.
+ * So a machine that ran `odu cache login` against the cache it reads can
  * discover it.
  */
 export async function discoveryToken(
@@ -229,17 +228,16 @@ export async function discoveryToken(
   substituter: string,
   tokenFile: string | undefined,
 ): Promise<string | null> {
-  if (tokenFile !== undefined) return (await readFile(tokenFile, "utf8")).trim();
-  const fromEnv = env.ODU_CACHE_TOKEN?.trim();
-  if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
   let origin: string;
   try {
     const url = new URL(substituter);
-    origin = normalizeOrigin(`${url.protocol}//${url.host}`);
+    origin = `${url.protocol}//${url.host}`;
   } catch {
-    return null;
+    // Not a URL at all: the file and the variable still answer, and no
+    // credential is keyed under a name this is not.
+    origin = substituter;
   }
-  return (await readCredentials(env))[origin] ?? null;
+  return resolveToken(env, origin, tokenFile);
 }
 
 /** One field of a `nix-cache-info`, or null. The format is `Key: value` a line

@@ -132,10 +132,10 @@ export type CompleteUpload =
  * instead of a workflow hard-coding three facts about a cache it reads from.
  * Nix ignores keys it does not know, so a client is unaffected.
  */
-export function nixCacheInfo(bucket: { origin: string; bucket: string }): string {
+export function nixCacheInfo(of: { origin: string; bucket: string }): string {
   return (
     "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n" +
-    `${ODU_ORIGIN_FIELD}: ${bucket.origin}\n${ODU_BUCKET_FIELD}: ${bucket.bucket}\n`
+    `${ODU_ORIGIN_FIELD}: ${of.origin}\n${ODU_BUCKET_FIELD}: ${of.bucket}\n`
   );
 }
 
