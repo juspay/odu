@@ -166,8 +166,24 @@ export interface S3Request {
   signal?: AbortSignal;
 }
 
-/** One signed request, sent by `send`. `body` is a stream or bytes; a stream
- *  is sent with `duplex: "half"` and never buffered here. */
+/**
+ * One signed request, sent by `send`. `body` is a stream or bytes; a stream
+ * is sent with `duplex: "half"` and never buffered here.
+ *
+ * ASKS FOR THE OBJECT, NOT A RE-ENCODING OF IT. Bun's `fetch` offers an
+ * `accept-encoding` of its own, and an edge in front of the service — R2 sits
+ * behind Cloudflare — takes that offer for a compressible content type: the
+ * answer then measures its own body rather than the object, which is what
+ * `content-length` on a HEAD and `content-range` on a window are read for.
+ * Asked here, at the one place every request is made, rather than tolerated
+ * at each answer that measures something.
+ *
+ * NOT SIGNED, deliberately: it goes in UNDER the signed headers, so
+ * `SignedHeaders` never names it and a proxy rewriting what it asks for
+ * cannot turn a request into a SigV4 failure. An edge free to ignore it is
+ * also free to re-encode anyway, so `s3Store`'s HEAD still reads the record
+ * before the length.
+ */
 export function s3Fetch(
   target: S3Target,
   method: string,
@@ -178,7 +194,7 @@ export function s3Fetch(
   const url = objectUrl(target, key, init.query);
   return send(url, {
     method,
-    headers: signedHeaders(target, method, url, init.headers ?? {}),
+    headers: { "accept-encoding": "identity", ...signedHeaders(target, method, url, init.headers ?? {}) },
     ...(init.body === undefined ? {} : { body: init.body, duplex: "half" }),
     ...(init.signal === undefined ? {} : { signal: init.signal }),
   } as RequestInit);

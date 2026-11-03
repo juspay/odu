@@ -126,7 +126,9 @@ export interface ObjectStore {
   head(key: string): Promise<number | null>;
   /** The STORED object's facts — what `put` recorded — or null when the key is
    *  absent. A read of what was written, never a re-hash of the bytes; an S3
-   *  object that carries none fails with {@link UnrecordedObject}. */
+   *  object that carries none fails with {@link UnrecordedObject}, as does one
+   *  whose bytes no longer measure what it recorded — a check the store makes
+   *  where it can, and cannot make of an answer an intermediary re-encoded. */
   facts(key: string): Promise<ObjectFacts | null>;
   /** Idempotent: deleting an absent key is not an error. */
   delete(key: string): Promise<void>;
