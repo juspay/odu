@@ -47,6 +47,9 @@ async function row(publicOrigin: string): Promise<{
     stateRoot,
     stores: localStores(stateRoot),
     rootToken: "root-token",
+    // THE SAME ORIGIN THE ROW IS BUILT WITH: a bucket's `nix-cache-info`
+    // names it, and the row's `url`/`pushUrl` are built from it.
+    publicOrigin,
   });
   trash.push(cache);
   const server = cacheServer({

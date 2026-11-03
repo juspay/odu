@@ -219,6 +219,13 @@ What each step delivers:
     tests, not yet run against the pod.
   - **Proof:** the e2e substitutes through a 307 from a private bucket with a
     real Nix client, and the NixOS VM test copies through one.[^reads]
+  - **The cache names its own push address.** A read address is no longer a
+    push address, so `nix-cache-info` states both in two lines Nix ignores —
+    `Odu-Origin` (this daemon) and `Odu-Bucket` — on odu's routes and in the
+    object in the store, rewritten by content when the origin moves.
+    `odu cache push --cache <substituter>` reads them, and the push action
+    takes one `cache:` input where it took `origin:` and `bucket:`, so a
+    consumer repository holds the one fact its `nix.conf` already has.
 - **2.9 Uploads go straight to the store.** The client uploads to the store
   through presigned parts. Odu then reads the object back and verifies it
   before signing. That is Cachix's upload, but without Cachix's trust in the

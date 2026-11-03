@@ -71,7 +71,7 @@ import {
   NAR_CONTENT_TYPE,
   narinfoKey,
   NARINFO_CONTENT_TYPE,
-  NIX_CACHE_INFO,
+  nixCacheInfo,
   objectKey,
   type CompleteUpload,
   type NarinfoOutcome,
@@ -443,6 +443,12 @@ export interface Cache {
   bucketByDomain(host: string): BucketRow | null;
   authorize(header: string | undefined, bucket: BucketRow, need: Scope): AuthVerdict;
   narinfoText(bucket: BucketRow, hash: string): string | null;
+  /** `nix-cache-info` for one bucket, by name — the three lines a Nix client
+   *  reads first and the two `Odu-` lines that say where this bucket is
+   *  pushed to. One rendering for the ROUTE and for the object written to the
+   *  store, so a reader that reaches odu and one that reaches only the store
+   *  cannot be told different things. */
+  cacheInfoText(bucket: string): string;
   touch(bucket: BucketRow, hash: string): void;
   /** ONE operational line; the row hands the daemon's logger to the cache. */
   log(event: string, fields: Record<string, unknown>): void;
@@ -550,6 +556,25 @@ export interface CacheOptions {
   stateRoot: string;
   /** `$ODU_ROOT_TOKEN`, or null when the operator supplied none. */
   rootToken: string | null;
+  /**
+   * WHERE THIS DAEMON IS REACHED — the same string the row builds a bucket's
+   * `pushUrl` and its path-form `url` from.
+   *
+   * The cache needs it because `nix-cache-info` NAMES IT (PLAN 2.8): reads
+   * come from the store, so the push address can no longer be derived from
+   * the substituter, and the file a Nix client reads first is where the cache
+   * states it.
+   *
+   * THE ROW PASSES `$ODU_PUBLIC_ORIGIN` WHEN THERE IS ONE AND THE BOUND
+   * ORIGIN OTHERWISE (`server.ts`), which on a loopback daemon makes
+   * `Odu-Origin` a `127.0.0.1` address. That is honest — it is exactly what
+   * `pushUrl` and the bucket page already say, and on a loopback daemon it is
+   * where a push goes — but a deployment whose reads come from a store and
+   * whose operator never set `$ODU_PUBLIC_ORIGIN` publishes a push address
+   * only its own machine can use. Required rather than defaulted so that
+   * answer is the ROW's, said once, and not a constant hidden here.
+   */
+  publicOrigin: string;
   /** THE OLD NIX STORE, read only during the one-time migration. `null` on a
    *  fresh deployment; the row never needs a store otherwise. */
   legacyStore?: {
@@ -888,14 +913,30 @@ export function createCache(options: CacheOptions): Cache {
     return outcome;
   }
 
-  /** `nix-cache-info` for one bucket. Written when the bucket is created and
-   *  confirmed by the backfill; its text is a constant, so this is a no-op
-   *  after the first time — and on the day that constant changes (a
-   *  `Priority:` edit), the rewrite is announced like any other. */
+  /** THE ONE RENDERING of a bucket's `nix-cache-info` — what the route
+   *  answers and what the object in the store holds. The origin is this
+   *  daemon's (`publicOrigin`), which is the address `odu cache push` has to
+   *  reach; the substituter a reader came from may be a store's domain that
+   *  takes no PUT at all. */
+  const cacheInfoText = (bucket: string): string =>
+    nixCacheInfo({ origin: options.publicOrigin, bucket });
+
+  /**
+   * `nix-cache-info` for one bucket, written when the bucket is created and
+   * confirmed on every backfill.
+   *
+   * IT IS NOT A CONSTANT ANY MORE (PLAN 2.8): the text carries this daemon's
+   * origin and this bucket's name, so moving the deployment behind a new
+   * `$ODU_PUBLIC_ORIGIN` changes it. `writeText` compares the STORED SHA256
+   * the store already keeps rather than the length — the two origins a move
+   * is between can be the same number of characters — and a rewrite is
+   * purged like a narinfo's, because the old text was cacheable for a day and
+   * names an address that no longer takes a push.
+   */
   async function keepCacheInfoObject(bucket: BucketRow): Promise<void> {
     const outcome = await keepTextObject(bucket, {
       key: cacheInfoKey(bucket.name),
-      text: NIX_CACHE_INFO,
+      text: cacheInfoText(bucket.name),
       contentType: CACHE_INFO_CONTENT_TYPE,
     });
     if (outcome === "rewritten") {
@@ -1952,6 +1993,8 @@ export function createCache(options: CacheOptions): Cache {
       const row = repo.objectByHash(bucket.name, hash);
       return row === null ? null : narinfoFor(bucket, row);
     },
+
+    cacheInfoText,
 
     log: (event, fields) => options.log?.(event, fields),
 

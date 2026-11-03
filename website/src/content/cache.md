@@ -115,6 +115,15 @@ export ODU_CACHE_TOKEN=<your-write-token>
 odu cache push main <paths> --origin https://odu.example.com
 ```
 
+**Or name only the cache you read from.** `--cache <substituter>` takes the URL that is already in your `nix.conf` and reads the rest off that cache's own `nix-cache-info` — the push origin and the bucket — so a CI job holds one fact instead of three:
+
+```sh
+export ODU_CACHE_TOKEN=<your-write-token>
+odu cache push --cache https://odu.example.com/cache/main <paths>
+```
+
+It is exclusive with `<bucket> --origin`: the two answer the same question from opposite ends, and the positional form stays for a person in a shell who has both in hand. A cache that does not state both lines, or does not answer, is refused with a sentence naming the URL — a push aimed at a guessed origin is a push at a URL nobody owns. `--output json` is unchanged: it still answers `served` and `substituter`.
+
 What it says while it works — one preamble, then one line per path as the bucket answers:
 
 ```text
@@ -182,8 +191,7 @@ Then it proves the push. For every path the bucket serves, `check.sh` asks `<sub
 # .github/workflows — with Nix installed in an earlier step
 - uses: juspay/odu/.github/actions/push@<odu-revision>
   with:
-    origin: https://odu.example.com
-    bucket: main
+    cache: https://odu.example.com/cache/main
     token: ${{ secrets.ODU_CACHE_TOKEN }}
     # No `paths`: every package, dev shell and check of this flake, for the
     # runner's system. Name `paths` to push only what you name. `pin` holds
@@ -192,7 +200,9 @@ Then it proves the push. For every path the bucket serves, `check.sh` asks `<sub
     pin: ${{ github.ref_name == github.event.repository.default_branch }}
 ```
 
-**With no `paths`, the whole flake goes** — every `packages.<system>`, `devShells.<system>` and `checks.<system>` output for the runner's system, enumerated by Nix rather than listed by hand, so a flake that gains an output gains it here on the next push. Name `paths` to push exactly what you name instead: store paths, `result` links, or flake installables, space- or newline-separated, installables built first. A bucket page prints this block filled in with its own origin and name under **Push from GitHub Actions**.
+**`cache:` is the one fact — the substituter URL**, the same line your `nix.conf` already has. The push origin and the bucket name are read off `<cache>/nix-cache-info`, which states them ([The cache describes itself](#the-cache-describes-itself)). They cannot be derived any more: a bucket whose reads are served from a store answers `GET` at an address that takes no push at all. A cache that states neither refuses the step, naming the URL it asked.
+
+**With no `paths`, the whole flake goes** — every `packages.<system>`, `devShells.<system>` and `checks.<system>` output for the runner's system, enumerated by Nix rather than listed by hand, so a flake that gains an output gains it here on the next push. Name `paths` to push exactly what you name instead: store paths, `result` links, or flake installables, space- or newline-separated, installables built first. A bucket page prints this block filled in with its own substituter URL under **Push from GitHub Actions**.
 
 **`pin:` is a boolean, and the line above is the policy.** The action holds none of its own: it pins whatever this push landed, whenever the workflow says true. The pin's NAME is derived — `<owner>/<repo>@<ref>/<system>`, e.g. `juspay/kolu@master/x86_64-linux` — because several repositories share one bucket and a matrix pushes a Linux closure and a macOS closure on the same commit; under one name the second job to finish would re-point the pin and hand the first job's closure to the next collection. Anything falsy, the default, pins nothing. Free-text pin names stay in the API, for the board and an administrator.
 
@@ -229,8 +239,7 @@ After — the same three steps, with the first and last replaced by one that car
         run: om ci run --systems "${{ matrix.system }}"
       - uses: juspay/odu/.github/actions/push@<odu-revision>
         with:
-          origin: https://cache.kolu.dev
-          bucket: chutney
+          cache: https://cache.kolu.dev/chutney
           token: ${{ secrets.ODU_CACHE_TOKEN }}
           paths: result
 ```
@@ -591,6 +600,21 @@ The `pin` route is the one pin verb outside the administrative surface, and it t
 
 Re-pointing a pin releases whatever that pin held before, so the line is drawn by who made it — `createdBy`, which `pin_list` shows. A write token may re-point a pin a write token made, and never an administrator's: a leaked CI token, or a typo in a workflow's `pin:`, must not drop `release-1.0`. Write tokens of one bucket are peers here, as they already are in pushing to it. Deleting a pin stays an administrator's either way.
 
+### The cache describes itself
+
+`nix-cache-info` carries two lines beyond the three a Nix client reads, in both spellings of it and in the copy the store holds:
+
+```text
+Odu-Origin: https://odu.example.com
+Odu-Bucket: main
+```
+
+`Odu-Origin` is the daemon a push is taken by — never the name the reader arrived on, which may be a store's domain or a CDN that answers `GET` and nothing else — and `Odu-Bucket` is which bucket that substituter serves. Nix ignores keys it does not know, so a reader is unaffected; `odu cache push --cache <substituter>` and [the push action](#push-from-github-actions) are what read them, which is how a consumer repository holds one fact about its cache instead of three.
+
+The object in the store is rewritten whenever that text changes — a move behind a new public origin — by the same boot pass that backfills narinfos, compared by the stored sha256 rather than by length, and the address it was cacheable at is purged at the edge.
+
+**Naming a cache is trusting it.** `--cache` sends your write token to the substituter you named (a private bucket's `nix-cache-info` answers nobody without it) and then pushes to whatever origin that file states, so a cache you do not control — or a DNS or CDN compromise in front of one — is a cache you have handed the token to. Name a substituter you trust, as you already do in `nix.conf`.
+
 ## Command reference
 
 The CLI keeps the three cache commands a shell is the natural place for. Everything else is the board or the API verb — `odu surface cache <verb> --input '{…}' --json`, with `rootToken` a field of the input.
@@ -599,7 +623,7 @@ The CLI keeps the three cache commands a shell is the natural place for. Everyth
 | --- | --- | --- | --- |
 | Print the substituter and key settings, the `nixConfig` block, and the netrc lines. No account for a public bucket | `odu cache use <bucket>` | `bucket_describe` | a bucket page's block |
 | Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — | — (a machine's disk) |
-| Upload only the paths the bucket is missing; the bucket keeps what it takes. `--pin NAME` re-points that pin at the closure this push landed, unless a path was refused | `odu cache push <bucket> <paths…> [--part-size MiB] [--pin NAME]` | — | — (a build box's job) |
+| Upload only the paths the bucket is missing; the bucket keeps what it takes. `--cache <substituter>` reads the origin and the bucket off the cache's own `nix-cache-info` instead of being told them. `--pin NAME` re-points that pin at the closure this push landed, unless a path was refused | `odu cache push <bucket> <paths…> [--part-size MiB] [--pin NAME]`, or `odu cache push --cache <substituter> <paths…>` | — | — (a build box's job) |
 | Create a bucket; answer its substituter URL, public key and store. `retentionDays` is how long it keeps what nobody wants (90 when absent). `upstreamKeys: []` takes everything, including upstream-signed closures (costs disk; for consumers that cannot reach cache.nixos.org). `store` keeps its objects in a declared store (default `local`) | — | `bucket_create` | Cache → **Create bucket**, **Skip upstream paths** off, the **store** field |
 | List buckets | — | `bucket_list` | Cache |
 | Give a bucket a DNS name of its own, or take it away (omit `domain`) | — | `bucket_domain` | bucket → **Domain** |

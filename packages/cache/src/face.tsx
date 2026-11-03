@@ -936,8 +936,7 @@ function BucketPage(
                 actions={
                   <CopyButton
                     text={actionsPushBlock({
-                      origin: pushOriginOf(row().pushUrl),
-                      bucket: props.name,
+                      url: row().url,
                       ref: pushActionRef(),
                     })}
                   />
@@ -945,8 +944,7 @@ function BucketPage(
               >
                 <pre class="use-block actions-push-block">
                   {actionsPushBlock({
-                    origin: pushOriginOf(row().pushUrl),
-                    bucket: props.name,
+                    url: row().url,
                     ref: pushActionRef(),
                   })}
                 </pre>

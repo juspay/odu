@@ -34,7 +34,7 @@ import { type Cache, createCache } from "./cache";
 import { openCacheRepo } from "./db";
 import { base32, storePathHash } from "./narinfo";
 import { cacheServer, exposedBuckets, probePublicStores, probeStoreEndpoints } from "./server";
-import { cacheInfoKey, narinfoKey, NIX_CACHE_INFO } from "./staging";
+import { cacheInfoKey, narinfoKey, nixCacheInfo } from "./staging";
 import { storeFacts } from "./stores";
 import type { CacheBucket } from "./surface";
 import { asRoot } from "./testlib";
@@ -90,6 +90,7 @@ function daemon(declared: StoreDeclarations): {
   const cache = createCache({
     stateRoot: scratch,
     rootToken: ROOT,
+    publicOrigin: ORIGIN,
     stores: new Map<string, ObjectStore>([
       ["local", diskObjectStore({ dir: join(scratch, "cache") })],
       ["r2", diskObjectStore({ dir: join(scratch, "r2") })],
@@ -240,6 +241,9 @@ describe("asking a store's domain whether it serves", () => {
     const refusals = await probePublicStores({
       stores: storeFacts(declaring(R2)),
       buckets,
+      // WHAT THE STORE OUGHT TO BE SERVING — the cache's own rendering for
+      // that bucket, origin and name included.
+      info: (bucket) => nixCacheInfo({ origin: ORIGIN, bucket }),
       send,
       log: (event, fields) => logged.push({ event, fields }),
     });
@@ -247,7 +251,9 @@ describe("asking a store's domain whether it serves", () => {
   };
 
   it("is satisfied by the file a Nix client reads first", async () => {
-    const seen = await probe(() => new Response(NIX_CACHE_INFO, { status: 200 }));
+    const seen = await probe(() =>
+      new Response(nixCacheInfo({ origin: ORIGIN, bucket: "kolu" }), { status: 200 }),
+    );
     expect(seen.asked).toEqual([PROBED]);
     expect(seen.refusals).toEqual([]);
     expect(seen.logged).toEqual([]);
@@ -371,6 +377,7 @@ describe("a private bucket on a store the world can read", () => {
     const cache = createCache({
       stateRoot: scratch,
       rootToken: ROOT,
+      publicOrigin: ORIGIN,
       stores: new Map<string, ObjectStore>([
         ["local", diskObjectStore({ dir: join(scratch, "cache") })],
         ["r2", diskObjectStore({ dir: join(scratch, "r2") })],
@@ -422,6 +429,7 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
     const cache = createCache({
       stateRoot: scratch,
       rootToken: ROOT,
+      publicOrigin: ORIGIN,
       stores: new Map<string, ObjectStore>([["local", objects]]),
     });
     trash.push(cache);
@@ -478,7 +486,7 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
       // the same signed narinfo odu would have rendered for it.
       expect(await textOf(objects, narinfoKey("main", hash))).toBe(cache.narinfoText(bucket, hash));
     }
-    expect(await textOf(objects, cacheInfoKey("main"))).toBe(NIX_CACHE_INFO);
+    expect(await textOf(objects, cacheInfoKey("main"))).toBe(cache.cacheInfoText("main"));
   });
 
   it("writes nothing the second time, which is how a restart resumes it", async () => {
@@ -502,6 +510,36 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
 
     expect(await cache.backfillObjects()).toEqual({ rows: 2, written: 1, failures: 0 });
     expect(await textOf(objects, narinfoKey("main", hash))).toBe(cache.narinfoText(bucket, hash));
+  });
+
+  it("rewrites `nix-cache-info` when the daemon's public origin changed, and purges it", async () => {
+    // A DEPLOYMENT MOVED behind a new `$ODU_PUBLIC_ORIGIN`. The object in the
+    // store names the OLD one, and a pusher reading it (`odu cache push
+    // --cache`) would aim at an address this daemon no longer answers. The
+    // backfill is the pass that notices — by the stored sha256, not the
+    // length, which two origins can share.
+    const { cache, objects } = await pushedBefore28();
+    await cache.backfillObjects();
+    expect(await textOf(objects, cacheInfoKey("main"))).toContain(`Odu-Origin: ${ORIGIN}\n`);
+    await cache.close();
+
+    const MOVED = "https://odu.moved.example";
+    const purged: { reason: string; cacheInfo: boolean }[] = [];
+    const later = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      publicOrigin: MOVED,
+      stores: new Map<string, ObjectStore>([["local", objects]]),
+      purged: (moved) => purged.push({ reason: moved.reason, cacheInfo: moved.cacheInfo === true }),
+    });
+    trash.push(later);
+    await later.backfillObjects();
+
+    expect(await textOf(objects, cacheInfoKey("main"))).toBe(later.cacheInfoText("main"));
+    expect(await textOf(objects, cacheInfoKey("main"))).toContain(`Odu-Origin: ${MOVED}\n`);
+    // ANNOUNCED LIKE A NARINFO REWRITE: the superseded text was cacheable for
+    // a day, and it names an origin that no longer takes a push.
+    expect(purged).toContainEqual({ reason: "repush", cacheInfo: true });
   });
 
   it("leaves alone a row whose NAR the legacy migration has not landed", async () => {
@@ -551,6 +589,7 @@ describe("a re-push purges the narinfo it rewrote", () => {
     const cache = createCache({
       stateRoot: scratch,
       rootToken: ROOT,
+      publicOrigin: ORIGIN,
       stores: new Map<string, ObjectStore>([["local", diskObjectStore({ dir: join(scratch, "cache") })]]),
       purged: (moved) =>
         purged.push({

@@ -30,6 +30,19 @@ export const UPLOAD_SESSION_HEADER = "x-odu-upload";
 /** Where the push API lives — odu's own, beside the Nix protocol's mount. */
 export const PUSH_API = "/_odu/v1";
 
+/**
+ * THE TWO LINES A CACHE SAYS ABOUT ITSELF in `nix-cache-info` — where its
+ * push API is, and which bucket the reader is looking at.
+ *
+ * Spelled here for the same reason the mount is: the SERVER writes them
+ * (`./staging`'s `nixCacheInfo`, the routes, the object in the store) and the
+ * CLIENT reads them (`./push`'s `describeCache`, behind `odu cache push
+ * --cache`), and the client must import no router and no store. Nix ignores
+ * keys it does not know, so these cost a reader nothing.
+ */
+export const ODU_ORIGIN_FIELD = "Odu-Origin";
+export const ODU_BUCKET_FIELD = "Odu-Bucket";
+
 /** Nix's base32, as a route fragment: a narinfo is named for its 32-character
  *  store-path hash, and a DOMAIN's root route has no bucket segment to make the
  *  route unambiguous. */

@@ -514,7 +514,7 @@ odu mcp
 | `ci protect` | Configure GitHub required checks; preview with `--dry-run` | **Maintenance** → **Apply protection** |
 | `cache use <bucket>` | Print the nix.conf settings, a `nixConfig` block and netrc for a bucket | **Cache** |
 | `cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — (a machine's disk) |
-| `cache push <bucket> <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--pin NAME` re-points that pin at the closure it landed | — (a build box's job) |
+| `cache push <bucket> <path>…`, `cache push --cache <substituter> <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--cache` reads the push origin and the bucket off that cache's own `nix-cache-info`. `--pin NAME` re-points that pin at the closure it landed | — (a build box's job) |
 | `auth login <origin>` | Save a personal access token in `~/.config/odu/auth/credentials` | — (a machine's disk) |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport | — |
 

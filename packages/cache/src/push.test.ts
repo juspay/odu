@@ -21,6 +21,8 @@ import { narHashBase32, storePathHash } from "./narinfo";
 import {
   credentialsPath,
   type ClosureEntry,
+  describeCache,
+  discoveryToken,
   formatPushNarinfo,
   pushToCache,
   resolveBucket,
@@ -696,6 +698,119 @@ describe("resolving the bucket argument", () => {
     });
     await saveCredential(env, "http://127.0.0.1:8888", "t");
     expect(await resolveBucket(env, "main")).toHaveProperty("error");
+  });
+});
+
+describe("a cache that describes itself (`--cache`)", () => {
+  /** A `fetch` that answers one body, and remembers what it was asked —
+   *  including the authorization it carried, which is what a private bucket
+   *  decides on. */
+  const answering = (
+    reply: () => Response | Promise<Response>,
+  ): { send: typeof fetch; asked: string[]; auth: (string | null)[] } => {
+    const asked: string[] = [];
+    const auth: (string | null)[] = [];
+    return {
+      asked,
+      auth,
+      send: (async (url: string | URL | Request, init?: RequestInit) => {
+        asked.push(String(url));
+        auth.push(
+          ((init?.headers ?? {}) as Record<string, string>)["authorization"] ?? null,
+        );
+        return await reply();
+      }) as unknown as typeof fetch,
+    };
+  };
+
+  const INFO =
+    "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n" +
+    "Odu-Origin: https://odu.example.org\nOdu-Bucket: kolu-r2\n";
+
+  it("reads the push origin and the bucket off the substituter's nix-cache-info", async () => {
+    // THE ONE FACT A CONSUMER HAS is the substituter URL. The push address
+    // cannot be derived from it: this one is an R2 domain that answers GET.
+    const { send, asked } = answering(() => new Response(INFO, { status: 200 }));
+    expect(await describeCache("https://cache.kolu.dev/kolu-r2/", send)).toEqual({
+      origin: "https://odu.example.org",
+      bucket: "kolu-r2",
+    });
+    expect(asked).toEqual(["https://cache.kolu.dev/kolu-r2/nix-cache-info"]);
+  });
+
+  it("refuses a cache that answers without the two lines, naming the URL", async () => {
+    // cache.nixos.org, or an odu from before this: guessing an origin from the
+    // substituter is how a push ends up at a URL nobody owns.
+    const { send } = answering(
+      () => new Response("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n", { status: 200 }),
+    );
+    const refusal = await describeCache("https://cache.nixos.org", send).catch((err: Error) => err);
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("https://cache.nixos.org/nix-cache-info");
+    expect((refusal as Error).message).toContain("Odu-Origin");
+  });
+
+  it("refuses a cache that does not answer, naming the URL", async () => {
+    const dead = (async () => {
+      throw new Error("getaddrinfo ENOTFOUND cache.gone.example");
+    }) as unknown as typeof fetch;
+    const refusal = await describeCache("https://cache.gone.example", dead).catch(
+      (err: Error) => err,
+    );
+    expect((refusal as Error).message).toContain("https://cache.gone.example/nix-cache-info");
+    expect((refusal as Error).message).toContain("ENOTFOUND");
+
+    const { send } = answering(() => new Response("no", { status: 404 }));
+    const missing = await describeCache("https://cache.kolu.dev/gone", send).catch(
+      (err: Error) => err,
+    );
+    expect((missing as Error).message).toContain("answered 404");
+    // AND IT SAYS WHY THAT MIGHT BE: an anonymous read of a private bucket is
+    // a 404, so "no such cache" and "not yours" look identical from here.
+    expect((missing as Error).message).toContain("no token was sent");
+  });
+
+  it("carries the bucket's token, because a private bucket answers nobody without one", async () => {
+    // A PRIVATE BUCKET IS `404 no such bucket` TO AN ANONYMOUS READER, and its
+    // substituter is always odu's own (a private bucket is never store-fronted),
+    // so an unauthenticated discovery would make exactly the buckets that need
+    // a token unpushable. The token is the push's own, one request earlier.
+    const { send, auth } = answering(() => new Response(INFO, { status: 200 }));
+    expect(await describeCache("https://odu.example.org/cache/private", send, "odc_write")).toEqual(
+      { origin: "https://odu.example.org", bucket: "kolu-r2" },
+    );
+    expect(auth).toEqual(["Bearer odc_write"]);
+
+    // A refusal of the token this machine DOES hold says that, rather than
+    // telling a CI job to set a variable it already set.
+    const denied = answering(() => new Response("", { status: 403 }));
+    const refusal = await describeCache("https://odu.example.org/cache/private", denied.send, "odc_write").catch(
+      (err: Error) => err,
+    );
+    expect((refusal as Error).message).toContain("answered 403");
+    expect((refusal as Error).message).toContain("the token this machine holds");
+  });
+
+  it("resolves that token from the push's own three sources", async () => {
+    // The file and the variable are origin-free. The credentials file is keyed
+    // by origin, and the origin is what is being discovered — so the key is the
+    // SUBSTITUTER's own origin, which is where this request is going.
+    const env = envOf({ ODU_CACHE_TOKEN: "odc_from_env" });
+    const file = join(scratch, "token");
+    writeFileSync(file, "odc_from_file\n");
+    await saveCredential(env, "https://odu.example.org", "odc_from_login");
+
+    expect(await discoveryToken(env, "https://cache.kolu.dev/kolu-r2", file)).toBe("odc_from_file");
+    expect(await discoveryToken(env, "https://cache.kolu.dev/kolu-r2", undefined)).toBe(
+      "odc_from_env",
+    );
+    expect(await discoveryToken({ HOME: scratch }, "https://odu.example.org/cache/private", undefined)).toBe(
+      "odc_from_login",
+    );
+    // A cache this machine has never logged in to is anonymous, honestly.
+    expect(
+      await discoveryToken({ HOME: scratch }, "https://cache.kolu.dev/kolu-r2", undefined),
+    ).toBeNull();
   });
 });
 

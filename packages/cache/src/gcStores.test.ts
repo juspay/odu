@@ -277,6 +277,7 @@ async function subject(
   const cache = createCache({
     stateRoot: dir,
     rootToken: ROOT,
+    publicOrigin: "http://cache.test",
     now: () => clock,
     // `local` is always declared (the cache's own disk); the S3 run adds a
     // second name and creates its bucket there, which is the only difference

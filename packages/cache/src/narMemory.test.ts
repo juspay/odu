@@ -114,7 +114,12 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
     const stateRoot = join(dir, "state");
     const hash = "a".repeat(52);
     const storePath = `/nix/store/${"a".repeat(32)}-big`;
-    const cache = createCache({ stateRoot, stores: localStores(stateRoot), rootToken: "root" });
+    const cache = createCache({
+      stateRoot,
+      stores: localStores(stateRoot),
+      rootToken: "root",
+      publicOrigin: "http://cache.test",
+    });
     await cache.admin.create({
       ...asRoot("root"),
       name: "main",

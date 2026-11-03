@@ -437,9 +437,12 @@ old last-access field is gone from a path and from `stats_read` — and added
   `kept` with a reason instead.
 
 - **A workflow pushes in ONE step.** `juspay/odu/.github/actions/push@<sha>`
-  takes `origin`, `bucket`, `token` and `paths`; it builds the `odu` it pushes
-  with from the revision it is pinned to, and then proves the push where Nix
-  asks: each served path's narinfo at the bucket's SUBSTITUTER URL (its domain
+  takes `cache`, `token` and `paths` — `cache` is the SUBSTITUTER URL the
+  repository already substitutes from, and the push origin and the bucket are
+  read off that cache's `nix-cache-info` (`Odu-Origin`, `Odu-Bucket`), never
+  spelled in the workflow. It builds the `odu` it pushes with from the
+  revision it is pinned to, and then proves the push where Nix asks: each
+  served path's narinfo at the bucket's SUBSTITUTER URL (its domain
   when it has one), and the NAR that narinfo names at the `FileSize:` it
   claims — truncated objects are a narinfo that answers and a NAR that does not.
   Each failure is named and reddens the step. An empty `token` builds and pushes
@@ -451,7 +454,7 @@ old last-access field is gone from a path and from `stats_read` — and added
   BOOLEAN; the workflow holds the policy and the action holds none:
 
   ```yaml
-      # one more line in the step's `with:`, beside origin/bucket/token
+      # one more line in the step's `with:`, beside cache/token
       pin: ${{ github.ref_name == github.event.repository.default_branch }}
   ```
 
@@ -654,7 +657,13 @@ declares.
   the closure: the closure still holds the upstream-signed paths a bucket
   refuses by design.
 - The repository ships a GitHub Actions push step
-  (`juspay/odu/.github/actions/push@<sha>`), which verifies its own push.
+  (`juspay/odu/.github/actions/push@<sha>`), which verifies its own push. Its
+  only address input is `cache:` — the substituter URL.
+- `odu cache push --cache <substituter>` is the same discovery in a shell: it
+  GETs `<substituter>/nix-cache-info`, requires `Odu-Origin` and `Odu-Bucket`,
+  and pushes to them. It is exclusive with `<bucket> --origin <url>`, which
+  stays for a person who has both in hand. A cache that states neither — or
+  does not answer — is refused with a sentence naming the URL.
 - `odu cache push --pin NAME` re-points a pin at the closure the push landed
   (nothing is pinned if a path was refused). The push action takes `pin: true`
   instead of a name and derives `<owner>/<repo>@<ref>/<system>`; when to pin is

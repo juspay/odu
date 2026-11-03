@@ -46,7 +46,21 @@ field() {
   printf '%s\n' "$1" | tr -d '\r' | sed -n "s/^$2:[[:space:]]*//p" | tail -1
 }
 
-narinfo=$(curl -sS -f -K "$config" "$narinfo_url") ||
+# RETRIED, BECAUSE THE NETWORK IS NOT THE CACHE. A macOS runner saw bursts of
+# `curl (35) Connection reset by peer` against R2 on a bucket that was serving
+# perfectly, and turned a green push red. `--retry-all-errors` is what makes
+# `--retry` cover a connection reset as well as a 5xx — without it curl retries
+# only "transient" HTTP statuses and gives up on exactly the failure seen.
+#
+# BOUNDED IN TIME, NOT ONLY IN ATTEMPTS. A reset fails in milliseconds, but a
+# black-holed edge does not answer at all, and curl's default connect timeout
+# is 300 seconds — five retries of that is half an hour for ONE path, eight of
+# them at once under `xargs -P 8`. So a connection gets ten seconds to be made
+# and the whole retry sequence thirty, after which the path is reported FAILED,
+# which is what a step that proves a push is for.
+retry=(--retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 30 --connect-timeout 10)
+
+narinfo=$(curl -sS -f "${retry[@]}" -K "$config" "$narinfo_url") ||
   no "its narinfo did not answer at $narinfo_url"
 
 url=$(field "$narinfo" URL)
@@ -55,7 +69,7 @@ size=$(field "$narinfo" FileSize)
 [ -n "$size" ] || no "its narinfo at $narinfo_url has no FileSize: line"
 
 nar_url="$substituter/$url"
-answer=$(curl -sS -I -L -K "$config" -w 'HTTP_CODE:%{http_code}\n' "$nar_url" 2>/dev/null) || true
+answer=$(curl -sS -I -L "${retry[@]}" -K "$config" -w 'HTTP_CODE:%{http_code}\n' "$nar_url" 2>/dev/null) || true
 code=${answer##*HTTP_CODE:}
 code=${code%%[!0-9]*}
 length=$(printf '%s\n' "$answer" | tr -d '\r' |

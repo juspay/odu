@@ -321,6 +321,10 @@ let main: Bucket;
 let writeToken: string;
 let pinned: string;
 let evictable: string;
+/** The private bucket, and a write token for it — made by the private-read
+ *  scenario and read by the discovery one below it. */
+let priv: Bucket;
+let privToken: string;
 
 describe("odu serves a Nix binary cache", () => {
   it("creates a bucket and prints what a client has to trust", () => {
@@ -477,6 +481,37 @@ describe("odu serves a Nix binary cache", () => {
     expect(substituted.status).toBe(0);
   });
 
+  it("discovers a bucket from its substituter, and pushes with `--cache` alone", async () => {
+    // WHAT A CONSUMER REPOSITORY HAS is the URL in its `nix.conf`. The push
+    // origin and the bucket are read off `<substituter>/nix-cache-info`, which
+    // the cache states for itself — nothing here names a bucket or an origin.
+    const info = await fetch(`${main.url}/nix-cache-info`);
+    expect(info.status).toBe(200);
+    const stated = await info.text();
+    expect(stated).toContain(`Odu-Origin: ${world.origin}\n`);
+    expect(stated).toContain("Odu-Bucket: main\n");
+
+    const discovered = build("odu-cache-e2e-discovered");
+    const pushed = cli(["cache", "push", "--cache", main.url, "--output", "json", discovered], {
+      ODU_CACHE_TOKEN: writeToken,
+      NIX_REMOTE: builderStore,
+    });
+    expect({ status: pushed.status, stderr: pushed.stderr }).toMatchObject({ status: 0 });
+    const summary = JSON.parse(pushed.stdout) as {
+      pushed: number;
+      failed: number;
+      served: string[];
+      substituter: string;
+    };
+    expect(summary).toMatchObject({ pushed: 1, failed: 0, substituter: main.url });
+    expect(summary.served).toContain(discovered);
+
+    // SERVED WHERE NIX ASKS, which is what the push action then proves.
+    const narinfo = await fetch(`${main.url}/${hashOf(discovered)}.narinfo`);
+    expect(narinfo.status).toBe(200);
+    expect(await narinfo.text()).toContain(`StorePath: ${discovered}`);
+  });
+
   it("takes a path `nix copy --to` uploads, and keeps the client's signature", async () => {
     evictable = build("odu-cache-e2e-evictable");
 
@@ -589,13 +624,14 @@ describe("odu serves a Nix binary cache", () => {
       retentionDays: 90,
     });
     expect(created.status).toBe(0);
-    const priv = JSON.parse(created.stdout) as Bucket;
+    priv = JSON.parse(created.stdout) as Bucket;
     const minted = surface("token_mint", {
       rootToken: ROOT_TOKEN,
       bucket: "private",
       scope: "write",
     });
     const token = (JSON.parse(minted.stdout) as { token: string }).token;
+    privToken = token;
     const secret = build("odu-cache-e2e-private");
     const pushed = cli(["cache", "push", "private", secret], {
       ODU_CACHE_TOKEN: token,
@@ -643,6 +679,36 @@ describe("odu serves a Nix binary cache", () => {
     expect(read.stderr).not.toContain("not signed");
     expect(read.stderr).not.toContain("401");
     expect(read.status).toBe(0);
+  });
+
+  it("discovers a PRIVATE bucket, which answers its nix-cache-info to nobody", async () => {
+    // THE BLOCKER THIS PINS: an anonymous read of a private bucket is a 404,
+    // so a discovery that carried no credential would leave exactly the
+    // buckets that need a token unpushable — and `--cache` is the push
+    // action's only address input now.
+    expect((await fetch(`${priv.url}/nix-cache-info`)).status).toBe(404);
+    const stated = await fetch(`${priv.url}/nix-cache-info`, {
+      headers: { authorization: `Bearer ${privToken}` },
+    });
+    expect(stated.status).toBe(200);
+    expect(await stated.text()).toContain("Odu-Bucket: private\n");
+
+    const blind = cli(["cache", "push", "--cache", priv.url, build("odu-cache-e2e-blind")], {
+      ODU_CACHE_TOKEN: "",
+      NIX_REMOTE: builderStore,
+    });
+    expect(blind.status).toBe(1);
+    expect(blind.stderr).toContain("no token was sent");
+
+    const discovered = build("odu-cache-e2e-private-discovered");
+    const pushed = cli(
+      ["cache", "push", "--cache", priv.url, "--output", "json", discovered],
+      { ODU_CACHE_TOKEN: privToken, NIX_REMOTE: builderStore },
+    );
+    expect({ status: pushed.status, stderr: pushed.stderr }).toMatchObject({ status: 0 });
+    const summary = JSON.parse(pushed.stdout) as { failed: number; served: string[] };
+    expect(summary.failed).toBe(0);
+    expect(summary.served).toContain(discovered);
   });
 
   it("redirects a private bucket's NAR to its store, and a real Nix client follows it", async () => {

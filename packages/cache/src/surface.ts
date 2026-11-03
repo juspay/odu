@@ -612,12 +612,17 @@ export const ACTION_REF_PLACEHOLDER = "<odu-revision>";
  *
  * It is NOT a spelling of {@link pushBlock}: the action takes the token as an
  * input fed from a secret, so the token is a `secrets.` reference here rather
- * than the once-shown value. What the two share is the ORIGIN and the bucket,
- * which is exactly what a page knows and a person would mistype.
+ * than the once-shown value. And it names ONE fact where the shell command
+ * names two — the SUBSTITUTER URL, which is the line the reader's `nix.conf`
+ * already has. The action reads the push origin and the bucket off that
+ * cache's own `nix-cache-info`, so a workflow cannot carry a stale origin for
+ * a bucket that moved.
  */
 export function actionsPushBlock(input: {
-  readonly origin: string;
-  readonly bucket: string;
+  /** The substituter URL the bucket publishes — its domain or its store's
+   *  public URL when it has one, the mount path otherwise. The same string
+   *  the `nix.conf` block above it carries. */
+  readonly url: string;
   /** The revision the action is pinned to: the daemon's own commit
    *  (`build.commit` on the service cell), or {@link ACTION_REF_PLACEHOLDER}
    *  when its build baked none. */
@@ -626,8 +631,7 @@ export function actionsPushBlock(input: {
   return `# .github/workflows — with Nix installed in an earlier step
 - uses: juspay/odu/.github/actions/push@${input.ref}
   with:
-    origin: ${input.origin.replace(/\/$/, "")}
-    bucket: ${input.bucket}
+    cache: ${input.url.replace(/\/$/, "")}
     token: \${{ secrets.ODU_CACHE_TOKEN }}
     # No \`paths\`: every package, dev shell and check of this flake, for the
     # runner's system. Name \`paths\` to push only what you name. \`pin\` holds

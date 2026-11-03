@@ -54,6 +54,7 @@ import { type KeptFile, keptFileOf, objectFactsOf } from "./fileHash";
 import { writeAll } from "./sink";
 import { verifyNarFile } from "./store";
 import type { BucketRow } from "./db";
+import { ODU_BUCKET_FIELD, ODU_ORIGIN_FIELD } from "./paths";
 import {
   narFileName,
   isDerivationPath,
@@ -121,8 +122,22 @@ export type CompleteUpload =
  * CDN would have served from nearer, for free. A number that loses the tie
  * takes that decision away from whoever wrote the `nix.conf`. It is Attic's
  * convention for the same reason.
+ *
+ * **THE CACHE NAMES ITS OWN PUSH ADDRESS** (PLAN 2.8). Reads come from the
+ * store now, so the daemon that takes a push can no longer be derived from
+ * the substituter a client reads — an R2 domain answers `GET` and nothing
+ * else. The two `Odu-` lines say where the push API is and which bucket this
+ * is, in the one file a Nix client fetches before anything else, so a pusher
+ * given only a substituter URL (`odu cache push --cache`) can find the rest
+ * instead of a workflow hard-coding three facts about a cache it reads from.
+ * Nix ignores keys it does not know, so a client is unaffected.
  */
-export const NIX_CACHE_INFO = "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n";
+export function nixCacheInfo(of: { origin: string; bucket: string }): string {
+  return (
+    "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n" +
+    `${ODU_ORIGIN_FIELD}: ${of.origin}\n${ODU_BUCKET_FIELD}: ${of.bucket}\n`
+  );
+}
 
 /** An upload session as a client names it (`x-odu-upload`): a plain token,
  *  because it becomes part of a staged file name. */

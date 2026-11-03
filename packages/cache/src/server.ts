@@ -81,7 +81,6 @@ import {
   cacheInfoKey,
   narFileKey,
   narinfoKey,
-  NIX_CACHE_INFO,
   publicBucketUrl,
   publicObjectUrl,
 } from "./staging";
@@ -284,6 +283,11 @@ export interface UnreachableStore {
 export async function probePublicStores(input: {
   stores: readonly CacheStore[];
   buckets: readonly { name: string; public: boolean; store: string }[];
+  /** What that bucket's `nix-cache-info` should say — the cache's own
+   *  rendering, which carries this daemon's origin and the bucket's name, so
+   *  a store serving a STALE copy of it is as unreachable as one serving
+   *  nothing. */
+  info: (bucket: string) => string;
   log?: (event: string, fields: Record<string, unknown>) => void;
   send?: typeof fetch;
 }): Promise<readonly UnreachableStore[]> {
@@ -298,7 +302,7 @@ export async function probePublicStores(input: {
     const url = publicObjectUrl(store.publicUrl, cacheInfoKey(bucket.name));
     const response = await send(url).catch(() => null);
     const body = response === null ? "" : await response.text().catch(() => "");
-    if (response !== null && response.status === 200 && body === NIX_CACHE_INFO) continue;
+    if (response !== null && response.status === 200 && body === input.info(bucket.name)) continue;
     const refusal = { store: store.name, url, status: response?.status ?? null };
     unreachable.push(refusal);
     input.log?.("cache.store.public.unreachable", refusal);
@@ -935,6 +939,11 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     const cache = createCache({
       stateRoot: stateDir,
       rootToken,
+      // WHERE A PUSH IS AIMED, which the cache states in every bucket's
+      // `nix-cache-info` (PLAN 2.8). The same string the row builds `pushUrl`
+      // and a path-form substituter from: the proxy's origin when one stands
+      // in front, the bound one otherwise.
+      publicOrigin: publicOrigin ?? boundOrigin,
       // THE STORES AS VALUES, built once from what the operator declared: the
       // cache holds them by name and never asks what kind they are.
       stores: objectStores(declared, join(stateDir, "cache")),
@@ -1044,6 +1053,17 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // row could be counted unreadable and wait a whole boot. The NARINFO
     // BACKFILL (2.8) sits between them for the same reason: a row whose object
     // the migration has not landed yet has no `FileHash` to put in a narinfo.
+    //
+    // AND THE PUBLIC-URL PROBE IS LAST OF ALL, after the self pass: it has to
+    // come after the BACKFILL because it compares what the store serves with
+    // what the cache renders now, and a `$ODU_PUBLIC_ORIGIN` move leaves the
+    // stale object there until the backfill rewrites it — a healthy store
+    // logged unreachable once, with nothing after it to correct the claim.
+    // It goes after the self pass because it DIALS a name: a domain still
+    // propagating keeps a request open for curl's own patience, and nothing
+    // waiting on it should be work this daemon could have finished.
+    const say = (event: string, fields: Record<string, unknown>): void =>
+      log.info(fields, `odu cache: ${event}`);
     yield* Effect.forkScoped(
       Effect.promise(async () => {
         await cache.migrate();
@@ -1055,6 +1075,12 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
           );
         }
         await cache.proveSelf();
+        await probePublicStores({
+          stores,
+          buckets: cache.snapshot(),
+          info: cache.cacheInfoText,
+          log: say,
+        });
       }),
     );
 
@@ -1063,25 +1089,18 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // from the old one and should finish as soon as the row is up.
     yield* Effect.forkScoped(Effect.promise(() => cache.resumeMigrations()));
 
-    // THREE QUESTIONS ABOUT THE DECLARED STORES, asked once the row is up and
-    // all of them answered with a log line rather than a refused boot.
-    //
-    // The first two are READS of what the operator declared — which private
-    // buckets a bound domain exposes, and whether an endpoint a client now
-    // has to dial is a loopback address — so they are answered here and now.
-    // The third DIALS the domain and is forked, because a DNS name that is
-    // still propagating must not hold the mount.
-    const say = (event: string, fields: Record<string, unknown>): void =>
-      log.info(fields, `odu cache: ${event}`);
+    // TWO MORE QUESTIONS ABOUT THE DECLARED STORES, asked once the row is up
+    // and both answered with a log line rather than a refused boot: which
+    // private buckets a bound domain exposes, and whether an endpoint a client
+    // now has to dial is a loopback address. Both are READS of what the
+    // operator declared, so they are answered here and now; the third, which
+    // DIALS the domain, runs at the end of the background fibre above.
     exposedBuckets({ stores, buckets: cache.snapshot(), log: say });
     probeStoreEndpoints({
       stores: [...declared].map(([name, store]) => ({ name, endpoint: store.target.endpoint })),
       buckets: cache.snapshot(),
       log: say,
     });
-    yield* Effect.forkScoped(
-      Effect.promise(() => probePublicStores({ stores, buckets: cache.snapshot(), log: say })),
-    );
 
     // (The schedule is forked below, after the finalizers — see why there.)
 

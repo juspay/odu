@@ -40,7 +40,13 @@ import {
   storePathBasename,
   storePathHash,
 } from "./narinfo";
-import { CACHE_MOUNT, PARTS_HEADER, UPLOAD_SESSION_HEADER } from "./paths";
+import {
+  CACHE_MOUNT,
+  ODU_BUCKET_FIELD,
+  ODU_ORIGIN_FIELD,
+  PARTS_HEADER,
+  UPLOAD_SESSION_HEADER,
+} from "./paths";
 import { DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES } from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
@@ -122,6 +128,130 @@ export async function resolveBucket(
     ),
     name: argument,
   };
+}
+
+/**
+ * WHAT A SUBSTITUTER SAYS ABOUT ITSELF — `odu cache push --cache <url>`.
+ *
+ * A consumer repository knows ONE fact about its cache: the URL its `nix.conf`
+ * substitutes from. Everything else it used to hard-code — the push origin and
+ * the bucket name — is now stated by the cache, in `nix-cache-info`, the file a
+ * Nix client fetches before anything else. It has to be stated rather than
+ * derived because reads come from the store (PLAN 2.8): `https://cache.kolu.dev`
+ * is an R2 domain that answers GET and takes no push at all.
+ *
+ * IT CARRIES THE BUCKET'S TOKEN. An anonymous read of a PRIVATE bucket is
+ * `404 no such bucket` — the cache refuses to confirm a private name to
+ * somebody who has not proved anything — so discovery without a credential
+ * would make exactly the buckets that need a token unpushable. The token is
+ * the same one the push that follows uses, resolved from the same places
+ * ({@link discoveryToken}), and a public bucket ignores it. It is the push's
+ * own authority sent one request earlier, so nothing is granted by this.
+ *
+ * WHAT THE TOKEN TRAVELS TO is the SUBSTITUTER the caller named, and the push
+ * then travels to the origin that file states. Naming a cache is trusting it.
+ *
+ * BOTH LINES OR NOTHING. A cache that answers a `nix-cache-info` without them
+ * is a cache this cannot push to — some other implementation, or an odu from
+ * before this — and guessing an origin from the substituter is how a push ends
+ * up at a URL nobody owns. The refusal names the URL it asked.
+ */
+export interface DescribedCache {
+  /** `Odu-Origin`: the daemon that takes the push. */
+  origin: string;
+  /** `Odu-Bucket`: which bucket at that daemon this substituter serves. */
+  bucket: string;
+}
+
+export async function describeCache(
+  substituter: string,
+  send: typeof fetch = fetch,
+  /** The bucket's token when this machine has one. Null is a legitimate
+   *  answer — a public bucket needs none — and a private one then refuses
+   *  with the sentence that says so. */
+  token: string | null = null,
+): Promise<DescribedCache> {
+  const url = `${substituter.trim().replace(/\/$/, "")}/nix-cache-info`;
+  let response: Response;
+  try {
+    response = await send(
+      url,
+      token === null ? {} : { headers: { authorization: `Bearer ${token}` } },
+    );
+  } catch (err) {
+    throw new Error(
+      `${url} could not be read (${err instanceof Error ? err.message : String(err)}) — ` +
+        `--cache takes the substituter URL your nix.conf uses, and this one did not answer`,
+    );
+  }
+  if (!response.ok) {
+    // A PRIVATE BUCKET IS A 404 TO A READER WITHOUT A TOKEN, and a 403 to one
+    // whose token cannot read it, so the status alone cannot tell "no such
+    // cache" from "not yours". What decides the next move is whether a token
+    // was sent at all, so that is what the sentence says.
+    const why =
+      token === null
+        ? "and no token was sent — a PRIVATE bucket answers its nix-cache-info to " +
+          "nobody. Set $ODU_CACHE_TOKEN (or --token-file), or check the URL"
+        : "for the token this machine holds — check the URL, and that the token " +
+          "may read this bucket";
+    throw new Error(`${url} answered ${response.status} ${why}`);
+  }
+  const text = await response.text();
+  const origin = infoField(text, ODU_ORIGIN_FIELD);
+  const bucket = infoField(text, ODU_BUCKET_FIELD);
+  if (origin === null || bucket === null) {
+    throw new Error(
+      `${url} does not say where it is pushed to: a cache odu can push to states ` +
+        `${ODU_ORIGIN_FIELD} and ${ODU_BUCKET_FIELD} there. Name the bucket and its ` +
+        `origin instead (\`odu cache push <bucket> --origin <url>\`), or upgrade the ` +
+        `odu that serves it`,
+    );
+  }
+  return { origin: normalizeOrigin(origin), bucket };
+}
+
+/**
+ * THE TOKEN DISCOVERY CARRIES — the push's own resolution, asked one origin
+ * earlier.
+ *
+ * `resolveToken` already is that order (`--token-file`, `$ODU_CACHE_TOKEN`,
+ * then the credential for an ORIGIN), and the only thing discovery has to
+ * decide is WHICH origin, because the push's own is the fact being
+ * discovered. It is the substituter's — where this request is going, and for
+ * a private bucket odu itself, since a private bucket is never store-fronted.
+ * So a machine that ran `odu cache login` against the cache it reads can
+ * discover it.
+ */
+export async function discoveryToken(
+  env: PushEnv,
+  substituter: string,
+  tokenFile: string | undefined,
+): Promise<string | null> {
+  let origin: string;
+  try {
+    const url = new URL(substituter);
+    origin = `${url.protocol}//${url.host}`;
+  } catch {
+    // Not a URL at all: the file and the variable still answer, and no
+    // credential is keyed under a name this is not.
+    origin = substituter;
+  }
+  return resolveToken(env, origin, tokenFile);
+}
+
+/** One field of a `nix-cache-info`, or null. The format is `Key: value` a line
+ *  at a time; the key is matched case-insensitively because the only cost of
+ *  doing so is nothing, and `\r` is stripped for the proxy that adds one. */
+function infoField(text: string, field: string): string | null {
+  for (const line of text.split("\n")) {
+    const at = line.indexOf(":");
+    if (at === -1) continue;
+    if (line.slice(0, at).trim().toLowerCase() !== field.toLowerCase()) continue;
+    const value = line.slice(at + 1).trim();
+    if (value !== "") return value;
+  }
+  return null;
 }
 
 /** The token, in the order the docs promise: `--token-file`, then
