@@ -7,7 +7,7 @@ Object stores: immutable bytes under opaque keys, on a local disk or in any S3-c
 | Module | `src/diskStore.ts` | `src/s3Store.ts` (signed by `src/s3sign.ts`) |
 | Objects at | `<dir>/objects/<key>` | `<bucket>/<key>`, path-style |
 | A put onto an existing key | refused with `exists` (`link` fails on an existing name) | refused with `exists` (`If-None-Match: *`; `412` lost, `409` retried) |
-| Facts (`size`, hex `sha256`) | a sidecar under `objects/.facts/` | `x-amz-meta-odu-size` / `-sha256` — the SIZE is the metadata's, never the HEAD's `content-length`: an edge in front of the service (Cloudflare over R2, for a compressible `content-type`) answers with `content-encoding` and no length |
+| Facts (`size`, hex `sha256`) | a sidecar under `objects/.facts/` | `x-amz-meta-odu-size` / `-sha256` — the SIZE is the metadata's; a HEAD that measured the object (no `content-encoding`) still checks it, and one an edge re-encoded (Cloudflare over R2, for a compressible `content-type`) carries no length to check with |
 | A large put | streamed to a temp file, then linked | multipart, `partSize` (8 MiB) parts, `parallelParts` (4) at once, bounded memory |
 | A read | the file from any offset, 64 KiB pulls | ranged GETs, 1 MiB windows, one prefetched; no HEAD — the first GET gives the size; a window shorter than its range fails the read |
 | `link(key, file, facts)` | yes: the file becomes the object, no copy | absent: put `Bun.file(file)` instead |

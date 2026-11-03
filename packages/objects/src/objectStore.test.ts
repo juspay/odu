@@ -206,6 +206,25 @@ describe("s3 object store: an object odu did not write", () => {
     await expect(facts).rejects.toBeInstanceOf(UnrecordedObject);
     await facts.catch((err: UnrecordedObject) => expect(err.key).toBe("main/nar/x.nar.zst"));
   });
+
+  it("is one whose bytes no longer measure the size it recorded, when the answer measured them", async () => {
+    const target = await gateway.bucket();
+    const store = s3ObjectStore({ target, partSize: PART });
+    const bytes = new TextEncoder().encode("the bytes the put recorded");
+    expect((await store.put("main/nar/y.nar.zst", new Blob([bytes]))).ok).toBe(true);
+    // THE BYTES REPLACED BEHIND THE STORE'S BACK, carrying the metadata of
+    // the object they displaced and a LENGTH that is not its own.
+    const head = await s3Fetch(target, "HEAD", "main/nar/y.nar.zst");
+    const meta = Object.fromEntries([...head.headers.entries()].filter(([name]) => name.startsWith("x-amz-meta-")));
+    const shorter = new TextEncoder().encode("fewer bytes");
+    const put = await s3Fetch(target, "PUT", "main/nar/y.nar.zst", {
+      headers: { ...meta, "content-length": String(shorter.length) },
+      body: shorter as Uint8Array<ArrayBuffer>,
+    });
+    expect(put.ok).toBe(true);
+    // A PLAIN ANSWER MEASURED THE OBJECT, so the record is still checked.
+    await expect(store.facts("main/nar/y.nar.zst")).rejects.toBeInstanceOf(UnrecordedObject);
+  });
 });
 
 describe("s3 object store: an edge that re-encodes the answer", () => {
