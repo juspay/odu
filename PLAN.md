@@ -1,8 +1,8 @@
 # Odu as a product: Nix cache + CI you run yourself
 
 Status: living, 2026-11-02.
-- Phase 1 and phases 2.1–2.4 are on master.
-- **Next is 2.5**, the staging fix.
+- Phase 1, phases 2.1–2.7 and 2.10 are on master.
+- **Next is 2.8**, reads leaving odu.
 - One step is one PR, and the order is a dependency order. There is no schedule.
 
 ## Contents
@@ -146,12 +146,12 @@ the read path wherever it can be, behind a board people want to use.
 | 2.2 | The object cache | ✅ #139, #140 |
 | 2.3 | Push from GitHub Actions | ✅ #142 |
 | 2.4 | Object storage | ✅ #143 |
-| 2.5 | Staging never refuses a valid NAR | next |
-| 2.6 | The board, redesigned | |
-| 2.7 | GC and pins on every store | |
+| 2.5 | Staging never refuses a valid NAR | ✅ #147 |
+| 2.6 | The board, redesigned | ✅ #146 |
+| 2.7 | GC and pins on every store | ✅ #145 |
 | 2.8 | Reads leave odu | |
 | 2.9 | Uploads go straight to the store | |
-| 2.10 | The admin CLI is retired | |
+| 2.10 | The admin CLI is retired | ✅ #144 |
 
 What each step delivers:
 - **2.1 ✅** `cache.kolu.dev` is live through a Cloudflare tunnel, with no open
@@ -162,11 +162,12 @@ What each step delivers:
   answer.[^action]
 - **2.4 ✅** A bucket lives on local disk or any S3 store (R2, AWS, Garage),
   and one contract suite proves both.[^objects] It's measured on the pod.[^bench]
-- **2.5 Staging never refuses a valid NAR.** Staging refuses some valid NARs
-  with `zstd exited 1`: under concurrent pushes, and every time for one small
-  fixed-output path.[^zstd] Find the root cause and fix it, and add a
-  regression test for both cases. A cache that refuses valid paths comes
-  before every feature.
+- **2.5 ✅** The pusher's `nix store dump-path | zstd` stream read its FIFO
+  non-blocking and took `EAGAIN` — "a writer is here, nothing yet" — for end
+  of file. A NAR small enough that zstd's only write and the pipeline's exit
+  land together was published as ZERO bytes, and the narinfo was then refused
+  with `zstd exited 1`.[^zstd] Both reported symptoms were that one cause, and
+  the disk/S3 split was a red herring: R2's first push refused the same paths.
 - **2.6 The board, redesigned.** One PR that ships the "Night shift" design
   system and moves every existing screen onto it.[^board]
   - **Theme:** dark by default and light from the same tokens. It follows the
@@ -436,10 +437,11 @@ Commits and PR bodies use the earlier names.
     names Cloudflare. The contract suite gains GC and pin cases, run on disk and
     on S3.
 
-[^zstd]: `narinfo upload answered 400: nar/<hash>.nar.zst: zstd exited 1`. It
-    happens under concurrent pushes, and deterministically for the 2 KB
-    fixed-output path `exec-path.c`: `localtest` refused it twice, `r2test`
-    accepted it. The evidence is on #142 and #143.
+[^zstd]: `narinfo upload answered 400: nar/<hash>.nar.zst: zstd exited 1`,
+    seen under concurrent pushes, for `exec-path.c` (952 B compressed) and for
+    `kolu-typecheck-2.2.0`, whose NAR is an empty file (95 B). The cause was
+    the pusher's FIFO read taking `EAGAIN` for EOF and publishing a NAR of
+    zero bytes; measured at 12–24 empty dumps in 640. Fixed in #147.
 
 [^reads]: How 2.8 works:
     - At push, odu writes `<hash>.narinfo` and `nar/<file>` as objects with

@@ -9,10 +9,21 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
+import { fifoStream } from "./fifo";
 import { narHashModuloHasher, nixDump, parsePathInfoTable, verifyNarFile } from "./store";
 import { contentAddressOf } from "./storePath";
 
@@ -119,6 +130,72 @@ describe("a NAR stream", () => {
       restore();
       rmSync(empty, { recursive: true, force: true });
     }
+  });
+
+  /**
+   * THE DEFECT, FORCED. A non-blocking FIFO read answers `EAGAIN` — "a writer
+   * holds me and has nothing this instant" — and the loop used to report that
+   * as a zero-byte read, which ends the stream as soon as the writer has
+   * ended. Both are true at once for any NAR small enough that zstd's only
+   * write and the pipeline's exit land in the same breath.
+   */
+  it("keeps reading when a writer has nothing YET", async () => {
+    let fifo = "";
+    let fd = -1;
+    let asked = 0;
+    const reader = fifoStream((path) => {
+      fifo = path;
+      // O_RDWR never blocks and counts as a writer, so the FIFO has one from
+      // the first poll — which is what makes a read with nothing in it answer
+      // EAGAIN rather than 0.
+      fd = openSync(path, constants.O_RDWR);
+      return {
+        ended: () => {
+          asked += 1;
+          return { ok: true };
+        },
+        stop: () => {},
+      };
+    }).getReader();
+    try {
+      writeSync(fd, "first");
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
+      // A REAL CLOCK, deliberately: the loop polls the OS every few ms, and
+      // the defect was a race between that syscall and a process exit. No fake
+      // timer drives a FIFO. The old loop ended the stream on the first of
+      // these polls, because it took EAGAIN for end of file.
+      const late = reader.read();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      writeSync(fd, "late");
+      expect(new TextDecoder().decode((await late).value)).toBe("late");
+      // And it never even asked: while a writer holds the FIFO, how that
+      // writer ended is not a question the reader has any business putting.
+      expect(asked).toBe(0);
+      closeSync(fd);
+      fd = -1;
+      expect((await reader.read()).done).toBe(true);
+      // The node belongs to the stream, and is gone before the consumer is
+      // told the stream ended.
+      expect(existsSync(fifo)).toBe(false);
+    } finally {
+      if (fd !== -1) closeSync(fd);
+    }
+  });
+
+  /**
+   * WHAT A REFUSAL HAS TO SAY. `zstd exited 1` is the same sentence for an
+   * empty upload, a truncated one and a corrupt one, and it is the sentence
+   * that cost a day of guessing which. zstd knows; the refusal repeats it.
+   */
+  it("refuses an empty upload with the decompressor's own reason", async () => {
+    scratch = mkdtempSync(join(tmpdir(), "odu-cache-nar-"));
+    const path = join(scratch, "nar.zst");
+    writeFileSync(path, "");
+    const checked = await verifyNarFile(path, "zstd");
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.message).toContain("zstd exited 1");
+    expect(checked.message).toContain("unexpected end of");
   });
 });
 
