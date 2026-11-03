@@ -102,7 +102,12 @@ describe("a bucket's store", () => {
   const create = { name: "main", public: true, retentionDays: 30, upstreamKeys: [] };
 
   it("is local unless named, and a name nobody declared is refused", async () => {
-    const cache = createCache({ stateRoot: scratch, stores: localStores(scratch), rootToken: "root" });
+    const cache = createCache({
+      stateRoot: scratch,
+      stores: localStores(scratch),
+      rootToken: "root",
+      publicOrigin: "http://cache.test",
+    });
     expect(await cache.admin.create({ ...asRoot("root"), ...create })).toMatchObject({
       ok: true,
       value: { store: "local" },
@@ -119,13 +124,19 @@ describe("a bucket's store", () => {
     const declared = createCache({
       stateRoot: scratch,
       rootToken: "root",
+      publicOrigin: "http://cache.test",
       stores: new Map([...localStores(scratch), ["nas", diskObjectStore({ dir: join(scratch, "nas") })]]),
     });
     expect(await declared.admin.create({ ...asRoot("root"), ...create, store: "nas" })).toMatchObject({ ok: true });
     expect(await declared.boot()).toMatchObject({ ok: true });
     await declared.close();
 
-    const forgotten = createCache({ stateRoot: scratch, stores: localStores(scratch), rootToken: "root" });
+    const forgotten = createCache({
+      stateRoot: scratch,
+      stores: localStores(scratch),
+      rootToken: "root",
+      publicOrigin: "http://cache.test",
+    });
     const booted = await forgotten.boot();
     expect(booted).toEqual({
       ok: false,

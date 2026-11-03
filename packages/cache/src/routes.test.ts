@@ -26,7 +26,7 @@ import { base32Bytes, storePathHashOf } from "./storePath";
 import { type Cache, createCache } from "./cache";
 import { openCacheRepo } from "./db";
 import { CACHE_MOUNT } from "./paths";
-import { NIX_CACHE_INFO } from "./staging";
+import { nixCacheInfo } from "./staging";
 import { cacheRoutes } from "./routes";
 import { FakeStore, hashOf } from "../test/fakeStore";
 import { type Gateway, startGateway } from "@odu/objects/testing";
@@ -131,6 +131,9 @@ async function harness(
   const cache = createCache({
     stateRoot: scratch,
     rootToken: ROOT,
+    // The DAEMON's own origin, which every bucket's `nix-cache-info` names.
+    // The same string the board is at here, as it is on a real deployment.
+    publicOrigin: boardOrigin,
     legacyStore: { dump: (path) => store.dump(path) },
     now: () => NOW,
     log,
@@ -345,13 +348,24 @@ describe("nix-cache-info", () => {
     const response = await h.fetch("/main/nix-cache-info");
     expect(response.status).toBe(200);
     const text = await response.text();
-    expect(text).toBe(NIX_CACHE_INFO);
+    expect(text).toBe(nixCacheInfo({ origin: "https://odu.example.org", bucket: "main" }));
     // THE NUMBER, not just the constant: 41 is one WORSE than
     // cache.nixos.org's 40, so an upstream-signed path this bucket also
     // holds is fetched from the CDN whatever order a client's
     // `substituters` are in. At 40 the two are equal, and equal means
     // whoever wrote the `nix.conf` decides which uplink pays.
     expect(text).toContain("Priority: 41\n");
+    await h.dispose();
+  });
+
+  it("names the daemon a push goes to, and the bucket it is pushing to", async () => {
+    // THE WHOLE POINT OF THE TWO EXTRA LINES: reads come from the store, so a
+    // client holding only a substituter URL cannot derive where a push is
+    // taken. `odu cache push --cache <url>` reads exactly these.
+    const h = await harness(true);
+    const text = await (await h.fetch("/main/nix-cache-info")).text();
+    expect(text).toContain("Odu-Origin: https://odu.example.org\n");
+    expect(text).toContain("Odu-Bucket: main\n");
     await h.dispose();
   });
 
@@ -503,6 +517,7 @@ describe("the auth matrix", () => {
       stateRoot: scratch,
       stores: localStores(scratch),
       rootToken: ROOT,
+      publicOrigin: "https://odu.example.org",
       legacyStore: { dump: (path) => h.store.dump(path) },
       now: () => NOW + 10 * 24 * 60 * 60 * 1000,
     });
@@ -1517,7 +1532,12 @@ describe("a bucket's domain", () => {
 
     const info = await host("/nix-cache-info");
     expect(info.status).toBe(200);
-    expect(await info.text()).toContain("WantMassQuery");
+    const infoText = await info.text();
+    expect(infoText).toContain("WantMassQuery");
+    // THE DAEMON'S ORIGIN, NOT THE NAME THE READER ARRIVED ON. A bucket's
+    // domain may be a store's own, which answers GET and takes no push: the
+    // address a pusher needs is odu's.
+    expect(infoText).toBe(nixCacheInfo({ origin: "https://odu.example.org", bucket: "main" }));
 
     const narinfo = await host(`/${hashOf(HELLO)}.narinfo`);
     expect(narinfo.status).toBe(200);

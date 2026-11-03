@@ -13,11 +13,18 @@
 #   - uses: actions/checkout@<sha>
 #   - uses: juspay/odu/.github/actions/push@<sha>
 #     with:
-#       origin: <your bucket's substituter URL>
-#       bucket: <bucket>
+#       cache: <your bucket's substituter URL — the SAME line as above>
 #       token: <your ODU_CACHE_TOKEN secret, as a workflow expression>
 #       pin: <true on the ref you want held — the README spells the one-line
 #             GitHub expression; it cannot be written in this file>
+#
+# **ONE FACT, NOT THREE.** `cache:` is the substituter URL a repository
+# already has in its `nix.conf`; the push origin and the bucket name are read
+# off that cache's own `nix-cache-info`, which states them (`Odu-Origin`,
+# `Odu-Bucket`). They cannot be derived any more: reads come from the store
+# (PLAN 2.8), so `https://cache.kolu.dev/kolu-r2` is an R2 domain that answers
+# GET and takes no push at all. A cache that does not state them refuses this
+# step with a sentence naming the URL it asked.
 #
 # **The pusher is this action's own `odu`.** It is built from the checkout the
 # action itself runs out of — `$GITHUB_ACTION_PATH/../../..` — so pinning the
@@ -96,14 +103,13 @@ branding:
   color: purple
 
 inputs:
-  origin:
+  cache:
     description: >-
-      The bucket's URL — the substituter URL a bucket page prints, e.g.
-      https://cache.kolu.dev. A bucket's own domain, or the instance's origin,
-      both work: the action asks for /cache/<bucket>/... at it.
-    required: true
-  bucket:
-    description: The bucket's name, e.g. kolu.
+      The SUBSTITUTER URL your nix.conf substitutes from, e.g.
+      https://cache.kolu.dev/kolu-r2 — the one line this action needs. It
+      reads that cache's nix-cache-info for the push origin (Odu-Origin) and
+      the bucket (Odu-Bucket), so neither is spelled here and neither can
+      drift. A cache that states neither is refused, naming the URL.
     required: true
   token:
     description: >-
@@ -139,8 +145,7 @@ runs:
       # Every input rides as ENVIRONMENT, not interpolated into the script: a
       # `paths:` value cannot become shell, and a token cannot become shell.
       env:
-        ODU_PUSH_ORIGIN: ${{ inputs.origin }}
-        ODU_PUSH_BUCKET: ${{ inputs.bucket }}
+        ODU_PUSH_CACHE: ${{ inputs.cache }}
         ODU_PUSH_TOKEN: ${{ inputs.token }}
         ODU_PUSH_PATHS: ${{ inputs.paths }}
         ODU_PUSH_PIN: ${{ inputs.pin }}

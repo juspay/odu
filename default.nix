@@ -64,9 +64,18 @@ let
           else { repo = "juspay/odu"; branch = "ca-index"; };
         # THE DECLARATION NAMES ITS PUSHER, so the publish job pushes to odu's
         # OWN cache: the first substituter is `cache.kolu.dev`, and its bucket
-        # is `kolu`. kolu#2334 added this field; a binder that leaves it null
-        # bakes the declaration it always did.
-        pusher = { kind = "odu"; bucket = "kolu"; };
+        # is `kolu-r2` — the one the `nix-cache` workflow pushes to now that
+        # reads are served from R2.
+        #
+        # THE BUCKET IS STILL SPELLED HERE ONLY BECAUSE KOLU STILL ASKS FOR
+        # IT. The cache states its own bucket and push origin in
+        # `nix-cache-info` (`Odu-Origin`/`Odu-Bucket`), which is how
+        # `odu cache push --cache <substituter>` and this repository's push
+        # action find them — but kolu's pinned `binary-cache.nix` asserts the
+        # pusher is EXACTLY `{ kind, bucket }` (an `origin` is refused at
+        # evaluation), so this stays until kolu's follow-up PR drops the field
+        # and this becomes `pusher = { kind = "odu"; };`.
+        pusher = { kind = "odu"; bucket = "kolu-r2"; };
         extraFiles = { "commit-hash" = commitHash; };
       };
 

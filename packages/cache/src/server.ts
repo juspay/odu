@@ -81,7 +81,6 @@ import {
   cacheInfoKey,
   narFileKey,
   narinfoKey,
-  NIX_CACHE_INFO,
   publicBucketUrl,
   publicObjectUrl,
 } from "./staging";
@@ -284,6 +283,11 @@ export interface UnreachableStore {
 export async function probePublicStores(input: {
   stores: readonly CacheStore[];
   buckets: readonly { name: string; public: boolean; store: string }[];
+  /** What that bucket's `nix-cache-info` should say — the cache's own
+   *  rendering, which carries this daemon's origin and the bucket's name, so
+   *  a store serving a STALE copy of it is as unreachable as one serving
+   *  nothing. */
+  info: (bucket: string) => string;
   log?: (event: string, fields: Record<string, unknown>) => void;
   send?: typeof fetch;
 }): Promise<readonly UnreachableStore[]> {
@@ -298,7 +302,7 @@ export async function probePublicStores(input: {
     const url = publicObjectUrl(store.publicUrl, cacheInfoKey(bucket.name));
     const response = await send(url).catch(() => null);
     const body = response === null ? "" : await response.text().catch(() => "");
-    if (response !== null && response.status === 200 && body === NIX_CACHE_INFO) continue;
+    if (response !== null && response.status === 200 && body === input.info(bucket.name)) continue;
     const refusal = { store: store.name, url, status: response?.status ?? null };
     unreachable.push(refusal);
     input.log?.("cache.store.public.unreachable", refusal);
@@ -935,6 +939,11 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     const cache = createCache({
       stateRoot: stateDir,
       rootToken,
+      // WHERE A PUSH IS AIMED, which the cache states in every bucket's
+      // `nix-cache-info` (PLAN 2.8). The same string the row builds `pushUrl`
+      // and a path-form substituter from: the proxy's origin when one stands
+      // in front, the bound one otherwise.
+      publicOrigin: publicOrigin ?? boundOrigin,
       // THE STORES AS VALUES, built once from what the operator declared: the
       // cache holds them by name and never asks what kind they are.
       stores: objectStores(declared, join(stateDir, "cache")),
@@ -1080,7 +1089,14 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       log: say,
     });
     yield* Effect.forkScoped(
-      Effect.promise(() => probePublicStores({ stores, buckets: cache.snapshot(), log: say })),
+      Effect.promise(() =>
+        probePublicStores({
+          stores,
+          buckets: cache.snapshot(),
+          info: (bucket) => cache.cacheInfoText(bucket),
+          log: say,
+        }),
+      ),
     );
 
     // (The schedule is forked below, after the finalizers — see why there.)

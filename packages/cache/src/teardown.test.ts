@@ -145,7 +145,12 @@ describe("the cache row's teardown", () => {
     ) as Record<string, { narHash: string; narSize: number }> | { narHash: string; narSize: number }[];
     const facts = Array.isArray(info) ? info[0] : Object.values(info)[0];
     if (facts === undefined) throw new Error("nix path-info answered nothing");
-    const cache = createCache({ stateRoot: scratch, stores: localStores(scratch), rootToken: "root-token" });
+    const cache = createCache({
+      stateRoot: scratch,
+      stores: localStores(scratch),
+      rootToken: "root-token",
+      publicOrigin: "http://cache.test",
+    });
     await cache.admin.create({
       ...asRoot("root-token"),
       name: "main",
@@ -217,6 +222,7 @@ describe("the cache row's teardown", () => {
     const before = createCache({
       stateRoot: scratch,
       rootToken: "root-token",
+      publicOrigin: "http://cache.test",
       stores: new Map([...localStores(scratch), ["nas", diskObjectStore({ dir: join(scratch, "nas") })]]),
     });
     await before.admin.create({ ...asRoot("root-token"), name: "main", public: true, retentionDays: 30, upstreamKeys: [], store: "nas" });

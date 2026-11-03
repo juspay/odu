@@ -42,6 +42,7 @@ const cacheWith = (): Cache =>
   createCache({
     stateRoot: scratch,
     rootToken: ROOT,
+    publicOrigin: "https://odu.example.org",
     stores: localStores(scratch),
     now: () => clock,
   });

@@ -6,8 +6,7 @@
 #
 #   - uses: juspay/odu/.github/actions/push@<sha>
 #     with:
-#       origin: https://cache.kolu.dev
-#       bucket: kolu
+#       cache: https://cache.kolu.dev/kolu-r2
 #       token: ${{ secrets.ODU_CACHE_TOKEN }}
 #       pin: ${{ github.ref_name == github.event.repository.default_branch }}
 #
@@ -119,16 +118,18 @@ trim() {
 # (`repo_root` below) and the two helpers beside it are addressed from here.
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-origin=$(trim "${ODU_PUSH_ORIGIN:-}")
-origin=${origin%/}
-bucket=$(trim "${ODU_PUSH_BUCKET:-}")
+# THE ONE FACT THIS ACTION IS GIVEN: the substituter URL. Where a push is
+# TAKEN and which bucket it lands in are the cache's to state — `odu cache
+# push --cache` reads them off its `nix-cache-info` — because reads come from
+# the store now and a read address is no longer a push address.
+cache=$(trim "${ODU_PUSH_CACHE:-}")
+cache=${cache%/}
 token=$(trim "${ODU_PUSH_TOKEN:-}")
 pin=$(trim "${ODU_PUSH_PIN:-}")
 requested=$(printf '%s' "${ODU_PUSH_PATHS:-}" | tr -s '[:space:]' '\n' | sed '/^$/d')
 event=${GITHUB_EVENT_NAME:-local}
 
-[ -n "$origin" ] || fail "odu push: the \`origin:\` input is empty — give the bucket's URL, e.g. https://cache.kolu.dev."
-[ -n "$bucket" ] || fail "odu push: the \`bucket:\` input is empty — give the bucket's name, e.g. kolu."
+[ -n "$cache" ] || fail "odu push: the \`cache:\` input is empty — give the substituter URL your nix.conf uses, e.g. https://cache.kolu.dev/kolu-r2."
 
 command -v nix >/dev/null 2>&1 ||
   fail "odu push: \`nix\` is not on PATH, and this action never installs it. Install Nix in an earlier step — with the bucket's \"GitHub Actions\" block as its \`nix_conf\` — and run this action after it."
@@ -264,7 +265,7 @@ if [ -z "$token" ]; then
     fail "odu push: no token — \`token:\` is empty and this is a \`push\` event, which must publish its closure. Set the input from a repository secret: odu's own workflow reads \`secrets.ODU_CACHE_TOKEN\`, and a bucket page mints a write token once."
   fi
   say "odu push: no token, so nothing was pushed. Built $count store paths; a \`$event\` event is not required to publish."
-  summary "### Cache push — \`$bucket\` on \`$origin\`
+  summary "### Cache push — \`$cache\`
 
 **Built, pushed nothing.** No token: a \`$event\` event is not required to publish, so this step built $count store path(s) and stopped."
   if [ -n "$pin_requested" ]; then
@@ -299,7 +300,7 @@ set +e
 # `${pin_args[@]+…}` and not `"${pin_args[@]}"`: a macOS runner's bash is 3.2,
 # where an empty array expanded under `set -u` is an unbound variable. The pin
 # NAME is argv's business — it is not a secret; the token is still never there.
-ODU_CACHE_TOKEN="$token" "$odu" cache push "$bucket" --origin "$origin" --output json \
+ODU_CACHE_TOKEN="$token" "$odu" cache push --cache "$cache" --output json \
   ${pin_args[@]+"${pin_args[@]}"} \
   "${targets[@]}" > "$result"
 status=$?
@@ -323,7 +324,7 @@ substituter=$(jq -r '.substituter' "$result")
 pinned_name=$(jq -r '.pinned.name // empty' "$result")
 pinned_paths=$(jq -r '.pinned.rootPaths // empty' "$result")
 
-summary "### Cache push — \`$bucket\` on \`$origin\`
+summary "### Cache push — \`$cache\`
 
 | pushed | already present | skipped (upstream) | failed |
 | ---: | ---: | ---: | ---: |
@@ -382,7 +383,7 @@ xargs -n 2 -P 8 "$here/check.sh" < "$checks" > "$checked" || true
 
 answered=$(wc -l < "$checked" | tr -d ' ')
 if [ "$answered" != "$expected" ]; then
-  fail "odu push: the proof asked $expected paths and got $answered answers — the origin or curl stopped mid-check."
+  fail "odu push: the proof asked $expected paths and got $answered answers — the substituter or curl stopped mid-check."
 fi
 
 refused=$(grep '^FAIL ' "$checked" || true)

@@ -49,6 +49,7 @@ afterEach(() => {
 
 function cacheWith(rootToken: string | null): Cache {
   return createCache({
+    publicOrigin: "http://cache.test",
     stateRoot: scratch,
     stores: localStores(scratch),
     rootToken,
@@ -513,6 +514,7 @@ describe("gc and a concurrent push", () => {
     const cache = createCache({
       stateRoot: scratch,
       rootToken: ROOT,
+      publicOrigin: "http://cache.test",
       now: () => NOW,
       stores: new Map([
         [
@@ -803,6 +805,7 @@ describe("CA is proved from the path", () => {
         stateRoot: scratch,
         stores: localStores(scratch),
         rootToken: ROOT,
+        publicOrigin: "http://cache.test",
         now: () => NOW,
         log: (event, fields) => logs.push(`${event} ${JSON.stringify(fields)}`),
       });
@@ -876,6 +879,7 @@ describe("CA is proved from the path", () => {
       stateRoot: scratch,
       stores: localStores(scratch),
       rootToken: ROOT,
+      publicOrigin: "http://cache.test",
       now: () => NOW,
       migrationFreeFloor: 0,
       legacyStore: { dump: () => bytesStream(payload.bytes) },
@@ -915,6 +919,7 @@ describe("CA is proved from the path", () => {
       stateRoot: scratch,
       stores: localStores(scratch),
       rootToken: ROOT,
+      publicOrigin: "http://cache.test",
       now: () => NOW,
       migrationFreeFloor: 0,
       legacyStore: {
@@ -975,6 +980,7 @@ describe("CA is proved from the path", () => {
       stateRoot: scratch,
       stores: localStores(scratch),
       rootToken: ROOT,
+      publicOrigin: "http://cache.test",
       now: () => NOW,
       migrationFreeFloor: 0,
       legacyStore: { dump: () => bytesStream(payload) },
@@ -1013,6 +1019,7 @@ describe("CA is proved from the path", () => {
       stateRoot: scratch,
       stores: localStores(scratch),
       rootToken: ROOT,
+      publicOrigin: "http://cache.test",
       now: () => NOW,
       migrationFreeFloor: 0,
       legacyStore: {
@@ -1049,6 +1056,7 @@ describe("CA is proved from the path", () => {
       stateRoot: scratch,
       stores: localStores(scratch),
       rootToken: ROOT,
+      publicOrigin: "http://cache.test",
       now: () => NOW,
       migrationFreeFloor: 0,
       legacyStore: {
@@ -1089,6 +1097,7 @@ describe("CA is proved from the path", () => {
       stateRoot: scratch,
       stores: localStores(scratch),
       rootToken: ROOT,
+      publicOrigin: "http://cache.test",
       now: () => NOW,
       migrationFreeFloor: 1024,
       migrationRetryMs: 1,

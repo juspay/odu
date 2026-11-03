@@ -94,8 +94,11 @@ jobs:
       - name: Build odu's outputs, and push their closures
         uses: ./.github/actions/push
         with:
-          origin: https://cache.kolu.dev
-          bucket: kolu
+          # ONE FACT: the substituter. The push origin and the bucket are read
+          # off `https://cache.kolu.dev/kolu-r2/nix-cache-info`, which states
+          # them (`Odu-Origin`, `Odu-Bucket`) — they cannot be derived from a
+          # read address now that reads are served by R2.
+          cache: https://cache.kolu.dev/kolu-r2
           token: ${{ secrets.ODU_CACHE_TOKEN }}
           # ODU'S MASTER CLOSURE, HELD — and the WHEN is this workflow's, not
           # the action's: a push to master re-points the pin at what it just

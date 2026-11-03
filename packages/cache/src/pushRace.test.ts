@@ -91,7 +91,12 @@ beforeAll(async () => {
   if (!LINUX) return;
   dir = mkdtempSync(join(tmpdir(), "odu-push-race-"));
   const stateRoot = join(dir, "state");
-  const cache = createCache({ stateRoot, stores: localStores(stateRoot), rootToken: "root" });
+  const cache = createCache({
+    stateRoot,
+    stores: localStores(stateRoot),
+    rootToken: "root",
+    publicOrigin: "http://cache.test",
+  });
   const created = await cache.admin.create({
     ...asRoot("root"),
     name: "main",

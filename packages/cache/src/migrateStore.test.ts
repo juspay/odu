@@ -129,6 +129,7 @@ async function subject(input?: { dir?: string; far?: ObjectStore }): Promise<Sub
   const cache = createCache({
     stateRoot: dir,
     rootToken: ROOT,
+    publicOrigin: "http://cache.test",
     stores: new Map<string, ObjectStore>([
       ["local", local],
       ["far", far],

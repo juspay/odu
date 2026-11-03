@@ -53,7 +53,7 @@ import {
   PUSH_API,
   UPLOAD_SESSION_HEADER,
 } from "./paths";
-import { isUploadSession, NIX_CACHE_INFO } from "./staging";
+import { isUploadSession } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
 import {
@@ -632,12 +632,18 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     // answers both requests.
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket`, consumerFacts),
 
+    /** `nix-cache-info` under the mount. The text is the CACHE's — the three
+     *  lines a client reads plus the two `Odu-` lines naming this daemon and
+     *  this bucket — so the route and the object in the store say the same
+     *  thing. */
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {
         const bucket = yield* param("bucket");
         const admitted = admit(cache, request, bucket, "read");
         if (!admitted.ok) return admitted.response;
-        return HttpServerResponse.text(NIX_CACHE_INFO, { contentType: "text/plain" });
+        return HttpServerResponse.text(cache.cacheInfoText(admitted.bucket.name), {
+          contentType: "text/plain",
+        });
       }),
     ),
 
@@ -758,12 +764,16 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
     // request whose `Host` names no bucket is a plain 404, which is exactly
     // what a wrong name deserves.
 
-    /** `nix-cache-info` at a bucket's domain. */
+    /** `nix-cache-info` at a bucket's domain. The same text the mount answers:
+     *  `Odu-Origin` is the DAEMON's, never the domain the reader arrived on,
+     *  because that name may be a store's and take no push at all. */
     HttpRouter.add("GET", "/nix-cache-info", (request) =>
       Effect.gen(function* () {
         const admitted = admitByHost(cache, request, "read");
         if (!admitted.ok) return admitted.response;
-        return HttpServerResponse.text(NIX_CACHE_INFO, { contentType: "text/plain" });
+        return HttpServerResponse.text(cache.cacheInfoText(admitted.bucket.name), {
+          contentType: "text/plain",
+        });
       }),
     ),
 

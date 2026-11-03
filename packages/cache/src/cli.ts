@@ -40,7 +40,7 @@ import { readDoor } from "@odu/cordis/services";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { Effect } from "effect";
 import { CACHE_MOUNT } from "./paths";
-import { normalizeOrigin, pushToCache, saveCredential } from "./push";
+import { describeCache, normalizeOrigin, pushToCache, saveCredential } from "./push";
 import {
   CACHE_KEY,
   CacheRefused,
@@ -86,10 +86,16 @@ use <bucket>                  the nix.conf settings, the nixConfig block and the
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
 push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [-o json]
+push --cache <substituter> <path>…
                               upload only the paths the bucket is missing.
                               Talks to the cache directly, from HERE. A NAR
                               larger than --part-size (64 MiB) is sent in parts,
                               each retried on its own.
+                              --cache takes the SUBSTITUTER URL a nix.conf
+                              already has: the cache names its own push origin
+                              and bucket in nix-cache-info, so a workflow keeps
+                              one fact instead of three. Exclusive with
+                              <bucket> --origin
                               --pin re-points that named pin at the closure
                               this push landed, so garbage collection keeps it.
                               The write token is the authority; nothing is
@@ -349,24 +355,69 @@ async function pushCommand(rest: string[]): Promise<number> {
       concurrency: { type: "string" },
       "part-size": { type: "string" },
       pin: { type: "string" },
+      cache: { type: "string" },
       origin: originOption,
       output: outputOption,
     },
   });
-  const [bucket, ...paths] = positionals;
-  if (bucket === undefined || paths.length === 0) {
-    process.stderr.write(`odu: cache push needs a bucket and at least one path\n${CACHE_USAGE}`);
-    return 1;
-  }
   const json = values.output === "json";
+  // ── WHERE THIS PUSH IS AIMED ────────────────────────────────────────────
+  //
+  // TWO SPELLINGS, MUTUALLY EXCLUSIVE, because they answer one question from
+  // opposite ends. `--cache <substituter>` is the single fact a consumer
+  // repository already has — the URL in its `nix.conf` — and the cache states
+  // the rest in its `nix-cache-info`. `<bucket> --origin <url>` is a person in
+  // a shell naming both, which stays: a person has them in hand, and a cache
+  // that predates this says nothing about itself.
+  const asked = values.cache;
+  let bucket: string;
+  let origin = values.origin;
+  let paths: string[];
+  if (asked !== undefined) {
+    if (values.origin !== undefined) {
+      process.stderr.write(
+        "odu: --cache and --origin name the same thing twice — --cache reads the " +
+          "push origin from the cache itself\n",
+      );
+      return 1;
+    }
+    if (positionals.length === 0) {
+      process.stderr.write(`odu: cache push --cache needs at least one path\n${CACHE_USAGE}`);
+      return 1;
+    }
+    try {
+      const facts = await describeCache(asked);
+      bucket = facts.bucket;
+      origin = facts.origin;
+      // THE DISCOVERY, SAID OUT LOUD on the human path: a push that resolved a
+      // URL to somewhere unexpected should be readable in the log of the job
+      // that ran it. `--output json` keeps stdout the answer and stderr quiet.
+      if (!json) {
+        process.stderr.write(`${asked} is bucket "${facts.bucket}" on ${facts.origin}\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`odu: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+    paths = positionals;
+  } else {
+    const [named, ...rest] = positionals;
+    if (named === undefined || rest.length === 0) {
+      process.stderr.write(`odu: cache push needs a bucket and at least one path\n${CACHE_USAGE}`);
+      return 1;
+    }
+    bucket = named;
+    paths = rest;
+  }
   try {
     const summary = await pushToCache({
       bucket,
       paths,
       env: process.env,
       // An EXPLICIT origin, which beats a stored credential: a machine logged
-      // in to one cache must still be able to push to a second.
-      ...(values.origin === undefined ? {} : { origin: values.origin }),
+      // in to one cache must still be able to push to a second. With `--cache`
+      // it is the origin the cache named.
+      ...(origin === undefined ? {} : { origin }),
       ...(values["token-file"] === undefined ? {} : { tokenFile: values["token-file"] }),
       ...(values.concurrency === undefined
         ? {}
