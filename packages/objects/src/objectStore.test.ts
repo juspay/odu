@@ -208,6 +208,52 @@ describe("s3 object store: an object odu did not write", () => {
   });
 });
 
+describe("s3 object store: an edge that re-encodes the answer", () => {
+  /**
+   * CLOUDFLARE IN FRONT OF R2, measured on `cache.kolu.dev`: a HEAD of a
+   * `text/plain` object from a client that accepts an encoding (Bun's `fetch`
+   * sends `accept-encoding` by default) comes back with `content-encoding`
+   * and NO `content-length` — while the `x-amz-meta-*` the store wrote are
+   * still there. Everything else is the gateway's own answer.
+   */
+  const reencoding: typeof fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const response = await fetch(url as string | URL, init);
+    if (init?.method !== "HEAD" || !response.ok) return response;
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    headers.set("content-encoding", "gzip");
+    return new Response(null, { status: response.status, headers });
+  }) as typeof fetch;
+
+  /** `nix-cache-info` is the one object of the protocol whose content type an
+   *  edge compresses, which is why it alone was refused (#151). */
+  const KEY = "main/nix-cache-info";
+  const text = "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n";
+  const bytes = new TextEncoder().encode(text);
+
+  it("is an object with facts, not one this store did not write", async () => {
+    const target = await gateway.bucket();
+    const written = s3ObjectStore({ target, partSize: PART });
+    expect(await written.put(KEY, new Blob([bytes]), factsOf(bytes), { contentType: "text/plain" })).toEqual({
+      ok: true,
+      facts: factsOf(bytes),
+    });
+
+    const store = s3ObjectStore({ target, partSize: PART, send: reencoding });
+    // THE RECORD ANSWERS, not the length of a response that carries no bytes.
+    expect(await store.facts(KEY)).toEqual(factsOf(bytes));
+    expect(await store.head(KEY)).toBe(bytes.length);
+    // AND THE REWRITE PATH WORKS: a put of new text over the key is refused
+    // with the kept object's facts, which is how the backfill learns the
+    // stored text is stale. It used to throw `UnrecordedObject` instead.
+    const next = new TextEncoder().encode(`${text}Odu-Origin: https://odu.example\n`);
+    expect(await store.put(KEY, new Blob([next]), factsOf(next), { contentType: "text/plain" })).toEqual({
+      ok: false,
+      refusal: { kind: "exists", key: KEY, facts: factsOf(bytes) },
+    });
+  });
+});
+
 describe("s3 object store: a put killed mid-upload", () => {
   /** The keys of every incomplete multipart upload in the bucket. */
   const uploadsIn = async (target: S3Target): Promise<string[]> => {
