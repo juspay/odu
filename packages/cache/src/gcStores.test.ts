@@ -24,7 +24,7 @@ import { diskObjectStore, s3ObjectStore, type ObjectStore } from "@odu/objects";
 import { type Gateway, startGateway } from "@odu/objects/testing";
 import { type Cache, createCache } from "./cache";
 import { base32 } from "./narinfo";
-import { objectKey } from "./staging";
+import { cacheInfoKey, narinfoKey, objectKey } from "./staging";
 import { storePathHash } from "./narinfo";
 import { asRoot } from "./testlib";
 
@@ -96,8 +96,26 @@ async function push(
  *  cannot drift from staging. */
 const keyFor = (storePath: string): string => objectKey("main", nar(storePath).narHash, "none");
 
+/** The key the path's NARINFO OBJECT lives at (PLAN 2.8): a push writes the
+ *  signed text beside the bytes so a store can serve the pair without odu,
+ *  and a collection that took the bytes must take this too — a narinfo left
+ *  behind is a client told to fetch a NAR that is gone. */
+const narinfoFor = (storePath: string): string => narinfoKey("main", storePathHash(storePath));
+
+/** The one key a bucket holds that belongs to no path. It is written when the
+ *  bucket is created and no collection may touch it: a bucket a collection
+ *  emptied is still a cache, and a Nix client reads this file first. */
+const CACHE_INFO = cacheInfoKey("main");
+
+/** Everything under the bucket's prefix, sorted — the NARs, their narinfos and
+ *  `nix-cache-info`. */
 const keysOf = async (objects: ObjectStore): Promise<string[]> =>
   (await objects.list("main")).map((entry) => entry.key).sort();
+
+/** What the store should hold for a set of surviving paths: each one's bytes
+ *  and narinfo, plus the bucket's `nix-cache-info`. */
+const keysOfPaths = (...storePaths: readonly string[]): string[] =>
+  [CACHE_INFO, ...storePaths.flatMap((path) => [keyFor(path), narinfoFor(path)])].sort();
 
 /**
  * The cases. One function, two stores — see this file's header.
@@ -134,7 +152,14 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       // what a pin promises, not a path.
       expect(cache.narinfoText(bucket, storePathHash(kept))).not.toBeNull();
       expect(cache.narinfoText(bucket, storePathHash(child))).not.toBeNull();
-      expect(await keysOf(objects)).toEqual([keyFor(kept), keyFor(child)].sort());
+      // WHAT 2.8 ADDED, asserted rather than tolerated: a path's NARINFO
+      // OBJECT leaves with its bytes, and the survivors' stay. A store that
+      // serves the pair on its own has no row to consult, so a narinfo left
+      // behind would point every client at a NAR the collection took.
+      expect(await keysOf(objects)).toEqual(keysOfPaths(kept, child));
+      expect(await objects.head(narinfoFor(gone))).toBeNull();
+      expect(await objects.head(narinfoFor(kept))).not.toBeNull();
+      expect(await objects.head(narinfoFor(child))).not.toBeNull();
       await dispose();
     });
 
@@ -145,7 +170,7 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "release", paths: [held] });
       travel(100 * DAY);
       await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
-      expect(await keysOf(objects)).toEqual([keyFor(held)]);
+      expect(await keysOf(objects)).toEqual(keysOfPaths(held));
 
       const listed = await cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" });
       expect(listed).toMatchObject({ ok: true });
@@ -155,7 +180,10 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
         await cache.admin.pinDelete({ ...asRoot(ROOT), bucket: "main", name: "release" }),
       ).toMatchObject({ ok: true });
       await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
-      expect(await keysOf(objects)).toEqual([]);
+      // THE BUCKET IS EMPTY AND STILL A CACHE: `nix-cache-info` is the one
+      // object no collection may take, because a client that reads it first
+      // must not meet a 404 for a bucket that merely has nothing in it yet.
+      expect(await keysOf(objects)).toEqual([CACHE_INFO]);
       await dispose();
     });
 
@@ -179,7 +207,7 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       const report = await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
       expect(report).toMatchObject({ ok: true });
       if (report.ok) expect(report.value.report.evicted).toBe(plan.value.evicted);
-      expect(await keysOf(objects)).toEqual([keyFor(fresh)]);
+      expect(await keysOf(objects)).toEqual(keysOfPaths(fresh));
       await dispose();
     });
 
@@ -201,7 +229,7 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       cache.touch(bucket, storePathHash(silent));
 
       await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
-      expect(await keysOf(objects)).toEqual([keyFor(asked)]);
+      expect(await keysOf(objects)).toEqual(keysOfPaths(asked));
       await dispose();
     });
 
@@ -220,7 +248,9 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       const report = await cache.admin.gc({ ...asRoot(ROOT), bucket: null });
       expect(report).toMatchObject({ ok: true });
       if (report.ok) expect(report.value.report.orphans).toBe(1);
-      expect(await keysOf(objects)).toEqual([keyFor(alive)]);
+      // ONE orphan, not three: the sweep knows the narinfo and
+      // `nix-cache-info` keys the push wrote, and deletes neither.
+      expect(await keysOf(objects)).toEqual(keysOfPaths(alive));
       await dispose();
     });
   });

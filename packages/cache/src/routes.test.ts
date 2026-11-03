@@ -656,136 +656,267 @@ describe("operational lines", () => {
   });
 });
 
-// ONE SERVING PATH, TWO STORES: every case below runs against the disk and
-// against S3 (versitygw), and must answer byte for byte the same.
-for (const where of [ON_DISK, ON_S3]) {
-  describe(`the NAR, from ${where.name === "local" ? "local disk" : "S3"}`, () => {
-    it("serves the KEPT file with a length and the file's own hash", async () => {
-      const h = await harness(true, undefined, undefined, where);
-      const hello = nar("a NAR, in pieces");
-      const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
-      const response = await h.fetch(`/main/nar/${name}`);
-      expect(response.status).toBe(200);
-      expect(response.headers.get("content-type")).toBe("application/x-nix-nar");
-      expect(response.headers.get("content-length")).toBe(String(hello.bytes.length));
-      const body = new Uint8Array(await response.arrayBuffer());
-      expect(Array.from(body)).toEqual(Array.from(hello.bytes));
-      // NOTHING RE-DUMPS THE PATH: the file the pusher sent is the answer.
-      expect(h.store.calls.filter((call) => call.op === "dump")).toHaveLength(0);
-      const narinfo = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
-      expect(narinfo).toContain(`FileSize: ${hello.bytes.length}`);
-      expect(narinfo).toContain(`FileHash: sha256:${base32(createHash("sha256").update(body).digest())}`);
-      await h.dispose();
-    });
+// ODU STREAMS THE DISK ITSELF. Every case below is the whole serving path for
+// a bucket whose objects are files on this machine: a length, the file's own
+// hash, each twin's compression, and `Range` arithmetic odu does. Since 2.8
+// an S3-backed bucket answers none of it — it answers a 307 and the store
+// does all of this instead — and that contrast is the point of keeping the
+// two groups side by side.
+describe("the NAR, from local disk", () => {
+  const where = ON_DISK;
 
-    it("serves each twin's own compression when NarHashes collide", async () => {
-      const h = await harness(true, undefined, undefined, where);
-      const raw = new TextEncoder().encode("identical NAR, two compression choices");
-      const zstd = spawnSync("zstd", ["-q", "-c"], { input: raw });
-      const xz = spawnSync("xz", ["-c"], { input: raw });
-      expect(zstd.status).toBe(0);
-      expect(xz.status).toBe(0);
-      const narHash = `sha256:${base32(createHash("sha256").update(raw).digest())}`;
-      const zstdBytes = new Uint8Array(zstd.stdout);
-      const xzBytes = new Uint8Array(xz.stdout);
-      const one = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-twin-zstd";
-      const two = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-twin-xz";
-      expect((await upload(h.fetch, h.tokens.write, one, { bytes: zstdBytes, narHash }, { compression: "zstd" })).status).toBe(200);
-      expect((await upload(h.fetch, h.tokens.write, two, { bytes: xzBytes, narHash }, { compression: "xz" })).status).toBe(200);
-      const oneNar = await h.fetch(`/main/nar/${narHash.slice(7)}.nar.zst`);
-      const twoNar = await h.fetch(`/main/nar/${narHash.slice(7)}.nar.xz`);
-      expect(oneNar.status).toBe(200);
-      expect(twoNar.status).toBe(200);
-      expect(Array.from(new Uint8Array(await oneNar.arrayBuffer()))).toEqual(Array.from(zstdBytes));
-      expect(Array.from(new Uint8Array(await twoNar.arrayBuffer()))).toEqual(Array.from(xzBytes));
-      expect(await (await h.fetch(`/main/${hashOf(one)}.narinfo`)).text()).toContain("Compression: zstd");
-      expect(await (await h.fetch(`/main/${hashOf(two)}.narinfo`)).text()).toContain("Compression: xz");
-      await h.dispose();
-    });
-
-    it("keeps an xz upload as xz and serves those exact bytes", async () => {
-      const h = await harness(true, undefined, undefined, where);
-      const raw = new TextEncoder().encode("a NAR compressed with xz");
-      const xz = spawnSync("xz", ["-c"], { input: raw });
-      expect(xz.status).toBe(0);
-      const payload = {
-        bytes: new Uint8Array(xz.stdout),
-        narHash: `sha256:${base32(createHash("sha256").update(raw).digest())}`,
-      };
-      const path = "/nix/store/dddddddddddddddddddddddddddddddd-xz";
-      const response = await upload(h.fetch, h.tokens.write, path, payload, { compression: "xz" });
-      expect(response.status).toBe(200);
-      const narinfo = await (await h.fetch(`/main/${hashOf(path)}.narinfo`)).text();
-      expect(narinfo).toContain("Compression: xz");
-      expect(narinfo).toContain(`FileSize: ${payload.bytes.length}`);
-      const name = `${payload.narHash.slice(7)}.nar.xz`;
-      const nar = await h.fetch(`/main/nar/${name}`);
-      expect(nar.status).toBe(200);
-      expect(nar.headers.get("content-length")).toBe(String(payload.bytes.length));
-      expect(Array.from(new Uint8Array(await nar.arrayBuffer()))).toEqual(Array.from(payload.bytes));
-      await h.dispose();
-    });
-
-    it("answers a Range from the file", async () => {
-      const h = await harness(true, undefined, undefined, where);
-      const hello = nar("a NAR, in pieces");
-      const response = await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`, {
-        headers: { range: "bytes=2-5" },
-      });
-      expect(response.status).toBe(206);
-      expect(response.headers.get("content-range")).toBe(
-        `bytes 2-5/${hello.bytes.length}`,
-      );
-      expect(response.headers.get("content-length")).toBe("4");
-      expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
-        Array.from(hello.bytes.subarray(2, 6)),
-      );
-      await h.dispose();
-    });
-
-    it("answers suffix and open-ended ranges, and refuses past the end", async () => {
-      const h = await harness(true, undefined, undefined, where);
-      const hello = nar("a NAR, in pieces");
-      const name = `${hello.narHash.slice(7)}.nar.zst`;
-      const suffix = await h.fetch(`/main/nar/${name}`, { headers: { range: "bytes=-4" } });
-      expect(suffix.status).toBe(206);
-      expect(suffix.headers.get("content-range")).toBe(
-        `bytes ${hello.bytes.length - 4}-${hello.bytes.length - 1}/${hello.bytes.length}`,
-      );
-      expect(Array.from(new Uint8Array(await suffix.arrayBuffer()))).toEqual(
-        Array.from(hello.bytes.subarray(hello.bytes.length - 4)),
-      );
-      const open = await h.fetch(`/main/nar/${name}`, {
-        headers: { range: `bytes=${hello.bytes.length - 2}-` },
-      });
-      expect(open.status).toBe(206);
-      expect(Array.from(new Uint8Array(await open.arrayBuffer()))).toEqual(
-        Array.from(hello.bytes.subarray(hello.bytes.length - 2)),
-      );
-      for (const range of [
-        `bytes=${hello.bytes.length}-`,
-        `bytes=${hello.bytes.length + 1}-`,
-        "bytes=-0",
-        "bytes=-",
-      ]) {
-        expect({ range, status: (await h.fetch(`/main/nar/${name}`, { headers: { range } })).status }).toEqual({
-          range,
-          status: 416,
-        });
-      }
-      await h.dispose();
-    });
-
-    it("finds the path by the hash alone, whatever compression the client asked for", async () => {
-      const h = await harness(true, undefined, undefined, where);
-      const hello = nar("a NAR, in pieces");
-      const hash = hello.narHash.replace(/^sha256:/, "");
-      expect((await h.fetch(`/main/nar/${hash}.nar.xz`)).status).toBe(200);
-      expect((await h.fetch(`/main/nar/${"1".repeat(52)}.nar.zst`)).status).toBe(404);
-      await h.dispose();
-    });
+  it("serves the KEPT file with a length and the file's own hash", async () => {
+    const h = await harness(true, undefined, undefined, where);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const response = await h.fetch(`/main/nar/${name}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/x-nix-nar");
+    expect(response.headers.get("content-length")).toBe(String(hello.bytes.length));
+    const body = new Uint8Array(await response.arrayBuffer());
+    expect(Array.from(body)).toEqual(Array.from(hello.bytes));
+    // NOTHING RE-DUMPS THE PATH: the file the pusher sent is the answer.
+    expect(h.store.calls.filter((call) => call.op === "dump")).toHaveLength(0);
+    const narinfo = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
+    expect(narinfo).toContain(`FileSize: ${hello.bytes.length}`);
+    expect(narinfo).toContain(`FileHash: sha256:${base32(createHash("sha256").update(body).digest())}`);
+    await h.dispose();
   });
+
+  it("serves each twin's own compression when NarHashes collide", async () => {
+    const h = await harness(true, undefined, undefined, where);
+    const raw = new TextEncoder().encode("identical NAR, two compression choices");
+    const zstd = spawnSync("zstd", ["-q", "-c"], { input: raw });
+    const xz = spawnSync("xz", ["-c"], { input: raw });
+    expect(zstd.status).toBe(0);
+    expect(xz.status).toBe(0);
+    const narHash = `sha256:${base32(createHash("sha256").update(raw).digest())}`;
+    const zstdBytes = new Uint8Array(zstd.stdout);
+    const xzBytes = new Uint8Array(xz.stdout);
+    const one = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-twin-zstd";
+    const two = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-twin-xz";
+    expect((await upload(h.fetch, h.tokens.write, one, { bytes: zstdBytes, narHash }, { compression: "zstd" })).status).toBe(200);
+    expect((await upload(h.fetch, h.tokens.write, two, { bytes: xzBytes, narHash }, { compression: "xz" })).status).toBe(200);
+    const oneNar = await h.fetch(`/main/nar/${narHash.slice(7)}.nar.zst`);
+    const twoNar = await h.fetch(`/main/nar/${narHash.slice(7)}.nar.xz`);
+    expect(oneNar.status).toBe(200);
+    expect(twoNar.status).toBe(200);
+    expect(Array.from(new Uint8Array(await oneNar.arrayBuffer()))).toEqual(Array.from(zstdBytes));
+    expect(Array.from(new Uint8Array(await twoNar.arrayBuffer()))).toEqual(Array.from(xzBytes));
+    expect(await (await h.fetch(`/main/${hashOf(one)}.narinfo`)).text()).toContain("Compression: zstd");
+    expect(await (await h.fetch(`/main/${hashOf(two)}.narinfo`)).text()).toContain("Compression: xz");
+    await h.dispose();
+  });
+
+  it("keeps an xz upload as xz and serves those exact bytes", async () => {
+    const h = await harness(true, undefined, undefined, where);
+    const raw = new TextEncoder().encode("a NAR compressed with xz");
+    const xz = spawnSync("xz", ["-c"], { input: raw });
+    expect(xz.status).toBe(0);
+    const payload = {
+      bytes: new Uint8Array(xz.stdout),
+      narHash: `sha256:${base32(createHash("sha256").update(raw).digest())}`,
+    };
+    const path = "/nix/store/dddddddddddddddddddddddddddddddd-xz";
+    const response = await upload(h.fetch, h.tokens.write, path, payload, { compression: "xz" });
+    expect(response.status).toBe(200);
+    const narinfo = await (await h.fetch(`/main/${hashOf(path)}.narinfo`)).text();
+    expect(narinfo).toContain("Compression: xz");
+    expect(narinfo).toContain(`FileSize: ${payload.bytes.length}`);
+    const name = `${payload.narHash.slice(7)}.nar.xz`;
+    const nar = await h.fetch(`/main/nar/${name}`);
+    expect(nar.status).toBe(200);
+    expect(nar.headers.get("content-length")).toBe(String(payload.bytes.length));
+    expect(Array.from(new Uint8Array(await nar.arrayBuffer()))).toEqual(Array.from(payload.bytes));
+    await h.dispose();
+  });
+
+  it("answers a Range from the file", async () => {
+    const h = await harness(true, undefined, undefined, where);
+    const hello = nar("a NAR, in pieces");
+    const response = await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`, {
+      headers: { range: "bytes=2-5" },
+    });
+    expect(response.status).toBe(206);
+    expect(response.headers.get("content-range")).toBe(
+      `bytes 2-5/${hello.bytes.length}`,
+    );
+    expect(response.headers.get("content-length")).toBe("4");
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual(
+      Array.from(hello.bytes.subarray(2, 6)),
+    );
+    await h.dispose();
+  });
+
+  it("answers suffix and open-ended ranges, and refuses past the end", async () => {
+    const h = await harness(true, undefined, undefined, where);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.slice(7)}.nar.zst`;
+    const suffix = await h.fetch(`/main/nar/${name}`, { headers: { range: "bytes=-4" } });
+    expect(suffix.status).toBe(206);
+    expect(suffix.headers.get("content-range")).toBe(
+      `bytes ${hello.bytes.length - 4}-${hello.bytes.length - 1}/${hello.bytes.length}`,
+    );
+    expect(Array.from(new Uint8Array(await suffix.arrayBuffer()))).toEqual(
+      Array.from(hello.bytes.subarray(hello.bytes.length - 4)),
+    );
+    const open = await h.fetch(`/main/nar/${name}`, {
+      headers: { range: `bytes=${hello.bytes.length - 2}-` },
+    });
+    expect(open.status).toBe(206);
+    expect(Array.from(new Uint8Array(await open.arrayBuffer()))).toEqual(
+      Array.from(hello.bytes.subarray(hello.bytes.length - 2)),
+    );
+    for (const range of [
+      `bytes=${hello.bytes.length}-`,
+      `bytes=${hello.bytes.length + 1}-`,
+      "bytes=-0",
+      "bytes=-",
+    ]) {
+      expect({ range, status: (await h.fetch(`/main/nar/${name}`, { headers: { range } })).status }).toEqual({
+        range,
+        status: 416,
+      });
+    }
+    await h.dispose();
+  });
+
+  it("finds the path by the hash alone, whatever compression the client asked for", async () => {
+    const h = await harness(true, undefined, undefined, where);
+    const hello = nar("a NAR, in pieces");
+    const hash = hello.narHash.replace(/^sha256:/, "");
+    expect((await h.fetch(`/main/nar/${hash}.nar.xz`)).status).toBe(200);
+    expect((await h.fetch(`/main/nar/${"1".repeat(52)}.nar.zst`)).status).toBe(404);
+    await h.dispose();
+  });
+});
+
+/**
+ * THE S3 STORE, with every presigned URL it mints counted.
+ *
+ * The count is how the private-bucket case says what it means: a refusal that
+ * happened BEFORE a URL was signed, rather than one that signed a URL and
+ * then thought better of handing it over.
+ */
+function countingS3(): { where: Where; minted: () => number } {
+  let minted = 0;
+  return {
+    where: {
+      name: "s3",
+      store: async () => {
+        const store = await (ON_S3.store as () => Promise<ObjectStore>)();
+        const sign = store.presignGet;
+        if (sign === undefined) throw new Error("an S3 store signs reads; this one does not");
+        return {
+          ...store,
+          presignGet: (key: string, seconds: number) => {
+            minted += 1;
+            return sign(key, seconds);
+          },
+        };
+      },
+    },
+    minted: () => minted,
+  };
 }
+
+// READS LEAVE ODU (PLAN 2.8). A bucket whose store can sign a URL is not
+// served by this daemon at all: the NAR route answers a 307 and the client
+// fetches the bytes from the store. Everything below is asserted THROUGH the
+// route, because the only thing that matters is what a Nix client meets.
+describe("the NAR, from S3", () => {
+  it("redirects to a signed URL on the store's own host, with no body", async () => {
+    const lines: string[] = [];
+    const { where } = countingS3();
+    const h = await harness(true, "https://odu.example.org", (event, fields) =>
+      lines.push(`${event} ${JSON.stringify(fields)}`), where);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const response = await h.fetch(`/main/nar/${name}`);
+
+    // 307, NOT 302: the method has to survive the hop (see the HEAD case).
+    expect(response.status).toBe(307);
+    const location = new URL(response.headers.get("location") as string);
+    expect(location.origin).toBe(gateway.endpoint.origin);
+    expect(location.origin).not.toBe("http://127.0.0.1:18440");
+    // A SIGNATURE IN THE QUERY is what makes this URL usable by a reader who
+    // holds no credential of the store's — the whole point of the hop.
+    expect(location.searchParams.get("X-Amz-Signature")).not.toBeNull();
+    expect(location.searchParams.get("X-Amz-Expires")).toBe("600");
+    // PUBLIC BUCKET, PRIVATE REDIRECT: the signature expires, so an edge that
+    // cached this 307 would hand out a dead URL long after it stopped working.
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.text()).toBe("");
+
+    // AND THE URL WORKS: the bytes come back from the store itself, with no
+    // credential of odu's travelling with the request.
+    const fromStore = await fetch(location.href);
+    expect(fromStore.status).toBe(200);
+    expect(Array.from(new Uint8Array(await fromStore.arrayBuffer()))).toEqual(Array.from(hello.bytes));
+
+    // THE LINE 2.8 TRADES AWAY ITS BYTE COUNT FOR: odu streamed nothing, and
+    // says so rather than logging a served NAR it never touched.
+    const served = lines.find((line) => line.startsWith("cache.nar.served"));
+    expect(served).toContain('"source":"redirect"');
+    expect(served).toContain('"bytes":0');
+    await h.dispose();
+  });
+
+  it("answers a HEAD with the same redirect, so a HEAD never becomes a GET", async () => {
+    const { where } = countingS3();
+    const h = await harness(true, undefined, undefined, where);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const response = await h.fetch(`/main/nar/${name}`, { method: "HEAD" });
+    expect(response.status).toBe(307);
+    const location = new URL(response.headers.get("location") as string);
+    expect(location.origin).toBe(gateway.endpoint.origin);
+    expect(location.searchParams.get("X-Amz-Signature")).not.toBeNull();
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    await h.dispose();
+  });
+
+  it("hands a Range to the store instead of answering it, and the store answers it", async () => {
+    const { where } = countingS3();
+    const h = await harness(true, undefined, undefined, where);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const response = await h.fetch(`/main/nar/${name}`, { headers: { range: "bytes=2-5" } });
+    // NOT a 206: odu does not proxy a resumed download. The client re-sends
+    // its own `Range` to the store, which is between those two from here on.
+    expect(response.status).toBe(307);
+    expect(response.headers.get("content-range")).toBeNull();
+
+    const location = response.headers.get("location") as string;
+    const ranged = await fetch(location, { headers: { range: "bytes=2-5" } });
+    expect(ranged.status).toBe(206);
+    expect(ranged.headers.get("content-range")).toBe(`bytes 2-5/${hello.bytes.length}`);
+    expect(Array.from(new Uint8Array(await ranged.arrayBuffer()))).toEqual(
+      Array.from(hello.bytes.subarray(2, 6)),
+    );
+    await h.dispose();
+  });
+
+  it("404s an anonymous reader of a private bucket before it signs anything", async () => {
+    const { where, minted } = countingS3();
+    const h = await harness(false, undefined, undefined, where);
+    const hello = nar("a NAR, in pieces");
+    const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const refused = await h.fetch(`/main/nar/${name}`);
+    // The private bucket's answer is unchanged by 2.8 — and a URL that was
+    // never minted cannot leak: admission comes first, signing second.
+    expect(refused.status).toBe(404);
+    expect(refused.headers.get("location")).toBeNull();
+    expect(minted()).toBe(0);
+
+    // A READER WITH A TOKEN still gets the hop, which is what makes the count
+    // above a fact about admission rather than about this store.
+    const allowed = await h.fetch(`/main/nar/${name}`, bearer(h.tokens.read));
+    expect(allowed.status).toBe(307);
+    expect(minted()).toBe(1);
+    await h.dispose();
+  });
+});
 
 describe("the NAR before its object", () => {
   it("falls back to the FIFO dump when the file is not there yet", async () => {

@@ -71,7 +71,7 @@ import {
   type Cache,
   type CacheOutcome,
 } from "./cache";
-import type { GcCollection, GcReport } from "./gc";
+import type { GcCollection, GcRemoval, GcReport } from "./gc";
 import { objectStores, type StoreDeclarations, storeFacts } from "./stores";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
@@ -146,6 +146,14 @@ export interface CacheServer {
   /** The substituter URL for one bucket, as the cache row publishes it — the
    *  same string the board's row carries, for a route that takes no root token. */
   readonly substituterUrl: (name: string) => string;
+  /** ANNOUNCE WHAT A FINISHED STORE-TO-STORE MOVE LET GO (PLAN 2.8). The
+   *  CACHE names the paths — it is the only thing that knows which object was
+   *  deleted — and the ROW turns them into the addresses they were served at. */
+  readonly announceMoved: (input: {
+    bucket: string;
+    store: string;
+    removals: readonly GcRemoval[];
+  }) => void;
 }
 
 /**
@@ -365,31 +373,63 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    * anybody does, and on a daemon with no CDN — most of them — a nightly
    * collection must not compose two URLs per evicted path for a no-op.
    */
+  /**
+   * EVERY ADDRESS ONE BUCKET'S PATHS ARE REACHABLE AT. `alsoStore` is a store
+   * the bucket is NO LONGER on — what a finished move left behind — whose
+   * domain served these very objects until a moment ago.
+   */
+  const basesFor = (name: string, alsoStore: string | null): Set<string> => {
+    const facts = cache.bucket(name);
+    // THE READ ADDRESS, not the push API's. They are the same string today
+    // and they are different facts: one is where Nix asks, the other is
+    // where a client uploads.
+    const bases = new Set([`${opts.publicOrigin}${opts.mount}/${name}`]);
+    if (facts?.domain != null) bases.add(`${scheme}//${facts.domain}`);
+    // THE STORE'S OWN DOMAIN, whether or not the bucket is public: a bucket
+    // that was public yesterday may be private today, and the edge still
+    // holds what it cached then.
+    for (const store of [facts?.store ?? null, alsoStore]) {
+      const fronted = store === null ? undefined : storeUrls.get(store);
+      if (fronted !== undefined) bases.add(`${fronted}/${name}`);
+    }
+    return bases;
+  };
+
+  const urlsFor = (name: string, alsoStore: string | null, removed: readonly GcRemoval[]): string[] => {
+    const urls: string[] = [];
+    for (const base of basesFor(name, alsoStore)) {
+      for (const removal of removed) {
+        urls.push(`${base}/${removal.hash}.narinfo`);
+        if (removal.narFile !== null) urls.push(`${base}/nar/${removal.narFile}`);
+      }
+    }
+    return urls;
+  };
+
   const announce = (collected: GcCollection): void => {
     if (!opts.purge.listening()) return;
     const urls: string[] = [];
     for (const [name, removed] of collected.removed) {
       if (removed.length === 0) continue;
-      const facts = cache.bucket(name);
-      // THE READ ADDRESS, not the push API's. They are the same string today
-      // and they are different facts: one is where Nix asks, the other is
-      // where a client uploads.
-      const bases = new Set([`${opts.publicOrigin}${opts.mount}/${name}`]);
-      if (facts?.domain != null) bases.add(`${scheme}//${facts.domain}`);
-      // THE STORE'S OWN DOMAIN, whether or not the bucket is public: a bucket
-      // that was public yesterday may be private today, and the edge still
-      // holds what it cached then.
-      const fronted = facts === null ? undefined : storeUrls.get(facts.store);
-      if (fronted !== undefined) bases.add(`${fronted}/${name}`);
-      for (const base of bases) {
-        for (const removal of removed) {
-          urls.push(`${base}/${removal.hash}.narinfo`);
-          if (removal.narFile !== null) urls.push(`${base}/nar/${removal.narFile}`);
-        }
-      }
+      urls.push(...urlsFor(name, null, removed));
     }
     if (urls.length === 0) return;
     opts.log?.("cache.gc.purge", { urls: urls.length });
+    opts.purge.announce(urls);
+  };
+
+  /** WHAT A FINISHED MOVE LET GO: the same announcement, for the store the
+   *  bucket has just left. The objects are identical in the new store, but
+   *  the OLD store's domain is about to answer 404 for every one of them. */
+  const announceMoved = (input: {
+    bucket: string;
+    store: string;
+    removals: readonly GcRemoval[];
+  }): void => {
+    if (!opts.purge.listening() || input.removals.length === 0) return;
+    const urls = urlsFor(input.bucket, input.store, input.removals);
+    if (urls.length === 0) return;
+    opts.log?.("cache.bucket.migrate.purge", { bucket: input.bucket, urls: urls.length });
     opts.purge.announce(urls);
   };
 
@@ -566,6 +606,17 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
               }),
             (facts) => rowOf(facts),
           ),
+        migrate: ({ input }) =>
+          admin(
+            input,
+            (authority) =>
+              cache.admin.migrateStore({
+                authority,
+                bucket: input.bucket,
+                store: input.store,
+              }),
+            (facts) => rowOf(facts),
+          ),
       },
       token: {
         mint: ({ input }) =>
@@ -700,6 +751,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         store: bucket?.store ?? LOCAL_STORE,
       });
     },
+    announceMoved,
   };
 }
 
@@ -749,6 +801,12 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     const purges = yield* CachePurge;
     const log = yield* Log;
 
+    // THE MOVE'S PURGE, LATE-BOUND. The cache is built before the server that
+    // knows where a bucket is reachable from, and a finished move needs both:
+    // the cache names the objects the old store gave up, this hands them to
+    // the row's URL builder. Null until the server below exists, which is
+    // before any verb can start a move.
+    let announceMoved: CacheServer["announceMoved"] | null = null;
     const cache = createCache({
       stateRoot: stateDir,
       rootToken,
@@ -766,6 +824,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       // ONE structured line per operational fact. The Effect logger renders
       // the fields; no per-chunk lines, no narration.
       log: (event, fields) => log.info(fields, `odu cache: ${event}`),
+      purged: (moved) => announceMoved?.(moved),
     });
     // BEFORE THE MOUNT: CA proof and the orphan/temp sweep. Nothing is
     // writing yet, so this cannot race a push.
@@ -816,6 +875,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       purge: purges,
       log: (event, fields) => log.info(fields, `odu cache: ${event}`),
     });
+    announceMoved = server.announceMoved;
 
     // THE MOUNT, in the activation. The framework walks the arriving surface,
     // proves the whole route set disjoint across root and siblings, and hands
@@ -865,6 +925,11 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
         await cache.proveSelf();
       }),
     );
+
+    // AND ANY MOVE A RESTART INTERRUPTED (2.8). Its own fibre, not queued
+    // behind the backfill: a bucket half-way between two stores is serving
+    // from the old one and should finish as soon as the row is up.
+    yield* Effect.forkScoped(Effect.promise(() => cache.resumeMigrations()));
 
     // AND IS THE STORE'S DOMAIN SERVING? A `publicUrl` is advertised as the
     // substituter URL of every public bucket on that store, so a daemon that

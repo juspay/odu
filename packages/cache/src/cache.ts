@@ -22,12 +22,21 @@
 
 import { statfs } from "node:fs/promises";
 import { join } from "node:path";
-import type { BucketRow, BucketTotals, ObjectRow, PinAuthor, Scope, TokenRow } from "./db";
+import type {
+  BucketRow,
+  BucketTotals,
+  MigrationRow,
+  ObjectRow,
+  PinAuthor,
+  Scope,
+  TokenRow,
+} from "./db";
 import { cursorFor, openCacheRepo } from "./db";
 import {
   closureOf,
   type GcBucketPlan,
   type GcCollection,
+  type GcRemoval,
   GC_PREVIEW_PATHS,
   type GcPreview,
   planGc,
@@ -35,6 +44,7 @@ import {
   runGc,
   sweepOrphans,
 } from "./gc";
+import { migrationKeys, runMigration } from "./migrateStore";
 import {
   fingerprintOf,
   formatNarinfo,
@@ -110,6 +120,23 @@ export interface BucketFacts {
   hits: number;
   /** The declared store its objects live in. */
   store: string;
+  /** THE MOVE RUNNING ON THIS BUCKET, or null. While it is not null the
+   *  bucket is still served from `store`; the move's own `to` is where it is
+   *  going (PLAN 2.8). */
+  migration: MigrationFacts | null;
+}
+
+/** A store-to-store move, as a subscriber watches it. */
+export interface MigrationFacts {
+  /** The store it is moving to. */
+  to: string;
+  /** `copying` while the new store is being filled, `flipping` for the moment
+   *  the bucket changes hands under the write lock, `deleting` while the old
+   *  store gives its copies up. */
+  state: "copying" | "flipping" | "deleting";
+  copied: number;
+  total: number;
+  bytes: number;
 }
 
 /**
@@ -256,6 +283,22 @@ export interface CacheAdmin {
     authority: Authority;
     bucket: string;
     retentionDays: number;
+  }): Promise<CacheOutcome<BucketFacts>>;
+  /**
+   * MOVE THIS BUCKET'S OBJECTS TO ANOTHER STORE (PLAN 2.8).
+   *
+   * Answers as soon as the move is RECORDED, not when it finishes: the copy
+   * runs in the background and its progress is on the bucket's own row, which
+   * the board already follows. The bucket is served from the old store the
+   * whole time and changes hands in one moment under the write lock.
+   *
+   * Refused for an unknown store, for the store it already lives in, and for
+   * a bucket that is already moving.
+   */
+  migrateStore(input: {
+    authority: Authority;
+    bucket: string;
+    store: string;
   }): Promise<CacheOutcome<BucketFacts>>;
   pin(input: { authority: Authority;
     bucket: string;
@@ -495,6 +538,9 @@ export interface Cache {
    *  narinfo and `nix-cache-info` objects, two at a time, skipping the ones
    *  already there (PLAN 2.8). Idempotent, so a restart resumes it. */
   backfillObjects(): Promise<ObjectBackfillReport>;
+  /** AFTER MOUNT: pick up every store-to-store move a restart interrupted
+   *  (PLAN 2.8). Answers when they are all finished. */
+  resumeMigrations(): Promise<void>;
   /** Join the row's background work, then close the database. */
   close(): Promise<void>;
 }
@@ -527,6 +573,20 @@ export interface CacheOptions {
    *  The row hands the daemon's logger here; a suite that does not care omits
    *  it. No per-chunk lines: a NAR read is one line. */
   log?: (event: string, fields: Record<string, unknown>) => void;
+  /**
+   * WHAT AN OLD STORE GAVE UP, so whoever fronts it can be told.
+   *
+   * A finished move leaves the previous store's copies deleted; anything that
+   * cached their addresses is holding bytes nobody will serve again. The ROW
+   * knows where a bucket is reachable from and the cache does not, so the
+   * cache names the paths and the row builds the URLs — the same division the
+   * collector's announcement uses.
+   */
+  purged?: (input: {
+    bucket: string;
+    store: string;
+    removals: readonly GcRemoval[];
+  }) => void;
 }
 
 /** The floor between two READ-driven publications. Reads are the only change
@@ -626,6 +686,13 @@ export function createCache(options: CacheOptions): Cache {
     return { ok: true, value: null };
   }
 
+  const migrationFactsOf = (bucket: string): MigrationFacts | null => {
+    const row = repo.migration(bucket);
+    return row === null
+      ? null
+      : { to: row.toStore, state: row.state, copied: row.copied, total: row.total, bytes: row.bytes };
+  };
+
   function factsOf(
     bucket: BucketRow,
     counted: Map<string, BucketTotals> = repo.bucketStats(),
@@ -645,6 +712,11 @@ export function createCache(options: CacheOptions): Cache {
       lastPush: counts?.lastPush ?? null,
       hits: counts?.hits ?? 0,
       store: bucket.store,
+      // THE MOVE, IF ONE IS RUNNING — read per bucket, because a bucket moves
+      // between stores perhaps twice in its life and a join for the usual
+      // answer would be a cost every page pays for a row that is almost
+      // always absent.
+      migration: migrationFactsOf(bucket.name),
     };
   }
 
@@ -867,6 +939,33 @@ export function createCache(options: CacheOptions): Cache {
   /** THE BACKFILL'S THROTTLE, its own: two narinfo objects at a time, so a
    *  catch-up pass cannot crowd out the migration's dumps. */
   const backfillSlots = createSlots(2);
+  /** THE STORE-TO-STORE MOVES RUNNING NOW, by bucket — so `close` can join
+   *  them and a start cannot begin the same one twice. */
+  const storeMoves = new Map<string, Promise<void>>();
+  /** Two objects in flight per move, the same throttle the rest of the row's
+   *  background work uses. */
+  const moveSlots = createSlots(2);
+
+  /** Start — or resume — one bucket's move, row-owned. */
+  const startMigration = (row: MigrationRow): Promise<void> => {
+    const running = storeMoves.get(row.bucket);
+    if (running !== undefined) return running;
+    const task = runMigration(row, {
+      repo,
+      storeNamed: (name) => stores.get(name) as ObjectStore,
+      withWriteLock,
+      slots: moveSlots,
+      now,
+      notify,
+      ...(options.log === undefined ? {} : { log: options.log }),
+      ...(options.purged === undefined ? {} : { purged: options.purged }),
+      stopping: () => stopping,
+    }).finally(() => {
+      storeMoves.delete(row.bucket);
+    });
+    storeMoves.set(row.bucket, task);
+    return task;
+  };
   /** Paths whose transition serve was refused, logged once each. */
   const unavailableLogged = new Set<string>();
   /** The row's background migration, so close can join it before the DB goes. */
@@ -1111,6 +1210,65 @@ export function createCache(options: CacheOptions): Cache {
       repo.putBucket(next);
       notify();
       return { ok: true, value: factsOf(next) };
+    },
+
+    async migrateStore(input) {
+      const root = requireRoot(input);
+      if (!root.ok) return root;
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+      }
+      if (!stores.has(input.store)) {
+        return {
+          ok: false,
+          code: "unknown_store",
+          message: `no store "${input.store}" — this daemon declares ${[...stores.keys()].join(", ")}`,
+        };
+      }
+      if (input.store === bucket.store) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message: `"${bucket.name}" already keeps its objects in "${input.store}"`,
+        };
+      }
+      // ONE MOVE PER BUCKET. A second one would be two copiers writing the
+      // same keys into two stores and one of them flipping the bucket under
+      // the other; a refusal says which one is running.
+      const running = repo.migration(bucket.name);
+      if (running !== null) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message:
+            `"${bucket.name}" is already moving to "${running.toStore}" ` +
+            `(${running.copied} of ${running.total} objects copied)`,
+        };
+      }
+      const row: MigrationRow = {
+        bucket: bucket.name,
+        fromStore: bucket.store,
+        toStore: input.store,
+        state: "copying",
+        copied: 0,
+        total: migrationKeys(repo, bucket.name).length,
+        bytes: 0,
+        started: now(),
+      };
+      repo.putMigration(row);
+      options.log?.("cache.bucket.migrate.start", {
+        bucket: row.bucket,
+        from: row.fromStore,
+        to: row.toStore,
+        total: row.total,
+      });
+      notify();
+      // THE ANSWER IS THE ROW, NOT THE OUTCOME: the copy is minutes of work
+      // on a bucket of any size, and a verb that waited for it would be a
+      // board control that times out. Progress is on the row.
+      startMigration(row);
+      return { ok: true, value: factsOf(repo.bucket(bucket.name) as BucketRow) };
     },
 
     async pin(input) {
@@ -1936,6 +2094,14 @@ export function createCache(options: CacheOptions): Cache {
       backfillTask = task;
       return task;
     },
+
+    async resumeMigrations() {
+      // A MOVE IS A ROW, so a restart finds the unfinished ones by reading
+      // them. Each resumes from the state it reached: copying walks the keys
+      // again (skipping what is already there), flipping redoes the delta and
+      // the flip, deleting lets the old copies go.
+      await Promise.all(repo.migrations().map((row) => startMigration(row)));
+    },
     onChange(listener) {
       listeners.add(listener);
       return () => {
@@ -1955,11 +2121,15 @@ export function createCache(options: CacheOptions): Cache {
       if (migrationTask !== null) await migrationTask.catch(() => {});
       if (selfTask !== null) await selfTask.catch(() => {});
       if (backfillTask !== null) await backfillTask.catch(() => {});
+      // JOIN EVERY STORE-TO-STORE MOVE: each checks `stopping` between keys,
+      // so this is the time its current copy takes and no more.
+      await Promise.all([...storeMoves.values()].map((task) => task.catch(() => {})));
       // REFUSE THE QUEUE FIRST: a job waiting for a slot belongs to this row,
       // and none of them may start after it closed. Then join the ones already
       // running, before the database closes.
       migrationSlots.close();
       backfillSlots.close();
+      moveSlots.close();
       await staging.close();
       listeners.clear();
       repo.close();
