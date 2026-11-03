@@ -63,10 +63,16 @@ let
           then null
           else { repo = "juspay/odu"; branch = "ca-index"; };
         # THE DECLARATION NAMES ITS PUSHER, so the publish job pushes to odu's
-        # OWN cache: the first substituter is `cache.kolu.dev`, and its bucket
-        # is `kolu`. kolu#2334 added this field; a binder that leaves it null
-        # bakes the declaration it always did.
-        pusher = { kind = "odu"; bucket = "kolu"; };
+        # OWN cache: the bucket is `kolu-r2`, whose substituter is R2 itself
+        # (`https://cache.kolu.dev/kolu-r2`, static files nothing can push to),
+        # so the declaration also names the odu `origin` the publisher pushes
+        # to. kolu#2334 added this field; a binder that leaves it null bakes the
+        # declaration it always did.
+        pusher = {
+          kind = "odu";
+          bucket = "kolu-r2";
+          origin = "https://odu-k3s.rooster-blues.ts.net";
+        };
         extraFiles = { "commit-hash" = commitHash; };
       };
 
