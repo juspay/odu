@@ -5,7 +5,8 @@
 # `juspay/kolu`'s `publish-closure` action, pinned to the kolu revision odu
 # pins in `npins/sources.json`).
 #
-# BOTH JOBS PUSH TO THE NAME THE FLAKE ADVERTISES: `https://cache.kolu.dev`.
+# BOTH JOBS PUSH TO THE POD'S OWN ORIGIN, `https://odu-k3s.rooster-blues.ts.net`
+# (a Tailscale Funnel), which serves the bucket reads come from.
 # The build job pushes with `./.github/actions/push` — the action odu ships for
 # ANY project, which builds its pusher from the checkout it sits in, so this
 # line pushes with this tree's odu, which chunks. The publish job's
@@ -17,10 +18,11 @@
 # `build-and-push` warms the input-addressed cache a lane host substitutes from
 # (odu's own, with `odu cache push`), and `publish-closures` then rewrites from
 # that same tree and pushes to the SAME bucket: the agent source bakes
-# `pusher = { kind = "odu"; bucket = "kolu"; }` (kolu#2334), so the action runs
-# `odu cache push` under `ODU_CACHE_TOKEN` and the checkout's own odu, which
-# chunks. It must be its OWN job: the action installs the Nix it rewrites with
-# (2.34.8 — see its `action.yml`), which has to be the job's only Nix.
+# `pusher = { kind = "odu"; bucket = "kolu-r2"; origin = "…"; }` (kolu#2334), so
+# the action runs `odu cache push` under `ODU_CACHE_TOKEN` and the checkout's
+# own odu, which chunks. It must be its OWN job: the action installs the Nix it
+# rewrites with (2.34.8 — see its `action.yml`), which has to be the job's only
+# Nix.
 #
 # `odu`'s `ca-index` branch is born on the first master push. A pull request
 # rewrites, smokes and import-verifies, and writes no index.
@@ -68,8 +70,8 @@ jobs:
       - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
         with:
           nix_conf: |
-            extra-substituters = https://cache.kolu.dev
-            extra-trusted-public-keys = kolu-1:eAXwD1RPt1BpFjrHfVUO8Ia0bK32WcuIeJcwFWmgj9Y=
+            extra-substituters = https://cache.kolu.dev/kolu-r2
+            extra-trusted-public-keys = kolu-r2-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=
             accept-flake-config = true
 
       # ONE step, not a step per branch, so the token is never consulted in an
@@ -83,14 +85,14 @@ jobs:
       # and `uses: juspay/odu/.github/actions/push@<sha>` elsewhere are the same
       # step: the action builds its pusher from its OWN checkout (so this line
       # pushes with the odu in this tree, and a pinned sha pushes with that
-      # commit's odu), and it proves the push — every path the bucket serves must
-      # answer its narinfo at `cache.kolu.dev`, or the step is red.
+      # commit's odu), and it proves the push — every path the bucket serves
+      # must answer its narinfo at `https://cache.kolu.dev/kolu-r2`, the R2 URL
+      # reads come from, or the step is red.
       #
       # `odu cache push` computes each closure, asks the bucket what it is
       # missing in one query, drops what an upstream key signed (the server
       # fetches those references itself), and CHUNKS a NAR too large for one
-      # request — which is what makes `cache.kolu.dev` (Cloudflare, 100 MB) safe
-      # for this pusher.
+      # request — which keeps the pusher safe behind any proxy with a body cap.
       - name: Build odu's outputs, and push their closures
         uses: ./.github/actions/push
         with:
@@ -117,10 +119,11 @@ jobs:
         run: |
           set -euo pipefail
           # THE DECLARATION AS THE FLAKE WRITES IT. Its first substituter is
-          # `https://cache.kolu.dev` — the bucket's DOMAIN ROOT, where the name
-          # serves the bucket — so a rewrite would be a no-op. The pusher is
-          # kolu #2335's pinned odu (this branch's 996f888): chunked push and
-          # the `CA:` line; verify imports the same URL.
+          # `https://cache.kolu.dev/kolu-r2` — the R2 URL the `kolu-r2` bucket
+          # is read from — and its pusher names the odu origin to push to, so a
+          # rewrite would be a no-op. The pusher is kolu #2335's pinned odu
+          # (this branch's 996f888): chunked push and the `CA:` line; verify
+          # imports the same URL.
           source=$(nix build .#agent-flake-source --no-link --print-out-paths --accept-flake-config)
           mkdir -p "$RUNNER_TEMP/declaration"
           cp "$source/binary-cache.json" "$RUNNER_TEMP/declaration/binary-cache.json"
@@ -170,7 +173,7 @@ jobs:
       #
       # The pin is kolu's merged head, which carries the `pusher` field the
       # declaration bakes (kolu#2334): the action pushes with
-      # `odu cache push kolu` when the declaration says `{ kind = "odu"; … }`.
+      # `odu cache push kolu-r2` when the declaration says `{ kind = "odu"; … }`.
       # WITH `sidecar`, installables are full flake installables, and the
       # revision the entries are keyed under defaults to the published commit.
       - uses: juspay/kolu/.github/actions/publish-closure@37b45f616ae4d7ef0cf3e160efefb7cb67b2bc85

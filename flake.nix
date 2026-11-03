@@ -13,13 +13,13 @@
 {
   inputs.bun2nix.url = "github:juspay/bun2nix/rawflake";
 
-  # ODU'S OWN CACHE. The bucket is `kolu` on the public pod; `cache.kolu.dev`
-  # is its name, wired by the daemon's cloudflare row (see the docs' "A domain
-  # for a bucket"). odu and its runners are substituted from here, and
-  # `.github/workflows/nix-cache.yml` pushes to it.
+  # ODU'S OWN CACHE. The bucket is `kolu-r2`, stored on Cloudflare R2 and read
+  # straight from it at `https://cache.kolu.dev/kolu-r2` — the store's URL with
+  # the bucket as a path. odu and its runners are substituted from there, and
+  # `.github/workflows/nix-cache.yml` pushes to the pod's own origin.
   nixConfig = {
-    extra-substituters = "https://cache.kolu.dev";
-    extra-trusted-public-keys = "kolu-1:eAXwD1RPt1BpFjrHfVUO8Ia0bK32WcuIeJcwFWmgj9Y=";
+    extra-substituters = "https://cache.kolu.dev/kolu-r2";
+    extra-trusted-public-keys = "kolu-r2-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=";
   };
 
   outputs = { self, bun2nix, ... }:

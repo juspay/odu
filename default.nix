@@ -63,13 +63,13 @@ let
           then null
           else { repo = "juspay/odu"; branch = "ca-index"; };
         # THE DECLARATION NAMES ITS PUSHER, so the publish job pushes to odu's
-        # OWN cache: the first substituter is `cache.kolu.dev`, and its bucket
-        # is `kolu-r2` — the one the `nix-cache` workflow pushes to now that
-        # reads are served from R2.
+        # OWN cache: the bucket is `kolu-r2`, whose substituter is R2 itself
+        # (`https://cache.kolu.dev/kolu-r2`, static files nothing can push to),
+        # so a pusher needs an odu origin that is not the read address.
         #
-        # THE BUCKET IS STILL SPELLED HERE ONLY BECAUSE KOLU STILL ASKS FOR
-        # IT. The cache states its own bucket and push origin in
-        # `nix-cache-info` (`Odu-Origin`/`Odu-Bucket`), which is how
+        # IT IS NOT SPELLED HERE, AND THE BUCKET ONLY IS BECAUSE KOLU STILL
+        # ASKS FOR IT. The cache states both in `nix-cache-info`
+        # (`Odu-Origin`/`Odu-Bucket`), which is how
         # `odu cache push --cache <substituter>` and this repository's push
         # action find them — but kolu's pinned `binary-cache.nix` asserts the
         # pusher is EXACTLY `{ kind, bucket }` (an `origin` is refused at
