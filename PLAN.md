@@ -1,7 +1,7 @@
 # Odu as a product: Nix cache + CI you run yourself
 
-Status: living, 2026-11-02.
-- Phase 1, phases 2.1–2.7 and 2.10 are on master; 2.8 is #148.
+Status: living, 2026-11-03.
+- Phase 1 and all of Phase 2 but 2.9 are on master: 2.8 is #148, #150 and #152.
 - **Next is 2.9**, uploads going straight to the store.
 - One step is one PR, and the order is a dependency order. There is no schedule.
 
@@ -70,9 +70,13 @@ object storage plus a lane pool. Hosting comes later, at a monthly price.
   may link to a repo, for provenance.
 - **Retention defaults to 90 days** from the last push that named a path. Pins
   are exempt, and each bucket can override the default.
-- **`kolu` moves to R2** so `cache.kolu.dev` stays up when the pod is down.
-  Reads left odu in 2.8 and `bucket_migrate` is the move; running it against
-  the pod is still PENDING.
+- **`kolu` moved to R2 by pushing afresh**, not by copying: the bucket is
+  `kolu-r2` on the R2 bucket `kolu`, read at `https://cache.kolu.dev/kolu-r2`
+  by odu, kolu, olai and agent-distro. The old `kolu` bucket (24 GiB on the
+  PVC) and `r2test` linger until a `bucket_delete` verb exists.
+- **Pushes go to odu over Tailscale Funnel**, not through the tunnel:
+  `https://odu-k3s.rooster-blues.ts.net` is public, the board behind GitHub
+  sign-in, so no second hostname and no 100 MB body cap stand in a push's way.
 - **The hosted offering is in scope** (Phase 6).
 
 ## Architecture
@@ -215,17 +219,23 @@ What each step delivers:
     unchanged: odu streams it.
   - `bucket.migrate` moves a bucket between stores — an API verb and a board
     control, not a CLI command (2.10) — serving from the old store until the
-    copy is done. **`kolu` moving to R2 is pending**: the verb is proved in
-    tests, not yet run against the pod.
+    copy is done. `kolu` did not use it: a fresh bucket and a fresh push were
+    cheaper than moving 24 GiB over the home uplink.
   - **Proof:** the e2e substitutes through a 307 from a private bucket with a
     real Nix client, and the NixOS VM test copies through one.[^reads]
-  - **The cache names its own push address.** A read address is no longer a
-    push address, so `nix-cache-info` states both in two lines Nix ignores —
-    `Odu-Origin` (this daemon) and `Odu-Bucket` — on odu's routes and in the
-    object in the store, rewritten by content when the origin moves.
-    `odu cache push --cache <substituter>` reads them, and the push action
-    takes one `cache:` input where it took `origin:` and `bucket:`, so a
-    consumer repository holds the one fact its `nix.conf` already has.
+  - **The cache names its own push address (#150).** A read address is no
+    longer a push address, so `nix-cache-info` states both in two lines Nix
+    ignores — `Odu-Origin` (this daemon) and `Odu-Bucket` — on odu's routes
+    and in the object in the store, rewritten by content when the origin
+    moves. `odu cache push --cache <substituter>` reads them (sending the
+    bucket token, so a private bucket answers), the push action takes one
+    `cache:` input where it took `origin:` and `bucket:`, and kolu's
+    `publish-closure` declaration is `pusher = { kind = "odu"; }` — a consumer
+    repository holds the one fact its `nix.conf` already has.
+  - **#152:** Cloudflare gzips `text/plain` between R2 and the pod, so the
+    store's HEAD could not match `nix-cache-info`'s recorded size and the
+    backfill refused to rewrite it. An object's size is its metadata's;
+    `content-length` is checked only on an answer that was not re-encoded.
 - **2.9 Uploads go straight to the store.** The client uploads to the store
   through presigned parts. Odu then reads the object back and verifies it
   before signing. That is Cachix's upload, but without Cachix's trust in the
@@ -297,10 +307,10 @@ Each fact was checked in the source when it was written.
 | F6 | Lane hosts never see credentials; GitHub posting happens on the coordinator | 4.2 relaxes this, bounded |
 | F7 | A run needs an absolute checkout on the service's machine | Hosted CI needs managed clones (5.1) |
 | F8 | Hosts are per user (`hosts.json`) | Org-scoped venues (5.1) |
-| F9 | The flake exports odu, the runner, the web UI and `services.odu`; its `nixConfig` names `cache.kolu.dev` | Odu is its own cache's first consumer |
+| F9 | The flake exports odu, the runner, the web UI and `services.odu`; its `nixConfig` names `https://cache.kolu.dev/kolu-r2` | Odu is its own cache's first consumer |
 | F10 | Every client takes `--origin`; remote dialling exists | Remote clients need only authentication |
 | F11 | odu's CI builds on Linux and macOS and pushes with the 2.3 action | The cache is dogfooded on every push to master |
-| F12 | Our deployment is a pod with no nginx, behind Tailscale and a Cloudflare tunnel[^pod] | Identity had to come before a public cache |
+| F12 | Our deployment is a pod with no nginx, public through Tailscale Funnel behind GitHub sign-in; bucket reads come from R2[^pod] | Identity had to come before a public cache |
 | F13 | Rows sit behind one fence: only roots name rows (`fence.test.ts`) | Identity is the host's fact plus the `auth` row |
 
 ## Appendix: old PR names
@@ -328,15 +338,18 @@ Commits and PR bodies use the earlier names.
     tokens are refused until 3.1 stores refresh tokens.
 
 [^pod]: nixos-config `k8s/apps/odu` runs `odu web` in `pureintent`'s K3s: one
-    replica, with a `local-path` PVC for the catalog and objects. It publishes
-    `https://odu-k3s.rooster-blues.ts.net` over Tailscale Serve, and the cache
-    is public through the cloudflare row's tunnel. The root token, the GitHub
-    App and the R2 keys come from 1Password through External Secrets.
+    replica, with a `local-path` PVC for the catalog and the `local` store. It
+    publishes `https://odu-k3s.rooster-blues.ts.net` over Tailscale Funnel
+    (public; GitHub sign-in fronts the board; CI pushes there). The `r2` store
+    is the R2 bucket `kolu` with `publicUrl = https://cache.kolu.dev`, a custom
+    domain the operator bound with `cf`; the cloudflare row's tunnel carries
+    nothing today. The root token, the GitHub App and the R2 keys (Account
+    token `odu-r2-kolu`) come from 1Password through External Secrets.
     `ODU_CACHE_STORE` remains only so 2.2's migration can dump the old 166 GB
-    store; it is deleted after `cache.migration.complete`. The bucket `kolu` is
-    `--no-upstream`, so the runner's published closure imports with no trusted
-    key. The pod runs odu master, with test buckets
-    `r2test` (R2, bucket `odu-test`) and `localtest` (disk).
+    store; it is deleted after `cache.migration.complete`. Buckets: `kolu-r2`
+    (production, on `r2`, skips `cache.nixos.org-1`), the old `kolu` (local,
+    no longer advertised) and `r2test` (its objects in the retired R2 bucket
+    `odu-test`); the last two wait for a delete verb.
 
 [^parity]: Parity is checked by each row's own e2e: one scenario per verb,
     driven through the face.
