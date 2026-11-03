@@ -168,7 +168,7 @@ What each step delivers:
   land together was published as ZERO bytes, and the narinfo was then refused
   with `zstd exited 1`.[^zstd] Both reported symptoms were that one cause, and
   the disk/S3 split was a red herring: R2's first push refused the same paths.
-- **2.6 The board, redesigned.** One PR that ships the "Night shift" design
+- **2.6 ✅ The board, redesigned.** One PR that ships the "Night shift" design
   system and moves every existing screen onto it.[^board]
   - **Theme:** dark by default and light from the same tokens. It follows the
     OS setting, with a toggle.
@@ -183,10 +183,18 @@ What each step delivers:
     `pipeline.mermaid`, though `pipeline_read` carries it; and the board has
     no "newest run of THIS checkout" selector, which `odu ci status` resolves
     with git.
-- **2.7 GC and pins on every store.** Liveness comes from pushes, not reads,
+- **2.7 ✅ GC and pins on every store.** Liveness comes from pushes, not reads,
   because reads are about to leave odu. GC is written only against
   `ObjectStore`, and deletions purge the CDN.[^gc] The bucket page dry-runs the
   next collection.
+  - **Pins from CI:** the push action's `pin:` is a boolean, and the workflow
+    decides when (`pin: ${{ github.ref_name == github.event.repository.default_branch }}`).
+    The name is derived, `<owner>/<repo>@<ref>/<system>`, one pin per system.
+    odu, kolu and agent-distro hold theirs; olai's follow #684.
+  - **Every bucket advertises `Priority: 41`**, so cache.nixos.org (40) wins
+    for any path both hold, whatever the user's substituter order.
+  - **Open:** the GC proof (a dry run at a short retention keeps every pin)
+    needs a dry-run-only retention override on `gc_plan`.
 - **2.8 Reads leave odu.** Today every byte crosses the odu machine's uplink,
   and on the pod that caps reads at ~2.5 MiB/s.[^bench]
   - **Public bucket:** plain static files (narinfos, NARs, `nix-cache-info`)
@@ -306,7 +314,7 @@ Commits and PR bodies use the earlier names.
     `ODU_CACHE_STORE` remains only so 2.2's migration can dump the old 166 GB
     store; it is deleted after `cache.migration.complete`. The bucket `kolu` is
     `--no-upstream`, so the runner's published closure imports with no trusted
-    key. The pod currently runs #143's head `6df8c8e`, with test buckets
+    key. The pod runs odu master, with test buckets
     `r2test` (R2, bucket `odu-test`) and `localtest` (disk).
 
 [^parity]: Parity is checked by each row's own e2e: one scenario per verb,
