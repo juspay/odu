@@ -477,6 +477,37 @@ describe("odu serves a Nix binary cache", () => {
     expect(substituted.status).toBe(0);
   });
 
+  it("discovers a bucket from its substituter, and pushes with `--cache` alone", async () => {
+    // WHAT A CONSUMER REPOSITORY HAS is the URL in its `nix.conf`. The push
+    // origin and the bucket are read off `<substituter>/nix-cache-info`, which
+    // the cache states for itself — nothing here names a bucket or an origin.
+    const info = await fetch(`${main.url}/nix-cache-info`);
+    expect(info.status).toBe(200);
+    const stated = await info.text();
+    expect(stated).toContain(`Odu-Origin: ${world.origin}\n`);
+    expect(stated).toContain("Odu-Bucket: main\n");
+
+    const discovered = build("odu-cache-e2e-discovered");
+    const pushed = cli(["cache", "push", "--cache", main.url, "--output", "json", discovered], {
+      ODU_CACHE_TOKEN: writeToken,
+      NIX_REMOTE: builderStore,
+    });
+    expect({ status: pushed.status, stderr: pushed.stderr }).toMatchObject({ status: 0 });
+    const summary = JSON.parse(pushed.stdout) as {
+      pushed: number;
+      failed: number;
+      served: string[];
+      substituter: string;
+    };
+    expect(summary).toMatchObject({ pushed: 1, failed: 0, substituter: main.url });
+    expect(summary.served).toContain(discovered);
+
+    // SERVED WHERE NIX ASKS, which is what the push action then proves.
+    const narinfo = await fetch(`${main.url}/${hashOf(discovered)}.narinfo`);
+    expect(narinfo.status).toBe(200);
+    expect(await narinfo.text()).toContain(`StorePath: ${discovered}`);
+  });
+
   it("takes a path `nix copy --to` uploads, and keeps the client's signature", async () => {
     evictable = build("odu-cache-e2e-evictable");
 

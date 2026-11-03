@@ -82,7 +82,7 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | `odu cache use <bucket>` | a bucket's page |
 | Scoped, expiring, revocable tokens; the plaintext is shown once | `odu surface cache token_mint\|token_list\|token_revoke` | a bucket's **Tokens** |
 | Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — |
-| Upload only the paths the bucket is missing; long NARs are chunked. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…` | — |
+| Upload only the paths the bucket is missing; long NARs are chunked. `--cache <substituter>` reads the push origin and the bucket off the cache's own `nix-cache-info`. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…`, `odu cache push --cache <substituter> <path>…` | — |
 | Give a bucket a DNS name of its own through a Cloudflare tunnel | `odu surface cache bucket_domain` | bucket → **Domain** |
 | How long a path outlives the last time anything wanted it, in days | `odu surface cache bucket_retention` | a bucket's **Retention** |
 | Move a bucket's objects to another declared store, serving from the old one until the copy is done | `odu surface cache bucket_migrate` | a bucket's **Move to another store** |

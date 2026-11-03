@@ -57,27 +57,28 @@ describe("the copy a bucket page and the docs share", () => {
   it("the docs quote the GitHub Actions push block the page prints", () => {
     expect(DOCS).toContain(
       actionsPushBlock({
-        origin: "https://odu.example.com",
-        bucket: "main",
+        url: "https://odu.example.com/cache/main",
         ref: ACTION_REF_PLACEHOLDER,
       }).trimEnd(),
     );
   });
 
-  it("names the bucket and the origin in the action's inputs, and the token as a secret", () => {
-    const origin = "https://odu.example.com";
-    const block = actionsPushBlock({ origin, bucket: "main", ref: ACTION_REF_PLACEHOLDER });
-    // The two facts a page knows are filled in; the one it must not know is
-    // not: the token is a `secrets.` reference, never a value.
-    expect(block).toContain(`origin: ${origin}`);
-    expect(block).toContain("bucket: main");
+  it("names ONE fact in the action's inputs — the substituter — and the token as a secret", () => {
+    // The push origin and the bucket are the CACHE's to state
+    // (`nix-cache-info`'s `Odu-Origin`/`Odu-Bucket`), so a workflow that was
+    // written once cannot carry a stale origin for a bucket that moved.
+    const url = "https://odu.example.com/cache/main";
+    const block = actionsPushBlock({ url, ref: ACTION_REF_PLACEHOLDER });
+    expect(block).toContain(`cache: ${url}`);
+    expect(block).not.toContain("origin:");
+    expect(block).not.toContain("bucket:");
     expect(block).toContain("token: ${{ secrets.ODU_CACHE_TOKEN }}");
     expect(block).toContain("uses: juspay/odu/.github/actions/push@");
     // Pinned by revision, because the action builds the pusher from the commit
     // it is pinned to. The PLACEHOLDER is what a build that cannot name its
     // commit offers; a daemon that can offers its own.
     expect(block).toContain(ACTION_REF_PLACEHOLDER);
-    expect(actionsPushBlock({ origin, bucket: "main", ref: "abc1234" })).toContain(
+    expect(actionsPushBlock({ url, ref: "abc1234" })).toContain(
       "uses: juspay/odu/.github/actions/push@abc1234",
     );
   });

@@ -512,6 +512,36 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
     expect(await textOf(objects, narinfoKey("main", hash))).toBe(cache.narinfoText(bucket, hash));
   });
 
+  it("rewrites `nix-cache-info` when the daemon's public origin changed, and purges it", async () => {
+    // A DEPLOYMENT MOVED behind a new `$ODU_PUBLIC_ORIGIN`. The object in the
+    // store names the OLD one, and a pusher reading it (`odu cache push
+    // --cache`) would aim at an address this daemon no longer answers. The
+    // backfill is the pass that notices — by the stored sha256, not the
+    // length, which two origins can share.
+    const { cache, objects } = await pushedBefore28();
+    await cache.backfillObjects();
+    expect(await textOf(objects, cacheInfoKey("main"))).toContain(`Odu-Origin: ${ORIGIN}\n`);
+    await cache.close();
+
+    const MOVED = "https://odu.moved.example";
+    const purged: { reason: string; cacheInfo: boolean }[] = [];
+    const later = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      publicOrigin: MOVED,
+      stores: new Map<string, ObjectStore>([["local", objects]]),
+      purged: (moved) => purged.push({ reason: moved.reason, cacheInfo: moved.cacheInfo === true }),
+    });
+    trash.push(later);
+    await later.backfillObjects();
+
+    expect(await textOf(objects, cacheInfoKey("main"))).toBe(later.cacheInfoText("main"));
+    expect(await textOf(objects, cacheInfoKey("main"))).toContain(`Odu-Origin: ${MOVED}\n`);
+    // ANNOUNCED LIKE A NARINFO REWRITE: the superseded text was cacheable for
+    // a day, and it names an origin that no longer takes a push.
+    expect(purged).toContainEqual({ reason: "repush", cacheInfo: true });
+  });
+
   it("leaves alone a row whose NAR the legacy migration has not landed", async () => {
     const { cache, objects } = await pushedBefore28();
     const hash = storePathHash(PATHS[0] as string);

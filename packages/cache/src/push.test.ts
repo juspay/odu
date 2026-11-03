@@ -21,6 +21,7 @@ import { narHashBase32, storePathHash } from "./narinfo";
 import {
   credentialsPath,
   type ClosureEntry,
+  describeCache,
   formatPushNarinfo,
   pushToCache,
   resolveBucket,
@@ -696,6 +697,66 @@ describe("resolving the bucket argument", () => {
     });
     await saveCredential(env, "http://127.0.0.1:8888", "t");
     expect(await resolveBucket(env, "main")).toHaveProperty("error");
+  });
+});
+
+describe("a cache that describes itself (`--cache`)", () => {
+  /** A `fetch` that answers one body, and remembers what it was asked. */
+  const answering = (
+    reply: () => Response | Promise<Response>,
+  ): { send: typeof fetch; asked: string[] } => {
+    const asked: string[] = [];
+    return {
+      asked,
+      send: (async (url: string | URL | Request) => {
+        asked.push(String(url));
+        return await reply();
+      }) as unknown as typeof fetch,
+    };
+  };
+
+  const INFO =
+    "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n" +
+    "Odu-Origin: https://odu.example.org\nOdu-Bucket: kolu-r2\n";
+
+  it("reads the push origin and the bucket off the substituter's nix-cache-info", async () => {
+    // THE ONE FACT A CONSUMER HAS is the substituter URL. The push address
+    // cannot be derived from it: this one is an R2 domain that answers GET.
+    const { send, asked } = answering(() => new Response(INFO, { status: 200 }));
+    expect(await describeCache("https://cache.kolu.dev/kolu-r2/", send)).toEqual({
+      origin: "https://odu.example.org",
+      bucket: "kolu-r2",
+    });
+    expect(asked).toEqual(["https://cache.kolu.dev/kolu-r2/nix-cache-info"]);
+  });
+
+  it("refuses a cache that answers without the two lines, naming the URL", async () => {
+    // cache.nixos.org, or an odu from before this: guessing an origin from the
+    // substituter is how a push ends up at a URL nobody owns.
+    const { send } = answering(
+      () => new Response("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n", { status: 200 }),
+    );
+    const refusal = await describeCache("https://cache.nixos.org", send).catch((err: Error) => err);
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("https://cache.nixos.org/nix-cache-info");
+    expect((refusal as Error).message).toContain("Odu-Origin");
+  });
+
+  it("refuses a cache that does not answer, naming the URL", async () => {
+    const dead = (async () => {
+      throw new Error("getaddrinfo ENOTFOUND cache.gone.example");
+    }) as unknown as typeof fetch;
+    const refusal = await describeCache("https://cache.gone.example", dead).catch(
+      (err: Error) => err,
+    );
+    expect((refusal as Error).message).toContain("https://cache.gone.example/nix-cache-info");
+    expect((refusal as Error).message).toContain("ENOTFOUND");
+
+    const { send } = answering(() => new Response("no", { status: 404 }));
+    const missing = await describeCache("https://cache.kolu.dev/gone", send).catch(
+      (err: Error) => err,
+    );
+    expect((missing as Error).message).toContain("answered 404");
   });
 });
 

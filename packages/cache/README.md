@@ -72,6 +72,12 @@ on the wire and `cache_bucket_create` to an agent.
   without odu. SQLite stays the truth — a narinfo served BY odu is still
   rendered and signed per request — and the objects are a projection of it,
   which is why the backfill may rewrite one at any time.
+  AND `nix-cache-info` SAYS WHERE THE PUSH GOES: `Odu-Origin` (this daemon's
+  public origin) and `Odu-Bucket`, one rendering (`Cache.cacheInfoText`) for
+  the two routes and the object alike. A read address is no longer a push
+  address once the store serves reads, so the cache states the push address
+  instead of leaving a consumer to derive it — which is what
+  `odu cache push --cache <substituter>` reads.
 - **GC is the niks3 model.** An object is evicted only when retention has
   expired, nothing retained in the bucket references it, and no pin holds it.
   This is the direct answer to the failure chutney shipped: 669 GB of S3 and
@@ -167,8 +173,11 @@ property of the STORE rather than of the protocol:
   narinfo object and `nix-cache-info`, two at a time, and is idempotent (a
   HEAD whose length matches the rendered text is a skip), so kolu's sixteen
   thousand rows cost a walk on the next restart rather than a rewrite.
-  Progress is `cache.narinfo.backfill {bucket, written, remaining}`, one line
-  per five hundred rows.
+  `nix-cache-info` is confirmed by CONTENT, not length — the put's refusal
+  carries the stored object's sha256 — so a daemon that moved behind a new
+  `$ODU_PUBLIC_ORIGIN` rewrites it and purges the address it was cacheable
+  at. Progress is `cache.narinfo.backfill {bucket, written, remaining}`, one
+  line per five hundred rows.
 
 The three kinds of key are known everywhere one key is: GC deletes a row's
 narinfo object with the row (a narinfo nobody can get a NAR for is worse than

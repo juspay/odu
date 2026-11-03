@@ -343,9 +343,15 @@ describe("the row's word", () => {
       expect(source(file), `${file} names neither CACHE_KEY nor CACHE_ROW`).toMatch(
         /\bCACHE_(KEY|ROW)\b/,
       );
-      // …and none of them spells the word itself as a sibling key.
+      // …and none of them spells the word itself as a SIBLING KEY.
+      //
+      // AN ARGV FLAG NAMED FOR THE ROW IS NOT ONE. `odu cache push --cache
+      // <substituter>` takes the cache's own URL, and `parseArgs` declares a
+      // flag as `cache: { type: … }` — a shape no sibling map ever has. The
+      // rule is about a face retyping the key it mounts the row at, and that
+      // is what stays forbidden.
       expect(source(file), `${file} spells the row's word`).not.toMatch(
-        new RegExp(`\\b${value as string}:`),
+        new RegExp(`\\b${value as string}:(?!\\s*\\{\\s*type:)`),
       );
     }
   });
