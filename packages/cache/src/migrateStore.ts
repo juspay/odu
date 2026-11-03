@@ -112,7 +112,12 @@ export interface MigrationDeps {
   log?: (event: string, fields: Record<string, unknown>) => void;
   /** What the old store gave up, so the row can purge the addresses it served
    *  them at. */
-  purged?: (input: { bucket: string; store: string; removals: readonly GcRemoval[] }) => void;
+  purged?: (input: {
+    bucket: string;
+    store: string;
+    reason: "migrate" | "repush";
+    removals: readonly GcRemoval[];
+  }) => void;
   /** True once the row is closing: every loop here checks it, so a move does
    *  not hold a database that is about to go. */
   stopping: () => boolean;
@@ -253,7 +258,12 @@ export async function runMigration(row: MigrationRow, deps: MigrationDeps): Prom
         if (deps.stopping()) return;
         await deps.slots.withSlot(() => from.delete(entry.key)).catch(() => {});
       }
-      deps.purged?.({ bucket: state.bucket, store: state.fromStore, removals });
+      deps.purged?.({
+        bucket: state.bucket,
+        store: state.fromStore,
+        reason: "migrate",
+        removals,
+      });
       repo.deleteMigration(state.bucket);
       deps.notify();
       log?.("cache.bucket.migrate.done", {

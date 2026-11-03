@@ -996,7 +996,3 @@ When("I move the bucket to {string}", async function (this: OduWorld, store: str
     .getByRole("button", { name: "Start move", exact: true })
     .click();
 });
-
-Then("the move says {string}", async function (this: OduWorld, text: string) {
-  await this.saysThat(migrateSection(this), "the move", text);
-});

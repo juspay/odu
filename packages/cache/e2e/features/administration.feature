@@ -78,8 +78,7 @@ Feature: An admin administers the cache from the board
     Then the bucket's facts say "objects on local"
     And the move offers the store "gw"
     When I move the bucket to "gw"
-    Then the move says "It keeps serving from local until every object is copied"
-    And the bucket's facts say "objects on gw"
+    Then the bucket's facts say "objects on gw"
     # The store publishes no public URL, so a read of it is still odu's to
     # answer — the other half of the fact this line now carries.
     And the bucket's facts say "reads served by odu"

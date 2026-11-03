@@ -414,6 +414,16 @@ in
               The service's endpoint URL. Requests are path-style
               (`<endpoint>/<bucket>/<key>`), which every S3-compatible service
               accepts and a local gateway needs.
+
+              CLIENTS DIAL THIS TOO, since odu stopped serving NAR bytes: a
+              NAR on an S3 store is answered with a redirect to a presigned
+              URL built from this endpoint, and the client follows it. So it
+              must resolve and be reachable from wherever `nix build` runs — a
+              loopback address, a VPC-only name or a tailnet name that only
+              the daemon can see makes every NAR read fail on the client's
+              side, with nothing in odu's log. odu logs
+              `cache.store.endpoint.unreachable` at startup for a loopback or
+              link-local endpoint that a bucket depends on.
             '';
           };
           bucket = mkOption {
@@ -451,10 +461,15 @@ in
               odu keeps signing its OWN requests against `endpoint`: this name
               is for readers, never for writes.
 
-              A private bucket's reads stay with odu, which is the only thing
-              that can ask who a caller is — but the domain you bind serves
-              every prefix in the S3 bucket, so do not keep private buckets on
-              a store that has one. Bind the domain to the bucket yourself —
+              A private bucket may not live on a store with a `publicUrl`:
+              the domain you bind serves every prefix in the S3 bucket, so its
+              narinfos and NARs would be readable by anyone who knows the
+              bucket's name whatever odu's own routes decide. `bucket_create`
+              and `bucket_migrate` refuse the combination, and a private
+              bucket that was already there when you bound the domain is named
+              at startup with `cache.bucket.exposed`.
+
+              Bind the domain to the bucket yourself —
               for R2, `cf r2 buckets domains custom create <bucket> --domain
               <host> --zone-id <zone>`.
             '';

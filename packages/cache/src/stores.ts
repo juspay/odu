@@ -121,9 +121,24 @@ export function storeFacts(declared: StoreDeclarations): CacheStore[] {
       name,
       kind: declaration.kind,
       default: false,
-      // WITHOUT ITS TRAILING SLASH: every caller joins `/<bucket>` onto it,
-      // and `https://cache.example.org//kolu` is a key nobody wrote.
-      publicUrl: declaration.target.publicUrl?.href.replace(/\/+$/, "") ?? null,
+      // THE ORIGIN, NOT THE HREF: the parser refused a path, a query and a
+      // fragment, so the origin is the whole of the URL — and every caller
+      // joins `/<bucket>` onto it, where `https://cache.example.org//kolu`
+      // would be a key nobody wrote.
+      publicUrl: declaration.target.publicUrl?.origin ?? null,
     })),
   ];
+}
+
+/** The stores whose objects the world can read without odu: those the
+ *  operator bound a domain to. The cache refuses a PRIVATE bucket on one of
+ *  them, because the binding covers every prefix in the store. */
+export function frontedStores(declared: StoreDeclarations): Set<string> {
+  return new Set([...declared].flatMap(([name, d]) => (d.target.publicUrl === undefined ? [] : [name])));
+}
+
+/** Each declared store's endpoint — what a presigned URL is built from, and
+ *  therefore an address the CLIENT must be able to dial (PLAN 2.8). */
+export function storeEndpoints(declared: StoreDeclarations): { name: string; endpoint: URL }[] {
+  return [...declared].map(([name, declaration]) => ({ name, endpoint: declaration.target.endpoint }));
 }

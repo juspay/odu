@@ -24,9 +24,10 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { diskObjectStore, s3ObjectStore, type ObjectStore } from "@odu/objects";
 import { type Gateway, startGateway } from "@odu/objects/testing";
 import { type Cache, createCache } from "./cache";
-import { openCacheRepo } from "./db";
+import { openCacheRepo, type BucketRow } from "./db";
 import { migrationKeys } from "./migrateStore";
 import { base32, storePathHash } from "./narinfo";
+import { narinfoKey, objectKey } from "./staging";
 import { asRoot } from "./testlib";
 
 const ROOT = "root-token";
@@ -55,15 +56,22 @@ const narinfoText = (storePath: string, payload: { narHash: string }): string =>
     "",
   ].join("\n");
 
-async function push(cache: Cache, storePath: string): Promise<void> {
-  const bucket = cache.bucket("main");
-  if (bucket === null) throw new Error("no bucket main");
+/** Push one path, against the bucket row the caller holds — a request is
+ *  admitted against a row read when it ARRIVED, and that row can be stale by
+ *  the time the push reaches the write lock. */
+async function pushAs(cache: Cache, bucket: BucketRow, storePath: string): Promise<void> {
   const payload = nar(storePath);
   const upload = await cache.beginUpload(bucket, `${payload.narHash.slice("sha256:".length)}.nar.zst`);
   await upload.write(payload.bytes);
   await upload.commit();
   const outcome = await cache.acceptNarinfo(bucket, storePathHash(storePath), stream(narinfoText(storePath, payload)));
   if (!outcome.ok) throw new Error(`push ${storePath}: ${outcome.message}`);
+}
+
+async function push(cache: Cache, storePath: string): Promise<void> {
+  const bucket = cache.bucket("main");
+  if (bucket === null) throw new Error("no bucket main");
+  await pushAs(cache, bucket, storePath);
 }
 
 const keysOf = async (objects: ObjectStore): Promise<string[]> =>
@@ -213,6 +221,38 @@ describe("bucket.migrate", () => {
 
     await settled(cache);
     expect(await keysOf(far)).toHaveLength(7);
+    await subjectUnder.dispose();
+  });
+
+  it("writes a push admitted before the flip into the store the bucket moved to", async () => {
+    const subjectUnder = await subject();
+    const { cache, local, far } = subjectUnder;
+    const [first, late] = PATHS;
+    await push(cache, first);
+
+    // THE ROW A REQUEST WAS ADMITTED AGAINST, taken before the move: a
+    // narinfo PUT that arrived now holds exactly this, and the write lock it
+    // then queues on is the lock the flip takes. The flip can therefore
+    // happen while this push waits — on a bucket of any size the delta pass
+    // holds that lock for minutes.
+    const admitted = cache.bucket("main");
+    if (admitted === null) throw new Error("no bucket main");
+    expect(admitted.store).toBe("local");
+
+    await cache.admin.migrateStore({ ...asRoot(ROOT), bucket: "main", store: "far" });
+    await settled(cache);
+    expect(cache.bucket("main")?.store).toBe("far");
+
+    // THE PUSH LANDS WHERE THE BUCKET IS NOW, not where it was when the
+    // request arrived. Written into the old store it would have been deleted
+    // by the move's own delete pass, and the push would have answered 200 for
+    // an object nobody has — a 307 into a 404.
+    await pushAs(cache, admitted, late);
+    expect(await keysOf(local)).toEqual([]);
+    expect(await readNar(cache, late)).toBe(late);
+    const key = objectKey("main", nar(late).narHash, "none");
+    expect(await far.head(key)).not.toBeNull();
+    expect(await far.head(narinfoKey("main", storePathHash(late)))).not.toBeNull();
     await subjectUnder.dispose();
   });
 

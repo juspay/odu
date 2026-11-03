@@ -138,13 +138,15 @@ property of the STORE rather than of the protocol:
   `stores` cell). A PUBLIC bucket on such a store has `readsFrom: "store"` and
   a `url` of `<publicUrl>/<bucket>`: its reads never reach the daemon, which
   may be down. Everything else is `readsFrom: "odu"` — a private bucket's
-  reads stay here because only odu can ask who is asking, and a store's domain
-  cannot, which is also why a private bucket does not BELONG on a store with a
-  public domain: that domain serves every prefix in the S3 bucket, odu's
-  authorisation or not. Both fields are on the bucket row and on
-  `bucket.describe`. The operator binds the domain to the S3 bucket
-  (`cf r2 buckets domains custom create <r2-bucket> --domain <host>
-  --zone-id <zone>`); odu only checks it at
+  reads stay here because only odu can ask who is asking. A private bucket may
+  not LIVE on such a store either: the bound domain serves every prefix in the
+  S3 bucket, odu's authorisation or not, so `admin.create` and
+  `admin.migrateStore` refuse `public: false` onto one (`frontedStores` is how
+  the cache learns which they are), and a private bucket that predates the
+  binding is named at mount with `cache.bucket.exposed`. Both fields are on
+  the bucket row and on `bucket.describe`. The operator binds the domain to
+  the S3 bucket (`cf r2 buckets domains custom create <r2-bucket> --domain
+  <host> --zone-id <zone>`); odu only checks it at
   mount — one `GET <publicUrl>/<bucket>/nix-cache-info` per store that has a
   public bucket, and anything but a 200 with the expected body is
   `cache.store.public.unreachable`, a logged refusal and never a boot failure.
@@ -155,6 +157,11 @@ property of the STORE rather than of the protocol:
   `cache.nar.served` carries `source: "redirect"` with `bytes: 0` because
   there is no body to observe. A disk store streams as it always did:
   `store.presignGet === undefined` is the whole test.
+  The store's `endpoint` is a CLIENT's address now, because the presigned URL
+  is built from it: `probeStoreEndpoints` logs
+  `cache.store.endpoint.unreachable` at mount for a loopback or link-local
+  endpoint a bucket depends on, which is the one case that is wrong for
+  certain.
 - **A cache that predates this is caught up at boot.** `backfillObjects()` is
   forked after the mount like the legacy migration, writes every missing
   narinfo object and `nix-cache-info`, two at a time, and is idempotent (a
@@ -166,8 +173,11 @@ property of the STORE rather than of the protocol:
 The three kinds of key are known everywhere one key is: GC deletes a row's
 narinfo object with the row (a narinfo nobody can get a NAR for is worse than
 none), the boot sweep counts all three as owned so it cannot mistake one for
-an orphan, and a collection announces the store's own URLs for purging beside
-odu's when the store has a public one.
+an orphan, a re-push that REWROTE a narinfo object purges that one address
+(`purged`, `reason: "repush"` — the NAR is named by its own bytes and never
+changes), and a collection announces the store's own URLs beside odu's.
+`publicObjectUrl` is the one place a key becomes a public address, so the
+purge set and the key set cannot drift apart.
 
 ## A bucket changes stores without going down
 

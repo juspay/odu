@@ -31,8 +31,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { purgeBroker } from "@odu/cordis/services";
 import { diskObjectStore, type ObjectStore, type S3Declaration, type StoreDeclarations } from "@odu/objects";
 import { type Cache, createCache } from "./cache";
+import { openCacheRepo } from "./db";
 import { base32, storePathHash } from "./narinfo";
-import { cacheServer, probePublicStores } from "./server";
+import { cacheServer, probePublicStores, probeStoreEndpoints } from "./server";
 import { cacheInfoKey, narinfoKey, NIX_CACHE_INFO } from "./staging";
 import { storeFacts } from "./stores";
 import type { CacheBucket } from "./surface";
@@ -275,14 +276,120 @@ describe("asking a store's domain whether it serves", () => {
     }
   });
 
-  it("never asks about a store whose buckets are all private", async () => {
-    // The domain may not be bound yet, and it would not matter: nothing on
-    // this store is read from it, so a refusal would be noise at every boot.
+  it("never asks about a store whose buckets are all private, and says they are exposed", async () => {
+    // The domain may not be bound yet, and it would not matter for the PROBE:
+    // nothing on this store is advertised at it. It matters for the BUCKET —
+    // the binding covers every prefix in the store, so a private bucket that
+    // was there before the domain was bound is readable at it by anyone who
+    // knows the name. `create` and `migrate` refuse the combination now; this
+    // is how an operator who already has one finds out.
     const seen = await probe(() => new Response("", { status: 404 }), [
       { name: "secret", public: false, store: "r2" },
     ]);
     expect(seen.asked).toEqual([]);
     expect(seen.refusals).toEqual([]);
+    expect(seen.logged).toEqual([
+      {
+        event: "cache.bucket.exposed",
+        fields: { bucket: "secret", store: "r2", url: `${PUBLIC_URL}/secret` },
+      },
+    ]);
+  });
+
+  it("says nothing about a bucket on a store nobody bound a domain to", async () => {
+    const logged: { event: string; fields: Record<string, unknown> }[] = [];
+    await probePublicStores({
+      stores: storeFacts(declaring(PLAIN)),
+      buckets: [{ name: "secret", public: false, store: "r2" }],
+      send: (() => Promise.reject(new Error("nobody should ask"))) as unknown as typeof fetch,
+      log: (event, fields) => logged.push({ event, fields }),
+    });
+    expect(logged).toEqual([]);
+  });
+});
+
+/**
+ * A STORE'S ENDPOINT IS A CLIENT'S ADDRESS NOW. Before 2.8 only the daemon
+ * dialled it; it is signed into the URL a 307 hands to `nix build`, which
+ * runs somewhere else, so a loopback endpoint is a cache that cannot be read
+ * from any other machine — with nothing in odu's own log to say why.
+ */
+describe("an endpoint a client cannot dial", () => {
+  const endpointing = (endpoint: string, buckets: readonly { store: string }[]) => {
+    const logged: { event: string; fields: Record<string, unknown> }[] = [];
+    const found = probeStoreEndpoints({
+      stores: [{ name: "r2", endpoint: new URL(endpoint) }],
+      buckets,
+      log: (event, fields) => logged.push({ event, fields }),
+    });
+    return { found, logged };
+  };
+
+  it("names a loopback or link-local endpoint that a bucket's reads depend on", () => {
+    for (const endpoint of [
+      "http://127.0.0.1:7070",
+      "http://localhost:7070",
+      "http://[::1]:7070",
+      "http://169.254.1.2",
+    ]) {
+      const seen = endpointing(endpoint, [{ store: "r2" }]);
+      expect({ endpoint, found: seen.found.length }).toEqual({ endpoint, found: 1 });
+      expect(seen.logged[0]?.event).toBe("cache.store.endpoint.unreachable");
+    }
+  });
+
+  it("says nothing about a routable endpoint, or about a store holding no bucket", () => {
+    expect(endpointing("https://acct.r2.cloudflarestorage.com", [{ store: "r2" }]).found).toEqual([]);
+    expect(endpointing("http://127.0.0.1:7070", [{ store: "local" }]).found).toEqual([]);
+  });
+});
+
+/**
+ * A PRIVATE BUCKET MAY NOT LIVE WHERE THE WORLD CAN READ. A bound domain
+ * covers the whole S3 bucket, every prefix in it, so a private bucket on such
+ * a store is private in name only — and odu holds both facts at the moment of
+ * the choice, which is why this is a refusal and not a documentation note.
+ */
+describe("a private bucket on a store the world can read", () => {
+  const fronted = (): Cache => {
+    const cache = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      stores: new Map<string, ObjectStore>([
+        ["local", diskObjectStore({ dir: join(scratch, "cache") })],
+        ["r2", diskObjectStore({ dir: join(scratch, "r2") })],
+      ]),
+      frontedStores: new Set(["r2"]),
+    });
+    trash.push(cache);
+    return cache;
+  };
+
+  it("is refused at create, and the public one beside it is not", async () => {
+    const cache = fronted();
+    const refused = await cache.admin.create({
+      ...asRoot(ROOT),
+      name: "secret",
+      public: false,
+      retentionDays: 30,
+      upstreamKeys: [],
+      store: "r2",
+    });
+    expect(refused).toMatchObject({ ok: false, code: "bad_input" });
+    if (!refused.ok) expect(refused.message).toContain("publishes its objects at a public URL");
+    await create(cache, "kolu", { public: true, store: "r2" });
+    expect(cache.bucket("kolu")?.store).toBe("r2");
+    // And a private bucket on the daemon's own disk is nobody's business.
+    await create(cache, "secret", { public: false, store: "local" });
+    expect(cache.bucket("secret")?.store).toBe("local");
+  });
+
+  it("is refused at migrate, so a move cannot publish what a create would not", async () => {
+    const cache = fronted();
+    await create(cache, "secret", { public: false, store: "local" });
+    const refused = await cache.admin.migrateStore({ ...asRoot(ROOT), bucket: "secret", store: "r2" });
+    expect(refused).toMatchObject({ ok: false, code: "bad_input" });
+    expect(cache.bucket("secret")?.store).toBe("local");
   });
 });
 
@@ -379,5 +486,96 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
 
     expect(await cache.backfillObjects()).toEqual({ rows: 2, written: 1, failures: 0 });
     expect(await textOf(objects, narinfoKey("main", hash))).toBe(cache.narinfoText(bucket, hash));
+  });
+
+  it("leaves alone a row whose NAR the legacy migration has not landed", async () => {
+    const { cache, objects } = await pushedBefore28();
+    const hash = storePathHash(PATHS[0] as string);
+    // A ROW FROM BEFORE OBJECTS WERE KEPT: no `FileHash`, no `FileSize`, and
+    // the old Nix store still serving it. Its narinfo would omit both and
+    // name a `URL:` that is not in the store — on a store-fronted bucket,
+    // a narinfo the store serves and a NAR that 404s.
+    const repo = openCacheRepo(join(scratch, "cache", "cache.sqlite"));
+    const row = repo.object("main", PATHS[0] as string);
+    if (row === null) throw new Error("no row");
+    repo.putObject({ ...row, fileHash: null, fileSize: null });
+    repo.close();
+
+    expect(await cache.backfillObjects()).toEqual({ rows: 2, written: 1, failures: 0 });
+    expect(await objects.head(narinfoKey("main", hash))).toBeNull();
+    expect(await objects.head(narinfoKey("main", storePathHash(PATHS[1] as string)))).not.toBeNull();
+  });
+});
+
+/**
+ * A RE-PUSH REWRITES A NARINFO OBJECT that carries a day of `Cache-Control`.
+ * Odu's own render is correct the moment the row changes; the store's copy is
+ * not, and whatever fronts the store has to be told — the same announcement a
+ * collection makes, for one address.
+ */
+describe("a re-push purges the narinfo it rewrote", () => {
+  const PATH = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-one";
+  const bytes = new TextEncoder().encode(PATH);
+  const narHash = `sha256:${base32(createHash("sha256").update(bytes).digest())}`;
+  const file = `${narHash.slice("sha256:".length)}.nar.zst`;
+  const narinfo = (sigs: readonly string[]): string =>
+    [
+      `StorePath: ${PATH}`,
+      `URL: nar/${file}`,
+      "Compression: none",
+      `NarHash: ${narHash}`,
+      `NarSize: ${bytes.length}`,
+      "References: ",
+      ...sigs.map((sig) => `Sig: ${sig}`),
+      "",
+    ].join("\n");
+
+  it("announces the one address whose bytes changed, and not the NAR's", async () => {
+    const purged: { bucket: string; store: string; reason: string; removed: string[] }[] = [];
+    const cache = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      stores: new Map<string, ObjectStore>([["local", diskObjectStore({ dir: join(scratch, "cache") })]]),
+      purged: (moved) =>
+        purged.push({
+          bucket: moved.bucket,
+          store: moved.store,
+          reason: moved.reason,
+          // THE NAR IS NOT IN IT: it is named by its own bytes and did not
+          // change, so purging it would be a cold cache for nothing.
+          removed: moved.removals.map((removal) => `${removal.hash}:${String(removal.narFile)}`),
+        }),
+    });
+    trash.push(cache);
+    await create(cache, "main", { public: true, store: "local" });
+    const bucket = cache.bucket("main");
+    if (bucket === null) throw new Error("no bucket main");
+    const push = async (sigs: readonly string[]): Promise<void> => {
+      const upload = await cache.beginUpload(bucket, file);
+      await upload.write(bytes);
+      await upload.commit();
+      const outcome = await cache.acceptNarinfo(
+        bucket,
+        storePathHash(PATH),
+        new Response(narinfo(sigs)).body as ReadableStream<Uint8Array>,
+      );
+      if (!outcome.ok) throw new Error(outcome.message);
+    };
+
+    await push([]);
+    // A FIRST WRITE IS NOT A REWRITE: nobody can be holding what was never
+    // served. Nor is an identical re-push, which changes no bytes.
+    await push([]);
+    expect(purged).toEqual([]);
+
+    await push(["lane-1:YWJj"]);
+    expect(purged).toEqual([
+      {
+        bucket: "main",
+        store: "local",
+        reason: "repush",
+        removed: [`${storePathHash(PATH)}:null`],
+      },
+    ]);
   });
 });

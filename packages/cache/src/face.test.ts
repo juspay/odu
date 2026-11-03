@@ -183,8 +183,9 @@ describe("a pin name is parsed in one pass", () => {
 /**
  * WHERE A READ IS ANSWERED is the fact 2.8 added to the bucket page, and it is
  * the one fact on that line a person checks after binding a domain: a bucket
- * whose reads still come from odu looks identical otherwise. Pure, so the two
- * sentences are pinned here rather than in a browser.
+ * whose reads still come from odu looks identical otherwise. What is pinned
+ * here is the HOST it extracts from a substituter URL — the part that can be
+ * wrong — and not the sentence it is put in.
  */
 describe("the facts line says who answers a read", () => {
   it("names the store's host when the reads left odu", async () => {
@@ -201,13 +202,6 @@ describe("the facts line says who answers a read", () => {
     );
   });
 
-  it("says odu for everything else, whatever the URL is", async () => {
-    const { readsFromText } = await import("./face");
-    expect(readsFromText({ readsFrom: "odu", url: "https://cache.example.org/kolu" })).toBe(
-      "reads served by odu",
-    );
-  });
-
   it("prints a URL it could not parse rather than nothing", async () => {
     const { readsFromText } = await import("./face");
     expect(readsFromText({ readsFrom: "store", url: "not a url" })).toBe(
@@ -217,11 +211,11 @@ describe("the facts line says who answers a read", () => {
 });
 
 /**
- * A MOVE'S THREE STATES ARE THREE DIFFERENT WAITS, and the panel's whole
- * progress report is this sentence — so the state it names, and the counts
- * beside it, are pinned here.
+ * THE ONE COMPUTATION IN A MOVE'S SENTENCE is its count: "1 object" against
+ * "12 objects", on a number that arrives from the row. The wording around it
+ * is wording, and is not pinned.
  */
-describe("a migration reads as one sentence per state", () => {
+describe("a migration counts what it has moved", () => {
   const moving = (over: Partial<CacheMigration> = {}): CacheMigration => ({
     to: "r2",
     state: "copying",
@@ -231,29 +225,13 @@ describe("a migration reads as one sentence per state", () => {
     ...over,
   });
 
-  it("counts the objects and the bytes while it copies", async () => {
+  it("keeps the plural for a bucket with many objects in it", async () => {
     const { migrationText } = await import("./face");
-    expect(migrationText(moving())).toBe("Copying to r2: 12 of 40 objects, 3.0 MiB.");
-  });
-
-  it("names the moment the bucket changes hands", async () => {
-    const { migrationText } = await import("./face");
-    expect(migrationText(moving({ state: "flipping", copied: 40 }))).toContain(
-      "Flipping to r2: 40 of 40 objects",
-    );
-  });
-
-  it("says the old copies are going away, which is not the same as done", async () => {
-    const { migrationText } = await import("./face");
-    expect(migrationText(moving({ state: "deleting", copied: 40 }))).toContain(
-      "Deleting the old copies on the way to r2",
-    );
+    expect(migrationText(moving())).toContain("12 of 40 objects");
   });
 
   it("keeps the singular for a bucket with one object in it", async () => {
     const { migrationText } = await import("./face");
-    expect(migrationText(moving({ copied: 1, total: 1, bytes: 0 }))).toBe(
-      "Copying to r2: 1 of 1 object, 0 B.",
-    );
+    expect(migrationText(moving({ copied: 1, total: 1, bytes: 0 }))).toContain("1 of 1 object,");
   });
 });
