@@ -6,7 +6,11 @@
 # pins in `npins/sources.json`).
 #
 # BOTH JOBS PUSH TO THE POD'S OWN ORIGIN, `https://odu-k3s.rooster-blues.ts.net`
-# (a Tailscale Funnel), which serves the bucket reads come from.
+# (a Tailscale Funnel), which is where the `kolu-r2` bucket takes a push —
+# reads come from R2 instead. NEITHER JOB SPELLS THAT ORIGIN: the build job
+# names only the substituter (`cache:`) and `odu cache push --cache` reads
+# `Odu-Origin` off its `nix-cache-info`; the publish job's pusher is the baked
+# declaration's.
 # The build job pushes with `./.github/actions/push` — the action odu ships for
 # ANY project, which builds its pusher from the checkout it sits in, so this
 # line pushes with this tree's odu, which chunks. The publish job's
@@ -18,7 +22,7 @@
 # `build-and-push` warms the input-addressed cache a lane host substitutes from
 # (odu's own, with `odu cache push`), and `publish-closures` then rewrites from
 # that same tree and pushes to the SAME bucket: the agent source bakes
-# `pusher = { kind = "odu"; bucket = "kolu-r2"; origin = "…"; }` (kolu#2334), so
+# `pusher = { kind = "odu"; bucket = "kolu-r2"; }` (kolu#2334), so
 # the action runs `odu cache push` under `ODU_CACHE_TOKEN` and the checkout's
 # own odu, which chunks. It must be its OWN job: the action installs the Nix it
 # rewrites with (2.34.8 — see its `action.yml`), which has to be the job's only

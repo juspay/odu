@@ -39,8 +39,9 @@ import { composedClients } from "@odu/cordis/compose";
 import { readDoor } from "@odu/cordis/services";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { Effect } from "effect";
+import { existsSync } from "node:fs";
 import { CACHE_MOUNT } from "./paths";
-import { describeCache, normalizeOrigin, pushToCache, saveCredential } from "./push";
+import { describeCache, discoveryToken, normalizeOrigin, pushToCache, saveCredential } from "./push";
 import {
   CACHE_KEY,
   CacheRefused,
@@ -385,8 +386,29 @@ async function pushCommand(rest: string[]): Promise<number> {
       process.stderr.write(`odu: cache push --cache needs at least one path\n${CACHE_USAGE}`);
       return 1;
     }
+    // A POSITIONAL BUCKET BESIDE `--cache` IS THE SAME CONFLICT `--origin` IS,
+    // and it has to be caught HERE: taken as a path, a bucket name reaches
+    // `nix path-info` and fails there, naming the store's complaint instead of
+    // the mistake. A path is absolute, or something on this disk, or a flake
+    // installable (`.#x`, `nixpkgs#x`); a bare word is none of those.
+    const named = positionals.filter(
+      (item) => !(item.startsWith("/") || item.includes("#") || existsSync(item)),
+    );
+    if (named.length > 0) {
+      process.stderr.write(
+        `odu: --cache names the bucket, so "${named[0] as string}" is not a path it can ` +
+          `push — with --cache every positional is a store path, a result link or a ` +
+          `flake installable. Drop it, or use \`odu cache push ${named[0] as string} ` +
+          `--origin <url>\`\n`,
+      );
+      return 1;
+    }
     try {
-      const facts = await describeCache(asked);
+      // THE PUSH'S OWN TOKEN, ONE REQUEST EARLIER: a private bucket answers
+      // its `nix-cache-info` to nobody, so discovery without it would make
+      // exactly the buckets that need a token unpushable.
+      const token = await discoveryToken(process.env, asked, values["token-file"]);
+      const facts = await describeCache(asked, fetch, token);
       bucket = facts.bucket;
       origin = facts.origin;
       // THE DISCOVERY, SAID OUT LOUD on the human path: a push that resolved a

@@ -557,15 +557,22 @@ export interface CacheOptions {
   /** `$ODU_ROOT_TOKEN`, or null when the operator supplied none. */
   rootToken: string | null;
   /**
-   * WHERE THIS DAEMON IS REACHED — the proxy's origin when one stands in
-   * front, the bound one otherwise, which is the same string the row builds a
-   * bucket's `pushUrl` from.
+   * WHERE THIS DAEMON IS REACHED — the same string the row builds a bucket's
+   * `pushUrl` and its path-form `url` from.
    *
    * The cache needs it because `nix-cache-info` NAMES IT (PLAN 2.8): reads
    * come from the store, so the push address can no longer be derived from
    * the substituter, and the file a Nix client reads first is where the cache
-   * states it. Required rather than defaulted: a cache that guessed loopback
-   * here would send every pusher to its own machine.
+   * states it.
+   *
+   * THE ROW PASSES `$ODU_PUBLIC_ORIGIN` WHEN THERE IS ONE AND THE BOUND
+   * ORIGIN OTHERWISE (`server.ts`), which on a loopback daemon makes
+   * `Odu-Origin` a `127.0.0.1` address. That is honest — it is exactly what
+   * `pushUrl` and the bucket page already say, and on a loopback daemon it is
+   * where a push goes — but a deployment whose reads come from a store and
+   * whose operator never set `$ODU_PUBLIC_ORIGIN` publishes a push address
+   * only its own machine can use. Required rather than defaulted so that
+   * answer is the ROW's, said once, and not a constant hidden here.
    */
   publicOrigin: string;
   /** THE OLD NIX STORE, read only during the one-time migration. `null` on a

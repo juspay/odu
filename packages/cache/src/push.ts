@@ -140,6 +140,17 @@ export async function resolveBucket(
  * derived because reads come from the store (PLAN 2.8): `https://cache.kolu.dev`
  * is an R2 domain that answers GET and takes no push at all.
  *
+ * IT CARRIES THE BUCKET'S TOKEN. An anonymous read of a PRIVATE bucket is
+ * `404 no such bucket` — the cache refuses to confirm a private name to
+ * somebody who has not proved anything — so discovery without a credential
+ * would make exactly the buckets that need a token unpushable. The token is
+ * the same one the push that follows uses, resolved from the same places
+ * ({@link discoveryToken}), and a public bucket ignores it. It is the push's
+ * own authority sent one request earlier, so nothing is granted by this.
+ *
+ * WHAT THE TOKEN TRAVELS TO is the SUBSTITUTER the caller named, and the push
+ * then travels to the origin that file states. Naming a cache is trusting it.
+ *
  * BOTH LINES OR NOTHING. A cache that answers a `nix-cache-info` without them
  * is a cache this cannot push to — some other implementation, or an odu from
  * before this — and guessing an origin from the substituter is how a push ends
@@ -155,11 +166,18 @@ export interface DescribedCache {
 export async function describeCache(
   substituter: string,
   send: typeof fetch = fetch,
+  /** The bucket's token when this machine has one. Null is a legitimate
+   *  answer — a public bucket needs none — and a private one then refuses
+   *  with the sentence that says so. */
+  token: string | null = null,
 ): Promise<DescribedCache> {
   const url = `${substituter.trim().replace(/\/$/, "")}/nix-cache-info`;
   let response: Response;
   try {
-    response = await send(url);
+    response = await send(
+      url,
+      token === null ? {} : { headers: { authorization: `Bearer ${token}` } },
+    );
   } catch (err) {
     throw new Error(
       `${url} could not be read (${err instanceof Error ? err.message : String(err)}) — ` +
@@ -167,9 +185,18 @@ export async function describeCache(
     );
   }
   if (!response.ok) {
+    // A PRIVATE BUCKET IS A 404 TO A READER WITHOUT A TOKEN, and a 403 to one
+    // whose token cannot read it, so the status alone cannot tell "no such
+    // cache" from "not yours". The sentence names both, and whether a token
+    // was sent at all — which is the fact that decides what to do next.
     throw new Error(
-      `${url} answered ${response.status} — --cache takes the substituter URL your ` +
-        `nix.conf uses, and a cache answers its nix-cache-info to every reader`,
+      `${url} answered ${response.status}${
+        token === null
+          ? " and no token was sent — a PRIVATE bucket answers its nix-cache-info to " +
+            "nobody. Set $ODU_CACHE_TOKEN (or --token-file), or check the URL"
+          : " for the token this machine holds — check the URL, and that the token " +
+            "may read this bucket"
+      }`,
     );
   }
   const text = await response.text();
@@ -184,6 +211,35 @@ export async function describeCache(
     );
   }
   return { origin: normalizeOrigin(origin), bucket };
+}
+
+/**
+ * THE TOKEN DISCOVERY CARRIES, from the push's own three sources.
+ *
+ * `--token-file` and `$ODU_CACHE_TOKEN` are origin-free and answer directly.
+ * The credentials file is keyed by ORIGIN, and the push's origin is the thing
+ * being discovered — so the key asked for here is the SUBSTITUTER's own
+ * origin, which is where this request is going. For a private bucket that is
+ * odu itself (a private bucket is never served from a store), so a machine
+ * that ran `odu cache login` against the cache it reads is already able to
+ * discover it.
+ */
+export async function discoveryToken(
+  env: PushEnv,
+  substituter: string,
+  tokenFile: string | undefined,
+): Promise<string | null> {
+  if (tokenFile !== undefined) return (await readFile(tokenFile, "utf8")).trim();
+  const fromEnv = env.ODU_CACHE_TOKEN?.trim();
+  if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
+  let origin: string;
+  try {
+    const url = new URL(substituter);
+    origin = normalizeOrigin(`${url.protocol}//${url.host}`);
+  } catch {
+    return null;
+  }
+  return (await readCredentials(env))[origin] ?? null;
 }
 
 /** One field of a `nix-cache-info`, or null. The format is `Key: value` a line

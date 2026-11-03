@@ -51,8 +51,14 @@ field() {
 # perfectly, and turned a green push red. `--retry-all-errors` is what makes
 # `--retry` cover a connection reset as well as a 5xx — without it curl retries
 # only "transient" HTTP statuses and gives up on exactly the failure seen.
-# Five attempts, two seconds apart, is well inside the step's own patience.
-retry=(--retry 5 --retry-all-errors --retry-delay 2)
+#
+# BOUNDED IN TIME, NOT ONLY IN ATTEMPTS. A reset fails in milliseconds, but a
+# black-holed edge does not answer at all, and curl's default connect timeout
+# is 300 seconds — five retries of that is half an hour for ONE path, eight of
+# them at once under `xargs -P 8`. So a connection gets ten seconds to be made
+# and the whole retry sequence thirty, after which the path is reported FAILED,
+# which is what a step that proves a push is for.
+retry=(--retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 30 --connect-timeout 10)
 
 narinfo=$(curl -sS -f "${retry[@]}" -K "$config" "$narinfo_url") ||
   no "its narinfo did not answer at $narinfo_url"

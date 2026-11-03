@@ -613,6 +613,8 @@ Odu-Bucket: main
 
 The object in the store is rewritten whenever that text changes — a move behind a new public origin — by the same boot pass that backfills narinfos, compared by the stored sha256 rather than by length, and the address it was cacheable at is purged at the edge.
 
+**Naming a cache is trusting it.** `--cache` sends your write token to the substituter you named (a private bucket's `nix-cache-info` answers nobody without it) and then pushes to whatever origin that file states, so a cache you do not control — or a DNS or CDN compromise in front of one — is a cache you have handed the token to. Name a substituter you trust, as you already do in `nix.conf`.
+
 ## Command reference
 
 The CLI keeps the three cache commands a shell is the natural place for. Everything else is the board or the API verb — `odu surface cache <verb> --input '{…}' --json`, with `rootToken` a field of the input.
