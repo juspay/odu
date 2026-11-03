@@ -53,6 +53,31 @@ export interface BucketRow {
   store: string;
 }
 
+/**
+ * A BUCKET'S MOVE FROM ONE STORE TO ANOTHER, as it stands.
+ *
+ * It is persisted because it is long and resumable: the objects are copied
+ * two at a time and the bucket keeps serving from `fromStore` throughout, so
+ * a daemon restarted in the middle picks the move up where it stopped rather
+ * than leaving half a bucket in each store with nobody tracking it.
+ *
+ * `state` is the only thing that says which store `bucket.store` names:
+ * `copying` and `flipping` mean the OLD one, `deleting` means the new one is
+ * already live and the old objects are being let go.
+ */
+export interface MigrationRow {
+  bucket: string;
+  fromStore: string;
+  toStore: string;
+  state: "copying" | "flipping" | "deleting";
+  /** Objects copied so far, and how many there are in all. */
+  copied: number;
+  total: number;
+  /** Bytes copied so far. */
+  bytes: number;
+  started: number;
+}
+
 export type Scope = "read" | "write" | "admin";
 
 /** A token. The plaintext exists exactly once, in the answer that minted it. */
@@ -163,6 +188,13 @@ export interface CacheRepo {
   bucketByDomain(domain: string): BucketRow | null;
   buckets(): BucketRow[];
   deleteBucket(name: string): void;
+  /** THE MOVE RUNNING ON A BUCKET, or null. One per bucket: a second
+   *  `bucket.migrate` while one is running is refused, not queued. */
+  migration(bucket: string): MigrationRow | null;
+  /** Every move in progress — what a boot resumes. */
+  migrations(): MigrationRow[];
+  putMigration(row: MigrationRow): void;
+  deleteMigration(bucket: string): void;
 
   putToken(row: TokenRow): void;
   tokenByHash(hash: string): TokenRow | null;
@@ -387,6 +419,24 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE pin ADD COLUMN created_by TEXT NOT NULL DEFAULT 'admin';
   `,
+  // Migration 15 — A BUCKET MOVES BETWEEN STORES (PLAN 2.8). The move is
+  // long: thousands of objects copied two at a time, and the bucket serves
+  // from the OLD store until every one of them is there. That means the move
+  // must survive a restart, so it is a row rather than a field in memory —
+  // and a row per bucket, because a second move of the same bucket while one
+  // is running is a refusal and not a queue.
+  `
+  CREATE TABLE bucket_migration (
+    bucket      TEXT PRIMARY KEY,
+    to_store    TEXT NOT NULL,
+    from_store  TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    copied      INTEGER NOT NULL DEFAULT 0,
+    total       INTEGER NOT NULL DEFAULT 0,
+    bytes       INTEGER NOT NULL DEFAULT 0,
+    started     INTEGER NOT NULL
+  );
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -443,6 +493,17 @@ const bucketOf = (row: Row): BucketRow => ({
   created: integer(row, "created"),
   domain: maybeText(row, "domain"),
   store: text(row, "store"),
+});
+
+const migrationOf = (row: Row): MigrationRow => ({
+  bucket: text(row, "bucket"),
+  fromStore: text(row, "from_store"),
+  toStore: text(row, "to_store"),
+  state: text(row, "state") as MigrationRow["state"],
+  copied: integer(row, "copied"),
+  total: integer(row, "total"),
+  bytes: integer(row, "bytes"),
+  started: integer(row, "started"),
 });
 
 const tokenOf = (row: Row): TokenRow => ({
@@ -587,6 +648,26 @@ export function openCacheRepo(path: string): CacheRepo {
       db.run("DELETE FROM bucket WHERE name = ?", [name]);
       db.run("DELETE FROM object WHERE bucket = ?", [name]);
       db.run("DELETE FROM pin WHERE bucket = ?", [name]);
+      db.run("DELETE FROM bucket_migration WHERE bucket = ?", [name]);
+    },
+
+    migration: (bucket) => {
+      const row = db.query("SELECT * FROM bucket_migration WHERE bucket = ?").get(bucket) as Row | null;
+      return row === null ? null : migrationOf(row);
+    },
+    migrations: () => all("SELECT * FROM bucket_migration ORDER BY bucket", [], migrationOf),
+    putMigration(row) {
+      db.run(
+        `INSERT INTO bucket_migration (bucket, to_store, from_store, state, copied, total, bytes, started)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(bucket) DO UPDATE SET to_store = excluded.to_store,
+           from_store = excluded.from_store, state = excluded.state,
+           copied = excluded.copied, total = excluded.total, bytes = excluded.bytes`,
+        [row.bucket, row.toStore, row.fromStore, row.state, row.copied, row.total, row.bytes, row.started],
+      );
+    },
+    deleteMigration(bucket) {
+      db.run("DELETE FROM bucket_migration WHERE bucket = ?", [bucket]);
     },
 
     putToken(row) {

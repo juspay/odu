@@ -22,12 +22,21 @@
 
 import { statfs } from "node:fs/promises";
 import { join } from "node:path";
-import type { BucketRow, BucketTotals, ObjectRow, PinAuthor, Scope, TokenRow } from "./db";
+import type {
+  BucketRow,
+  BucketTotals,
+  MigrationRow,
+  ObjectRow,
+  PinAuthor,
+  Scope,
+  TokenRow,
+} from "./db";
 import { cursorFor, openCacheRepo } from "./db";
 import {
   closureOf,
   type GcBucketPlan,
   type GcCollection,
+  type GcRemoval,
   GC_PREVIEW_PATHS,
   type GcPreview,
   planGc,
@@ -35,6 +44,7 @@ import {
   runGc,
   sweepOrphans,
 } from "./gc";
+import { migrationKeys, runMigration } from "./migrateStore";
 import {
   fingerprintOf,
   formatNarinfo,
@@ -53,13 +63,28 @@ import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
 import { LOCAL_STORE, PATH_PAGE_SIZE } from "./surface";
 import {
+  cacheInfoKey,
+  CACHE_INFO_CONTENT_TYPE,
   createStaging,
+  INFO_CACHE_CONTROL,
+  NAR_CACHE_CONTROL,
+  NAR_CONTENT_TYPE,
+  narinfoKey,
+  NARINFO_CONTENT_TYPE,
+  NIX_CACHE_INFO,
   objectKey,
   type CompleteUpload,
   type NarinfoOutcome,
   type Upload,
 } from "./staging";
-import { type ByteRange, type ObjectFacts, type ObjectStore } from "@odu/objects";
+import {
+  type ByteRange,
+  factsCounter,
+  type ObjectFacts,
+  type ObjectStore,
+  type PutOutcome,
+  sameFacts,
+} from "@odu/objects";
 import { type KeptFile, keptFileOf } from "./fileHash";
 import { contentAddressOf } from "./storePath";
 import { verifyNarStream } from "./store";
@@ -95,6 +120,23 @@ export interface BucketFacts {
   hits: number;
   /** The declared store its objects live in. */
   store: string;
+  /** THE MOVE RUNNING ON THIS BUCKET, or null. While it is not null the
+   *  bucket is still served from `store`; the move's own `to` is where it is
+   *  going (PLAN 2.8). */
+  migration: MigrationFacts | null;
+}
+
+/** A store-to-store move, as a subscriber watches it. */
+export interface MigrationFacts {
+  /** The store it is moving to. */
+  to: string;
+  /** `copying` while the new store is being filled, `flipping` for the moment
+   *  the bucket changes hands under the write lock, `deleting` while the old
+   *  store gives its copies up. */
+  state: "copying" | "flipping" | "deleting";
+  copied: number;
+  total: number;
+  bytes: number;
 }
 
 /**
@@ -114,6 +156,10 @@ export interface BucketIdentity {
   publicKey: string;
   /** The name a client substitutes from, when the bucket has one. */
   domain: string | null;
+  /** The store its objects live in. Not a secret — the row publishes it
+   *  already — and the one fact the caller needs to say whether the reads
+   *  come from odu or from the store's own domain. */
+  store: string;
 }
 
 export interface TokenMinted {
@@ -238,6 +284,22 @@ export interface CacheAdmin {
     bucket: string;
     retentionDays: number;
   }): Promise<CacheOutcome<BucketFacts>>;
+  /**
+   * MOVE THIS BUCKET'S OBJECTS TO ANOTHER STORE (PLAN 2.8).
+   *
+   * Answers as soon as the move is RECORDED, not when it finishes: the copy
+   * runs in the background and its progress is on the bucket's own row, which
+   * the board already follows. The bucket is served from the old store the
+   * whole time and changes hands in one moment under the write lock.
+   *
+   * Refused for an unknown store, for the store it already lives in, and for
+   * a bucket that is already moving.
+   */
+  migrateStore(input: {
+    authority: Authority;
+    bucket: string;
+    store: string;
+  }): Promise<CacheOutcome<BucketFacts>>;
   pin(input: { authority: Authority;
     bucket: string;
     name: string;
@@ -309,7 +371,15 @@ export type NarSource =
     }
   /** THE ONE-TIME MIGRATION: the old Nix store still has this row's path and
    *  its object has not been produced yet. Removed when that store is. */
-  | { kind: "legacy"; storePath: string; stream: ReadableStream<Uint8Array> };
+  | { kind: "legacy"; storePath: string; stream: ReadableStream<Uint8Array> }
+  /**
+   * THE STORE SERVES IT, NOT ODU (PLAN 2.8). The bucket's objects live in a
+   * store that hands out URLs of its own, so the route answers a redirect to
+   * one that expires and the bytes never cross this machine. odu still
+   * decided that this caller may read this bucket — the URL is minted only
+   * after that — which is why a PRIVATE bucket can be served this way at all.
+   */
+  | { kind: "redirect"; storePath: string; size: number; url: URL };
 
 /** Why the cache cannot be mounted. A value naming the fact, rendered once at
  *  the row's boundary. */
@@ -345,6 +415,14 @@ export interface SelfProofReport {
   proved: number;
   refused: number;
   unreadable: number;
+}
+
+/** What the narinfo backfill wrote: every bucket's rows walked, the objects
+ *  it had to write, and the ones no store would take. */
+export interface ObjectBackfillReport {
+  rows: number;
+  written: number;
+  failures: number;
 }
 
 /** What the row-owned background migration did. */
@@ -456,6 +534,13 @@ export interface Cache {
   /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: migrate objects the old store
    *  still owns, two at a time, resuming after a disk pause. */
   migrate(): Promise<MigrationReport>;
+  /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: write every bucket's
+   *  narinfo and `nix-cache-info` objects, two at a time, skipping the ones
+   *  already there (PLAN 2.8). Idempotent, so a restart resumes it. */
+  backfillObjects(): Promise<ObjectBackfillReport>;
+  /** AFTER MOUNT: pick up every store-to-store move a restart interrupted
+   *  (PLAN 2.8). Answers when they are all finished. */
+  resumeMigrations(): Promise<void>;
   /** Join the row's background work, then close the database. */
   close(): Promise<void>;
 }
@@ -483,17 +568,59 @@ export interface CacheOptions {
    *  from the operator's declarations (`./stores` `objectStores`), and a suite
    *  passes its own. The cache never builds a store. */
   stores: ReadonlyMap<string, ObjectStore>;
+  /**
+   * THE STORES THE WORLD CAN READ DIRECTLY — those whose declaration carries
+   * a `publicUrl` (PLAN 2.8).
+   *
+   * A bound domain covers the WHOLE store, every prefix in it, because that
+   * is what binding a custom domain to an S3 bucket means. So a PRIVATE
+   * bucket on one of these would have its narinfos and its NARs readable by
+   * anyone who can guess its name, whatever odu's own routes decide — which
+   * is why `create` and `migrate` refuse the combination rather than
+   * documenting it.
+   */
+  frontedStores?: ReadonlySet<string>;
   now?: () => number;
   /** ONE structured line per operational fact (serve, import, boot, refusal).
    *  The row hands the daemon's logger here; a suite that does not care omits
    *  it. No per-chunk lines: a NAR read is one line. */
   log?: (event: string, fields: Record<string, unknown>) => void;
+  /**
+   * AN ADDRESS WHOSE BYTES ARE NO LONGER WHAT THEY WERE, so whoever fronts
+   * the store can be told.
+   *
+   * Two callers. A finished MOVE leaves the previous store's copies deleted;
+   * a RE-PUSH rewrites a narinfo object that was cacheable for a day. The ROW
+   * knows where a bucket is reachable from and the cache does not, so the
+   * cache names the paths and the row builds the URLs — the same division the
+   * collector's announcement uses.
+   */
+  purged?: (input: {
+    bucket: string;
+    store: string;
+    reason: "migrate" | "repush";
+    removals: readonly GcRemoval[];
+    /** The bucket's `nix-cache-info`, when that is what changed — a move
+     *  deletes it with everything else, and a `Priority:` edit rewrites it. */
+    cacheInfo?: boolean;
+  }) => void;
 }
 
 /** The floor between two READ-driven publications. Reads are the only change
  *  that arrives thousands of times a minute, and a hit count that moved a second
  *  ago is as true for a reader as one that moved a millisecond ago. */
 export const HITS_REFRESH_MS = 1000;
+
+/**
+ * HOW LONG A REDIRECTED NAR URL LIVES — ten minutes, Attic's number for the
+ * same redirect.
+ *
+ * It is a copy budget, not a session: a client that followed the redirect is
+ * already downloading, and a resumed download re-asks odu. Long enough for a
+ * multi-gigabyte NAR on a slow link to start, short enough that a URL
+ * someone pasted out of a log is dead before it is useful.
+ */
+export const PRESIGN_SECONDS = 600;
 
 /** A bucket name is a path segment on the wire, so it is a DNS-ish label and
  *  nothing else: lowercase, digits, dashes. A name with a `/` in it would be a
@@ -510,6 +637,9 @@ export function createCache(options: CacheOptions): Cache {
   const dir = join(options.stateRoot, "cache");
   const repo = openCacheRepo(join(dir, "cache.sqlite"));
   const { stores } = options;
+  /** The stores a client can read without odu — empty unless the operator
+   *  bound a domain to one. */
+  const fronted = options.frontedStores ?? new Set<string>();
   /**
    * THE ONE PLACE A BUCKET BECOMES ITS STORE, from the row's own `store` fact.
    * Every bucket's store was proved declared at boot and at create, so a
@@ -576,6 +706,39 @@ export function createCache(options: CacheOptions): Cache {
     return { ok: true, value: null };
   }
 
+  /**
+   * WOULD THIS BUCKET'S BYTES BE WORLD-READABLE BY MERELY LIVING THERE?
+   *
+   * A store's `publicUrl` is a domain bound to the whole S3 bucket, so every
+   * prefix in it answers to anyone who knows a name — odu's own routes do not
+   * come into it. A PRIVATE bucket on such a store is therefore private in
+   * name only, and the refusal is here rather than in the documentation
+   * because odu holds both facts at the moment of the choice.
+   */
+  const exposure = (isPublic: boolean, store: string): CacheOutcome<never> | null =>
+    isPublic || !fronted.has(store)
+      ? null
+      : {
+          ok: false,
+          code: "bad_input",
+          message:
+            `the store "${store}" publishes its objects at a public URL, so a private ` +
+            "bucket on it would be readable by anyone who knows its name — make the " +
+            "bucket public, or choose a store with no publicUrl",
+        };
+
+  const migrationFactsOf = (bucket: string): MigrationFacts | null => {
+    const row = repo.migration(bucket);
+    return row === null
+      ? null
+      : { to: row.toStore, state: row.state, copied: row.copied, total: row.total, bytes: row.bytes };
+  };
+
+  /** What writing one of the protocol's text objects came to: a first write,
+   *  bytes that were already there, or a REWRITE whose old text an edge may
+   *  still be serving. */
+  type WriteOutcome = "written" | "same" | "rewritten";
+
   function factsOf(
     bucket: BucketRow,
     counted: Map<string, BucketTotals> = repo.bucketStats(),
@@ -595,6 +758,11 @@ export function createCache(options: CacheOptions): Cache {
       lastPush: counts?.lastPush ?? null,
       hits: counts?.hits ?? 0,
       store: bucket.store,
+      // THE MOVE, IF ONE IS RUNNING — read per bucket, because a bucket moves
+      // between stores perhaps twice in its life and a join for the usual
+      // answer would be a cost every page pays for a row that is almost
+      // always absent.
+      migration: migrationFactsOf(bucket.name),
     };
   }
 
@@ -630,6 +798,115 @@ export function createCache(options: CacheOptions): Cache {
       sigs: [signatureOf(bucket, row), ...row.sigs],
     };
     return formatNarinfo(info);
+  }
+
+  /**
+   * THE PROTOCOL'S TEXT FILES AS OBJECTS (PLAN 2.8) — a narinfo and
+   * `nix-cache-info`, written where the store can serve them without odu.
+   *
+   * `put` is CONDITIONAL — first writer wins — which is exactly right for a
+   * NAR, whose key names its own bytes, and exactly wrong for a narinfo that a
+   * re-push rewrote with one more signature. So this one compares: the kept
+   * object's facts come back on the refusal, identical bytes are left alone,
+   * and different ones are deleted and written again.
+   *
+   * A FAILURE HERE NEVER FAILS THE PUSH. The row is the truth and odu still
+   * renders the narinfo from it; the object is the store's copy, and the
+   * backfill (`backfillObjects`) writes any that a failed put left behind.
+   */
+  async function writeText(
+    objects: ObjectStore,
+    key: string,
+    text: string,
+    contentType: string,
+  ): Promise<WriteOutcome> {
+    const bytes = new TextEncoder().encode(text);
+    const counter = factsCounter();
+    counter.update(bytes);
+    const facts = counter.facts();
+    const put = (): Promise<PutOutcome> =>
+      objects.put(key, new Blob([bytes]), facts, {
+        contentType,
+        cacheControl: INFO_CACHE_CONTROL,
+      });
+    const first = await put();
+    if (first.ok) return "written";
+    if (first.refusal.kind === "exists" && sameFacts(first.refusal.facts, facts)) return "same";
+    await objects.delete(key);
+    const again = await put();
+    if (!again.ok) throw new Error(`${key} could not be written: ${again.refusal.kind}`);
+    // A REWRITE, NOT A FIRST WRITE: an edge may be holding the text this just
+    // replaced, for the day `INFO_CACHE_CONTROL` gave it. The caller purges.
+    return "rewritten";
+  }
+
+  /**
+   * ONE OF THE PROTOCOL'S TEXT OBJECTS, written or confirmed.
+   *
+   * A FAILURE HERE NEVER FAILS THE CALLER. The row is the truth and odu
+   * renders from it; the object is the store's copy, and the backfill writes
+   * what a failed put left behind. The caller announces a `"rewritten"`,
+   * because only it knows which address changed.
+   */
+  async function keepTextObject(
+    bucket: BucketRow,
+    what: { key: string; text: string; contentType: string },
+  ): Promise<WriteOutcome | "failed"> {
+    try {
+      return await writeText(storeOf(bucket), what.key, what.text, what.contentType);
+    } catch (err) {
+      options.log?.("cache.narinfo.object_failed", {
+        bucket: bucket.name,
+        path: what.key,
+        reason: String((err as Error).message ?? err),
+      });
+      return "failed";
+    }
+  }
+
+  /** The bucket's narinfo object for one row. A rewrite is announced: the
+   *  superseded text is cacheable for a day, and odu's own render is already
+   *  correct. One narinfo, no NAR — a NAR is named by its own bytes and never
+   *  changes, so purging it would be a cold cache for nothing. */
+  async function keepNarinfoObject(
+    bucket: BucketRow,
+    row: ObjectRow,
+  ): Promise<WriteOutcome | "failed"> {
+    const outcome = await keepTextObject(bucket, {
+      key: narinfoKey(bucket.name, row.hash),
+      text: narinfoFor(bucket, row),
+      contentType: NARINFO_CONTENT_TYPE,
+    });
+    if (outcome === "rewritten") {
+      options.purged?.({
+        bucket: bucket.name,
+        store: bucket.store,
+        reason: "repush",
+        removals: [{ storePath: row.storePath, hash: row.hash, narFile: null }],
+      });
+    }
+    return outcome;
+  }
+
+  /** `nix-cache-info` for one bucket. Written when the bucket is created and
+   *  confirmed by the backfill; its text is a constant, so this is a no-op
+   *  after the first time — and on the day that constant changes (a
+   *  `Priority:` edit), the rewrite is announced like any other. */
+  async function keepCacheInfoObject(bucket: BucketRow): Promise<void> {
+    const outcome = await keepTextObject(bucket, {
+      key: cacheInfoKey(bucket.name),
+      text: NIX_CACHE_INFO,
+      contentType: CACHE_INFO_CONTENT_TYPE,
+    });
+    if (outcome === "rewritten") {
+      options.purged?.({
+        bucket: bucket.name,
+        store: bucket.store,
+        reason: "repush",
+        removals: [],
+        cacheInfo: true,
+      });
+    }
   }
 
   /** Record an imported path. Idempotent: a re-pushed path refreshes its row
@@ -696,6 +973,13 @@ export function createCache(options: CacheOptions): Cache {
       // has just said this path matters to it.
       lastWanted: at,
     });
+    // THE STORE'S COPY OF THE NARINFO, rewritten from the row that has just
+    // landed (PLAN 2.8): a re-push that added a signature must not leave the
+    // store serving the old text. The row is already recorded, so a store that
+    // refuses this is a stale object the backfill picks up — never a push that
+    // 400s for bytes it kept.
+    const recorded = repo.object(bucket.name, info.storePath);
+    if (recorded !== null) await keepNarinfoObject(bucket, recorded);
     return true;
   }
 
@@ -703,6 +987,10 @@ export function createCache(options: CacheOptions): Cache {
   // its row under it, so neither a pin nor a collection lands in between.
   const staging = createStaging({
     storeOf,
+    // READ UNDER THE LOCK: which store a push writes to is decided from the
+    // row as it is then, never from the snapshot the request was admitted
+    // against (PLAN 2.8's move).
+    bucketNow: (name) => repo.bucket(name),
     dir,
     now,
     withWriteLock,
@@ -727,11 +1015,42 @@ export function createCache(options: CacheOptions): Cache {
   });
   /** THE MIGRATION'S THROTTLE: two old-store dumps at a time, never more. */
   const migrationSlots = createSlots(2);
+  /** THE BACKFILL'S THROTTLE, its own: two narinfo objects at a time, so a
+   *  catch-up pass cannot crowd out the migration's dumps. */
+  const backfillSlots = createSlots(2);
+  /** THE STORE-TO-STORE MOVES RUNNING NOW, by bucket — so `close` can join
+   *  them and a start cannot begin the same one twice. */
+  const storeMoves = new Map<string, Promise<void>>();
+  /** Two objects in flight per move, the same throttle the rest of the row's
+   *  background work uses. */
+  const moveSlots = createSlots(2);
+
+  /** Start — or resume — one bucket's move, row-owned. */
+  const startMigration = (row: MigrationRow): Promise<void> => {
+    const running = storeMoves.get(row.bucket);
+    if (running !== undefined) return running;
+    const task = runMigration(row, {
+      repo,
+      storeNamed: (name) => stores.get(name) as ObjectStore,
+      withWriteLock,
+      slots: moveSlots,
+      now,
+      notify,
+      ...(options.log === undefined ? {} : { log: options.log }),
+      ...(options.purged === undefined ? {} : { purged: options.purged }),
+      stopping: () => stopping,
+    }).finally(() => {
+      storeMoves.delete(row.bucket);
+    });
+    storeMoves.set(row.bucket, task);
+    return task;
+  };
   /** Paths whose transition serve was refused, logged once each. */
   const unavailableLogged = new Set<string>();
   /** The row's background migration, so close can join it before the DB goes. */
   let migrationTask: Promise<MigrationReport> | null = null;
   let selfTask: Promise<SelfProofReport> | null = null;
+  let backfillTask: Promise<ObjectBackfillReport> | null = null;
   let stopping = false;
   /** Resolves on close: a migration sleeping on disk or waiting on a dump can
    *  end without waiting for that promise to settle. */
@@ -806,6 +1125,8 @@ export function createCache(options: CacheOptions): Cache {
           message: `no store "${store}" — this daemon declares ${[...stores.keys()].join(", ")}`,
         };
       }
+      const exposed = exposure(input.public, store);
+      if (exposed !== null) return exposed;
       const keypair = generateKeypair(`${input.name}-1`);
       const bucket: BucketRow = {
         name: input.name,
@@ -820,6 +1141,12 @@ export function createCache(options: CacheOptions): Cache {
         store,
       };
       repo.putBucket(bucket);
+      // `nix-cache-info` AS AN OBJECT, from the moment the bucket exists: a
+      // store that fronts its own reads is asked for it before anything else,
+      // and a bucket whose first push had not happened yet would answer 404
+      // to every client that found it. Its text is a constant, so this is the
+      // only time it is written (the backfill confirms it).
+      await keepCacheInfoObject(bucket);
       // A bucket that appeared is a row that appeared.
       notify();
       return { ok: true, value: factsOf(bucket) };
@@ -849,6 +1176,7 @@ export function createCache(options: CacheOptions): Cache {
           public: bucket.isPublic,
           publicKey: bucket.publicKey,
           domain: bucket.domain,
+          store: bucket.store,
         },
       };
     },
@@ -963,6 +1291,67 @@ export function createCache(options: CacheOptions): Cache {
       repo.putBucket(next);
       notify();
       return { ok: true, value: factsOf(next) };
+    },
+
+    async migrateStore(input) {
+      const root = requireRoot(input);
+      if (!root.ok) return root;
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+      }
+      if (!stores.has(input.store)) {
+        return {
+          ok: false,
+          code: "unknown_store",
+          message: `no store "${input.store}" — this daemon declares ${[...stores.keys()].join(", ")}`,
+        };
+      }
+      if (input.store === bucket.store) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message: `"${bucket.name}" already keeps its objects in "${input.store}"`,
+        };
+      }
+      const exposed = exposure(bucket.isPublic, input.store);
+      if (exposed !== null) return exposed;
+      // ONE MOVE PER BUCKET. A second one would be two copiers writing the
+      // same keys into two stores and one of them flipping the bucket under
+      // the other; a refusal says which one is running.
+      const running = repo.migration(bucket.name);
+      if (running !== null) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message:
+            `"${bucket.name}" is already moving to "${running.toStore}" ` +
+            `(${running.copied} of ${running.total} objects copied)`,
+        };
+      }
+      const row: MigrationRow = {
+        bucket: bucket.name,
+        fromStore: bucket.store,
+        toStore: input.store,
+        state: "copying",
+        copied: 0,
+        total: migrationKeys(repo, bucket.name).length,
+        bytes: 0,
+        started: now(),
+      };
+      repo.putMigration(row);
+      options.log?.("cache.bucket.migrate.start", {
+        bucket: row.bucket,
+        from: row.fromStore,
+        to: row.toStore,
+        total: row.total,
+      });
+      notify();
+      // THE ANSWER IS THE ROW, NOT THE OUTCOME: the copy is minutes of work
+      // on a bucket of any size, and a verb that waited for it would be a
+      // board control that times out. Progress is on the row.
+      startMigration(row);
+      return { ok: true, value: factsOf(repo.bucket(bucket.name) as BucketRow) };
     },
 
     async pin(input) {
@@ -1383,7 +1772,10 @@ export function createCache(options: CacheOptions): Cache {
           // FIRST KEPT WINS: a twin that landed the key meanwhile is refused
           // with `exists`, and its facts are the row's.
           const writing = migrationSlots.withSlot(async (): Promise<ObjectFacts> => {
-            const outcome = await objects.put(key, dump);
+            const outcome = await objects.put(key, dump, undefined, {
+              contentType: NAR_CONTENT_TYPE,
+              cacheControl: NAR_CACHE_CONTROL,
+            });
             if (outcome.ok) return outcome.facts;
             if (outcome.refusal.kind === "exists") return outcome.refusal.facts;
             throw new Error(`${key}: the store kept nothing (${outcome.refusal.kind})`);
@@ -1441,6 +1833,84 @@ export function createCache(options: CacheOptions): Cache {
         options.log?.("cache.migration.incomplete", { migrated, failed: failures, remaining });
       }
     return { migrated, failures, complete, paused };
+  }
+
+  /**
+   * EVERY BUCKET'S NARINFO AND `nix-cache-info` AS OBJECTS — the one-time
+   * pass that catches up what was pushed before 2.8, and the repair for any
+   * object a failed put left behind.
+   *
+   * Forked after the mount beside the legacy migration, and for the same
+   * reason: kolu's bucket holds sixteen thousand rows, and a boot that wrote
+   * them all before serving would be a cache that is down for minutes. Two at
+   * a time, so a store sees the same concurrency a migration gives it.
+   *
+   * RESUMABLE because it is IDEMPOTENT: a row whose object is already there
+   * with the rendered text's length is skipped on one HEAD, so a daemon
+   * restarted half way through costs a walk and not a rewrite. The size test
+   * is the cheap one; `keepNarinfoObject` compares the bytes themselves for
+   * any row that fails it.
+   */
+  async function backfillNow(): Promise<ObjectBackfillReport> {
+    const buckets = repo.buckets();
+    let rows = 0;
+    let written = 0;
+    let failures = 0;
+    for (const bucket of buckets) {
+      if (stopping) break;
+      await keepCacheInfoObject(bucket);
+      const all = repo.objects(bucket.name);
+      rows += all.length;
+      let done = 0;
+      let inBucket = 0;
+      const one = async (row: ObjectRow): Promise<void> => {
+        if (stopping) return;
+        // THE BUCKET AS IT IS NOW, like a push's: this pass can run for
+        // minutes, and a `bucket.migrate` that flipped in the middle of it
+        // would otherwise have objects written into the store it is emptying.
+        const at = repo.bucket(bucket.name) ?? bucket;
+        const key = narinfoKey(at.name, row.hash);
+        const text = narinfoFor(at, row);
+        const size = await storeOf(at).head(key).catch(() => null);
+        // NOT A ROW WHOSE OBJECT THE LEGACY MIGRATION HAS NOT LANDED: with no
+        // `FileHash` the narinfo omits it, and the `URL:` it names is not in
+        // the store — on a store-fronted bucket that is a narinfo the store
+        // serves and a NAR that 404s. The pass that lands the object writes
+        // it. (Guarded here rather than returned, so `done` keeps counting
+        // and `remaining` still reaches zero.)
+        if (row.fileHash !== null && size !== new TextEncoder().encode(text).length) {
+          const outcome = await keepNarinfoObject(at, row);
+          if (outcome === "failed") failures += 1;
+          else if (outcome !== "same") {
+            written += 1;
+            inBucket += 1;
+          }
+        }
+        done += 1;
+        // ONE LINE PER FIVE HUNDRED ROWS: a line per object would be sixteen
+        // thousand lines for one bucket's catch-up.
+        if (done % 500 === 0) {
+          options.log?.("cache.narinfo.backfill", {
+            bucket: bucket.name,
+            written: inBucket,
+            remaining: all.length - done,
+          });
+        }
+      };
+      await Promise.all(
+        all.map((row) =>
+          backfillSlots.withSlot(() => one(row)).catch(() => {
+            failures += 1;
+          }),
+        ),
+      );
+      options.log?.("cache.narinfo.backfill", {
+        bucket: bucket.name,
+        written: inBucket,
+        remaining: all.length - done,
+      });
+    }
+    return { rows, written, failures };
   }
 
   return {
@@ -1521,6 +1991,20 @@ export function createCache(options: CacheOptions): Cache {
       if (row.fileHash !== null && row.fileSize !== null) {
         const key = objectKey(bucket.name, narHash, row.compression);
         const objects = storeOf(bucket);
+        // THE STORE HANDS OUT ITS OWN URLS (PLAN 2.8): odu has just decided
+        // that this caller may read this bucket, and from here on the bytes
+        // are between the client and the store. The URL expires, so a
+        // private bucket's NAR is reachable for ten minutes by whoever was
+        // authorised and not at all by anyone else. A store with no such
+        // capability — the disk — is streamed by odu as it always was.
+        if (objects.presignGet !== undefined) {
+          return {
+            kind: "redirect",
+            storePath: row.storePath,
+            size: row.fileSize,
+            url: objects.presignGet(key, PRESIGN_SECONDS),
+          };
+        }
         return {
           kind: "object",
           storePath: row.storePath,
@@ -1657,9 +2141,17 @@ export function createCache(options: CacheOptions): Cache {
       // are swept BEFORE the mount, so the sweep cannot race a live push.
       // PER BUCKET, under its own prefix in its own store: a store may be
       // shared, and only a bucket's prefix is the cache's to sweep.
-      const owned = new Set(
-        repo.objects().map((row) => objectKey(row.bucket, row.narHash, row.compression)),
-      );
+      // A BUCKET'S OBJECTS ARE THREE KINDS NOW (PLAN 2.8): the NARs, the
+      // narinfo beside each one, and the bucket's own `nix-cache-info`. A
+      // sweep that knew only the NARs would delete the other two every boot
+      // and the backfill would write them again — a cache that fights itself.
+      const owned = new Set([
+        ...repo.objects().flatMap((row) => [
+          objectKey(row.bucket, row.narHash, row.compression),
+          narinfoKey(row.bucket, row.hash),
+        ]),
+        ...repo.buckets().map((bucket) => cacheInfoKey(bucket.name)),
+      ]);
       let tempSwept = 0;
       let orphansSwept = 0;
       for (const bucket of repo.buckets()) {
@@ -1688,6 +2180,20 @@ export function createCache(options: CacheOptions): Cache {
       migrationTask = task;
       return task;
     },
+
+    backfillObjects() {
+      const task = backfillNow();
+      backfillTask = task;
+      return task;
+    },
+
+    async resumeMigrations() {
+      // A MOVE IS A ROW, so a restart finds the unfinished ones by reading
+      // them. Each resumes from the state it reached: copying walks the keys
+      // again (skipping what is already there), flipping redoes the delta and
+      // the flip, deleting lets the old copies go.
+      await Promise.all(repo.migrations().map((row) => startMigration(row)));
+    },
     onChange(listener) {
       listeners.add(listener);
       return () => {
@@ -1706,10 +2212,16 @@ export function createCache(options: CacheOptions): Cache {
       // may be one disk write away from a row.
       if (migrationTask !== null) await migrationTask.catch(() => {});
       if (selfTask !== null) await selfTask.catch(() => {});
+      if (backfillTask !== null) await backfillTask.catch(() => {});
+      // JOIN EVERY STORE-TO-STORE MOVE: each checks `stopping` between keys,
+      // so this is the time its current copy takes and no more.
+      await Promise.all([...storeMoves.values()].map((task) => task.catch(() => {})));
       // REFUSE THE QUEUE FIRST: a job waiting for a slot belongs to this row,
       // and none of them may start after it closed. Then join the ones already
       // running, before the database closes.
       migrationSlots.close();
+      backfillSlots.close();
+      moveSlots.close();
       await staging.close();
       listeners.clear();
       repo.close();

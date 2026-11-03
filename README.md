@@ -85,13 +85,14 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 | Upload only the paths the bucket is missing; long NARs are chunked. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…` | — |
 | Give a bucket a DNS name of its own through a Cloudflare tunnel | `odu surface cache bucket_domain` | bucket → **Domain** |
 | How long a path outlives the last time anything wanted it, in days | `odu surface cache bucket_retention` | a bucket's **Retention** |
+| Move a bucket's objects to another declared store, serving from the old one until the copy is done | `odu surface cache bucket_migrate` | a bucket's **Move to another store** |
 | Keep a closure out of garbage collection, see what each pin holds, let one go | `odu surface cache pin_create\|pin_list\|pin_delete` | a bucket's **Pins** |
 | Evict what retention expired and nothing references or pins — the daily pass, asked for now | `odu surface cache gc_run` | a bucket's **Run GC** |
 | What the next collection would take, without taking it | `odu surface cache gc_plan` | a bucket's **Dry run** |
 | Storage and reads | `odu surface cache stats_read` | a bucket's **Stats** |
 | The tunnel and the names it carries | `odu surface cloudflare status_read` | **Tunnel** |
 
-**Keep a bucket on R2, any S3, or local disk.** Declare a store (`services.odu.cache.stores.r2 = { endpoint; bucket; region; credentialsFile; }`), create the bucket on it, and it serves exactly like disk — the [cache page](https://odu.kolu.dev/docs/cache/#keep-a-bucket-on-s3) has the details.
+**Keep a bucket on R2, any S3, or local disk.** Declare a store (`services.odu.cache.stores.r2 = { endpoint; bucket; region; credentialsFile; }`), create the bucket on it, and it serves exactly like disk — the [cache page](https://odu.kolu.dev/docs/cache/#keep-a-bucket-on-s3) has the details. **Reads leave odu where they can:** a NAR on an S3 store is a 307 to a presigned URL good for ten minutes, and a store that names the domain you bound to it (`publicUrl`) has its public buckets advertised there, so they keep serving while odu is down.
 
 **A bucket keeps what nobody wants for 90 days.** Retention counts from `lastWanted` — renewed by a push and by the `missing` query a push asks first, never by a read, because reads are leaving odu and a clock a read wound would make the busiest paths look idle first. A pin holds a closure past that — CI takes one with `pin: ${{ github.ref_name == github.event.repository.default_branch }}` in the push action, under a name derived from the repository, the ref and the system — and the reference closure of anything kept is kept. The row collects every bucket once a day on its own; the bucket page's **Run GC** (`cache gc_run`) is that same collection asked for sooner, and its **Dry run** (`cache gc_plan`) says what it would take before you press it. Retention, pins and collection are the board and the API; the CLI's only word in this is `--pin` on a push.
 

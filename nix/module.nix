@@ -133,14 +133,33 @@ let
   # themselves never enter the Nix store — systemd copies each file into the
   # unit's private credentials directory (`LoadCredential` below), and this
   # file names that copy.
+  #
+  # `publicUrl` is written only when the store has one: absent is how the
+  # declaration says "every read of this store goes through odu", and a
+  # `null` in the JSON would be a third answer the parser would have to have
+  # an opinion about.
   storesFile = pkgs.writeText "odu-cache-stores.json" (builtins.toJSON (
     lib.mapAttrs
       (name: store: {
         inherit (store) kind endpoint bucket region;
         credentialsFile = "/run/credentials/odu-web.service/store-${name}";
+      } // lib.optionalAttrs (store.publicUrl != null) {
+        inherit (store) publicUrl;
       })
       cfg.cache.stores
   ));
+
+  # STORES WHOSE `publicUrl` IS NOT A BARE ORIGIN, by name. odu appends
+  # `/<bucket>/<key>` to that URL, so a path, a query or a fragment would end
+  # up in the MIDDLE of the address a reader fetches — the assertion below is
+  # what turns that into a refused rebuild rather than a cache nobody can read.
+  badPublicUrls = lib.attrNames (
+    lib.filterAttrs
+      (_: store:
+        store.publicUrl != null
+        && builtins.match "https?://[^/?#]+/?" store.publicUrl == null)
+      cfg.cache.stores
+  );
 
   # A WEBSOCKET IS NOT A REQUEST. nginx needs the upgrade pair on the location
   # that carries `/rpc/ws`, and `recommendedProxySettings` is what defines
@@ -395,6 +414,16 @@ in
               The service's endpoint URL. Requests are path-style
               (`<endpoint>/<bucket>/<key>`), which every S3-compatible service
               accepts and a local gateway needs.
+
+              CLIENTS DIAL THIS TOO, since odu stopped serving NAR bytes: a
+              NAR on an S3 store is answered with a redirect to a presigned
+              URL built from this endpoint, and the client follows it. So it
+              must resolve and be reachable from wherever `nix build` runs — a
+              loopback address, a VPC-only name or a tailnet name that only
+              the daemon can see makes every NAR read fail on the client's
+              side, with nothing in odu's log. odu logs
+              `cache.store.endpoint.unreachable` at startup for a loopback or
+              link-local endpoint that a bucket depends on.
             '';
           };
           bucket = mkOption {
@@ -413,6 +442,36 @@ in
               The signing region: `auto` for R2, the bucket's region for AWS,
               whatever the gateway was started with otherwise (`us-east-1` is
               versitygw's and MinIO's default).
+            '';
+          };
+          publicUrl = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "https://cache.example.com";
+            description = ''
+              The URL the WORLD reads this store's objects from: an R2 custom
+              domain bound to the bucket, or any name that serves the bucket's
+              objects over plain HTTP. An origin and nothing more — no path, no
+              query, no fragment — because odu appends `/<bucket>/<key>` to it.
+
+              With it set, odu advertises `<publicUrl>/<bucket>` as the
+              substituter URL of every PUBLIC bucket on the store, so a reader
+              fetches narinfos and NARs straight from the store and odu is not
+              on the path at all — it can be down and the cache still serves.
+              odu keeps signing its OWN requests against `endpoint`: this name
+              is for readers, never for writes.
+
+              A private bucket may not live on a store with a `publicUrl`:
+              the domain you bind serves every prefix in the S3 bucket, so its
+              narinfos and NARs would be readable by anyone who knows the
+              bucket's name whatever odu's own routes decide. `bucket_create`
+              and `bucket_migrate` refuse the combination, and a private
+              bucket that was already there when you bound the domain is named
+              at startup with `cache.bucket.exposed`.
+
+              Bind the domain to the bucket yourself —
+              for R2, `cf r2 buckets domains custom create <bucket> --domain
+              <host> --zone-id <zone>`.
             '';
           };
           # A STRING, NOT `types.path`: a literal path (`./r2.env`) would be
@@ -453,6 +512,7 @@ in
             endpoint = "https://<account>.r2.cloudflarestorage.com";
             bucket = "odu-cache";
             region = "auto";
+            publicUrl = "https://cache.example.com";
             credentialsFile = "/run/secrets/odu-r2";
           };
         }
@@ -524,6 +584,21 @@ in
           services.odu.cache.stores.local is declared, but `local` is the
           daemon's own disk under services.odu.stateDir and always exists —
           give the declared store another name.
+        '';
+      }
+      {
+        # A PUBLIC URL IS AN ORIGIN, NOT AN ADDRESS. The daemon's declaration
+        # parser refuses the same shape at boot; refusing it here too means a
+        # misspelled name costs a rebuild rather than a service that will not
+        # mount.
+        assertion = badPublicUrls == [ ];
+        message = ''
+          services.odu.cache.stores.${lib.concatStringsSep ", " badPublicUrls} has a
+          publicUrl that is not a bare origin. Write `https://host` (a port is
+          fine) and nothing else: odu advertises `<publicUrl>/<bucket>` as the
+          substituter URL of every public bucket on the store, so a path, a
+          query or a fragment would land in the middle of the address a reader
+          fetches.
         '';
       }
       {

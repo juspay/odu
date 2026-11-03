@@ -154,12 +154,83 @@ export function objectKey(
   narHash: string,
   compression: string | null = "zstd",
 ): string {
-  return `${bucket}/nar/${narFileName(narHash, compression)}`;
+  return narFileKey(bucket, narFileName(narHash, compression));
+}
+
+/** The same key, for a caller holding the NAR's FILE NAME rather than its
+ *  hash — a collection's removal, which names the file it deleted. */
+export function narFileKey(bucket: string, file: string): string {
+  return `${bucket}/nar/${file}`;
+}
+
+/**
+ * The object key a bucket's narinfo lives at: the same name the protocol
+ * serves it under, under this bucket's own prefix.
+ *
+ * THE NARINFO IS AN OBJECT NOW (PLAN 2.8) as well as a row. A store that
+ * fronts its own reads serves the pair — `<hash>.narinfo` and `nar/<file>` —
+ * without odu in the path, and a client that never reaches this daemon must
+ * find both where a Nix client looks for them. The row stays the truth; the
+ * object is what the store publishes, rewritten whenever the row changes.
+ */
+export function narinfoKey(bucket: string, hash: string): string {
+  return `${bucket}/${hash}.narinfo`;
+}
+
+/** The object key a bucket's `nix-cache-info` lives at — the first file a Nix
+ *  client reads, and the one a store-fronted bucket needs most. */
+export function cacheInfoKey(bucket: string): string {
+  return `${bucket}/nix-cache-info`;
+}
+
+/**
+ * WHAT A STORE TELLS A READER ABOUT THESE BYTES.
+ *
+ * A NAR is named by its own hash and can never change, so it is cacheable for
+ * a year and `immutable` — a revalidation of it is a round trip that cannot
+ * have a different answer. A narinfo and `nix-cache-info` CAN change (a
+ * re-push adds a signature, a collection removes the path), so they get a day
+ * and are purged when they move.
+ */
+export const NAR_CACHE_CONTROL = "public, max-age=31536000, immutable";
+export const INFO_CACHE_CONTROL = "public, max-age=86400";
+
+/** The content types the protocol's three files are served as. */
+export const NAR_CONTENT_TYPE = "application/x-nix-nar";
+export const NARINFO_CONTENT_TYPE = "text/x-nix-narinfo";
+export const CACHE_INFO_CONTENT_TYPE = "text/plain";
+
+/**
+ * WHERE A KEY IS READ FROM WHEN THE STORE SERVES ITSELF — the ONE place an
+ * object key becomes a public address (PLAN 2.8).
+ *
+ * The protocol path and the object key are decoupled on purpose (see
+ * `./narinfo`'s own note): they agree today and have moved apart before. A
+ * second place that composed `<publicUrl>/<bucket>/<something>` by hand would
+ * be the day a purge announces an address the store does not serve — the
+ * failure that note warns about — so every caller comes through here.
+ */
+export function publicObjectUrl(publicUrl: string, key: string): string {
+  return `${publicUrl}/${key}`;
+}
+
+/** Where a store-fronted bucket itself is read from: the base a client puts in
+ *  `extra-substituters`, and the prefix every one of its keys hangs off. */
+export function publicBucketUrl(publicUrl: string, bucket: string): string {
+  return `${publicUrl}/${bucket}`;
 }
 
 export interface StagingDeps {
   /** The store a bucket's objects live in — the cache's one answer to that. */
   storeOf: (bucket: BucketRow) => ObjectStore;
+  /** THE BUCKET'S ROW AS IT IS NOW, read inside the write lock.
+   *
+   *  A push is admitted against the row the request found, and a bucket can
+   *  CHANGE STORES while that push is queued on the lock (`bucket.migrate`,
+   *  PLAN 2.8). Writing into the snapshot's store would put the bytes in the
+   *  store the move is emptying, and the move's own delete pass would then
+   *  take them — a push that answered 200 for an object nobody has. */
+  bucketNow: (name: string) => BucketRow | null;
   /** The cache's own directory; staging lives at `<dir>/staging`. */
   dir: string;
   now: () => number;
@@ -216,7 +287,7 @@ export interface Staging {
 }
 
 export function createStaging(deps: StagingDeps): Staging {
-  const { storeOf, now, record, log, keptFacts, withWriteLock } = deps;
+  const { storeOf, bucketNow, now, record, log, keptFacts, withWriteLock } = deps;
   const stagingRoot = join(deps.dir, "staging");
   const stagedDir = (bucket: string): string => join(stagingRoot, bucket);
 
@@ -282,8 +353,8 @@ export function createStaging(deps: StagingDeps): Staging {
       // THE SECOND PROOF OF POSSESSION. Two store paths with identical content
       // share a NarHash, and the first to be recorded took the staged NAR with
       // it; so did an earlier push of this same path. The object is the proof.
-      return recordSerially(bucket, info, null, async () =>
-        (await keptFacts(bucket, info.narHash, info.compression)) ??
+      return recordSerially(bucket, info, null, async (current) =>
+        (await keptFacts(current, info.narHash, info.compression)) ??
         refuse(`the narinfo names ${info.url}, which was never uploaded to this bucket`),
       );
     }
@@ -300,8 +371,8 @@ export function createStaging(deps: StagingDeps): Staging {
           claimed,
         );
       }
-      return await recordSerially(bucket, info, checked.selfHash, () =>
-        keep(bucket, info, claimed.path, { fileHash: checked.fileHash, fileSize: checked.fileSize }),
+      return await recordSerially(bucket, info, checked.selfHash, (current) =>
+        keep(current, info, claimed.path, { fileHash: checked.fileHash, fileSize: checked.fileSize }),
       );
     } finally {
       // OURS TO REMOVE: kept, refused, or a duplicate of a kept object. A
@@ -498,7 +569,13 @@ export function createStaging(deps: StagingDeps): Staging {
       const expected = objectFactsOf(file);
       // A STORE WHOSE OBJECTS ARE FILES links the proved file into place, no
       // copy; one with none is handed it as a Blob, which it can read again.
-      const outcome = await (store.link?.(key, path, expected) ?? store.put(key, Bun.file(path), expected));
+      // THE HEADERS A STORE WILL SERVE IT WITH travel with the put: a NAR read
+      // from the store itself (PLAN 2.8) has no odu in the path to add them.
+      const outcome = await (store.link?.(key, path, expected) ??
+        store.put(key, Bun.file(path), expected, {
+          contentType: NAR_CONTENT_TYPE,
+          cacheControl: NAR_CACHE_CONTROL,
+        }));
       if (outcome.ok) return keptFileOf(outcome.facts);
       if (outcome.refusal.kind === "exists") return keptFileOf(outcome.refusal.facts);
       // THE STORE KEPT NOTHING — it read other bytes than the verify did, or
@@ -550,14 +627,21 @@ export function createStaging(deps: StagingDeps): Staging {
     bucket: BucketRow,
     info: NarInfo,
     selfHash: string | null,
-    keep: () => Promise<KeptFile | Refusal>,
+    keep: (bucket: BucketRow) => Promise<KeptFile | Refusal>,
   ): Promise<NarinfoOutcome> {
     return withWriteLock(async () => {
-      const file = await keep();
+      // THE ROW AS IT IS NOW, not as the request found it. This push was
+      // admitted against a snapshot, and a bucket can change stores while the
+      // push waits here (`bucket.migrate`, PLAN 2.8): keeping the object in
+      // the snapshot's store would put it in the one the move is emptying,
+      // and the move's delete pass would take it. The lock makes this read
+      // and the write that follows one moment.
+      const current = bucketNow(bucket.name) ?? bucket;
+      const file = await keep(current);
       if ("ok" in file) return file;
-      await record(bucket, info, file, selfHash);
+      await record(current, info, file, selfHash);
       log?.("cache.import.recorded", {
-        bucket: bucket.name,
+        bucket: current.name,
         path: info.storePath,
         bytes: info.narSize,
         fileSize: file.fileSize,

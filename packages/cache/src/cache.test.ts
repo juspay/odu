@@ -219,6 +219,12 @@ describe("describe", () => {
     // It takes no credential, so it must not report the object count, the
     // bytes, the retention or the upstream key names — those are what
     // `CacheBucket` is for, and `CacheBucket` is the root-token view.
+    //
+    // `store` IS in it since 2.8, and it is not a leak: the row publishes the
+    // store's name already, and it is the one fact the daemon needs to say
+    // whether a read is answered by odu or by the store's own domain
+    // (`readsFrom`, which the server derives — here, a bucket on `local`,
+    // whose objects no store fronts, so reads stay odu's).
     const cache = cacheWith(ROOT);
     await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
     const described = await cache.admin.describe({ bucket: "main" });
@@ -229,7 +235,9 @@ describe("describe", () => {
         "name",
         "public",
         "publicKey",
+        "store",
       ]);
+      expect(described.value.store).toBe("local");
     }
     await cache.close();
   });

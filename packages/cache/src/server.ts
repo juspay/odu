@@ -71,18 +71,27 @@ import {
   type Cache,
   type CacheOutcome,
 } from "./cache";
-import type { GcCollection, GcReport } from "./gc";
+import type { GcCollection, GcRemoval, GcReport } from "./gc";
 import { objectStores, type StoreDeclarations, storeFacts } from "./stores";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
 import { nixDump, nixPathInfo } from "./store";
 import {
+  cacheInfoKey,
+  narFileKey,
+  narinfoKey,
+  NIX_CACHE_INFO,
+  publicBucketUrl,
+  publicObjectUrl,
+} from "./staging";
+import {
   type CacheBucket,
   CACHE_KEY,
   CacheRefused,
   type CacheStore,
   DEFAULT_RETENTION_DAYS,
+  LOCAL_STORE,
   oduCacheSurface,
 } from "./surface";
 
@@ -144,6 +153,20 @@ export interface CacheServer {
   /** The substituter URL for one bucket, as the cache row publishes it — the
    *  same string the board's row carries, for a route that takes no root token. */
   readonly substituterUrl: (name: string) => string;
+  /** ANNOUNCE WHAT CHANGED OR WENT (PLAN 2.8): a finished store-to-store
+   *  move, or a re-push that rewrote a text object. The CACHE names what it
+   *  touched — it is the only thing that knows — and the ROW turns that into
+   *  the addresses it was served at. */
+  readonly announceMoved: (input: {
+    bucket: string;
+    /** A store the bucket is no longer on, whose domain served these objects
+     *  a moment ago; for a re-push, the one it still lives on. */
+    store: string;
+    reason: "migrate" | "repush";
+    removals: readonly GcRemoval[];
+    /** The bucket's own `nix-cache-info`, which no removal names. */
+    cacheInfo?: boolean;
+  }) => void;
 }
 
 /**
@@ -200,6 +223,132 @@ export function collectEvery(
   return Effect.forever(Effect.flatMap(Effect.sleep(Duration.millis(everyMs)), () => once));
 }
 
+/**
+ * WHICH PRIVATE BUCKETS A BOUND DOMAIN EXPOSES — a read of what is declared,
+ * asked at mount.
+ *
+ * `create` and `migrate` refuse the combination, so this names only what was
+ * already there when the operator bound the domain: its narinfos and NARs
+ * answer at `<publicUrl>/<bucket>/…` to anyone who knows the name, because
+ * the binding covers every prefix in the store and cannot ask who is asking.
+ *
+ * Not part of the probe below, though both run at mount: this is a fact about
+ * the operator's CONFIGURATION and that one is a fact about the NETWORK, and
+ * they go wrong for different reasons on different days.
+ */
+export function exposedBuckets(input: {
+  stores: readonly CacheStore[];
+  buckets: readonly { name: string; public: boolean; store: string }[];
+  log?: (event: string, fields: Record<string, unknown>) => void;
+}): readonly { bucket: string; store: string; url: string }[] {
+  const exposed: { bucket: string; store: string; url: string }[] = [];
+  for (const store of input.stores) {
+    if (store.publicUrl === null) continue;
+    for (const row of input.buckets) {
+      if (row.public || row.store !== store.name) continue;
+      const found = {
+        bucket: row.name,
+        store: store.name,
+        url: publicBucketUrl(store.publicUrl, row.name),
+      };
+      exposed.push(found);
+      input.log?.("cache.bucket.exposed", found);
+    }
+  }
+  return exposed;
+}
+
+/** A store whose public URL did not answer what a Nix client needs. */
+export interface UnreachableStore {
+  store: string;
+  url: string;
+  /** The status it answered, or `null` when the request itself failed. */
+  status: number | null;
+}
+
+/**
+ * DOES THE STORE'S PUBLIC URL ACTUALLY SERVE? — asked once, at mount, for
+ * every store that declares one and holds at least one PUBLIC bucket.
+ *
+ * A `publicUrl` is a promise the operator made outside odu: a custom domain
+ * bound to an R2 bucket, a CDN in front of it. Odu advertises it as the
+ * substituter URL of every public bucket on that store, so a typo there is a
+ * cache that answers 404 to everyone while every page says it is fine.
+ * `nix-cache-info` is the first file a Nix client reads and the cheapest
+ * thing to ask for, and the daemon wrote it as an object at bucket create.
+ *
+ * A LOGGED REFUSAL, NEVER A BOOT FAILURE. The daemon still serves every
+ * bucket itself; a domain that is being provisioned must not take the cache
+ * down while DNS propagates.
+ */
+export async function probePublicStores(input: {
+  stores: readonly CacheStore[];
+  buckets: readonly { name: string; public: boolean; store: string }[];
+  log?: (event: string, fields: Record<string, unknown>) => void;
+  send?: typeof fetch;
+}): Promise<readonly UnreachableStore[]> {
+  const send = input.send ?? fetch;
+  const unreachable: UnreachableStore[] = [];
+  for (const store of input.stores) {
+    if (store.publicUrl === null) continue;
+    // ONE BUCKET IS THE PROBE for the whole store: the question is whether
+    // the domain is bound and serving, not whether each bucket is.
+    const bucket = input.buckets.find((row) => row.public && row.store === store.name);
+    if (bucket === undefined) continue;
+    const url = publicObjectUrl(store.publicUrl, cacheInfoKey(bucket.name));
+    const response = await send(url).catch(() => null);
+    const body = response === null ? "" : await response.text().catch(() => "");
+    if (response !== null && response.status === 200 && body === NIX_CACHE_INFO) continue;
+    const refusal = { store: store.name, url, status: response?.status ?? null };
+    unreachable.push(refusal);
+    input.log?.("cache.store.public.unreachable", refusal);
+  }
+  return unreachable;
+}
+
+/**
+ * IS THIS STORE'S ENDPOINT AN ADDRESS A CLIENT CAN DIAL? — asked once, at
+ * mount, for every S3 store that holds a bucket.
+ *
+ * Before 2.8 the endpoint was dialled by the DAEMON alone, so a loopback or
+ * VPC-only address was a fine thing to declare. It is now signed into the
+ * presigned URL a 307 hands to `nix build`, which runs somewhere else: an
+ * endpoint of `http://127.0.0.1:7070` means every NAR read ends at the
+ * client's own machine. The symptom is a substituter that used to work and
+ * now cannot fetch, with nothing in odu's log, so the log line is here.
+ *
+ * It checks the SHAPE, not the reachability: odu cannot dial the client's
+ * network, and a name that resolves here may not resolve there. A loopback or
+ * link-local literal is the case that is wrong for certain.
+ */
+export function probeStoreEndpoints(input: {
+  stores: readonly { name: string; endpoint: URL }[];
+  buckets: readonly { store: string }[];
+  log?: (event: string, fields: Record<string, unknown>) => void;
+}): readonly { store: string; endpoint: string; host: string }[] {
+  // `URL.hostname` keeps an IPv6 literal's brackets and drops the port, so
+  // these are the whole of what a loopback or link-local endpoint looks like.
+  const local = (host: string): boolean =>
+    host === "localhost" ||
+    host === "[::1]" ||
+    /^127\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    host.startsWith("[fe80:");
+  const found: { store: string; endpoint: string; host: string }[] = [];
+  for (const store of input.stores) {
+    if (!local(store.endpoint.hostname)) continue;
+    if (!input.buckets.some((bucket) => bucket.store === store.name)) continue;
+    const refusal = {
+      store: store.name,
+      endpoint: store.endpoint.origin,
+      host: store.endpoint.hostname,
+    };
+    found.push(refusal);
+    input.log?.("cache.store.endpoint.unreachable", refusal);
+  }
+  return found;
+}
+
 export function cacheServer(opts: CacheServerOptions): CacheServer {
   const { cache } = opts;
   /** What was last published, per bucket name, so a republish is a DIFF. */
@@ -227,15 +376,42 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     }
   })();
 
+  /** THE PUBLIC URL OF EACH DECLARED STORE, by name — what the operator bound
+   *  a domain to. Read once from the declarations the row was built with. */
+  const storeUrls = new Map(
+    opts.stores.flatMap((store) => (store.publicUrl === null ? [] : [[store.name, store.publicUrl] as const])),
+  );
+
   /**
-   * WHERE A CLIENT SUBSTITUTES THIS BUCKET FROM. A domain is the whole
-   * address (that is what "a name of its own" means); otherwise the bucket is a
-   * path under the origin.
+   * WHO ANSWERS A READ OF THIS BUCKET (PLAN 2.8).
+   *
+   * The STORE, when it publishes a public URL and the bucket is PUBLIC: the
+   * objects are there under `<bucket>/…` and nothing about reading them needs
+   * odu, which is the whole point — the cache keeps serving while the daemon
+   * is down. A PRIVATE bucket stays odu's however its store is fronted,
+   * because a public URL cannot ask who is asking; odu authorises it and
+   * redirects the NAR to a URL that expires.
    */
-  const urlOf = (facts: { name: string; domain: string | null }): string =>
-    facts.domain === null
-      ? `${opts.publicOrigin}${opts.mount}/${facts.name}`
-      : `${scheme}//${facts.domain}`;
+  const readsFromOf = (facts: { name: string; public: boolean; store: string }): "store" | "odu" =>
+    facts.public && storeUrls.has(facts.store) ? "store" : "odu";
+
+  /**
+   * WHERE A CLIENT SUBSTITUTES THIS BUCKET FROM. The STORE's own domain when
+   * its reads come from there; a bucket domain is the whole address (that is
+   * what "a name of its own" means); otherwise the bucket is a path under the
+   * origin.
+   *
+   * A STORE-FRONTED BUCKET MAY STILL HAVE A DOMAIN, and odu still honours it
+   * for writes and for the `missing` query — but the address advertised to
+   * READERS is the store's, because that is the one that answers when odu
+   * does not.
+   */
+  const urlOf = (facts: { name: string; public: boolean; domain: string | null; store: string }): string =>
+    readsFromOf(facts) === "store"
+      ? publicBucketUrl(storeUrls.get(facts.store) as string, facts.name)
+      : facts.domain === null
+        ? `${opts.publicOrigin}${opts.mount}/${facts.name}`
+        : `${scheme}//${facts.domain}`;
 
   /** WHERE A PUSH ADDRESSES IT. Always the path form: the push API needs the
    *  bucket's name, and a domain host answers `/cache/<name>` too. */
@@ -246,6 +422,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     upstreamKeys: [...facts.upstreamKeys],
     url: urlOf(facts),
     pushUrl: pushUrlOf(facts.name),
+    readsFrom: readsFromOf(facts),
   });
 
   const publish = (): void => {
@@ -272,40 +449,109 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
   };
 
   /**
-   * WHAT A COLLECTION REMOVED, AS URLS — the one place a deleted row becomes
-   * an address, because the row is the one thing here that knows where a
-   * bucket is reachable from (its domain, or the mount under the origin).
+   * WHAT CHANGED, AS URLS — the one place a bucket's object becomes an
+   * address, because the row is the one thing here that knows where a bucket
+   * is reachable from (its domain, the mount under the origin, the store's
+   * own public name).
    *
-   * Both spellings of a bucket's address are announced when it has a domain:
-   * an edge may hold `https://cache.example.org/<hash>.narinfo` AND
+   * EVERY SPELLING IS ANNOUNCED. An edge may hold
+   * `https://cache.example.org/<hash>.narinfo` AND
    * `https://odu.example.org/cache/<bucket>/<hash>.narinfo`, and purging one
    * of them leaves the other serving a path the origin has forgotten.
+   *
+   * TWO KINDS OF SPELLING, and the difference is what `./narinfo`'s own note
+   * warns about: odu's addresses are PROTOCOL PATHS, while a store's are
+   * OBJECT KEYS, which are free to move apart from them. So the protocol
+   * spelling is composed here and the store's comes from the key builders
+   * through `publicObjectUrl`, never by hand.
+   *
+   * `alsoStore` is a store the bucket is NO LONGER on — what a finished move
+   * left behind, whose domain served these very objects a moment ago.
+   */
+  const urlsFor = (input: {
+    bucket: string;
+    alsoStore: string | null;
+    removals: readonly GcRemoval[];
+    cacheInfo?: boolean;
+  }): string[] => {
+    const facts = cache.bucket(input.bucket);
+    // THE READ ADDRESS, not the push API's. They are the same string today
+    // and they are different facts: one is where Nix asks, the other is where
+    // a client uploads.
+    const bases = new Set([`${opts.publicOrigin}${opts.mount}/${input.bucket}`]);
+    if (facts?.domain != null) bases.add(`${scheme}//${facts.domain}`);
+    const urls: string[] = [];
+    for (const base of bases) {
+      for (const removal of input.removals) {
+        urls.push(`${base}/${removal.hash}.narinfo`);
+        if (removal.narFile !== null) urls.push(`${base}/nar/${removal.narFile}`);
+      }
+      if (input.cacheInfo === true) urls.push(`${base}/nix-cache-info`);
+    }
+    // THE STORE DOMAINS these objects answer at: the one the bucket lives on
+    // and the one it has just left. Not filtered by `public` — a bucket that
+    // was public yesterday may be private today, and the edge still holds
+    // what it cached then.
+    const fronts = new Set(
+      [facts?.store ?? null, input.alsoStore].flatMap((store) => {
+        const fronted = store === null ? undefined : storeUrls.get(store);
+        return fronted === undefined ? [] : [fronted];
+      }),
+    );
+    for (const front of fronts) {
+      for (const removal of input.removals) {
+        urls.push(publicObjectUrl(front, narinfoKey(input.bucket, removal.hash)));
+        if (removal.narFile !== null) {
+          urls.push(publicObjectUrl(front, narFileKey(input.bucket, removal.narFile)));
+        }
+      }
+      if (input.cacheInfo === true) urls.push(publicObjectUrl(front, cacheInfoKey(input.bucket)));
+    }
+    return urls;
+  };
+
+  /**
+   * EVERY ANNOUNCEMENT GOES THROUGH HERE: a collection, a finished move, a
+   * re-push that rewrote a text object.
    *
    * NOTHING IS BUILT WHEN NOBODY FRONTS THESE URLS. The broker knows whether
    * anybody does, and on a daemon with no CDN — most of them — a nightly
    * collection must not compose two URLs per evicted path for a no-op.
    */
+  const announceUrls = (event: string, bucket: string, urls: readonly string[]): void => {
+    if (urls.length === 0) return;
+    opts.log?.(event, { bucket, urls: urls.length });
+    opts.purge.announce([...urls]);
+  };
+
   const announce = (collected: GcCollection): void => {
     if (!opts.purge.listening()) return;
-    const urls: string[] = [];
-    for (const [name, removed] of collected.removed) {
-      if (removed.length === 0) continue;
-      const facts = cache.bucket(name);
-      // THE READ ADDRESS, not the push API's. They are the same string today
-      // and they are different facts: one is where Nix asks, the other is
-      // where a client uploads.
-      const bases = new Set([urlOf({ name, domain: null })]);
-      if (facts?.domain != null) bases.add(urlOf({ name, domain: facts.domain }));
-      for (const base of bases) {
-        for (const removal of removed) {
-          urls.push(`${base}/${removal.hash}.narinfo`);
-          if (removal.narFile !== null) urls.push(`${base}/nar/${removal.narFile}`);
-        }
-      }
+    for (const [bucket, removals] of collected.removed) {
+      if (removals.length === 0) continue;
+      announceUrls("cache.gc.purge", bucket, urlsFor({ bucket, alsoStore: null, removals }));
     }
-    if (urls.length === 0) return;
-    opts.log?.("cache.gc.purge", { urls: urls.length });
-    opts.purge.announce(urls);
+  };
+
+  /**
+   * AN ADDRESS WHOSE BYTES CHANGED OR WENT, announced.
+   *
+   * A finished MOVE: the objects are identical in the new store, but the old
+   * store's domain is about to answer 404 for every one of them. A RE-PUSH:
+   * the text object was rewritten, and what it replaced is cacheable for a
+   * day while odu's own render is already correct.
+   */
+  const announceMoved: CacheServer["announceMoved"] = (input) => {
+    if (!opts.purge.listening()) return;
+    announceUrls(
+      input.reason === "migrate" ? "cache.bucket.migrate.purge" : "cache.narinfo.purge",
+      input.bucket,
+      urlsFor({
+        bucket: input.bucket,
+        alsoStore: input.store,
+        removals: input.removals,
+        ...(input.cacheInfo === true ? { cacheInfo: true } : {}),
+      }),
+    );
   };
 
   /** A collection, announced. BOTH doors go through this — the verb and the
@@ -436,8 +682,12 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
           ),
         describe: ({ input }) =>
           answer(() => cache.admin.describe(input), (identity) => ({
-            ...identity,
+            name: identity.name,
+            public: identity.public,
+            publicKey: identity.publicKey,
+            domain: identity.domain,
             url: urlOf(identity),
+            readsFrom: readsFromOf(identity),
           })),
         domain: ({ input }) =>
           admin(
@@ -474,6 +724,17 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 authority,
                 bucket: input.bucket,
                 retentionDays: input.retentionDays,
+              }),
+            (facts) => rowOf(facts),
+          ),
+        migrate: ({ input }) =>
+          admin(
+            input,
+            (authority) =>
+              cache.admin.migrateStore({
+                authority,
+                bucket: input.bucket,
+                store: input.store,
               }),
             (facts) => rowOf(facts),
           ),
@@ -604,8 +865,14 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     detach,
     substituterUrl: (name) => {
       const bucket = cache.bucket(name);
-      return urlOf({ name, domain: bucket?.domain ?? null });
+      return urlOf({
+        name,
+        public: bucket?.isPublic ?? false,
+        domain: bucket?.domain ?? null,
+        store: bucket?.store ?? LOCAL_STORE,
+      });
     },
+    announceMoved,
   };
 }
 
@@ -655,12 +922,29 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     const purges = yield* CachePurge;
     const log = yield* Log;
 
+    // THE MOVE'S PURGE, LATE-BOUND. The cache is built before the server that
+    // knows where a bucket is reachable from, and a finished move needs both:
+    // the cache names the objects the old store gave up, this hands them to
+    // the row's URL builder. Null until the server below exists, which is
+    // before any verb can start a move.
+    let announceMoved: CacheServer["announceMoved"] | null = null;
+    // THE DECLARED STORES AS FACTS, read once: what the `stores` cell
+    // publishes, which of them the world reads directly, and what the boot
+    // probe asks. Three readers, one reading.
+    const stores = storeFacts(declared);
     const cache = createCache({
       stateRoot: stateDir,
       rootToken,
       // THE STORES AS VALUES, built once from what the operator declared: the
       // cache holds them by name and never asks what kind they are.
       stores: objectStores(declared, join(stateDir, "cache")),
+      // AND WHICH OF THEM THE WORLD READS DIRECTLY: a private bucket may not
+      // be created on, or moved onto, a store with a bound domain.
+      frontedStores: new Set(
+        stores.flatMap((declaredStore) =>
+          declaredStore.publicUrl === null ? [] : [declaredStore.name],
+        ),
+      ),
       // THE OLD NIX STORE is read ONLY by the one-time object migration. A
       // fresh deployment leaves this null and the cache never shells out.
       // `NixStore` NULL IS THE HOST'S OWN /nix/store (the contract): a module
@@ -672,6 +956,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       // ONE structured line per operational fact. The Effect logger renders
       // the fields; no per-chunk lines, no narration.
       log: (event, fields) => log.info(fields, `odu cache: ${event}`),
+      purged: (moved) => announceMoved?.(moved),
     });
     // BEFORE THE MOUNT: CA proof and the orphan/temp sweep. Nothing is
     // writing yet, so this cannot race a push.
@@ -718,10 +1003,11 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       // substituter that works for nobody.
       publicOrigin: publicOrigin ?? boundOrigin,
       mount: CACHE_MOUNT,
-      stores: storeFacts(declared),
+      stores,
       purge: purges,
       log: (event, fields) => log.info(fields, `odu cache: ${event}`),
     });
+    announceMoved = server.announceMoved;
 
     // THE MOUNT, in the activation. The framework walks the arriving surface,
     // proves the whole route set disjoint across root and siblings, and hands
@@ -755,12 +1041,46 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // the lifecycle `cache.close()`'s stopping flag honours.
     // ONE background task: the self pass needs the objects the migration is
     // about to land, so it starts when migrate settles — not beside it, where a
-    // row could be counted unreadable and wait a whole boot.
+    // row could be counted unreadable and wait a whole boot. The NARINFO
+    // BACKFILL (2.8) sits between them for the same reason: a row whose object
+    // the migration has not landed yet has no `FileHash` to put in a narinfo.
     yield* Effect.forkScoped(
       Effect.promise(async () => {
         await cache.migrate();
+        const backfilled = await cache.backfillObjects();
+        if (backfilled.written > 0 || backfilled.failures > 0) {
+          log.info(
+            { rows: backfilled.rows, written: backfilled.written, failures: backfilled.failures },
+            "odu cache: narinfo objects backfilled",
+          );
+        }
         await cache.proveSelf();
       }),
+    );
+
+    // AND ANY MOVE A RESTART INTERRUPTED (2.8). Its own fibre, not queued
+    // behind the backfill: a bucket half-way between two stores is serving
+    // from the old one and should finish as soon as the row is up.
+    yield* Effect.forkScoped(Effect.promise(() => cache.resumeMigrations()));
+
+    // THREE QUESTIONS ABOUT THE DECLARED STORES, asked once the row is up and
+    // all of them answered with a log line rather than a refused boot.
+    //
+    // The first two are READS of what the operator declared — which private
+    // buckets a bound domain exposes, and whether an endpoint a client now
+    // has to dial is a loopback address — so they are answered here and now.
+    // The third DIALS the domain and is forked, because a DNS name that is
+    // still propagating must not hold the mount.
+    const say = (event: string, fields: Record<string, unknown>): void =>
+      log.info(fields, `odu cache: ${event}`);
+    exposedBuckets({ stores, buckets: cache.snapshot(), log: say });
+    probeStoreEndpoints({
+      stores: [...declared].map(([name, store]) => ({ name, endpoint: store.target.endpoint })),
+      buckets: cache.snapshot(),
+      log: say,
+    });
+    yield* Effect.forkScoped(
+      Effect.promise(() => probePublicStores({ stores, buckets: cache.snapshot(), log: say })),
     );
 
     // (The schedule is forked below, after the finalizers — see why there.)

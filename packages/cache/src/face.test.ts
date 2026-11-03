@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
+import type { CacheMigration } from "./surface";
 
 const require_ = createRequire(import.meta.url);
 const babel = require_("@babel/core") as {
@@ -176,5 +177,61 @@ describe("a pin name is parsed in one pass", () => {
     expect(groups[0]?.repo).toBe("a/b");
     expect(groups[0]?.pins[0]?.parsed.system).toBe("x86_64-linux");
     expect(took, `the parse took ${took}ms on a 20k-character name`).toBeLessThan(100);
+  });
+});
+
+/**
+ * WHERE A READ IS ANSWERED is the fact 2.8 added to the bucket page, and it is
+ * the one fact on that line a person checks after binding a domain: a bucket
+ * whose reads still come from odu looks identical otherwise. What is pinned
+ * here is the HOST it extracts from a substituter URL — the part that can be
+ * wrong — and not the sentence it is put in.
+ */
+describe("the facts line says who answers a read", () => {
+  it("names the store's host when the reads left odu", async () => {
+    const { readsFromText } = await import("./face");
+    expect(
+      readsFromText({ readsFrom: "store", url: "https://cache.example.org/kolu" }),
+    ).toBe("reads served from cache.example.org");
+  });
+
+  it("keeps the port, because a host with one is a different origin", async () => {
+    const { readsFromText } = await import("./face");
+    expect(readsFromText({ readsFrom: "store", url: "http://localhost:9000/kolu" })).toBe(
+      "reads served from localhost:9000",
+    );
+  });
+
+  it("prints a URL it could not parse rather than nothing", async () => {
+    const { readsFromText } = await import("./face");
+    expect(readsFromText({ readsFrom: "store", url: "not a url" })).toBe(
+      "reads served from not a url",
+    );
+  });
+});
+
+/**
+ * THE ONE COMPUTATION IN A MOVE'S SENTENCE is its count: "1 object" against
+ * "12 objects", on a number that arrives from the row. The wording around it
+ * is wording, and is not pinned.
+ */
+describe("a migration counts what it has moved", () => {
+  const moving = (over: Partial<CacheMigration> = {}): CacheMigration => ({
+    to: "r2",
+    state: "copying",
+    copied: 12,
+    total: 40,
+    bytes: 3_100_000,
+    ...over,
+  });
+
+  it("keeps the plural for a bucket with many objects in it", async () => {
+    const { migrationText } = await import("./face");
+    expect(migrationText(moving())).toContain("12 of 40 objects");
+  });
+
+  it("keeps the singular for a bucket with one object in it", async () => {
+    const { migrationText } = await import("./face");
+    expect(migrationText(moving({ copied: 1, total: 1, bytes: 0 }))).toContain("1 of 1 object,");
   });
 });

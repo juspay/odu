@@ -82,7 +82,7 @@ const serverOver = (cache: Cache, purge: ReturnType<typeof purgeBroker>) =>
     cache,
     publicOrigin: "https://odu.example.org",
     mount: "/cache",
-    stores: [{ name: "local", kind: "local", default: true }],
+    stores: [{ name: "local", kind: "local", default: true, publicUrl: null }],
     purge,
   });
 

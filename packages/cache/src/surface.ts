@@ -38,6 +38,29 @@ import type { ExposeMap } from "@kolu/surface/expose";
 // ── the row ─────────────────────────────────────────────────────────────────
 
 /**
+ * A BUCKET MOVING BETWEEN STORES, as the board watches it (PLAN 2.8).
+ *
+ * It is on the ROW rather than behind a verb because the board already
+ * follows the rows: a move is minutes of copying, and a panel that had to
+ * poll a procedure for progress would be the two-RPCs-per-second problem the
+ * collection already solved with deltas.
+ */
+export const CacheMigrationSchema = Schema.Struct({
+  /** The store it is moving to. Until it is done, the bucket is still served
+   *  from the `store` beside this. */
+  to: Schema.String,
+  /** `copying` fills the new store, `flipping` is the moment the bucket
+   *  changes hands under the write lock, `deleting` lets the old copies go. */
+  state: Schema.Literals(["copying", "flipping", "deleting"]),
+  /** Objects dealt with so far, out of how many the move found. */
+  copied: Schema.Int,
+  total: Schema.Int,
+  /** Bytes copied so far. */
+  bytes: Schema.Int,
+});
+export type CacheMigration = typeof CacheMigrationSchema.Type;
+
+/**
  * ONE BUCKET, as an administrator sees it: the public key a client has to
  * trust, the substituter URL to put in `nix.conf`, and how much is in it.
  *
@@ -81,6 +104,16 @@ export const CacheBucketSchema = Schema.Struct({
   /** The store its objects live in, by declared name — `local`, or one of
    *  the `stores` cell's names. Fixed at creation (3.1). */
   store: Schema.String,
+  /**
+   * WHO ANSWERS A READ OF THIS BUCKET (PLAN 2.8). `"store"` when its store
+   * publishes a public URL and the bucket is public — the substituter URL
+   * above is the store's own, and a client never reaches odu at all.
+   * `"odu"` otherwise: the daemon renders the narinfo and either streams the
+   * NAR (disk) or redirects to the store for it (S3).
+   */
+  readsFrom: Schema.Literals(["store", "odu"]),
+  /** The store-to-store move running on this bucket, or `null`. */
+  migration: Schema.NullOr(CacheMigrationSchema),
 });
 export type CacheBucket = typeof CacheBucketSchema.Type;
 
@@ -95,6 +128,10 @@ export const CacheStoreSchema = Schema.Struct({
   /** The store a bucket created without one lands on — true on exactly one
    *  entry, so a face never guesses it from the order. */
   default: Schema.Boolean,
+  /** WHERE THE WORLD READS THIS STORE'S OBJECTS, when the operator bound a
+   *  domain to it (`<publicUrl>/<bucket>/…`). `null` for a store nobody
+   *  fronts, and always `null` for the local disk. */
+  publicUrl: Schema.NullOr(Schema.String),
 });
 export type CacheStore = typeof CacheStoreSchema.Type;
 
@@ -119,6 +156,9 @@ export const CacheBucketIdentitySchema = Schema.Struct({
   domain: Schema.NullOr(Schema.String),
   /** The substituter URL — the domain when it has one. */
   url: Schema.String,
+  /** Whether a read of this bucket is answered by its store or by odu — see
+   *  {@link CacheBucketSchema}'s own `readsFrom`. */
+  readsFrom: Schema.Literals(["store", "odu"]),
 });
 export type CacheBucketIdentity = typeof CacheBucketIdentitySchema.Type;
 
@@ -278,6 +318,22 @@ const RetentionInputSchema = Schema.Struct({
   /** Days from `lastWanted`. Zero expires everything nothing references and
    *  no pin holds. */
   retentionDays: Schema.Int,
+});
+
+/**
+ * MOVE A BUCKET'S OBJECTS TO ANOTHER DECLARED STORE.
+ *
+ * The answer is the bucket's row the moment the move is RECORDED, with
+ * `migration` on it; the copy runs in the background and the row's deltas
+ * carry its progress. Refused for a store this daemon does not declare, for
+ * the store the bucket already lives in, and for a bucket that is already
+ * moving.
+ */
+const MigrateInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  bucket: Schema.String,
+  /** A name from the `stores` cell. */
+  store: Schema.String,
 });
 
 const PinInputSchema = Schema.Struct({
@@ -633,6 +689,7 @@ export const oduCacheSurface = defineSurface({
       domain: { input: DomainInputSchema, output: CacheBucketSchema, error: REFUSES },
       paths: { input: PathsInputSchema, output: PathsOutputSchema, error: REFUSES },
       retention: { input: RetentionInputSchema, output: CacheBucketSchema, error: REFUSES },
+      migrate: { input: MigrateInputSchema, output: CacheBucketSchema, error: REFUSES },
     },
     token: {
       mint: { input: TokenMintInputSchema, output: TokenMintOutputSchema, error: REFUSES },
@@ -693,6 +750,7 @@ export const ODU_CACHE_EXPOSE = {
   "bucket.domain": { tool: { mutates: true } },
   "bucket.paths": { tool: { mutates: false } },
   "bucket.retention": { tool: { mutates: true } },
+  "bucket.migrate": { tool: { mutates: true } },
   "token.mint": { tool: { mutates: true } },
   "token.list": { tool: { mutates: false } },
   "token.revoke": { tool: { mutates: true } },
@@ -739,6 +797,18 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "API needs. A bucket lives in one STORE, named at `cache_bucket_create`",
   "(`store`, default `local`, the daemon's disk); the `stores` resource lists",
   "the stores this daemon declared (local disk and any S3-compatible ones).",
+  "`cache_bucket_migrate` moves a bucket's objects to another declared store:",
+  "it answers the row as soon as the move is recorded, and the row's",
+  "`migration` field ({to, state, copied, total, bytes}) is the progress —",
+  "the bucket keeps being served from the OLD store until every object is",
+  "copied, so nothing is unavailable while it runs. A store may publish a",
+  "`publicUrl` (an R2 custom domain); a PUBLIC bucket on such a store has",
+  "`readsFrom: \"store\"` and a substituter URL on that domain, which keeps",
+  "serving while odu is down. Everything else has `readsFrom: \"odu\"`, and a",
+  "NAR on an S3 store is answered with a 307 to a presigned URL that expires.",
+  "A PRIVATE bucket may not live on a store with a `publicUrl`: the bound",
+  "domain serves every prefix in it, so `cache_bucket_create` and",
+  "`cache_bucket_migrate` refuse that combination with `bad_input`.",
 ].join("\n");
 
 // ── the row ─────────────────────────────────────────────────────────────────
@@ -780,8 +850,14 @@ export const CACHE_KEY = "cache";
  * `pin.list`, `pin.delete`, `gc.plan` (the dry run), `orphans` on the GC
  * report, `createdBy` on a pin (who may re-point it), and
  * `bucket.create`'s `retentionDays` is now optional (90 days).
+ *
+ * 4.1: READS LEAVE ODU (PLAN 2.8). Additive, so a 4.0 reader is unaffected:
+ * `readsFrom` on a bucket row and on `bucket.describe` (whether the store's
+ * own domain or odu answers a read), `publicUrl` on a declared store,
+ * `migration` on a bucket row, and the new verb `bucket.migrate` that moves
+ * a bucket's objects between stores.
  */
-export const CACHE_CONTRACT_VERSION = "4.0";
+export const CACHE_CONTRACT_VERSION = "4.1";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

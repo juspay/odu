@@ -12,6 +12,7 @@ import {
   type ObjectBody,
   type ObjectFacts,
   type ObjectStore,
+  type PutOptions,
   type PutOutcome,
   safeKey,
   sameFacts,
@@ -133,7 +134,12 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     return { ok: true, facts };
   }
 
-  async function put(key: string, body: ObjectBody, expected?: ObjectFacts): Promise<PutOutcome> {
+  // `_options` IS ACCEPTED AND DROPPED: a file has no response of its own to
+  // carry a content type or a cache lifetime, and nothing fetches an object
+  // from this store without going through odu, which decides them itself.
+  // There is no `presignGet` here for the same reason: these objects are
+  // files on odu's machine, reachable only by reading them.
+  async function put(key: string, body: ObjectBody, expected?: ObjectFacts, _options?: PutOptions): Promise<PutOutcome> {
     const stream = body instanceof Blob ? body.stream() : body;
     const target = pathOf(key);
     if ((await isFile(target)) !== null) {

@@ -18,10 +18,12 @@ const LEDGER: ContractLedger = {
   "2.4": "ce07c59972729e8e",
   "3.0": "8988b569266ac6a6",
   "3.1": "585f670f12a0d425",
-  // 4.0 is THIS branch's own line, not a historical one: it has never been
-  // on master, so review moving the surface inside it (a pin's `createdBy`)
-  // re-pins the fingerprint rather than inventing a 4.1 nobody ever spoke.
+  // 4.0 shipped on master.
   "4.0": "500e6115015b54b2",
+  // 4.1 — PLAN 2.8: `readsFrom` on a bucket row and on `bucket.describe`,
+  // `publicUrl` on a declared store, `migration` on a bucket row, and the
+  // `bucket.migrate` verb. Every one of them additive.
+  "4.1": "75a8d40ef7202061",
 };
 
 describe("the cache row's contract", () => {

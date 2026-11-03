@@ -54,10 +54,11 @@ describe("reading the declarations", () => {
         secretAccessKey: "s3cr3t",
       },
     });
-    // WHAT THE BOARD IS TOLD: names and kinds, never an endpoint or a key.
+    // WHAT THE BOARD IS TOLD: names, kinds and the public URL, never an
+    // endpoint or a key.
     expect(storeFacts(reading.stores)).toEqual([
-      { name: "local", kind: "local", default: true },
-      { name: "r2", kind: "s3", default: false },
+      { name: "local", kind: "local", default: true, publicUrl: null },
+      { name: "r2", kind: "s3", default: false, publicUrl: null },
     ]);
   });
 

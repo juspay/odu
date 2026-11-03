@@ -16,13 +16,15 @@
  * pointed at the same store the derivation was built into.
  *
  * The order of the tests is the order of the story: create, push, substitute,
- * verify, sign, read a private bucket, then collect.
+ * verify, sign, read a private bucket, follow a redirect to the store that
+ * holds its NAR, then collect.
  */
 
 import { spawnSync } from "node:child_process";
-import { readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { type Gateway, startGateway } from "@odu/objects/testing";
 import {
   BIG,
   buildOduBinary,
@@ -31,7 +33,7 @@ import {
   scratchDir,
   suitePortFor,
 } from "../../../../tests/e2e/harness";
-import { type WebWorld, startWebService } from "../../../../tests/e2e/webHarness";
+import { type WebWorld, startWebService, until } from "../../../../tests/e2e/webHarness";
 
 /** The root token this world's daemon was started with. Administration needs
  *  it; reads of a public bucket do not. */
@@ -44,6 +46,12 @@ let world: WebWorld;
 let storeRoot: string;
 let builderStore: string;
 let substituteStore: string;
+/** A real S3 service of this suite's own, declared to the daemon as an object
+ *  store, so one bucket's NARs live somewhere odu can hand a client off to. */
+let gateway: Gateway;
+
+/** The name that store is declared under — what `bucket_create { store }` says. */
+const GATEWAY_STORE = "gw";
 
 const dirs: string[] = [];
 
@@ -55,18 +63,52 @@ beforeAll(async () => {
   storeRoot = scratchDir("odu-e2e-cache-");
   builderStore = `local?root=${join(storeRoot, "builder")}`;
   substituteStore = `local?root=${join(storeRoot, "substitute")}`;
+
+  // THE DECLARED STORE, written before the daemon starts: `$ODU_OBJECT_STORES`
+  // is read once at boot, so a store this suite wants has to exist before the
+  // service does.
+  gateway = await startGateway();
+  const target = await gateway.bucket();
+  const credentials = join(storeRoot, "gw-credentials");
+  writeFileSync(
+    credentials,
+    `AWS_ACCESS_KEY_ID=${target.accessKeyId}\nAWS_SECRET_ACCESS_KEY=${target.secretAccessKey}\n`,
+    { mode: 0o600 },
+  );
+  const stores = join(storeRoot, "object-stores.json");
+  writeFileSync(
+    stores,
+    JSON.stringify({
+      [GATEWAY_STORE]: {
+        kind: "s3",
+        // `localhost`, SPELLED THAT WAY ON PURPOSE. The gateway listens on
+        // 127.0.0.1 and so does odu, but the two hosts differ as STRINGS —
+        // which is the whole of the redirect proof below: curl drops an
+        // `Authorization` header when a redirect changes host, so a NAR that
+        // still arrives proves the presigned URL carries its own authority and
+        // that the bucket's token never reached the store.
+        endpoint: `http://localhost:${gateway.endpoint.port}`,
+        bucket: target.bucket,
+        region: target.region,
+        credentialsFile: credentials,
+      },
+    }),
+  );
+
   world = await startWebService(
     odu,
     {
       ODU_ROOT_TOKEN: ROOT_TOKEN,
       ODU_CACHE_STORE: `local?root=${join(storeRoot, "server")}`,
+      ODU_OBJECT_STORES: stores,
     },
     suitePortFor("cache"),
   );
 }, 900_000); // nix build, cold cache
 
-afterAll(() => {
+afterAll(async () => {
   world?.dispose();
+  await gateway?.stop();
   for (const dir of dirs.splice(0)) cleanup(dir);
 });
 
@@ -235,6 +277,44 @@ interface Bucket {
   publicKey: string;
   keyName: string;
   upstreamKeys: string[];
+  /** The declared store its objects live in. */
+  store: string;
+  /** Who answers a read of it — the store itself, or odu (PLAN 2.8). */
+  readsFrom: "store" | "odu";
+}
+
+/** One `cache.nar.served` line the daemon wrote. The daemon's log is JSON per
+ *  line on stderr, which the world's harness collects into a file: this is the
+ *  only place a test can see HOW a NAR left — whether odu streamed it or handed
+ *  the client an address. */
+interface Served {
+  bucket: string;
+  /** The store path the NAR holds — what a caller names a read by, since the
+   *  line's `hash` is the NAR's and not the store path's. */
+  path: string;
+  bytes: number;
+  source: "object" | "transition" | "redirect";
+}
+
+/** Every `cache.nar.served` line written for `storePath`, in order. */
+function narServed(storePath: string): Served[] {
+  let text: string;
+  try {
+    text = readFileSync(world.logPath, "utf-8");
+  } catch {
+    return [];
+  }
+  const lines: Served[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.includes("cache.nar.served")) continue;
+    try {
+      const entry = JSON.parse(line) as Served & { msg?: string };
+      if (entry.msg === "odu cache: cache.nar.served" && entry.path === storePath) lines.push(entry);
+    } catch {
+      // A partial last line: the daemon is still writing it. The poll retries.
+    }
+  }
+  return lines;
 }
 
 let main: Bucket;
@@ -565,6 +645,141 @@ describe("odu serves a Nix binary cache", () => {
     expect(read.status).toBe(0);
   });
 
+  it("redirects a private bucket's NAR to its store, and a real Nix client follows it", async () => {
+    // PLAN 2.8, END TO END, with nothing faked: the bucket's objects live on a
+    // real S3 service, odu renders and signs the narinfo as it always has, and
+    // answers the NAR with an ADDRESS instead of bytes.
+    //
+    // The bucket is PRIVATE and the store is spelled `localhost` while the
+    // daemon is bound at `127.0.0.1`. curl calls that a change of host and
+    // drops the `Authorization` the netrc supplied, so a NAR that arrives
+    // anyway arrived on the presigned URL's own signature — which is the claim
+    // worth proving: the read left odu, and the bucket's token did not.
+    const created = surface("bucket_create", {
+      rootToken: ROOT_TOKEN,
+      name: "fronted",
+      public: false,
+      retentionDays: 90,
+      store: GATEWAY_STORE,
+    });
+    expect({ status: created.status, stderr: created.stderr }).toMatchObject({ status: 0 });
+    const fronted = JSON.parse(created.stdout) as Bucket;
+    expect(fronted.store).toBe(GATEWAY_STORE);
+    // The store fronts no public URL of its own, so odu is still the address a
+    // client is handed: it is the NAR, and only the NAR, that leaves.
+    expect(fronted.readsFrom).toBe("odu");
+    expect(new URL(fronted.url).hostname).toBe("127.0.0.1");
+
+    const minted = surface("token_mint", {
+      rootToken: ROOT_TOKEN,
+      bucket: "fronted",
+      scope: "write",
+    });
+    expect(minted.status).toBe(0);
+    const token = (JSON.parse(minted.stdout) as { token: string }).token;
+
+    const offloaded = build("odu-cache-e2e-fronted");
+    const pushed = cli(["cache", "push", "fronted", offloaded], {
+      ODU_CACHE_TOKEN: token,
+      NIX_REMOTE: builderStore,
+    });
+    expect({ status: pushed.status, stderr: pushed.stderr.split("\n")[0] }).toMatchObject({
+      status: 0,
+    });
+    expect(pushed.stdout).toContain("pushed 1");
+
+    // THE REDIRECT ITSELF, before anything is asked to follow one. A 307, so
+    // the method survives the hop; a URL on the STORE's host; no body; and
+    // nothing an edge may keep, because the signature in it expires.
+    const basic = {
+      authorization: `Basic ${Buffer.from(`anyone:${token}`).toString("base64")}`,
+    };
+    const narinfo = await fetch(`${fronted.url}/${hashOf(offloaded)}.narinfo`, { headers: basic });
+    expect(narinfo.status).toBe(200);
+    const narPath = /^URL: (.+)$/m.exec(await narinfo.text())?.[1];
+    expect(narPath).toMatch(/^nar\//);
+    const redirect = await fetch(`${fronted.url}/${narPath}`, {
+      headers: basic,
+      redirect: "manual",
+    });
+    expect(redirect.status).toBe(307);
+    expect(redirect.headers.get("cache-control")).toBe("private, no-store");
+    expect((await redirect.arrayBuffer()).byteLength).toBe(0);
+    const location = new URL(redirect.headers.get("location") ?? "");
+    expect(location.hostname).toBe("localhost");
+    expect(location.port).toBe(gateway.endpoint.port);
+    expect(location.searchParams.get("X-Amz-Expires")).toBe("600");
+
+    // AND A REAL CLIENT FOLLOWS IT. The netrc names odu's host only — the
+    // gateway is nowhere in it — so the hop is unauthenticated by construction.
+    const netrc = join(storeRoot, "fronted-netrc");
+    writeFileSync(netrc, `machine ${new URL(fronted.url).hostname} password ${token}\n`, {
+      mode: 0o600,
+    });
+    const clientStore = `local?root=${join(storeRoot, "fronted-client")}`;
+    const read = spawnSync(
+      "nix",
+      [
+        "build",
+        "--store",
+        clientStore,
+        "--substituters",
+        fronted.url,
+        "--trusted-public-keys",
+        fronted.publicKey,
+        "--netrc-file",
+        netrc,
+        "--no-link",
+        offloaded,
+      ],
+      { encoding: "utf-8", maxBuffer: BIG },
+    );
+    expect(read.stderr).not.toContain("not signed");
+    expect(read.stderr).not.toContain("403");
+    expect(read.status).toBe(0);
+
+    // The path is VALID in the client's store: the bytes that came off the
+    // gateway are the NAR the narinfo odu signed describes.
+    const verified = spawnSync(
+      "nix",
+      [
+        "store",
+        "verify",
+        "--store",
+        clientStore,
+        "--trusted-public-keys",
+        fronted.publicKey,
+        offloaded,
+      ],
+      { encoding: "utf-8", maxBuffer: BIG },
+    );
+    expect(verified.stderr).not.toContain("not signed");
+    expect(verified.status).toBe(0);
+
+    // ODU STREAMED ZERO NAR BYTES. The daemon's own log is the only witness to
+    // that: every line for this path says `redirect`, and none says `object`.
+    // Polled, because the world collects the daemon's stderr on this process's
+    // event loop and the `nix build` above held it.
+    // TWO of them: the probe above, and the client's own fetch — so this waits
+    // for the second rather than passing on the first and calling the line the
+    // suite made its own proof.
+    const served = await until(
+      "odu to log the two NARs it redirected",
+      () => {
+        const lines = narServed(offloaded);
+        return lines.filter((line) => line.source === "redirect").length >= 2 ? lines : null;
+      },
+      30_000,
+    );
+    expect(served.find((line) => line.source === "redirect")).toMatchObject({
+      bucket: "fronted",
+      source: "redirect",
+      bytes: 0,
+    });
+    expect(served.map((line) => line.source)).not.toContain("object");
+    expect(served.every((line) => line.bytes === 0)).toBe(true);
+  });
+
   it("pushes a two-path closure in dependency order, and substitutes the top path cold", () => {
     const { parent, child } = buildPair("odu-cache-e2e-pair");
     expect(parent).not.toBe("");
@@ -712,6 +927,7 @@ describe("odu serves a Nix binary cache", () => {
     };
     expect(answer.buckets.map((bucket) => bucket.name).sort()).toEqual([
       "everything",
+      "fronted",
       "main",
       "private",
       "thief",

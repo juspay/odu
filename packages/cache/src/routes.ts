@@ -147,7 +147,7 @@ function narResponse(
   const started = performance.now();
   const at = file.indexOf(".nar");
   const hash = at === -1 ? file : file.slice(0, at);
-  const served = (kind: "object" | "transition") =>
+  const served = (kind: "object" | "transition" | "redirect") =>
     (bytes: number, cancelled: boolean, error: string | null): void =>
       cache.log("cache.nar.served", {
         bucket,
@@ -173,6 +173,30 @@ function narResponse(
     );
   if (source.kind === "legacy") {
     return Effect.succeed(streamed(source.stream, "transition", { headers }));
+  }
+  /**
+   * THE STORE SERVES IT (PLAN 2.8). A `307` — not a `302` — because the
+   * method must survive the hop: a HEAD that came back as a GET would hand a
+   * client asking "is it there" a whole NAR.
+   *
+   * NO `Range` IS PROXIED. The client re-sends its own `Range` to the store,
+   * which answers the 206 — so a resumed download is between those two and
+   * odu never sees a byte of it. For the same reason the redirect itself is
+   * `private, no-store` on every bucket, public or not: the URL in it carries
+   * a signature that expires, and an edge that cached the redirect would hand
+   * out a dead URL long after.
+   *
+   * The line is written HERE rather than by the body observer, because there
+   * is no body to observe: `bytes: 0` is the fact 2.8 trades away.
+   */
+  if (source.kind === "redirect") {
+    served("redirect")(0, false, null);
+    return Effect.succeed(
+      HttpServerResponse.empty({
+        status: 307,
+        headers: { location: source.url.href, "cache-control": "private, no-store" },
+      }),
+    );
   }
   const range = rangeOf(request.headers["range"], source.size);
   if (range === "unsatisfiable") return Effect.succeed(HttpServerResponse.empty({ status: 416 }));
@@ -353,8 +377,13 @@ function refused(
  * before anybody has signed in, and what makes the page a cURL away. A private
  * bucket answers them only to a reader, through the same per-bucket rule the
  * protocol's reads use.
+ *
+ * `readsFrom` is NOT among them: the page answers at `/cache/<bucket>`, so
+ * odu is self-evidently serving this request, and the one fact a consumer
+ * acts on — where to substitute from — is already the `url` above, which is
+ * the store's domain when a store fronts the bucket (PLAN 2.8).
  */
-export interface ConsumerFacts extends CacheBucketIdentity {
+export interface ConsumerFacts extends Omit<CacheBucketIdentity, "readsFrom"> {
   readonly upstreamKeys: readonly string[];
   /** The `nix.conf` / `flake.nix` / netrc block, `home` unpinned: the page
    *  cannot know a reader's home, and `useBlock` says so. */

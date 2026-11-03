@@ -11,13 +11,14 @@ import {
   isTemp,
   type ObjectFacts,
   type ObjectStore,
+  type PutOptions,
   type PutOutcome,
   safeKey,
   sameFacts,
   TEMP,
   UnrecordedObject,
 } from "./objectStore";
-import { s3Fetch, type S3Request, type S3Target } from "./s3sign";
+import { presignGet, s3Fetch, type S3Request, type S3Target } from "./s3sign";
 import { newChain, type Chain, serial } from "./serial";
 
 export interface S3ObjectStoreOptions {
@@ -78,6 +79,14 @@ class S3Failure extends Error {
 const metaOf = (facts: ObjectFacts): Record<string, string> => ({
   [META_SIZE]: String(facts.size),
   [META_SHA256]: facts.sha256,
+});
+
+/** The response headers the object will answer a READER with, in S3's
+ *  spelling: kept with the object by the call that creates it, which for a
+ *  multipart object is the CreateMultipartUpload and not the Complete. */
+const headersOf = (options?: PutOptions): Record<string, string> => ({
+  ...(options?.contentType === undefined ? {} : { "content-type": options.contentType }),
+  ...(options?.cacheControl === undefined ? {} : { "cache-control": options.cacheControl }),
 });
 
 /** The value of one XML element, as S3 spells its few answers. */
@@ -293,8 +302,8 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * metadata is fixed when an upload is created, and the hash is known only at
    * the end.
    */
-  async function copyInto(key: string, tempKey: string, facts: ObjectFacts): Promise<Decided> {
-    const uploadId = await createUpload(key, metaOf(facts));
+  async function copyInto(key: string, tempKey: string, facts: ObjectFacts, options?: PutOptions): Promise<Decided> {
+    const uploadId = await createUpload(key, { ...metaOf(facts), ...headersOf(options) });
     try {
       const etags: string[] = [];
       for (let start = 0, part = 1; start < facts.size; start += COPY_PART, part += 1) {
@@ -324,6 +333,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     key: string,
     stream: ReadableStream<Uint8Array>,
     expected?: ObjectFacts,
+    options?: PutOptions,
   ): Promise<PutOutcome> {
     safeKey(key);
     // ASKED FIRST so a re-push costs a HEAD rather than an upload; the
@@ -357,7 +367,12 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       // The bytes are in hand, so a `409` is answered by sending them again.
       const decided = await untilDecided(async () => {
         const response = await call("PUT", key, {
-          headers: { "if-none-match": "*", "content-length": String(filled), ...metaOf(facts) },
+          headers: {
+            "if-none-match": "*",
+            "content-length": String(filled),
+            ...metaOf(facts),
+            ...headersOf(options),
+          },
           body: first as Uint8Array<ArrayBuffer>,
         });
         const text = await response.text();
@@ -374,7 +389,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     // copied into place once the hash is known.
     const direct = expected !== undefined;
     const uploadKey = direct ? key : `${key.slice(0, key.lastIndexOf("/") + 1)}${TEMP}${randomUUID()}`;
-    const uploadId = await createUpload(uploadKey, direct ? metaOf(expected) : {});
+    const uploadId = await createUpload(uploadKey, direct ? { ...metaOf(expected), ...headersOf(options) } : {});
     // PARTS IN PARALLEL, `parallel` at a time. The stream is read in order —
     // the hash needs that — and a part is read only once a slot is free, into
     // one of `parallel` buffers that are REUSED (a fresh buffer per part left
@@ -456,7 +471,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     await complete(uploadKey, uploadId, etags, false);
     try {
       // The temp object stays put, so a conflicted copy is simply started again.
-      const decided = await untilDecided(() => copyInto(key, uploadKey, facts));
+      const decided = await untilDecided(() => copyInto(key, uploadKey, facts, options));
       if (decided === "conflict") return conflicted(key, CONFLICT_TRIES);
       return decided === "won" ? { ok: true, facts } : await exists(key);
     } finally {
@@ -622,15 +637,19 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     // A BODY THAT CAN BE READ AGAIN (a Blob) restarts a conflicted multipart
     // upload whole — what AWS asks of a `409` on `CompleteMultipartUpload`. A
     // stream is read once.
-    put: (key, body, expected) =>
+    put: (key, body, expected, options) =>
       oneWriter(key, async () => {
-        if (!(body instanceof Blob)) return putOnce(key, body, expected);
+        if (!(body instanceof Blob)) return putOnce(key, body, expected, options);
         const outcome = await untilDecided(async () => {
-          const once = await putOnce(key, body.stream(), expected);
+          const once = await putOnce(key, body.stream(), expected, options);
           return !once.ok && once.refusal.kind === "conflict" ? "conflict" : once;
         });
         return outcome === "conflict" ? conflicted(key, CONFLICT_TRIES) : outcome;
       }),
+
+    // A URL OF ITS OWN: this store's objects are fetchable by anybody holding
+    // a signature, so odu may answer a read with one instead of the bytes.
+    presignGet: (key, expiresSeconds) => presignGet(target, safeKey(key), expiresSeconds),
 
     // NO HEAD: the first window's GET answers whether the object is there
     // (404), how big it is (`Content-Range`), and its first bytes, in one round

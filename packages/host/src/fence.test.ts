@@ -105,6 +105,12 @@ const declaration = {
       "packages/web-acceptance/support/cloudflareStub.ts": 1,
       // `cache-control` on three responses — an HTTP header, not a bucket.
       "packages/host/src/principal.ts": 3,
+      // THE SAME HEADER, in the store layer: `PutOptions.cacheControl` and
+      // the `cache-control` an S3 put sends with the bytes (PLAN 2.8, where
+      // reads are served by the store itself and nothing of odu's is in the
+      // path to add one). An HTTP header on an object, not the cache row.
+      "packages/objects/src/objectStore.ts": 1,
+      "packages/objects/src/s3Store.ts": 3,
       // The bucket-domain gate: the page rewrite's `/cache/` and its own
       // 404 sentence. The path GRAMMAR moved to the row's `bucketOf` fact.
       "packages/host/src/bucketDomain.ts": 2,

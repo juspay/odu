@@ -3,11 +3,14 @@
  */
 export {
   type ByteRange,
+  factsCounter,
   type ObjectBody,
   type ObjectFacts,
   type ObjectRefusal,
   type ObjectStore,
+  type PutOptions,
   type PutOutcome,
+  sameFacts,
   type StoredObject,
   UnrecordedObject,
 } from "./objectStore";
