@@ -16,13 +16,23 @@
 
 import * as assert from "node:assert";
 import { mkdtempSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { Given, Then, When } from "@cucumber/cucumber";
+import { AfterAll, Given, Then, When } from "@cucumber/cucumber";
 import type { Locator } from "playwright";
-import { oduCli, ROOT_TOKEN, until } from "../../../web-acceptance/support/service.ts";
-import type { OduWorld } from "../../../web-acceptance/support/world.ts";
+import { type Gateway, startGateway } from "@odu/objects/testing";
+import {
+  oduCli,
+  readOduBin,
+  ROOT_TOKEN,
+  type Service,
+  startService,
+  stopService,
+  until,
+} from "../../../web-acceptance/support/service.ts";
+import { type OduWorld, RUN_SETUP_TIMEOUT } from "../../../web-acceptance/support/world.ts";
 
 function unique(what: string): string {
   return `wa-${what}-${Math.random().toString(36).slice(2, 10)}`;
@@ -875,4 +885,118 @@ When("I type the root token", async function (this: OduWorld) {
 
 When("I type a wrong root token", async function (this: OduWorld) {
   await this.page.getByLabel("root token", { exact: true }).fill("not-the-root-token");
+});
+
+// ── a second store, and a bucket that moves to it ───────────────────────────
+
+/**
+ * A WORLD WITH SOMEWHERE TO MOVE A BUCKET TO.
+ *
+ * `$ODU_OBJECT_STORES` is read ONCE at boot, so the daemon that declares a
+ * second store cannot be the worker's loopback one — it is a daemon of this
+ * row's own, beside a real S3 service (versitygw, the same gateway the
+ * cache's unit suite runs against), so the objects really do travel.
+ *
+ * IT IS STARTED HERE rather than in the harness because a store is the
+ * CACHE's noun: `support/hooks.ts` owns the three worlds every row shares and
+ * names no row's vocabulary, and `@odu/objects/testing` is a dependency only
+ * this package has. The step hands it over as `this.service`, which is the
+ * handle every cache step already uses — so the whole vocabulary above works
+ * unchanged against it.
+ *
+ * One per WORKER, not per scenario: a daemon is seconds to start and the move
+ * is what the scenario is about.
+ */
+const SECOND_STORE = "gw";
+let gateway: Gateway | undefined;
+let storesWorld: Service | undefined;
+
+/** A port the kernel vouches for. The harness reserves one per world it owns
+ *  and this world is not one of them, so it is asked for the same way: bind
+ *  zero, read what was assigned, let it go. */
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (typeof address !== "object" || address === null) throw new Error("no free port");
+  return address.port;
+}
+
+async function storesService(): Promise<Service> {
+  if (storesWorld !== undefined) return storesWorld;
+  gateway = await startGateway();
+  const target = await gateway.bucket();
+  const dir = mkdtempSync(join(tmpdir(), "odu-wa-stores-"));
+  const credentials = join(dir, "gw-credentials");
+  writeFileSync(
+    credentials,
+    `AWS_ACCESS_KEY_ID=${target.accessKeyId}\nAWS_SECRET_ACCESS_KEY=${target.secretAccessKey}\n`,
+    { mode: 0o600 },
+  );
+  const declarations = join(dir, "object-stores.json");
+  writeFileSync(
+    declarations,
+    JSON.stringify({
+      [SECOND_STORE]: {
+        kind: "s3",
+        endpoint: target.endpoint.origin,
+        bucket: target.bucket,
+        region: target.region,
+        credentialsFile: credentials,
+      },
+    }),
+  );
+  storesWorld = await startService(readOduBin(), await freePort(), {
+    ODU_OBJECT_STORES: declarations,
+  });
+  return storesWorld;
+}
+
+AfterAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
+  if (storesWorld !== undefined) {
+    stopService(storesWorld);
+    storesWorld = undefined;
+  }
+  if (gateway !== undefined) {
+    await gateway.stop();
+    gateway = undefined;
+  }
+});
+
+Given(
+  "a daemon that declares a second store",
+  { timeout: RUN_SETUP_TIMEOUT },
+  async function (this: OduWorld) {
+    this.service = await storesService();
+  },
+);
+
+/** The move's own panel. The bucket page draws one card per store it could
+ *  move to, and the facts line above is where the move ENDS — so every
+ *  assertion about the control itself is scoped here. */
+function migrateSection(world: OduWorld): Locator {
+  return world.page.locator('section[aria-label="migrate"]');
+}
+
+/** A CARD, by its accessible name — which is the store's name followed by the
+ *  sentence explaining what kind of store it is, so the match is a prefix
+ *  rather than the whole of it. */
+function storeCard(world: OduWorld, store: string): Locator {
+  return migrateSection(world).getByRole("radio", { name: store });
+}
+
+Then("the move offers the store {string}", async function (this: OduWorld, store: string) {
+  await storeCard(this, store).waitFor({ timeout: 30_000 });
+});
+
+When("I move the bucket to {string}", async function (this: OduWorld, store: string) {
+  await storeCard(this, store).check();
+  await migrateSection(this)
+    .getByRole("button", { name: "Start move", exact: true })
+    .click();
+});
+
+Then("the move says {string}", async function (this: OduWorld, text: string) {
+  await this.saysThat(migrateSection(this), "the move", text);
 });

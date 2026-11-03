@@ -99,7 +99,7 @@ The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`lo
 | machines and holds | `odu ci hosts`, `odu ci lease`, `odu ci release` | `venue_probe`, `venue_hold`, `venue_release` | **Machines** |
 | import or expire history | `odu ci history import`, `odu ci history prune` | `catalog_import`, `catalog_prune` | **Maintenance** (dry run first) |
 | require odu's checks | `odu ci protect` | `protect_apply` | **Maintenance** → **Apply protection** (admin; dry run first) |
-| administer the cache | — | `odu surface cache bucket_create\|bucket_list\|bucket_domain\|bucket_retention\|token_mint\|token_list\|token_revoke\|pin_create\|pin_list\|pin_delete\|gc_plan\|gc_run\|stats_read` | **Cache**, and a bucket's page (admin) — **Retention**, **Pins**, **Dry run**, **Run GC**; see [the cache docs](cache/#the-cache-view) |
+| administer the cache | — | `odu surface cache bucket_create\|bucket_list\|bucket_domain\|bucket_retention\|bucket_migrate\|token_mint\|token_list\|token_revoke\|pin_create\|pin_list\|pin_delete\|gc_plan\|gc_run\|stats_read` | **Cache**, and a bucket's page (admin) — **Retention**, **Move to another store**, **Pins**, **Dry run**, **Run GC**; see [the cache docs](cache/#the-cache-view) |
 | tokens and sessions | — | `odu surface auth token_create\|token_list\|token_revoke` | the profile page |
 | roles and who you are | — | `odu surface auth user_grant`, `odu surface auth grant_list`, `odu surface auth user_whoami` | **People** (owner) |
 | the tunnel and its names | — | `odu surface cloudflare status_read` | **Tunnel** |
@@ -218,11 +218,11 @@ Each row versions its own surface. The daemon publishes the host's version and e
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
 | `ci` (runs) | 2.4 | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
-| `cache` | **4.0** | `odu cache`, `odu surface cache`, the board |
+| `cache` | **4.1** | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
 
-Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource; **4.0** runs retention on `lastWanted` and drops the last-access field a path and `cache_stats_read` used to carry, and adds `cache_bucket_retention`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan` and `orphans` on the GC report (`retentionDays` at creation is now optional, defaulting to 90 days). A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
+Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource; **4.0** runs retention on `lastWanted` and drops the last-access field a path and `cache_stats_read` used to carry, and adds `cache_bucket_retention`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan` and `orphans` on the GC report (`retentionDays` at creation is now optional, defaulting to 90 days); **4.1** adds `readsFrom` on a bucket row and on `cache_bucket_describe`, `publicUrl` on a declared store, `migration` on a bucket row, and `cache_bucket_migrate`, which moves a bucket's objects between stores. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
 
 
 ## Server mode
@@ -473,6 +473,7 @@ Other shared verbs: `run_list` (the board filtered by checkout, commit and seq, 
 | `cache_describe` | `cache_bucket_describe` | no |
 | — | `cache_bucket_paths` | no |
 | — | `cache_bucket_retention` (4.0) | yes |
+| — | `cache_bucket_migrate` (4.1) | yes |
 | `cache_tokenMint` | `cache_token_mint` | yes |
 | `cache_tokenList` | `cache_token_list` | yes |
 | `cache_tokenRevoke` | `cache_token_revoke` | yes |

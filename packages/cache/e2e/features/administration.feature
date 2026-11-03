@@ -64,6 +64,27 @@ Feature: An admin administers the cache from the board
     And the cache says "objects on local"
     And there should be no page errors
 
+  # WHERE A BUCKET'S OBJECTS LIVE IS NO LONGER FINAL. The move is the row's —
+  # it copies every object to the other store, keeps serving from the old one
+  # until it is done, then flips — and the page follows it from the bucket's
+  # own deltas: the panel reports the move, and the facts line at the top says
+  # the new store once the bucket has changed hands. The second store is a
+  # real S3 service on this machine, so the objects really do travel.
+  Scenario: A bucket is moved to another declared store from its page
+    Given a daemon that declares a second store
+    And a bucket created from the board
+    And I mint a "write" token
+    When a path is pushed with that token from the CLI
+    Then the bucket's facts say "objects on local"
+    And the move offers the store "gw"
+    When I move the bucket to "gw"
+    Then the move says "It keeps serving from local until every object is copied"
+    And the bucket's facts say "objects on gw"
+    # The store publishes no public URL, so a read of it is still odu's to
+    # answer — the other half of the fact this line now carries.
+    And the bucket's facts say "reads served by odu"
+    And there should be no page errors
+
   @signed-in:admin
   Scenario: A token is minted, listed and revoked from a bucket page
     Given a bucket created from the board

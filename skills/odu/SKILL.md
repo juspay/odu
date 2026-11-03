@@ -19,7 +19,7 @@ run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_
 catalog_import · catalog_prune · pipeline_read
 venue_probe · venue_hold · venue_release · protect_apply
 cache_bucket_create · cache_bucket_list · cache_bucket_describe · cache_bucket_paths
-cache_bucket_domain · cache_bucket_retention
+cache_bucket_domain · cache_bucket_retention · cache_bucket_migrate
 cache_token_mint · cache_token_list · cache_token_revoke
 cache_pin_create · cache_pin_list · cache_pin_delete
 cache_gc_plan · cache_gc_run · cache_stats_read
@@ -315,15 +315,16 @@ terminal.
 | import old runs | `odu surface catalog_import --input '{…}' --json` | `catalog_import` | `checkout`, `dryRun?`, `requestId` | `imported[]`, `skipped[]`, `catalog` |
 | expire old runs | `odu surface catalog_prune --input '{…}' --json` | `catalog_prune` | `retentionDays?`, `dryRun?`, `requestId` | `expired[]`, `kept[]`, `retentionDays`, `dryRun`, `replayed` |
 | require odu's checks | `odu surface protect_apply --input '{…}' --json` | `protect_apply` | `checkout`, `branch?`, `platforms?`, `hostsFile?`, `dryRun?`, `create?`, `requestId` | `repo`, `branch`, `contexts[]`, `rulesetId`, `applied`, `created`, `derivedFrom`, `detail`, `replayed` |
-| create a cache bucket | `odu surface cache bucket_create --input '{…}' --json` | `cache_bucket_create` | `rootToken`, `name`, `public`, `retentionDays?` (absent is 90 days), `upstreamKeys?`, `store?` (a declared store; default `local`, `unknown_store` otherwise) | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `store` |
+| create a cache bucket | `odu surface cache bucket_create --input '{…}' --json` | `cache_bucket_create` | `rootToken`, `name`, `public`, `retentionDays?` (absent is 90 days), `upstreamKeys?`, `store?` (a declared store; default `local`, `unknown_store` otherwise) | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `store`, `readsFrom` (`store` the store's own domain answers reads, `odu` the daemon does), `migration` (a store move in flight, or `null`) |
 | list buckets | `odu surface cache bucket_list --input '{…}' --json` | `cache_bucket_list` | `rootToken` | `buckets[]` (the shape above) |
-| one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `domain`, `url` only — the substituter's identity, not the operator's counts |
+| one bucket's public identity | `odu surface cache bucket_describe --input '{…}' --json` | `cache_bucket_describe` | `bucket` — **no root token** | `name`, `public`, `publicKey`, `domain`, `url`, `readsFrom` only — the substituter's identity, not the operator's counts |
 | give a bucket a DNS name | `odu surface cache bucket_domain --input '{…}' --json` | `cache_bucket_domain` | `rootToken`, `bucket`, `domain` (omit to clear) | the bucket row; `url` becomes the name and `pushUrl` stays the path |
 | change a bucket's retention | `odu surface cache bucket_retention --input '{…}' --json` | `cache_bucket_retention` | `rootToken`, `bucket`, `retentionDays` (days from `lastWanted`; `0` keeps only what is referenced or pinned) | the bucket row |
+| move a bucket to another store | `odu surface cache bucket_migrate --input '{…}' --json` | `cache_bucket_migrate` | `rootToken`, `bucket`, `store` (a name from the `stores` resource) | the bucket row, with `migration` on it. The copy runs in the background and the bucket keeps serving from the OLD store until it is done; refused for an undeclared store, the store it is already on, and a bucket already moving |
 | one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastWanted`), `next?` — newest first, 100 a page |
 | the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
-| the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits`, `store` — one row per bucket, published as it moves |
-| the stores a bucket can live in | `odu surface get cache stores` | the `stores` resource | *(none)* | `[{ name, kind, default }]` — `local` (the server's disk, `default: true`) first, then each declared S3 store; never an endpoint or a credential |
+| the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits`, `store`, `readsFrom`, `migration` (`{to, state: copying\|flipping\|deleting, copied, total, bytes}`, or `null`) — one row per bucket, published as it moves |
+| the stores a bucket can live in | `odu surface get cache stores` | the `stores` resource | *(none)* | `[{ name, kind, default, publicUrl }]` — `local` (the server's disk, `default: true`, `publicUrl: null`) first, then each declared S3 store; never an endpoint or a credential |
 | mint a cache token | `odu surface cache token_mint --input '{…}' --json` | `cache_token_mint` | `rootToken`, `bucket`, `scope` (`read`/`write`/`admin`), `expiresDays?`, `bucketGlob?` | `token` (plaintext, ONCE), `facts` |
 | list cache tokens | `odu surface cache token_list --input '{…}' --json` | `cache_token_list` | `rootToken`, `bucket?` | `tokens[]` — never a plaintext |
 | revoke a cache token | `odu surface cache token_revoke --input '{…}' --json` | `cache_token_revoke` | `rootToken`, `id` | `id`, `revoked` |
@@ -350,7 +351,9 @@ are real, `CA:` is proved from name, references and bytes) and keeps no Nix
 store: references are names, so a push records a path even when they are not in
 the bucket. A bucket's objects live in its **store** — `local` disk, or an
 S3-compatible bucket the operator declared (`services.odu.cache.stores`) — chosen
-at `cache_bucket_create` and kept; every store serves through the same routes.
+at `cache_bucket_create`, moved afterwards with `cache_bucket_migrate`; every
+store holds the whole protocol (`<bucket>/nar/<file>`, `<bucket>/<hash>.narinfo`,
+`<bucket>/nix-cache-info`).
 Setting up R2 for one (the operator's job, either way; full steps in the cache
 docs, "Set up an R2 bucket"):
 
@@ -368,11 +371,26 @@ docs, "Set up an R2 bucket"):
 - **Then:** a credentials file of `AWS_ACCESS_KEY_ID=` and
   `AWS_SECRET_ACCESS_KEY=` lines, and `services.odu.cache.stores.<name> = {
   endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"; bucket; region =
-  "auto"; credentialsFile; }`.
-The cache row is at contract 4.0 (3.0 removed `held` and `--wait`; 3.1 added
+  "auto"; credentialsFile; publicUrl?; }` — `publicUrl` being the custom domain
+  bound to that bucket, an origin with no path, which public buckets on the
+  store are then advertised at.
+The cache row is at contract 4.1 (3.0 removed `held` and `--wait`; 3.1 added
 `store` and the `stores` resource; 4.0 moved retention onto `lastWanted` — the
 old last-access field is gone from a path and from `stats_read` — and added
-`bucket_retention`, `pin_list`, `pin_delete`, `gc_plan` and `orphans`).
+`bucket_retention`, `pin_list`, `pin_delete`, `gc_plan` and `orphans`; 4.1 added
+`readsFrom`, `publicUrl` on a store, `migration` on a bucket row and
+`bucket_migrate`).
+
+- **READS LEAVE ODU WHERE THEY CAN.** A store may declare a `publicUrl` — an
+  R2 custom domain the operator bound to the bucket (`cf r2 buckets domains
+  custom create <r2-bucket> --domain <host> --zone-id <zone>`; odu binds
+  nothing). A PUBLIC bucket on such a store answers `readsFrom: "store"` and a
+  `url` of `<publicUrl>/<bucket>`: its reads never reach the daemon, so the
+  cache serves while odu is down. Everything else is `readsFrom: "odu"`, and a
+  NAR on any S3 store is a **307** to a presigned URL good for ten minutes —
+  which is what makes a PRIVATE bucket work too: odu authorises, then the
+  store serves, and the client re-sends its own `Range` there. A disk store
+  streams from odu as before.
 
 - **RETENTION COUNTS FROM `lastWanted`, which a read does not move.** A path's
   clock is renewed by a stored push and by the `missing` query that named it

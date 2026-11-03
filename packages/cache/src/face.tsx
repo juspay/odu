@@ -86,6 +86,7 @@ import {
 import {
   type CacheBucket,
   type CacheGcPlan,
+  type CacheMigration,
   type CachePath,
   type CachePin,
   type CacheStats,
@@ -98,6 +99,7 @@ import {
   PATH_PAGE_SIZE,
   ACTION_REF_PLACEHOLDER,
   DEFAULT_RETENTION_DAYS,
+  LOCAL_STORE,
   actionsPushBlock,
   pushBlock,
   useCommand,
@@ -118,6 +120,25 @@ function pushOriginOf(pushUrl: string): string {
     return new URL(pushUrl).origin;
   } catch {
     return pushUrl;
+  }
+}
+
+/**
+ * WHO ANSWERS A READ OF THIS BUCKET, as the facts line says it (PLAN 2.8).
+ *
+ * `readsFrom` is the row's own answer and the URL beside it is where it
+ * points, so the sentence names the HOST rather than repeating the whole
+ * substituter line the "Use it" block already carries. Exported and pure, so
+ * both halves are pinned by a unit test rather than by reading JSX.
+ */
+export function readsFromText(bucket: Pick<CacheBucket, "readsFrom" | "url">): string {
+  if (bucket.readsFrom !== "store") return "reads served by odu";
+  try {
+    return `reads served from ${new URL(bucket.url).host}`;
+  } catch {
+    // A URL this row could not parse is still the fact it advertised; printing
+    // it whole beats printing nothing where a person is checking a domain.
+    return `reads served from ${bucket.url}`;
   }
 }
 
@@ -808,6 +829,11 @@ function BucketPage(
                 </Show>
                 {/* WHERE THE BYTES ARE: the store it was created on. */}
                 <span>objects on {row().store}</span>
+                {/* AND WHO ANSWERS A READ OF THEM (2.8): the store's own
+                    domain when it publishes one, else this daemon — which is
+                    the difference between a cache that serves while odu is
+                    down and one that does not. */}
+                <span>{readsFromText(row())}</span>
                 {/* The creation fact the upstream switch set, said back: a
                     bucket that takes every path is a choice worth seeing. */}
                 <span>
@@ -1041,6 +1067,14 @@ function BucketPage(
                     rootToken={props.rootToken}
                     name={name}
                     retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
+                  />
+                  <BucketMigrate
+                    client={props.client}
+                    call={props.call}
+                    rootToken={props.rootToken}
+                    name={name}
+                    store={bucket()?.store ?? LOCAL_STORE}
+                    migration={bucket()?.migration ?? null}
                   />
                   <BucketPins
                     client={props.client}
@@ -1316,6 +1350,134 @@ function BucketRetention(
           >
             {action.busy() ? "working…" : "Set retention"}
           </Button>
+          <Answer control={action} />
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+/**
+ * A MOVE IN PROGRESS, as one sentence (PLAN 2.8).
+ *
+ * The three states are three different things to be waiting for — the copy,
+ * the moment the bucket changes hands, and the old copies going away — so the
+ * sentence names which, rather than printing a bar that means "something is
+ * happening". Exported and pure: the wording is pinned by a unit test, and
+ * the panel below is then only the subscription.
+ */
+export function migrationText(migration: CacheMigration): string {
+  const progress =
+    `${migration.copied} of ${migration.total} object${migration.total === 1 ? "" : "s"}` +
+    `, ${bytes(migration.bytes)}`;
+  switch (migration.state) {
+    case "copying":
+      return `Copying to ${migration.to}: ${progress}.`;
+    case "flipping":
+      return `Flipping to ${migration.to}: ${progress}.`;
+    default:
+      return `Deleting the old copies on the way to ${migration.to}: ${progress}.`;
+  }
+}
+
+/**
+ * WHERE A BUCKET'S OBJECTS LIVE, changed — `bucket.migrate`.
+ *
+ * The one creation fact that used to be final. The cards are the stores this
+ * daemon declared MINUS the one it is on, because moving a bucket where it
+ * already is is a refusal rather than a choice; a daemon that declares only
+ * its own disk has nowhere to move anything, and says so instead of offering
+ * an empty fieldset.
+ *
+ * PROGRESS IS THE ROW'S, not this panel's. A move is minutes of copying and
+ * the bucket's row already streams its `migration` deltas to this page, so
+ * the panel reads the prop and holds no copy of it — nothing here polls, and
+ * nothing here can disagree with the board. While one is running the Start
+ * control is not drawn at all: a second move of the same bucket is refused by
+ * the row, and a button whose only answer is "already moving" is noise.
+ */
+function BucketMigrate(
+  props: AdminProps & {
+    name: string;
+    store: string;
+    migration: CacheMigration | null;
+  },
+): JSX.Element {
+  const stores = props.client.cells.stores.use();
+  const elsewhere = createMemo(() =>
+    (stores.value() ?? []).filter((one) => one.name !== props.store),
+  );
+  /** `null` until somebody picks: the first offered store is the card that
+   *  starts chosen, and the pick survives a republish of the list. */
+  const [picked, setPicked] = createSignal<string | null>(null);
+  const target = createMemo(() => {
+    const chosen = picked();
+    const offered = elsewhere();
+    return chosen !== null && offered.some((one) => one.name === chosen)
+      ? chosen
+      : (offered[0]?.name ?? "");
+  });
+  const action = createControl(props.call);
+  const start = (): void => {
+    const to = target();
+    if (to === "") return;
+    action.run(
+      props.client.procedures.bucket.migrate({
+        rootToken: props.rootToken(),
+        bucket: props.name,
+        store: to,
+      }),
+      (row) =>
+        `Moving ${row.name} to ${row.migration?.to ?? to}. It keeps serving from ${row.store} until every object is copied.`,
+    );
+  };
+  return (
+    <Panel
+      title="Move to another store"
+      note="Copies every object to another declared store. The bucket keeps serving from the old store until the copy is done."
+      label="migrate"
+    >
+      <div class="panel-body">
+        <div class="stack">
+          <Show
+            when={props.migration}
+            fallback={
+              <Show
+                when={elsewhere().length > 0}
+                fallback={
+                  <p class="hint">
+                    This daemon declares only one store, so there is nowhere to move
+                    this bucket.
+                  </p>
+                }
+              >
+                <fieldset class="toggles">
+                  <legend>Where to move it</legend>
+                  <div class="form-pair">
+                    <For each={elsewhere()}>
+                      {(one) => (
+                        <Choice
+                          name="migrate-store"
+                          value={one.name}
+                          checked={target() === one.name}
+                          label={one.name}
+                          note={
+                            one.kind === "local" ? "This server's disk." : "An S3 store."
+                          }
+                          onPick={(name) => setPicked(name)}
+                        />
+                      )}
+                    </For>
+                  </div>
+                </fieldset>
+                <Button class="btn-primary" disabled={action.busy()} onClick={start}>
+                  {action.busy() ? "starting…" : "Start move"}
+                </Button>
+              </Show>
+            }
+          >
+            {(moving) => <p class="hint migration-progress">{migrationText(moving())}</p>}
+          </Show>
           <Answer control={action} />
         </div>
       </div>

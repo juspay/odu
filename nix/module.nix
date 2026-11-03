@@ -451,10 +451,12 @@ in
               odu keeps signing its OWN requests against `endpoint`: this name
               is for readers, never for writes.
 
-              Private buckets are unaffected: their reads stay with odu, which
-              is the only thing that can ask who a caller is. Bind the domain to
-              the bucket yourself — for R2, `cf r2 buckets domains custom create
-              <bucket> --domain <host> --zone-id <zone>`.
+              A private bucket's reads stay with odu, which is the only thing
+              that can ask who a caller is — but the domain you bind serves
+              every prefix in the S3 bucket, so do not keep private buckets on
+              a store that has one. Bind the domain to the bucket yourself —
+              for R2, `cf r2 buckets domains custom create <bucket> --domain
+              <host> --zone-id <zone>`.
             '';
           };
           # A STRING, NOT `types.path`: a literal path (`./r2.env`) would be

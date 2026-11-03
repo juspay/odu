@@ -1,8 +1,8 @@
 # Odu as a product: Nix cache + CI you run yourself
 
 Status: living, 2026-11-02.
-- Phase 1, phases 2.1–2.7 and 2.10 are on master.
-- **Next is 2.8**, reads leaving odu.
+- Phase 1, phases 2.1–2.7 and 2.10 are on master; 2.8 is #148.
+- **Next is 2.9**, uploads going straight to the store.
 - One step is one PR, and the order is a dependency order. There is no schedule.
 
 ## Contents
@@ -70,8 +70,9 @@ object storage plus a lane pool. Hosting comes later, at a monthly price.
   may link to a repo, for provenance.
 - **Retention defaults to 90 days** from the last push that named a path. Pins
   are exempt, and each bucket can override the default.
-- **`kolu` moves to R2** once reads leave odu (2.8), so `cache.kolu.dev` stays
-  up when the pod is down.
+- **`kolu` moves to R2** so `cache.kolu.dev` stays up when the pod is down.
+  Reads left odu in 2.8 and `bucket_migrate` is the move; running it against
+  the pod is still PENDING.
 - **The hosted offering is in scope** (Phase 6).
 
 ## Architecture
@@ -149,7 +150,7 @@ the read path wherever it can be, behind a board people want to use.
 | 2.5 | Staging never refuses a valid NAR | ✅ #147 |
 | 2.6 | The board, redesigned | ✅ #146 |
 | 2.7 | GC and pins on every store | ✅ #145 |
-| 2.8 | Reads leave odu | |
+| 2.8 | Reads leave odu | ✅ #148 |
 | 2.9 | Uploads go straight to the store | |
 | 2.10 | The admin CLI is retired | ✅ #144 |
 
@@ -195,16 +196,29 @@ What each step delivers:
     for any path both hold, whatever the user's substituter order.
   - **Open:** the GC proof (a dry run at a short retention keeps every pin)
     needs a dry-run-only retention override on `gc_plan`.
-- **2.8 Reads leave odu.** Today every byte crosses the odu machine's uplink,
-  and on the pod that caps reads at ~2.5 MiB/s.[^bench]
-  - **Public bucket:** plain static files (narinfos, NARs, `nix-cache-info`)
-    on the store's public URL or CDN, so the cache stays up when odu is down.
-  - **Private bucket on S3:** odu authorises, then redirects the NAR to a
-    presigned URL that expires in 10 minutes.
-  - **Local disk:** odu serves the same layout.
-  - `odu cache migrate` moves buckets between stores, and `kolu` moves to R2.
-    It is an API verb and a board control, not a CLI command (2.10).
-  - **Proof:** the pod at zero replicas still substitutes kolu.[^reads]
+- **2.8 ✅ Reads leave odu.** Every byte used to cross the odu machine's
+  uplink, which caps reads on the pod at ~2.5 MiB/s.[^bench] The store now
+  holds the whole protocol — `<bucket>/nar/<file>`, `<bucket>/<hash>.narinfo`
+  and `<bucket>/nix-cache-info`, each with its own `Cache-Control` — written
+  at push and backfilled at boot for caches that predate it.
+  - **Option A:** one R2 bucket (a store) serves many odu buckets under one
+    domain, keys in path form (`<publicUrl>/<bucket>/…`). A store declares
+    that domain as `publicUrl`; a PUBLIC bucket on it is advertised there and
+    reads never reach odu, which may be down.
+  - **The operator binds the custom domain** (`cf r2 buckets domains custom
+    create <r2-bucket> --domain <host> --zone-id <zone>`). The cloudflare row
+    is untouched — it has no R2 API. Odu checks the binding at boot and logs
+    `cache.store.public.unreachable` rather than refusing to start.
+  - **A NAR on any S3 store, public or private:** 307 to a presigned URL that
+    expires in ten minutes. A private bucket works because odu authorises
+    first and the client re-sends its own `Range` to the store. Local disk is
+    unchanged: odu streams it.
+  - `bucket.migrate` moves a bucket between stores — an API verb and a board
+    control, not a CLI command (2.10) — serving from the old store until the
+    copy is done. **`kolu` moving to R2 is pending**: the verb is proved in
+    tests, not yet run against the pod.
+  - **Proof:** the e2e substitutes through a 307 from a private bucket with a
+    real Nix client, and the NixOS VM test copies through one.[^reads]
 - **2.9 Uploads go straight to the store.** The client uploads to the store
   through presigned parts. Odu then reads the object back and verifies it
   before signing. That is Cachix's upload, but without Cachix's trust in the
@@ -453,15 +467,21 @@ Commits and PR bodies use the earlier names.
 
 [^reads]: How 2.8 works:
     - At push, odu writes `<hash>.narinfo` and `nar/<file>` as objects with
-      `Cache-Control`. NARs are immutable. Narinfos have a long TTL and are
-      purged on a re-push, delete or key rotation. A key rotation rewrites
-      every narinfo.
-    - A bucket's substituter URL is its store's public URL, and the cloudflare
-      row binds the domain to the R2 bucket instead of the tunnel.
+      `Cache-Control` (NARs immutable for a year, narinfos and
+      `nix-cache-info` a day). A boot backfill writes the ones a cache from
+      before this never had, and GC deletes a row's narinfo object with the
+      row and purges it. There is no key-rotation verb to rewrite them for.
+    - A PUBLIC bucket's substituter URL is its store's `publicUrl` when the
+      store declares one; the OPERATOR binds that domain to the R2 bucket
+      (`cf r2 buckets domains custom create`). The cloudflare row is
+      untouched — it has no R2 API, and the tunnel is still what a bucket's
+      own domain rides.
     - Private-bucket redirects rely on Nix following them
       (`CURLOPT_FOLLOWLOCATION`) and on curl dropping `Authorization` when the
-      host changes. The e2e must prove both.
-    - What odu gives up: `cache.nar.served` logs a redirect, not bytes.
+      host changes. The e2e proves both, with odu on `127.0.0.1` and the
+      gateway on `localhost` so the hosts differ as strings.
+    - What odu gives up: `cache.nar.served` logs `source: "redirect"` and
+      `bytes: 0`, not bytes.
     - Precedent: Attic answers `307` to a 10-minute presigned URL for
       single-chunk NARs only, and stitches multi-chunk ones through the server
       (`server/src/api/binary_cache.rs`). Cachix serves NARs from a CDN. Odu

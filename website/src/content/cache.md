@@ -176,7 +176,7 @@ Until the hook ships, a CI job pushes only the closures it names. Plain `nix cop
 
 One step, in any repository. The action odu ships pushes with **its own `odu`** — built from the revision you pin the action to, so the pin is the pusher. A bucket page fills the revision in with the commit *its* server was built from, so the pusher matches the cache; a build that cannot say which commit it is from leaves the placeholder.
 
-Then it proves the push. For every path the bucket serves, `check.sh` asks `<substituter>/<hash>.narinfo` — the address a Nix client asks, which is the bucket's own domain when it has one — reads the narinfo's `URL:` and `FileSize:`, and requires the NAR to answer `200` with a matching `Content-Length`. Plain HTTP throughout, so no local narinfo cache can answer for the bucket, and an object truncated by a proxy's body cap is caught rather than counted as landed.
+Then it proves the push. For every path the bucket serves, `check.sh` asks `<substituter>/<hash>.narinfo` — the address a Nix client asks, which is the store's public URL or the bucket's own domain when it has one — reads the narinfo's `URL:` and `FileSize:`, and requires the NAR to answer `200` with a matching `Content-Length`, following a redirect to the store as a client would. Plain HTTP throughout, so no local narinfo cache can answer for the bucket, and an object truncated by a proxy's body cap is caught rather than counted as landed.
 
 ```yaml
 # .github/workflows — with Nix installed in an earlier step
@@ -275,7 +275,7 @@ On the board, a bucket page carries **Retention**, **Pins** (pin a closure, read
 
 ## Keep a bucket on S3
 
-A bucket keeps its objects in a **store**: `local`, the server's own disk (always there), or an S3-compatible bucket you declare — Cloudflare R2, AWS S3, Garage, versitygw, MinIO. The store is chosen when the bucket is created and kept; every store serves through the same routes, with `Content-Length` and `Range`, so a client cannot tell which one it is reading.
+A bucket keeps its objects in a **store**: `local`, the server's own disk (always there), or an S3-compatible bucket you declare — Cloudflare R2, AWS S3, Garage, versitygw, MinIO. The store is chosen when the bucket is created, and a bucket moves between stores with [`bucket_migrate`](#move-a-bucket-to-another-store). Every store holds the whole protocol — the NAR, the narinfo beside it, and the bucket's `nix-cache-info` — so a store can answer a reader on its own; what differs is who hands a NAR over, odu or the store ([Reads leave odu](#reads-leave-odu)).
 
 | | `local` | an S3 store |
 | --- | --- | --- |
@@ -284,7 +284,9 @@ A bucket keeps its objects in a **store**: `local`, the server's own disk (alway
 | A put that finds the key | refused, first kept wins (`link`) | refused, first kept wins (`If-None-Match: *`) |
 | `FileHash`/`FileSize` kept | beside the object (`objects/.facts/`) | as object metadata (`x-amz-meta-odu-*`) |
 | A large upload | streamed to a temp file | multipart, 8 MiB parts, four at a time, bounded memory |
-| A read | the file, from any offset | ranged GETs, 1 MiB at a time with the next one prefetched; no HEAD first |
+| A read odu does itself (verifying, copying, collecting) | the file, from any offset | ranged GETs, 1 MiB at a time with the next one prefetched; no HEAD first |
+| A NAR a client asks for | odu streams it | **307** to a presigned URL that expires in ten minutes |
+| A name the world may read it at | never | `publicUrl`, an R2 custom domain bound to the bucket |
 
 A put is put-if-absent within one daemon on every store. Between two daemons writing one S3 bucket's prefix it holds where the service honours `If-None-Match` on the write that finishes the object: AWS does on both [`PutObject` and `CompleteMultipartUpload`](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html); R2 documents it [on `PutObject` only](https://developers.cloudflare.com/r2/api/s3/api/), so there it covers objects of one 8 MiB part.
 
@@ -294,7 +296,7 @@ Either way, you end with four facts: the **Account ID**, a private **bucket**, a
 
 **From the Cloudflare dashboard**
 
-1. **R2 object storage → Create bucket**, say `odu-cache`. Leave public access off: every read goes through odu, which checks the bucket's tokens.
+1. **R2 object storage → Create bucket**, say `odu-cache`. Leave public access off unless you mean to serve this store's public buckets from a domain of its own ([A public URL for a store](#a-public-url-for-a-store)); with it off, every read goes through odu, which checks the bucket's tokens.
 2. **R2 object storage → Account Details → API Tokens → Manage → Create Account API token**. Permissions: **Object Read & Write**; under the bucket scope, pick only `odu-cache`.
 3. Copy the **Access Key ID** and the **Secret Access Key**; the secret is shown once. The page also shows the endpoint, `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`.
 
@@ -353,28 +355,106 @@ services.odu.cache.stores.r2 = {
 odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30,"store":"r2"}' --json
 ```
 
-On the board, the **Create bucket** form offers the declared stores, and a bucket's page says where its objects are (`objects on r2`). The credentials file is a systemd credential: never in the Nix store, never in the database, never logged; the key needs object read, write, delete and list. Without the module, point `$ODU_OBJECT_STORES` at a JSON file of the same shape — `{"r2": {"kind": "s3", "endpoint": …, "bucket": …, "region": …, "credentialsFile": …}}` — before `odu web` starts.
+On the board, the **Create bucket** form offers the declared stores, and a bucket's page says where its objects are (`objects on r2`). The credentials file is a systemd credential: never in the Nix store, never in the database, never logged; the key needs object read, write, delete and list. Without the module, point `$ODU_OBJECT_STORES` at a JSON file of the same shape — `{"r2": {"kind": "s3", "endpoint": …, "bucket": …, "region": …, "credentialsFile": …, "publicUrl": …}}` — before `odu web` starts.
 
 - **One S3 bucket, many odu buckets.** Each odu bucket is a key prefix of its own name; odu lists, sweeps and deletes nothing outside those prefixes, so the S3 bucket may hold other things.
 - **A store a bucket still names cannot be removed.** The cache row refuses to mount, naming the bucket and the store, rather than serve 404 for every path it has.
-- **Moving a bucket between stores** is not in this release; neither are reads straight from the store (PR 3d) or uploads straight to it (PR 3g). Uploads and reads go through odu.
+- **Moving a bucket between stores** is `bucket_migrate`, below. Uploads still go through odu; sending them straight to the store is a later release.
 - **Abandoned multipart uploads** are aborted by the push that started them. One whose daemon was killed mid-upload (eviction, OOM, `kill -9`) is aborted by the next boot, which lists the bucket's incomplete uploads and aborts those begun before it; a lifecycle rule (R2 and AWS: "abort incomplete multipart uploads") is a second net, not the first.
+
+## Reads leave odu
+
+Every byte used to cross the odu machine's uplink. It no longer has to: the store holds the whole protocol, so a reader can be sent to the store — for a public bucket, permanently, and for everything else for the ten minutes a signature lasts.
+
+What a push writes as objects, beside the row it records in SQLite:
+
+| Object | Written by | `Cache-Control` |
+| --- | --- | --- |
+| `<bucket>/nar/<narHash>.<ext>` | the push, as the bytes arrived | `public, max-age=31536000, immutable` |
+| `<bucket>/<hash>.narinfo` | the push, signed with the bucket's key | `public, max-age=86400` |
+| `<bucket>/nix-cache-info` | `bucket_create` | `public, max-age=86400` |
+
+A cache that predates this has rows but no narinfo objects. At boot, after the row is already serving, odu walks every bucket and writes the missing ones, two at a time, logging `cache.narinfo.backfill {bucket, written, remaining}`. It is idempotent — an object already there with the rendered text's length is skipped on one HEAD — so a daemon restarted half way through costs a walk, not a rewrite. Garbage collection deletes a row's narinfo object with the row: a narinfo nobody can get a NAR for is worse than no narinfo.
+
+### A public URL for a store
+
+A store may say where the WORLD reads it:
+
+```nix
+services.odu.cache.stores.r2 = {
+  endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com";
+  bucket = "odu-cache";
+  region = "auto";
+  publicUrl = "https://cache.example.com";   # the custom domain bound to odu-cache
+  credentialsFile = "/run/secrets/odu-r2";
+};
+```
+
+An origin and nothing more — no path, no query, no fragment — because odu appends `/<bucket>/<key>` to it; anything else refuses the rebuild. One S3 bucket still serves many odu buckets, each under its own name: `https://cache.example.com/main/nix-cache-info`.
+
+**A public bucket on such a store is advertised there.** Its substituter URL — on its page, in `bucket_describe`, in `odu cache use` — becomes `<publicUrl>/<bucket>`, and the bucket page says **reads served from cache.example.com** rather than **reads served by odu**. Nothing about reading it touches the daemon, so the cache keeps serving while odu is down, redeployed, or at zero replicas. Odu still signs its own requests against `endpoint`: the public name is for readers, never for writes, and `odu cache push` keeps addressing `/cache/<bucket>` on the server.
+
+**Private buckets keep their reads with odu.** A public URL cannot ask who is asking, so odu authorises them itself and `readsFrom` stays `odu`. But the domain you bound serves the whole S3 bucket, every prefix in it: keep private buckets on a store you have NOT given a public name, or their objects are fetchable by anyone who can guess `<publicUrl>/<bucket>/<hash>.narinfo`. A store-fronted bucket may still carry a [domain of its own](#a-domain-for-a-bucket) — odu honours it for writes and for the `missing` query — but the address advertised to readers is the store's, because that is the one that answers when odu does not.
+
+**You bind the domain; odu does not.** For R2, one command:
+
+```sh
+cf r2 buckets domains custom create <r2-bucket> --domain <host> --zone-id <zone>
+```
+
+The cloudflare row has no R2 API: it binds tunnels, creates DNS records and purges the edge, and it is untouched by this. Odu checks your work instead — at boot, for each store with a `publicUrl` and at least one public bucket on it, it fetches `<publicUrl>/<bucket>/nix-cache-info`; anything but a 200 with the expected body is one `cache.store.public.unreachable {store, url, status}` line and never a refused boot, because a domain that is still propagating must not take the cache down.
+
+### A NAR is a redirect
+
+`GET /cache/<bucket>/nar/<file>` on an **S3 store** answers **307** with a presigned URL that expires in ten minutes, and no body. A `307` rather than a `302` because the method must survive the hop: a HEAD that came back as a GET would hand a client asking "is it there?" a whole NAR.
+
+- **It works for a private bucket** because odu authorises first and only then hands out a URL that carries its own authority. Make the store's host differ from odu's and curl drops the `Authorization` header on the redirect, which is exactly what you want: the token never reaches the store.
+- **`Range` is the client's and the store's.** Odu proxies none of it; a client re-sends its range to the presigned URL and the store answers the 206, so a resumed download never touches the daemon.
+- **The redirect itself is `private, no-store`** on every bucket, public or not: it holds a signature that expires, and an edge that cached it would hand out a dead URL long after.
+- **A disk store still streams from odu**, with `Content-Length` and `Range`, exactly as before.
+- **What odu gives up** is the byte count: `cache.nar.served` gains `source: "redirect"` with `bytes: 0`, because there is no body to observe.
+
+Narinfos and `nix-cache-info` asked of odu are still rendered from SQLite and answered by odu. An anonymous read of a private bucket is still 404.
+
+### Move a bucket to another store
+
+```sh
+odu surface cache bucket_migrate --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","store":"r2"}' --json
+```
+
+On the board it is a bucket page's **Move to another store** panel: pick a store under **Where to move it**, then **Start move**. A daemon that declares only one store says so instead.
+
+**The bucket keeps serving from the OLD store the whole time.** Every object — the NARs, the narinfo beside each one, `nix-cache-info` — is copied first, two at a time; only when the copy is complete does the bucket change hands, under the same lock a push takes, with a last delta pass inside it so a path that landed mid-move is not left behind. Then the old copies are deleted and their URLs purged at the edge. A move that flipped first would be a substituter that 404s everything until the copy caught up.
+
+The verb answers the bucket's **row** as soon as the move is recorded — the copying runs in the background — and progress is the `migration` field on that row, which the board follows live and an agent reads from `bucket_list`:
+
+| Field | What it says |
+| --- | --- |
+| `to` | the store it is moving to; the `store` beside it is still where reads come from |
+| `state` | `copying` fills the new store, `flipping` is the moment the bucket changes hands, `deleting` lets the old copies go |
+| `copied` / `total` | objects dealt with, out of what the move found |
+| `bytes` | bytes copied so far |
+
+It is `null` when nothing is moving. The panel says it in a sentence — "Copying to r2: 12 of 40 objects, 3.0 MiB."
+
+It is resumable: an object already in the new store with the same length is skipped, and the move's own row survives a restart, so a daemon that died half way through carries on rather than starting again. It refuses a store this daemon does not declare, the store the bucket is already on, a second move of the same bucket, and anyone who is not an administrator.
 
 ## Where the data lives
 
 The cache keeps **the compressed NAR the pusher sent**, once, and no Nix store of its own. That is the Cachix/Attic model: an object is a content-named file (`<bucket>/nar/<narHash>.<ext>`, where the extension is the stored compression), references are names in the narinfo, and nothing is imported. On the pod this replaced a 166 GB `/nix/store` of upstream closures nobody pulled from us.
 
 - A push assembles (or receives) `nar/<narHash>.<ext>`, decompresses and hashes it against the narinfo's `NarHash`, then **keeps the file** and records its sha256 and length as `FileHash:`/`FileSize:`. One write, no second copy; the same NarHash+compression keeps the existing file, and twins share one object until GC deletes it with the last row.
-- Serving is the object, from the bucket's store, with `Content-Length` and `Range`: Cloudflare's 512 MB per-file CACHE limit means larger objects are served uncached through the tunnel, not refused — and its 100 MB request cap is why pushes are chunked. A 634 MB NAR pulls through a cold edge. The server never re-dumps or re-compresses a path per reader.
+- Serving is the object, from the bucket's store, with `Content-Length` and `Range` — or, on an S3 store, a 307 to the store itself ([Reads leave odu](#reads-leave-odu)). When odu does stream it: Cloudflare's 512 MB per-file CACHE limit means larger objects are served uncached through the tunnel, not refused — and its 100 MB request cap is why pushes are chunked. A 634 MB NAR pulls through a cold edge. The server never re-dumps or re-compresses a path per reader.
 - A narinfo whose references are absent is recorded anyway: references are names, not paths a store must hold first. A `.drv` path, or a reference to one, is still refused with 400.
 - `CA:` is **proved from the object we hold**: odu recomputes Nix's `fixed:r:sha256` store path from (name, references and bytes) and serves the line only when the formula reproduces the path. A non-self row uses its NarHash; a self-referencing row uses Nix's hash-modulo-self-references, computed while the NAR streams through verification. Old rows get a one-time background pass after the cache is serving (two workers, progress logged), and the verdict is persisted so a row is read once. Nothing is taken from the pusher.
-- GC deletes the object with its row; an object with no row (a crash between put and record) is swept at boot and logged.
+- A push also writes the narinfo beside the NAR (`<bucket>/<hash>.narinfo`) and `nix-cache-info` is written at bucket create, so the store holds a readable cache on its own. GC deletes a row's object and its narinfo object with the row; an object with no row (a crash between put and record) is swept at boot and logged, and the sweep knows all three kinds of key, so it cannot mistake a narinfo for an orphan.
 - **The one-time migration.** A deployment upgrading from the store-backed cache has rows whose object is not on disk. After the cache is mounted and serving, two at a time, odu dumps each from the old store (`$ODU_CACHE_STORE`, or the host's own `/nix/store` when unset) into the object store. It pauses below 10 GiB free and re-checks every minute, resuming without a restart. Until a row's object lands, its NAR is served through the old store (logged as `source: transition`); a row the old store does not have answers 404 and is named once. A row whose object is missing or unreadable is retried by the next boot's background work, not by a request. The log line `cache.migration.complete` says every row has its object and the old store can be deleted. On the module shape the old store is the host's `/nix/store`: delete the abandoned roots under `<state>/cache/gcroots`, then let `nix-collect-garbage` reclaim the paths; do not delete `/nix/store`.
 - **Sizing.** Disk is the compressed objects plus staging for the largest in-flight NAR; memory is constant per NAR, not proportional to its size. A `--no-upstream` bucket also stores every upstream-signed closure it is pushed, so budget that disk deliberately.
 
 ```text
 <state>/cache/cache.sqlite            metadata, bucket signing keys, token hashes, pins
-<state>/cache/objects/<bucket>/nar/   the objects: <narHash>.<ext>, immutable
+<state>/cache/objects/<bucket>/       nar/<narHash>.<ext> (immutable), <hash>.narinfo,
+                                      nix-cache-info
 <state>/cache/staging/                uploads between their NAR and their narinfo
 ```
 
@@ -431,6 +511,8 @@ A name is **wiring** while that happens, **live** once `https://<name>/nix-cache
 
 Once live, the bucket's **Use it** block and `odu cache use kolu` print the new URL; the old `/cache/kolu` URL keeps working. Pushes are unchanged: `odu cache push kolu` finds the bucket by name.
 
+**A store's public URL wins over a bucket's domain**, for a public bucket on a store that declares one: the advertised read URL is `<publicUrl>/<bucket>` ([A public URL for a store](#a-public-url-for-a-store)), because that is the address that answers when odu does not. The bucket's own name keeps working for writes and for the `missing` query, which are odu's either way.
+
 **The name serves only the bucket.** `/` is the bucket's public page, the Nix protocol's paths (`/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>`, the push API) are served, and everything else on that hostname — the board, `/mcp`, `/auth`, `/rpc/ws` — is the cache row's 404. The tunnel forwards every path, so the daemon's `Host` routing is what keeps the control plane off a substituter's name; the board stays on `cache.domain`.
 
 **The server's own origin rides the same tunnel** when its host is in a zone the token can edit — the board, `/mcp` and the websocket. That is what lets a Tailscale Funnel retire; the GitHub App's callback URL then moves to that name.
@@ -447,9 +529,9 @@ The connector needs outbound HTTPS from the server and nothing inbound: no port 
 
 ## The Cache view
 
-`odu web`'s page has **Runs** and **Cache** in the header. `#/cache` lists the buckets — name, public or private, how many paths, how much space, when it last took a push, how many reads — and `#/cache/<bucket>` is one bucket: its substituter URL, its public key, the `nix.conf` / netrc block above ready to copy, and its paths newest first with a filter box.
+`odu web`'s page has **Runs** and **Cache** in the header. `#/cache` lists the buckets — name, public or private, how many paths, how much space, when it last took a push, how many reads — and `#/cache/<bucket>` is one bucket: its substituter URL, its public key, the `nix.conf` / netrc block above ready to copy, and its paths newest first with a filter box. The facts line says who answers a read of it — **reads served from cache.example.com**, or **reads served by odu**.
 
-**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page **Tokens** (mint write or read, shown once; list; revoke), **Retention**, **Pins** (pin a closure; what each pin holds; delete one), **Dry run**, **Run GC** and **Stats**. The dry run is asked for rather than taken on arrival, and is asked again after every collection — "what am I about to lose" is a question a report answers too late, and a question nobody asked must not answer in red. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
+**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page **Tokens** (mint write or read, shown once; list; revoke), **Retention**, **Move to another store**, **Pins** (pin a closure; what each pin holds; delete one), **Dry run**, **Run GC** and **Stats**. The dry run is asked for rather than taken on arrival, and is asked again after every collection — "what am I about to lose" is a question a report answers too late, and a question nobody asked must not answer in red. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
 
 The rows arrive over the wire the page already holds, so a path pushed from a build box appears without a reload; reads are folded into a bucket's counters at most once a second rather than once per NAR.
 
@@ -459,11 +541,14 @@ Watch these lines on a foreground `odu web` (it prints a row's operational `info
 
 - `cache.migration.start` / `.progress` / `.pause` / `.resume` / `.complete` / `.incomplete` — objects, NAR bytes, free space. On `incomplete`, the rows it names have no object and no old-store copy: their NAR answers 404 until re-pushed.
 - `cache.self_ca.start` / `.progress` / `.complete` — the one-time self-reference proof pass, with rows, bytes, proved/refused/unreadable.
-- `cache.nar.served` — path, bytes actually written, ms, `source` (`object` from the bucket's store, `transition` from the old Nix store), `cancelled`.
+- `cache.nar.served` — path, bytes actually written, ms, `source` (`object` from the bucket's store, `transition` from the old Nix store, `redirect` for a 307 to an S3 store, which always says `bytes: 0`), `cancelled`.
 - `cache.nar.unavailable` — no object and the old store lacks it; served as 404 once per path.
 - `cache.boot.orphans`, `cache.boot.ca` — sweep and metadata-CA counts at boot.
 - `cache.import.recorded`, `cache.request.refused`, `cache.object.put_failed`.
 - `cache.gc` — one line per collection, scheduled or asked for: `evicted`, `kept` (rows whose bytes a twin still names), `orphans`, `bytes`. `cache.gc.purge` says how many URLs were announced and whether anything was `listening`; `cache.gc.failed` is a scheduled pass that hit something, with the next one still scheduled.
+- `cache.narinfo.backfill` — the boot pass that writes missing narinfo objects: `bucket`, `written`, `remaining`, one line per five hundred rows and one at the end. `cache.narinfo.object_failed` names a row whose narinfo object could not be written.
+- `cache.store.public.unreachable` — a store's `publicUrl` did not answer `nix-cache-info` at boot (`store`, `url`, `status`). Odu goes on serving; readers pointed at that domain do not.
+- `cache.bucket.migrate.purge` — a finished store move, and how many old URLs it asked the edge to drop.
 
 ## Protocol
 
@@ -473,7 +558,8 @@ One bucket is one substituter. Point any Nix-compatible tool at these routes:
 GET  /cache/<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 41
 HEAD /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/<hash>.narinfo
-GET  /cache/<bucket>/nar/<narHash>.<ext>       the object, from its store; Content-Length + Range
+GET  /cache/<bucket>/nar/<narHash>.<ext>       the object: streamed from a disk store with
+                                               Content-Length + Range, or 307 to the S3 store
 PUT  /cache/<bucket>/nar/<narHash>.<ext>         Bearer or Basic; any ext Nix sends
 PUT  /cache/<bucket>/<hash>.narinfo             server re-signs with the bucket key
 POST /_odu/v1/buckets/<bucket>/missing          batch "which of these are you missing"
@@ -483,6 +569,8 @@ GET  /cache/<bucket>/                           a public bucket's facts: the use
 ```
 
 **Priority 41 is one worse than `cache.nixos.org`'s 40, on purpose.** A bucket created to take everything also holds upstream-signed paths, and at an equal priority the client's own substituter order decides who serves them — this machine's uplink, or the CDN that would have served them from nearer and for free. Losing the tie takes that decision away from whoever wrote the `nix.conf`.
+
+**A NAR on an S3 store is a 307**, to a presigned URL good for ten minutes, and the client re-sends its own `Range` there; a disk store streams it from odu. See [A NAR is a redirect](#a-nar-is-a-redirect). The same three protocol files also sit in the store itself (`<bucket>/nix-cache-info`, `<bucket>/<hash>.narinfo`, `<bucket>/nar/<file>`), which is what lets a public bucket be read from the store's own domain with odu switched off.
 
 On a bucket's own domain the same four Nix paths sit at `/`: `/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>` and their uploads. `Host` names the bucket.
 
@@ -511,6 +599,7 @@ The CLI keeps the three cache commands a shell is the natural place for. Everyth
 | List buckets | — | `bucket_list` | Cache |
 | Give a bucket a DNS name of its own, or take it away (omit `domain`) | — | `bucket_domain` | bucket → **Domain** |
 | Change how long a bucket keeps what nobody wants | — | `bucket_retention` | bucket → **Retention** |
+| Move a bucket's objects to another declared store; answers the row, and `migration` on it is the progress. Serves from the old store until the copy is done | — | `bucket_migrate` | bucket → **Move to another store** → **Start move** |
 | Mint a token, answered once (`scope`: `read`, `write` or `admin`) | — | `token_mint` | bucket → **Mint token** (write or read) |
 | List tokens with scope, expiry and last use | — | `token_list` | bucket → Tokens |
 | Revoke one token | — | `token_revoke` | bucket → Tokens → **revoke** |

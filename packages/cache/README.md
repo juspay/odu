@@ -66,6 +66,12 @@ on the wire and `cache_bucket_create` to an agent.
   range, and the facts written at put are read back. Nothing is imported, and
   references are names in the narinfo. Dedup is per NarHash per bucket, and a
   twin row shares the object until GC deletes it with the last row.
+  THE WHOLE PROTOCOL IS IN THE STORE (PLAN 2.8): the signed narinfo goes
+  beside the NAR as `<bucket>/<hash>.narinfo`, and `<bucket>/nix-cache-info`
+  is written when the bucket is created, so a store can answer a reader
+  without odu. SQLite stays the truth — a narinfo served BY odu is still
+  rendered and signed per request — and the objects are a projection of it,
+  which is why the backfill may rewrite one at any time.
 - **GC is the niks3 model.** An object is evicted only when retention has
   expired, nothing retained in the bucket references it, and no pin holds it.
   This is the direct answer to the failure chutney shipped: 669 GB of S3 and
@@ -122,6 +128,67 @@ on the wire and `cache_bucket_create` to an agent.
   a typo in a workflow's `pin:` must not drop `release-1.0`. Write tokens of
   one bucket are peers in this, as they already are in pushing to it.
   DELETING a pin stays the admin surface's either way.
+
+## Reads leave odu
+
+Every byte used to cross the daemon. Three things changed that, and each is a
+property of the STORE rather than of the protocol:
+
+- **A store may publish a `publicUrl`** (`@odu/objects`' declarations, and the
+  `stores` cell). A PUBLIC bucket on such a store has `readsFrom: "store"` and
+  a `url` of `<publicUrl>/<bucket>`: its reads never reach the daemon, which
+  may be down. Everything else is `readsFrom: "odu"` — a private bucket's
+  reads stay here because only odu can ask who is asking, and a store's domain
+  cannot, which is also why a private bucket does not BELONG on a store with a
+  public domain: that domain serves every prefix in the S3 bucket, odu's
+  authorisation or not. Both fields are on the bucket row and on
+  `bucket.describe`. The operator binds the domain to the S3 bucket
+  (`cf r2 buckets domains custom create <r2-bucket> --domain <host>
+  --zone-id <zone>`); odu only checks it at
+  mount — one `GET <publicUrl>/<bucket>/nix-cache-info` per store that has a
+  public bucket, and anything but a 200 with the expected body is
+  `cache.store.public.unreachable`, a logged refusal and never a boot failure.
+- **A NAR on an S3 store is a `307`** to `presignGet(key, PRESIGN_SECONDS)` —
+  ten minutes — with `cache-control: private, no-store` and no body. The
+  method survives the hop (a `307`, so a HEAD stays a HEAD), no `Range` is
+  proxied (the client re-sends it to the store, which answers the 206), and
+  `cache.nar.served` carries `source: "redirect"` with `bytes: 0` because
+  there is no body to observe. A disk store streams as it always did:
+  `store.presignGet === undefined` is the whole test.
+- **A cache that predates this is caught up at boot.** `backfillObjects()` is
+  forked after the mount like the legacy migration, writes every missing
+  narinfo object and `nix-cache-info`, two at a time, and is idempotent (a
+  HEAD whose length matches the rendered text is a skip), so kolu's sixteen
+  thousand rows cost a walk on the next restart rather than a rewrite.
+  Progress is `cache.narinfo.backfill {bucket, written, remaining}`, one line
+  per five hundred rows.
+
+The three kinds of key are known everywhere one key is: GC deletes a row's
+narinfo object with the row (a narinfo nobody can get a NAR for is worse than
+none), the boot sweep counts all three as owned so it cannot mistake one for
+an orphan, and a collection announces the store's own URLs for purging beside
+odu's when the store has a public one.
+
+## A bucket changes stores without going down
+
+`bucket.migrate { bucket, store }` (`src/migrateStore.ts`) copies every object
+of a bucket — NARs, narinfos, `nix-cache-info` — into another declared store,
+two in flight, and **the bucket is served from the OLD store until the copy is
+complete**. Only then does `bucket.store` flip, under the write lock a push
+takes, with a last delta pass inside it so a path that landed mid-move is not
+left behind; then the old copies are deleted and their URLs purged
+(`cache.bucket.migrate.purge`). Flipping first would be a substituter that
+404s everything until the copy caught up.
+
+It is resumable because it is idempotent: an object already in the new store
+with the same length is skipped on one HEAD, and the move's own row
+(`bucket_migration`) survives a restart. The verb answers the bucket's ROW the
+moment the move is recorded, and progress is `migration` on that row —
+`{ to, state: "copying" | "flipping" | "deleting", copied, total, bytes }`, or
+`null` when nothing is moving — written back every twenty-five objects,
+because a write and a broadcast per HEAD is the storm the collection already
+solved with deltas. It refuses an undeclared store, the store the bucket is
+already on, a second move of the same bucket, and a non-admin.
 
 ## The row a board follows
 
