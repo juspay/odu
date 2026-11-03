@@ -81,6 +81,14 @@ export const CacheBucketSchema = Schema.Struct({
   /** The store its objects live in, by declared name — `local`, or one of
    *  the `stores` cell's names. Fixed at creation (3.1). */
   store: Schema.String,
+  /**
+   * WHO ANSWERS A READ OF THIS BUCKET (PLAN 2.8). `"store"` when its store
+   * publishes a public URL and the bucket is public — the substituter URL
+   * above is the store's own, and a client never reaches odu at all.
+   * `"odu"` otherwise: the daemon renders the narinfo and either streams the
+   * NAR (disk) or redirects to the store for it (S3).
+   */
+  readsFrom: Schema.Literals(["store", "odu"]),
 });
 export type CacheBucket = typeof CacheBucketSchema.Type;
 
@@ -95,6 +103,10 @@ export const CacheStoreSchema = Schema.Struct({
   /** The store a bucket created without one lands on — true on exactly one
    *  entry, so a face never guesses it from the order. */
   default: Schema.Boolean,
+  /** WHERE THE WORLD READS THIS STORE'S OBJECTS, when the operator bound a
+   *  domain to it (`<publicUrl>/<bucket>/…`). `null` for a store nobody
+   *  fronts, and always `null` for the local disk. */
+  publicUrl: Schema.NullOr(Schema.String),
 });
 export type CacheStore = typeof CacheStoreSchema.Type;
 
@@ -119,6 +131,9 @@ export const CacheBucketIdentitySchema = Schema.Struct({
   domain: Schema.NullOr(Schema.String),
   /** The substituter URL — the domain when it has one. */
   url: Schema.String,
+  /** Whether a read of this bucket is answered by its store or by odu — see
+   *  {@link CacheBucketSchema}'s own `readsFrom`. */
+  readsFrom: Schema.Literals(["store", "odu"]),
 });
 export type CacheBucketIdentity = typeof CacheBucketIdentitySchema.Type;
 

@@ -16,6 +16,12 @@
 #   * a bucket on an S3 STORE — a versitygw on the same machine, declared in
 #     `cache.stores` — takes a push into the S3 bucket (not the local disk)
 #     and the client substitutes it back through the same proxy;
+#   * a NAR on that S3 store is a 307 to a PRESIGNED url on the gateway, not
+#     bytes odu copied: the redirect is asserted as itself, and then followed
+#     by a real `nix copy`;
+#   * and the headline of PLAN 2.8 — a public bucket on a store with a
+#     `publicUrl` is read with the daemon STOPPED, because its narinfos,
+#     its `nix-cache-info` and its NARs are objects the store serves itself;
 #   * the board does NOT answer from outside — `/` is 404 and `/mcp` is not 200,
 #     because the virtual host has no `location /`. That is the module's whole
 #     security story and it is asserted, not asserted-in-a-comment.
@@ -40,10 +46,16 @@
       cache.enableACME = false;
       # AN S3 STORE, on this machine: versitygw over a directory (below). The
       # credentials file is a systemd credential, exactly as a real R2 key.
+      #
+      # The endpoint is a NAME, not loopback: odu hands clients presigned URLs
+      # built from it, and `127.0.0.1` on the client is the client. `publicUrl`
+      # is the store's own name for readers — the nginx vhost below, standing
+      # in for an R2 custom domain bound to the R2 bucket.
       cache.stores.s3 = {
-        endpoint = "http://127.0.0.1:7070";
+        endpoint = "http://gateway.test:7070";
         bucket = "odu-objects";
         region = "us-east-1";
+        publicUrl = "http://public.test";
         credentialsFile = "/etc/odu-s3-credentials";
       };
     };
@@ -63,7 +75,7 @@
         StateDirectory = "versitygw";
         ExecStart =
           "${pkgs.versitygw}/bin/versitygw --access odu --secret odu-s3-secret"
-          + " --port 127.0.0.1:7070 --quiet posix /var/lib/versitygw";
+          + " --port 0.0.0.0:7070 --quiet posix /var/lib/versitygw";
       };
     };
 
@@ -71,11 +83,25 @@
     # secret file because a VM has no agenix and the module only needs a path.
     environment.etc."odu-root-token".text = "test-root-token";
 
+    # WHAT THE WORLD READS THE STORE FROM. `publicUrl` names this vhost, and
+    # odu appends `/<bucket>/<key>`; path-style S3 puts the S3 bucket's name
+    # first, so the vhost's root IS the `odu-objects/` prefix and
+    # `http://public.test/far/<hash>.narinfo` lands on the object the push
+    # wrote. Nothing here is odu: that is the point of the test below.
+    services.nginx.virtualHosts."public.test".locations."/".proxyPass =
+      "http://127.0.0.1:7070/odu-objects/";
+
+    # The gateway and the store's public name both answer on this machine, and
+    # the DAEMON resolves the first one when it signs a URL for a client.
+    networking.extraHosts = "192.168.1.2 gateway.test\n192.168.1.2 public.test";
+
     # The server builds the path it pushes, so it needs the flake-era CLI. A
     # real host has this for its own reasons; here it is the fixture's.
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-    networking.firewall.allowedTCPPorts = [ 80 ];
+    # 7070 is the gateway: a presigned URL is followed by the CLIENT, so the
+    # port the signature names has to be reachable from off the machine.
+    networking.firewall.allowedTCPPorts = [ 80 7070 ];
   };
 
   nodes.client = { pkgs, ... }: {
@@ -87,7 +113,12 @@
     # TWO LINES, not one: `/etc/hosts` is `IP name [aliases…]`, so the one-line
     # form made `door.test` an ALIAS of 192.168.1.2 — the loopback machine —
     # and every door assertion then read nginx's 404 from the wrong vhost.
-    networking.extraHosts = "192.168.1.2 cache.test main.test\n192.168.1.3 door.test";
+    networking.extraHosts = ''
+      192.168.1.2 cache.test main.test
+      192.168.1.2 gateway.test
+      192.168.1.2 public.test
+      192.168.1.3 door.test
+    '';
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
       # No substituters: the point is that the only source is the cache under
@@ -324,6 +355,24 @@
     server.wait_until_succeeds("curl -sS -o /dev/null http://127.0.0.1:7070/")
     s3 = "--aws-sigv4 aws:amz:us-east-1:s3 --user odu:odu-s3-secret"
     server.succeed(f"curl -sSf {s3} -X PUT http://127.0.0.1:7070/odu-objects")
+    # ANONYMOUS READS ARE THE S3 BUCKET'S OWN DOING. versitygw refuses an
+    # unsigned GET until a policy says otherwise, and that policy is the
+    # gateway's spelling of what binding an R2 custom domain does: every
+    # object under this ONE S3 bucket becomes world-readable. Which is why
+    # odu advertises the store's name for PUBLIC odu buckets only.
+    public_read = json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::odu-objects/*",
+        }],
+    })
+    server.succeed(
+        f"curl -sSf {s3} -X PUT --data-binary {shlex.quote(public_read)}"
+        f" 'http://127.0.0.1:7070/odu-objects?policy'"
+    )
     far = json.loads(
         surface(
             server,
@@ -347,16 +396,34 @@
     listed = server.succeed(f"curl -sSf {s3} 'http://127.0.0.1:7070/odu-objects?list-type=2&prefix=far/'")
     assert "<Key>far/nar/" in listed, listed
     server.fail("ls /var/lib/odu/cache/objects/far")
-    # A RANGE, answered from S3 through the same route.
+    # ── THE NAR IS NOT ODU'S TO SERVE when the bucket is on an S3 store ────
+    # PLAN 2.8: odu answers a NAR on an S3 store with a 307 to a PRESIGNED
+    # GET on the gateway and no body at all. The redirect is asserted as
+    # ITSELF — the code, and a `location` on the gateway's own host — because
+    # a test that only followed it could not tell a redirect from a proxy.
     far_file = client.succeed(
         "curl -sS http://cache.test/cache/far/%s.narinfo | sed -n 's|^URL: nar/||p'"
         % path.split("/")[-1][:32]
     ).strip()
-    ranged = server.succeed(
-        f"curl -sS -D - -o /dev/null -H 'Range: bytes=0-3'"
-        f" http://127.0.0.1:18440/cache/far/nar/{far_file}"
+    nar_code = client.succeed(
+        f"curl -sS -o /dev/null -w '%{{http_code}}'"
+        f" http://cache.test/cache/far/nar/{far_file}"
+    ).strip()
+    assert nar_code == "307", f"a NAR on an S3 store answered {nar_code}, not a redirect"
+    location = client.succeed(
+        f"curl -sS -D - -o /dev/null http://cache.test/cache/far/nar/{far_file}"
+        " | sed -n 's|^[Ll]ocation: ||p'"
+    ).strip()
+    assert location.startswith("http://gateway.test:7070/odu-objects/far/nar/"), location
+    assert "X-Amz-Signature=" in location, location
+    # AND THE RANGE IS THE STORE'S TOO: odu does not proxy one, so the client
+    # re-sends the header to the address the redirect named.
+    ranged = client.succeed(
+        f"curl -sSL -D - -o /dev/null -H 'Range: bytes=0-3'"
+        f" http://cache.test/cache/far/nar/{far_file}"
     )
-    assert "206 partial content" in ranged.lower() and "content-length: 4" in ranged.lower(), ranged
+    assert "206 partial content" in ranged.lower(), ranged
+    assert "content-length: 4" in ranged.lower(), ranged
     # AND THE CLIENT SUBSTITUTES IT, trusting only that bucket's key.
     from_s3 = client.execute(
         f"nix copy --from http://cache.test/cache/far --to local?root=/tmp/sub-s3"
@@ -368,6 +435,35 @@
         f"NIX_REMOTE=local?root=/tmp/sub-s3 nix store verify {path}"
         f" --option trusted-public-keys '{far_key}'"
     )
+
+    # ── READS WITH ODU STOPPED — what PLAN 2.8 is for ──────────────────────
+    # The store declares a `publicUrl`, so a PUBLIC bucket on it advertises
+    # the store's own name instead of odu's, and everything the Nix protocol
+    # asks for is an object the push wrote: `nix-cache-info`, the narinfo,
+    # the NAR. Stop the daemon and the cache still serves.
+    assert far["url"] == "http://public.test/far", far["url"]
+    for probe in ["nix-cache-info", "%s.narinfo" % path.split("/")[-1][:32], f"nar/{far_file}"]:
+        code = client.succeed(
+            f"curl -sS -o /dev/null -w '%{{http_code}}' http://public.test/far/{probe}"
+        ).strip()
+        assert code == "200", f"http://public.test/far/{probe} answered {code} with odu up"
+
+    server.succeed("systemctl stop odu-web.service")
+    server.fail("curl -sS --max-time 5 -o /dev/null http://127.0.0.1:18440/")
+    without_odu = client.execute(
+        f"nix copy --from http://public.test/far --to local?root=/tmp/sub-down"
+        f" --option trusted-public-keys '{far_key}' {path}"
+    )
+    print(without_odu)
+    assert without_odu[0] == 0, without_odu
+    client.succeed(
+        f"NIX_REMOTE=local?root=/tmp/sub-down nix store verify {path}"
+        f" --option trusted-public-keys '{far_key}'"
+    )
+    # The steps after this one are the daemon's again.
+    server.succeed("systemctl start odu-web.service")
+    server.wait_for_unit("odu-web.service")
+    server.wait_until_succeeds("curl -sS -o /dev/null http://127.0.0.1:18440/")
 
     # ── administration works, and collection does not eat the bucket ────────
     surface(server, admin, "cache", "stats_read", {})

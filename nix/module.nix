@@ -133,14 +133,33 @@ let
   # themselves never enter the Nix store — systemd copies each file into the
   # unit's private credentials directory (`LoadCredential` below), and this
   # file names that copy.
+  #
+  # `publicUrl` is written only when the store has one: absent is how the
+  # declaration says "every read of this store goes through odu", and a
+  # `null` in the JSON would be a third answer the parser would have to have
+  # an opinion about.
   storesFile = pkgs.writeText "odu-cache-stores.json" (builtins.toJSON (
     lib.mapAttrs
       (name: store: {
         inherit (store) kind endpoint bucket region;
         credentialsFile = "/run/credentials/odu-web.service/store-${name}";
+      } // lib.optionalAttrs (store.publicUrl != null) {
+        inherit (store) publicUrl;
       })
       cfg.cache.stores
   ));
+
+  # STORES WHOSE `publicUrl` IS NOT A BARE ORIGIN, by name. odu appends
+  # `/<bucket>/<key>` to that URL, so a path, a query or a fragment would end
+  # up in the MIDDLE of the address a reader fetches — the assertion below is
+  # what turns that into a refused rebuild rather than a cache nobody can read.
+  badPublicUrls = lib.attrNames (
+    lib.filterAttrs
+      (_: store:
+        store.publicUrl != null
+        && builtins.match "https?://[^/?#]+/?" store.publicUrl == null)
+      cfg.cache.stores
+  );
 
   # A WEBSOCKET IS NOT A REQUEST. nginx needs the upgrade pair on the location
   # that carries `/rpc/ws`, and `recommendedProxySettings` is what defines
@@ -415,6 +434,29 @@ in
               versitygw's and MinIO's default).
             '';
           };
+          publicUrl = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "https://cache.example.com";
+            description = ''
+              The URL the WORLD reads this store's objects from: an R2 custom
+              domain bound to the bucket, or any name that serves the bucket's
+              objects over plain HTTP. An origin and nothing more — no path, no
+              query, no fragment — because odu appends `/<bucket>/<key>` to it.
+
+              With it set, odu advertises `<publicUrl>/<bucket>` as the
+              substituter URL of every PUBLIC bucket on the store, so a reader
+              fetches narinfos and NARs straight from the store and odu is not
+              on the path at all — it can be down and the cache still serves.
+              odu keeps signing its OWN requests against `endpoint`: this name
+              is for readers, never for writes.
+
+              Private buckets are unaffected: their reads stay with odu, which
+              is the only thing that can ask who a caller is. Bind the domain to
+              the bucket yourself — for R2, `cf r2 buckets domains custom create
+              <bucket> --domain <host> --zone-id <zone>`.
+            '';
+          };
           # A STRING, NOT `types.path`: a literal path (`./r2.env`) would be
           # copied into the world-readable Nix store, so only an absolute path
           # on the host — an agenix or sops secret — is accepted.
@@ -453,6 +495,7 @@ in
             endpoint = "https://<account>.r2.cloudflarestorage.com";
             bucket = "odu-cache";
             region = "auto";
+            publicUrl = "https://cache.example.com";
             credentialsFile = "/run/secrets/odu-r2";
           };
         }
@@ -524,6 +567,21 @@ in
           services.odu.cache.stores.local is declared, but `local` is the
           daemon's own disk under services.odu.stateDir and always exists —
           give the declared store another name.
+        '';
+      }
+      {
+        # A PUBLIC URL IS AN ORIGIN, NOT AN ADDRESS. The daemon's declaration
+        # parser refuses the same shape at boot; refusing it here too means a
+        # misspelled name costs a rebuild rather than a service that will not
+        # mount.
+        assertion = badPublicUrls == [ ];
+        message = ''
+          services.odu.cache.stores.${lib.concatStringsSep ", " badPublicUrls} has a
+          publicUrl that is not a bare origin. Write `https://host` (a port is
+          fine) and nothing else: odu advertises `<publicUrl>/<bucket>` as the
+          substituter URL of every public bucket on the store, so a path, a
+          query or a fragment would land in the middle of the address a reader
+          fetches.
         '';
       }
       {

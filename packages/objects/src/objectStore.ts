@@ -86,10 +86,24 @@ export type ObjectRefusal =
 
 export type PutOutcome = { ok: true; facts: ObjectFacts } | { ok: false; refusal: ObjectRefusal };
 
+/**
+ * WHAT A READER OF THE OBJECT SHOULD BE TOLD, when the store can tell it: the
+ * response headers an HTTP read of the object answers with. A store that
+ * serves its objects itself (S3) keeps them with the object; a store whose
+ * objects are plain files has no responses to put them on and ignores them.
+ * They are not facts: nothing reads them back, and they never decide a put.
+ */
+export interface PutOptions {
+  readonly contentType?: string;
+  readonly cacheControl?: string;
+}
+
 export interface ObjectStore {
   /** Write `body` at `key`, unless the key holds an object already. With
-   *  `expected`, the bytes must have those facts or nothing is kept. */
-  put(key: string, body: ObjectBody, expected?: ObjectFacts): Promise<PutOutcome>;
+   *  `expected`, the bytes must have those facts or nothing is kept.
+   *  `options` ride with the object for a reader that fetches it from the
+   *  store, and a store with no readers of its own ignores them. */
+  put(key: string, body: ObjectBody, expected?: ObjectFacts, options?: PutOptions): Promise<PutOutcome>;
   /**
    * OPTIONAL — a store whose objects are files offers it: make the file at
    * `file`, on this machine, the object at `key` WITHOUT copying it, and drop
@@ -98,6 +112,15 @@ export interface ObjectStore {
    * with no local files (S3) leaves it out, and the caller `put`s the file.
    */
   link?(key: string, file: string, facts: ObjectFacts): Promise<PutOutcome>;
+  /**
+   * OPTIONAL — a store a reader can fetch from offers it: a URL that fetches
+   * the object at `key` for the next `expiresSeconds`, carrying its own
+   * authority, so whoever holds it needs no credential of this store's. S3
+   * signs one; disk, whose objects are files on odu's own machine, leaves it
+   * out — and `store.presignGet === undefined` is how a caller asks whether
+   * reads can leave odu at all.
+   */
+  presignGet?(key: string, expiresSeconds: number): URL;
   /** The object, or the `range` of it; null when the key is absent. */
   get(key: string, range?: ByteRange): Promise<StoredObject | null>;
   head(key: string): Promise<number | null>;

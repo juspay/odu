@@ -109,10 +109,21 @@ export function objectStores(
   ]);
 }
 
-/** What the `stores` cell publishes: names and kinds, nothing else. */
+/** What the `stores` cell publishes: names, kinds and the public URL the
+ *  operator bound to the store. Never an endpoint and never a credential —
+ *  those are the operator's configuration, and nothing on the wire needs
+ *  them. The public URL IS published, because it is the address every client
+ *  of a store-fronted bucket is handed anyway (PLAN 2.8). */
 export function storeFacts(declared: StoreDeclarations): CacheStore[] {
   return [
-    { name: LOCAL_STORE, kind: "local", default: true },
-    ...[...declared].map(([name, declaration]) => ({ name, kind: declaration.kind, default: false })),
+    { name: LOCAL_STORE, kind: "local", default: true, publicUrl: null },
+    ...[...declared].map(([name, declaration]) => ({
+      name,
+      kind: declaration.kind,
+      default: false,
+      // WITHOUT ITS TRAILING SLASH: every caller joins `/<bucket>` onto it,
+      // and `https://cache.example.org//kolu` is a key nobody wrote.
+      publicUrl: declaration.target.publicUrl?.href.replace(/\/+$/, "") ?? null,
+    })),
   ];
 }

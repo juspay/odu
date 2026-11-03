@@ -157,6 +157,43 @@ export function objectKey(
   return `${bucket}/nar/${narFileName(narHash, compression)}`;
 }
 
+/**
+ * The object key a bucket's narinfo lives at: the same name the protocol
+ * serves it under, under this bucket's own prefix.
+ *
+ * THE NARINFO IS AN OBJECT NOW (PLAN 2.8) as well as a row. A store that
+ * fronts its own reads serves the pair — `<hash>.narinfo` and `nar/<file>` —
+ * without odu in the path, and a client that never reaches this daemon must
+ * find both where a Nix client looks for them. The row stays the truth; the
+ * object is what the store publishes, rewritten whenever the row changes.
+ */
+export function narinfoKey(bucket: string, hash: string): string {
+  return `${bucket}/${hash}.narinfo`;
+}
+
+/** The object key a bucket's `nix-cache-info` lives at — the first file a Nix
+ *  client reads, and the one a store-fronted bucket needs most. */
+export function cacheInfoKey(bucket: string): string {
+  return `${bucket}/nix-cache-info`;
+}
+
+/**
+ * WHAT A STORE TELLS A READER ABOUT THESE BYTES.
+ *
+ * A NAR is named by its own hash and can never change, so it is cacheable for
+ * a year and `immutable` — a revalidation of it is a round trip that cannot
+ * have a different answer. A narinfo and `nix-cache-info` CAN change (a
+ * re-push adds a signature, a collection removes the path), so they get a day
+ * and are purged when they move.
+ */
+export const NAR_CACHE_CONTROL = "public, max-age=31536000, immutable";
+export const INFO_CACHE_CONTROL = "public, max-age=86400";
+
+/** The content types the protocol's three files are served as. */
+export const NAR_CONTENT_TYPE = "application/x-nix-nar";
+export const NARINFO_CONTENT_TYPE = "text/x-nix-narinfo";
+export const CACHE_INFO_CONTENT_TYPE = "text/plain";
+
 export interface StagingDeps {
   /** The store a bucket's objects live in — the cache's one answer to that. */
   storeOf: (bucket: BucketRow) => ObjectStore;
@@ -498,7 +535,13 @@ export function createStaging(deps: StagingDeps): Staging {
       const expected = objectFactsOf(file);
       // A STORE WHOSE OBJECTS ARE FILES links the proved file into place, no
       // copy; one with none is handed it as a Blob, which it can read again.
-      const outcome = await (store.link?.(key, path, expected) ?? store.put(key, Bun.file(path), expected));
+      // THE HEADERS A STORE WILL SERVE IT WITH travel with the put: a NAR read
+      // from the store itself (PLAN 2.8) has no odu in the path to add them.
+      const outcome = await (store.link?.(key, path, expected) ??
+        store.put(key, Bun.file(path), expected, {
+          contentType: NAR_CONTENT_TYPE,
+          cacheControl: NAR_CACHE_CONTROL,
+        }));
       if (outcome.ok) return keptFileOf(outcome.facts);
       if (outcome.refusal.kind === "exists") return keptFileOf(outcome.refusal.facts);
       // THE STORE KEPT NOTHING — it read other bytes than the verify did, or

@@ -53,7 +53,7 @@
 import type { ObjectStore } from "@odu/objects";
 import type { BucketRow, CacheRepo, ObjectRow, PinRow } from "./db";
 import { narFileName } from "./narinfo";
-import { objectKey } from "./staging";
+import { cacheInfoKey, narinfoKey, objectKey } from "./staging";
 
 export interface GcInput {
   buckets: readonly BucketRow[];
@@ -283,6 +283,11 @@ export async function runGc(
       // It is `freedBytes`' rule, applied against the rows as they are.
       const twin = repo.objectsByNarHash(entry.bucket, row.narHash).length > 0;
       if (!twin) await objects.delete(objectKey(entry.bucket, row.narHash, row.compression));
+      // THE NARINFO OBJECT IS THE ROW'S OWN (PLAN 2.8) — one per store path,
+      // never shared by twins the way a NAR is, so it goes whenever the row
+      // does. A store left holding it would answer a path odu has forgotten,
+      // with a NAR URL that 404s.
+      await objects.delete(narinfoKey(entry.bucket, row.hash));
       left.push({
         storePath: row.storePath,
         hash: row.hash,
@@ -326,9 +331,16 @@ export async function sweepOrphans(
   bucket: string,
   objects: ObjectStore,
 ): Promise<number> {
-  const named = new Set(
-    repo.objects(bucket).map((row) => objectKey(bucket, row.narHash, row.compression)),
-  );
+  // EVERY KEY A BUCKET IS MEANT TO HAVE: its NARs, the narinfo beside each
+  // one, and its `nix-cache-info` (PLAN 2.8). The last is named by the bucket
+  // rather than by a row, so an empty bucket keeps it.
+  const named = new Set([
+    ...repo.objects(bucket).flatMap((row) => [
+      objectKey(bucket, row.narHash, row.compression),
+      narinfoKey(bucket, row.hash),
+    ]),
+    cacheInfoKey(bucket),
+  ]);
   let swept = 0;
   for (const object of await objects.list(bucket)) {
     if (named.has(object.key)) continue;

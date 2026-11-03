@@ -230,6 +230,89 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
+    it("hands a reader a URL of its own, which fetches the bytes and takes a Range", async () => {
+      const { store, dispose } = await make();
+      const payload = bytes("0123456789abcdef");
+      await store.put("main/nar/p.nar.zst", streamOf([payload]));
+      if (store.presignGet === undefined) {
+        // A STORE WITH NO URLS OF ITS OWN leaves the member out, and that
+        // absence is the whole answer: its objects are reachable only through
+        // whoever holds the store. Nothing else here applies to it.
+        await dispose();
+        return;
+      }
+      const url = store.presignGet("main/nar/p.nar.zst", 600);
+      // A PLAIN `fetch`: no Authorization, no netrc, no client of this
+      // store's — the URL carries every bit of authority the read needs.
+      const whole = await fetch(url);
+      expect({ status: whole.status, text: await whole.text() }).toEqual({ status: 200, text: "0123456789abcdef" });
+      // THE READER RE-SENDS ITS RANGE to the store, so the store must answer
+      // one: a redirected Nix client resuming a NAR depends on it.
+      const ranged = await fetch(url, { headers: { range: "bytes=3-6" } });
+      expect({
+        status: ranged.status,
+        range: ranged.headers.get("content-range"),
+        text: await ranged.text(),
+      }).toEqual({ status: 206, range: "bytes 3-6/16", text: "3456" });
+      await dispose();
+    });
+
+    it("lets a presigned URL expire", async () => {
+      const { store, dispose } = await make();
+      if (store.presignGet === undefined) {
+        await dispose();
+        return;
+      }
+      await store.put("main/nar/short.nar.zst", streamOf([bytes("briefly readable")]));
+      // ONE SECOND, then two of them pass: the URL is not a key to the object
+      // for ever, which is what makes handing one out safe for a private
+      // bucket.
+      const url = store.presignGet("main/nar/short.nar.zst", 1);
+      await Bun.sleep(2_000);
+      const late = await fetch(url);
+      expect({ ok: late.ok, status: late.status }).toEqual({ ok: false, status: 403 });
+      await late.body?.cancel().catch(() => {});
+      await dispose();
+    });
+
+    it("takes a reader's content type and cache lifetime, one part or many", async () => {
+      const { store, partSize, dispose } = await make();
+      const options = { contentType: "application/x-nix-nar", cacheControl: "public, max-age=31536000, immutable" };
+      const small = bytes("one part of a NAR");
+      // LARGER THAN ONE PART, both ways a multipart object is made: with its
+      // facts promised it goes straight to the key, and without them it is
+      // staged and copied into place — and the copy is what carries the
+      // headers for the second, so both are asked.
+      const big = patterned((partSize ?? 5 * 1024 * 1024) + 1024, 13);
+      kept(await store.put("main/nar/opt-small.nar.zst", streamOf([small]), undefined, options));
+      kept(await store.put("main/nar/opt-direct.nar.zst", streamOf(pieces(big)), factsOf(big), options));
+      kept(await store.put("main/nar/opt-copied.nar.zst", streamOf(pieces(big)), undefined, options));
+      // THE OPTIONS DECIDE NOTHING ABOUT THE OBJECT: the bytes and the facts
+      // are what they would have been without them, on every store.
+      expect(new TextDecoder().decode((await read(store, "main/nar/opt-small.nar.zst")) as Uint8Array)).toBe(
+        "one part of a NAR",
+      );
+      for (const key of ["main/nar/opt-direct.nar.zst", "main/nar/opt-copied.nar.zst"]) {
+        expect(await store.facts(key)).toEqual(factsOf(big));
+      }
+      if (store.presignGet === undefined) {
+        // A STORE WITH NO RESPONSES OF ITS OWN took them and dropped them.
+        await dispose();
+        return;
+      }
+      for (const key of ["main/nar/opt-small.nar.zst", "main/nar/opt-direct.nar.zst", "main/nar/opt-copied.nar.zst"]) {
+        const response = await fetch(store.presignGet(key, 600));
+        expect({
+          key,
+          status: response.status,
+          type: response.headers.get("content-type"),
+          cache: response.headers.get("cache-control"),
+        }).toEqual({ key, status: 200, type: options.contentType, cache: options.cacheControl });
+        await response.body?.cancel().catch(() => {});
+      }
+      await dispose();
+    });
+
     it("reads the facts its put wrote, never the bytes", async () => {
       const { store, rewriteBehind, dispose } = await make();
       expect(await store.facts("main/nar/none.nar.zst")).toBeNull();

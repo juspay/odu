@@ -6,12 +6,17 @@
  *
  * ```json
  * { "r2": { "kind": "s3", "endpoint": "https://<account>.r2.cloudflarestorage.com",
- *           "bucket": "odu", "region": "auto", "credentialsFile": "/run/…/r2" } }
+ *           "bucket": "odu", "region": "auto", "credentialsFile": "/run/…/r2",
+ *           "publicUrl": "https://cache.example.com" } }
  * ```
  *
  * and each `credentialsFile` is `KEY=value` lines — `AWS_ACCESS_KEY_ID`,
  * `AWS_SECRET_ACCESS_KEY`, optionally `AWS_SESSION_TOKEN` — the shape an
  * `EnvironmentFile`, an agenix secret or an R2 key export already has.
+ *
+ * `publicUrl` is optional: the host the world reads this store's objects from,
+ * when its operator has bound one to the bucket. It is a host alone — no path,
+ * query or fragment — because the keys hang under it as they do in the bucket.
  *
  * The parser takes the declarations' TEXT and a reader for the credentials
  * files, so where the declarations come from (an environment variable, a test)
@@ -114,6 +119,29 @@ export function parseStoreDeclarations(
     if (endpoint.search !== "" || endpoint.hash !== "") {
       return bad(`endpoint ${spelled} has a query or fragment, and an S3 endpoint has neither`);
     }
+    // A STORE'S PUBLIC URL is where the WORLD reads the bucket from — an R2
+    // custom domain — and never where odu signs. The keys hang under it
+    // exactly as they do in the bucket, so a path of its own would move every
+    // one of them; it is a host and nothing else.
+    const spelledPublic = entry["publicUrl"];
+    let publicUrl: URL | undefined;
+    if (spelledPublic !== undefined) {
+      if (!nonEmpty(spelledPublic)) return bad("publicUrl is not a URL");
+      try {
+        publicUrl = new URL(spelledPublic);
+      } catch {
+        return bad(`publicUrl ${spelledPublic} is not a URL`);
+      }
+      if (publicUrl.protocol !== "https:" && publicUrl.protocol !== "http:") {
+        return bad(`publicUrl ${spelledPublic} is not an http(s) URL`);
+      }
+      if (publicUrl.search !== "" || publicUrl.hash !== "") {
+        return bad(`publicUrl ${spelledPublic} has a query or fragment, and a store's public URL has neither`);
+      }
+      if (publicUrl.pathname !== "/") {
+        return bad(`publicUrl ${spelledPublic} has a path, and a store's public URL is a host alone`);
+      }
+    }
     const credentialsFile = entry["credentialsFile"] as string;
     let credentials: ReturnType<typeof parseCredentials>;
     try {
@@ -141,6 +169,7 @@ export function parseStoreDeclarations(
         endpoint,
         bucket: entry["bucket"] as string,
         region: entry["region"] as string,
+        ...(publicUrl === undefined ? {} : { publicUrl }),
         ...credentials,
       },
     });

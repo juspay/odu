@@ -9,6 +9,11 @@
  * a multipart upload — and the metadata HEAD are signed here and sent with
  * `fetch`.
  *
+ * SIGNATURES ALSO TRAVEL ALONE. `presignGet` puts one in a URL's QUERY rather
+ * than a header, so a reader holding no credential of this store's — a Nix
+ * client odu redirected — fetches the bytes from the service itself, until the
+ * URL's own expiry passes.
+ *
  * This module knows WHO is asking and WHERE (endpoint, bucket, region,
  * credentials) and nothing about objects: no streaming, no ranges, no
  * multipart. The payload is never hashed — `UNSIGNED-PAYLOAD` is what every S3
@@ -28,6 +33,12 @@ export interface S3Target {
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
   readonly sessionToken?: string;
+  /** WHERE THE WORLD READS THIS STORE FROM, when it is readable without a
+   *  credential: an R2 custom domain (`https://cache.example.com`) bound to
+   *  the same bucket. Never where odu signs a request — signing stays on
+   *  `endpoint`, whose host is the service's own. A URL with no path, query
+   *  or fragment; the keys hang under it as they do in the bucket. */
+  readonly publicUrl?: URL;
 }
 
 const hmac = (key: string | Buffer, text: string): Buffer =>
@@ -54,6 +65,33 @@ export function objectUrl(target: S3Target, key: string, query: Record<string, s
   return url;
 }
 
+/** SigV4 spells a moment twice: `20240102T030405Z` in the signature, and the
+ *  day alone in the scope and the signing key. */
+const stampOf = (at: Date): { stamp: string; day: string } => {
+  const stamp = at.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  return { stamp, day: stamp.slice(0, 8) };
+};
+
+/** What a signature is good for: one day, one region, S3. */
+const scopeOf = (target: S3Target, day: string): string => `${day}/${target.region}/s3/aws4_request`;
+
+/** The query string as SigV4 canonicalises it: every pair encoded, then sorted
+ *  by the ENCODED name and value. */
+const canonicalQuery = (url: URL): string =>
+  [...url.searchParams.entries()]
+    .map(([name, value]) => [encode(name), encode(value)] as const)
+    .sort(([a, x], [b, y]) => (a === b ? (x < y ? -1 : 1) : a < b ? -1 : 1))
+    .map(([name, value]) => `${name}=${value}`)
+    .join("&");
+
+/** The signature over one canonical request: the day's derived key (the secret
+ *  itself never signs anything) over the string to sign. */
+function signature(target: S3Target, stamp: string, day: string, canonical: string): string {
+  const toSign = ["AWS4-HMAC-SHA256", stamp, scopeOf(target, day), sha256Hex(canonical)].join("\n");
+  const key = hmac(hmac(hmac(hmac(`AWS4${target.secretAccessKey}`, day), target.region), "s3"), "aws4_request");
+  return createHmac("sha256", key).update(toSign).digest("hex");
+}
+
 /**
  * The headers that sign one request. `headers` are the request's own (each is
  * signed, so a metadata header or a precondition cannot be stripped in
@@ -67,8 +105,7 @@ export function signedHeaders(
   headers: Record<string, string>,
   at: Date = new Date(),
 ): Record<string, string> {
-  const stamp = at.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-  const day = stamp.slice(0, 8);
+  const { stamp, day } = stampOf(at);
   const all: Record<string, string> = {
     ...Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value.trim()])),
     host: url.host,
@@ -77,11 +114,7 @@ export function signedHeaders(
     ...(target.sessionToken === undefined ? {} : { "x-amz-security-token": target.sessionToken }),
   };
   const names = Object.keys(all).sort();
-  const query = [...url.searchParams.entries()]
-    .map(([name, value]) => [encode(name), encode(value)] as const)
-    .sort(([a, x], [b, y]) => (a === b ? (x < y ? -1 : 1) : a < b ? -1 : 1))
-    .map(([name, value]) => `${name}=${value}`)
-    .join("&");
+  const query = canonicalQuery(url);
   const canonical = [
     method,
     url.pathname,
@@ -90,16 +123,38 @@ export function signedHeaders(
     names.join(";"),
     "UNSIGNED-PAYLOAD",
   ].join("\n");
-  const scope = `${day}/${target.region}/s3/aws4_request`;
-  const toSign = ["AWS4-HMAC-SHA256", stamp, scope, sha256Hex(canonical)].join("\n");
-  const key = hmac(hmac(hmac(hmac(`AWS4${target.secretAccessKey}`, day), target.region), "s3"), "aws4_request");
-  const signature = createHmac("sha256", key).update(toSign).digest("hex");
   return {
     ...all,
     authorization:
-      `AWS4-HMAC-SHA256 Credential=${target.accessKeyId}/${scope}, ` +
-      `SignedHeaders=${names.join(";")}, Signature=${signature}`,
+      `AWS4-HMAC-SHA256 Credential=${target.accessKeyId}/${scopeOf(target, day)}, ` +
+      `SignedHeaders=${names.join(";")}, Signature=${signature(target, stamp, day, canonical)}`,
   };
+}
+
+/**
+ * A URL THAT FETCHES `key` BY ITSELF, for `expiresSeconds` from `at`. The
+ * signature is in the query, so the reader sends no credential and needs none:
+ * the service checks the URL. Only `host` is signed — a reader may add any
+ * header it likes, `Range` above all, and the payload hash is the literal
+ * `UNSIGNED-PAYLOAD` that query auth uses.
+ *
+ * Signed against `endpoint`, never `publicUrl`: a signature covers the host it
+ * names, and the host odu knows the credentials for is the service's.
+ */
+export function presignGet(target: S3Target, key: string, expiresSeconds: number, at: Date = new Date()): URL {
+  const { stamp, day } = stampOf(at);
+  const url = objectUrl(target, key, {
+    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+    "X-Amz-Credential": `${target.accessKeyId}/${scopeOf(target, day)}`,
+    "X-Amz-Date": stamp,
+    "X-Amz-Expires": String(Math.max(1, Math.floor(expiresSeconds))),
+    "X-Amz-SignedHeaders": "host",
+    ...(target.sessionToken === undefined ? {} : { "X-Amz-Security-Token": target.sessionToken }),
+  });
+  const canonical = ["GET", url.pathname, canonicalQuery(url), `host:${url.host}\n`, "host", "UNSIGNED-PAYLOAD"].join("\n");
+  // LAST, and not itself signed: the signature is over the other parameters.
+  url.searchParams.set("X-Amz-Signature", signature(target, stamp, day, canonical));
+  return url;
 }
 
 /** What one request carries beyond its method and key. */

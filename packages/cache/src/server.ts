@@ -77,12 +77,14 @@ import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
 import { nixDump, nixPathInfo } from "./store";
+import { NIX_CACHE_INFO } from "./staging";
 import {
   type CacheBucket,
   CACHE_KEY,
   CacheRefused,
   type CacheStore,
   DEFAULT_RETENTION_DAYS,
+  LOCAL_STORE,
   oduCacheSurface,
 } from "./surface";
 
@@ -200,6 +202,54 @@ export function collectEvery(
   return Effect.forever(Effect.flatMap(Effect.sleep(Duration.millis(everyMs)), () => once));
 }
 
+/** A store whose public URL did not answer what a Nix client needs. */
+export interface UnreachableStore {
+  store: string;
+  url: string;
+  /** The status it answered, or `null` when the request itself failed. */
+  status: number | null;
+}
+
+/**
+ * DOES THE STORE'S PUBLIC URL ACTUALLY SERVE? — asked once, at mount, for
+ * every store that declares one and holds at least one PUBLIC bucket.
+ *
+ * A `publicUrl` is a promise the operator made outside odu: a custom domain
+ * bound to an R2 bucket, a CDN in front of it. Odu advertises it as the
+ * substituter URL of every public bucket on that store, so a typo there is a
+ * cache that answers 404 to everyone while every page says it is fine.
+ * `nix-cache-info` is the first file a Nix client reads and the cheapest
+ * thing to ask for, and the daemon wrote it as an object at bucket create.
+ *
+ * A LOGGED REFUSAL, NEVER A BOOT FAILURE. The daemon still serves every
+ * bucket itself; a domain that is being provisioned must not take the cache
+ * down while DNS propagates.
+ */
+export async function probePublicStores(input: {
+  stores: readonly CacheStore[];
+  buckets: readonly { name: string; public: boolean; store: string }[];
+  log?: (event: string, fields: Record<string, unknown>) => void;
+  send?: typeof fetch;
+}): Promise<readonly UnreachableStore[]> {
+  const send = input.send ?? fetch;
+  const unreachable: UnreachableStore[] = [];
+  for (const store of input.stores) {
+    if (store.publicUrl === null) continue;
+    // ONE BUCKET IS THE PROBE for the whole store: the question is whether
+    // the domain is bound and serving, not whether each bucket is.
+    const bucket = input.buckets.find((row) => row.public && row.store === store.name);
+    if (bucket === undefined) continue;
+    const url = `${store.publicUrl}/${bucket.name}/nix-cache-info`;
+    const response = await send(url).catch(() => null);
+    const body = response === null ? "" : await response.text().catch(() => "");
+    if (response !== null && response.status === 200 && body === NIX_CACHE_INFO) continue;
+    const refusal = { store: store.name, url, status: response?.status ?? null };
+    unreachable.push(refusal);
+    input.log?.("cache.store.public.unreachable", refusal);
+  }
+  return unreachable;
+}
+
 export function cacheServer(opts: CacheServerOptions): CacheServer {
   const { cache } = opts;
   /** What was last published, per bucket name, so a republish is a DIFF. */
@@ -227,15 +277,42 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     }
   })();
 
+  /** THE PUBLIC URL OF EACH DECLARED STORE, by name — what the operator bound
+   *  a domain to. Read once from the declarations the row was built with. */
+  const storeUrls = new Map(
+    opts.stores.flatMap((store) => (store.publicUrl === null ? [] : [[store.name, store.publicUrl] as const])),
+  );
+
   /**
-   * WHERE A CLIENT SUBSTITUTES THIS BUCKET FROM. A domain is the whole
-   * address (that is what "a name of its own" means); otherwise the bucket is a
-   * path under the origin.
+   * WHO ANSWERS A READ OF THIS BUCKET (PLAN 2.8).
+   *
+   * The STORE, when it publishes a public URL and the bucket is PUBLIC: the
+   * objects are there under `<bucket>/…` and nothing about reading them needs
+   * odu, which is the whole point — the cache keeps serving while the daemon
+   * is down. A PRIVATE bucket stays odu's however its store is fronted,
+   * because a public URL cannot ask who is asking; odu authorises it and
+   * redirects the NAR to a URL that expires.
    */
-  const urlOf = (facts: { name: string; domain: string | null }): string =>
-    facts.domain === null
-      ? `${opts.publicOrigin}${opts.mount}/${facts.name}`
-      : `${scheme}//${facts.domain}`;
+  const readsFromOf = (facts: { name: string; public: boolean; store: string }): "store" | "odu" =>
+    facts.public && storeUrls.has(facts.store) ? "store" : "odu";
+
+  /**
+   * WHERE A CLIENT SUBSTITUTES THIS BUCKET FROM. The STORE's own domain when
+   * its reads come from there; a bucket domain is the whole address (that is
+   * what "a name of its own" means); otherwise the bucket is a path under the
+   * origin.
+   *
+   * A STORE-FRONTED BUCKET MAY STILL HAVE A DOMAIN, and odu still honours it
+   * for writes and for the `missing` query — but the address advertised to
+   * READERS is the store's, because that is the one that answers when odu
+   * does not.
+   */
+  const urlOf = (facts: { name: string; public: boolean; domain: string | null; store: string }): string =>
+    readsFromOf(facts) === "store"
+      ? `${storeUrls.get(facts.store) as string}/${facts.name}`
+      : facts.domain === null
+        ? `${opts.publicOrigin}${opts.mount}/${facts.name}`
+        : `${scheme}//${facts.domain}`;
 
   /** WHERE A PUSH ADDRESSES IT. Always the path form: the push API needs the
    *  bucket's name, and a domain host answers `/cache/<name>` too. */
@@ -246,6 +323,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     upstreamKeys: [...facts.upstreamKeys],
     url: urlOf(facts),
     pushUrl: pushUrlOf(facts.name),
+    readsFrom: readsFromOf(facts),
   });
 
   const publish = (): void => {
@@ -276,10 +354,12 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    * an address, because the row is the one thing here that knows where a
    * bucket is reachable from (its domain, or the mount under the origin).
    *
-   * Both spellings of a bucket's address are announced when it has a domain:
-   * an edge may hold `https://cache.example.org/<hash>.narinfo` AND
-   * `https://odu.example.org/cache/<bucket>/<hash>.narinfo`, and purging one
-   * of them leaves the other serving a path the origin has forgotten.
+   * EVERY SPELLING OF A BUCKET'S ADDRESS is announced: the path form, the
+   * bucket's own domain when it has one, and — since 2.8 — the STORE's public
+   * URL, where an R2 custom domain now serves the very objects a collection
+   * just deleted. An edge may hold `https://cache.example.org/<hash>.narinfo`
+   * AND `https://odu.example.org/cache/<bucket>/<hash>.narinfo`, and purging
+   * one of them leaves the other serving a path the origin has forgotten.
    *
    * NOTHING IS BUILT WHEN NOBODY FRONTS THESE URLS. The broker knows whether
    * anybody does, and on a daemon with no CDN — most of them — a nightly
@@ -294,8 +374,13 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       // THE READ ADDRESS, not the push API's. They are the same string today
       // and they are different facts: one is where Nix asks, the other is
       // where a client uploads.
-      const bases = new Set([urlOf({ name, domain: null })]);
-      if (facts?.domain != null) bases.add(urlOf({ name, domain: facts.domain }));
+      const bases = new Set([`${opts.publicOrigin}${opts.mount}/${name}`]);
+      if (facts?.domain != null) bases.add(`${scheme}//${facts.domain}`);
+      // THE STORE'S OWN DOMAIN, whether or not the bucket is public: a bucket
+      // that was public yesterday may be private today, and the edge still
+      // holds what it cached then.
+      const fronted = facts === null ? undefined : storeUrls.get(facts.store);
+      if (fronted !== undefined) bases.add(`${fronted}/${name}`);
       for (const base of bases) {
         for (const removal of removed) {
           urls.push(`${base}/${removal.hash}.narinfo`);
@@ -436,8 +521,12 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
           ),
         describe: ({ input }) =>
           answer(() => cache.admin.describe(input), (identity) => ({
-            ...identity,
+            name: identity.name,
+            public: identity.public,
+            publicKey: identity.publicKey,
+            domain: identity.domain,
             url: urlOf(identity),
+            readsFrom: readsFromOf(identity),
           })),
         domain: ({ input }) =>
           admin(
@@ -604,7 +693,12 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     detach,
     substituterUrl: (name) => {
       const bucket = cache.bucket(name);
-      return urlOf({ name, domain: bucket?.domain ?? null });
+      return urlOf({
+        name,
+        public: bucket?.isPublic ?? false,
+        domain: bucket?.domain ?? null,
+        store: bucket?.store ?? LOCAL_STORE,
+      });
     },
   };
 }
@@ -755,12 +849,36 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // the lifecycle `cache.close()`'s stopping flag honours.
     // ONE background task: the self pass needs the objects the migration is
     // about to land, so it starts when migrate settles — not beside it, where a
-    // row could be counted unreadable and wait a whole boot.
+    // row could be counted unreadable and wait a whole boot. The NARINFO
+    // BACKFILL (2.8) sits between them for the same reason: a row whose object
+    // the migration has not landed yet has no `FileHash` to put in a narinfo.
     yield* Effect.forkScoped(
       Effect.promise(async () => {
         await cache.migrate();
+        const backfilled = await cache.backfillObjects();
+        if (backfilled.written > 0 || backfilled.failures > 0) {
+          log.info(
+            { rows: backfilled.rows, written: backfilled.written, failures: backfilled.failures },
+            "odu cache: narinfo objects backfilled",
+          );
+        }
         await cache.proveSelf();
       }),
+    );
+
+    // AND IS THE STORE'S DOMAIN SERVING? A `publicUrl` is advertised as the
+    // substituter URL of every public bucket on that store, so a daemon that
+    // never checked would publish an address only its operator can discover
+    // is wrong. Forked, because a DNS name that is still propagating must not
+    // hold the mount.
+    yield* Effect.forkScoped(
+      Effect.promise(() =>
+        probePublicStores({
+          stores: storeFacts(declared),
+          buckets: cache.snapshot(),
+          log: (event, fields) => log.info(fields, `odu cache: ${event}`),
+        }),
+      ),
     );
 
     // (The schedule is forked below, after the finalizers — see why there.)
