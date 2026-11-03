@@ -22,7 +22,7 @@
  *   2. a signal read lands in a thunk rather than in the component body — which
  *      IS the statement "a component does not re-run when a value changes";
  *   3. a `<Show>`'s children compile to a getter — the compiler's answer to the
- *      dead-node bug `./dom.tsx`'s header records.
+ *      dead-node bug `@odu/face`'s `ui.tsx` header records.
  *
  * The RUN VIEWS live in `@odu/ci` now (they are the `ci` row's face), so this
  * list follows them; `@odu/web-ui`'s twin checks the shell's own views. Both
@@ -74,13 +74,20 @@ function compile(source: string, filename: string): string {
 /** Every view this package ships. Listed rather than globbed: a file that stops
  *  being a `.tsx` should be a decision somebody made here, not a silent drop
  *  from the set this test polices. */
-const VIEWS = ["ci.tsx", "board.tsx", "create.tsx", "detail.tsx", "dom.tsx"];
+const VIEWS = [
+  "ci.tsx",
+  "board.tsx",
+  "commit.tsx",
+  "create.tsx",
+  "detail.tsx",
+  "ops.tsx",
+];
 
 /** The views that carry markup of their own. `ci.tsx` composes other components
  *  and renders no element itself, so its compiled output has no template to
  *  clone — the signature of the Solid transform there is `createComponent`
  *  imported from `solid-js/web`, which the shared assertions below check. */
-const MARKUP = new Set(["board.tsx", "create.tsx", "detail.tsx", "dom.tsx"]);
+const MARKUP = new Set(["board.tsx", "commit.tsx", "create.tsx", "detail.tsx", "ops.tsx"]);
 
 describe("the Solid compiler that builds this app", () => {
   it.each(VIEWS)("compiles %s to cloned templates, not to component calls", (view) => {
@@ -119,7 +126,9 @@ describe("the Solid compiler that builds this app", () => {
     // fresh one. Under hyperscript they were a value, built once when the props
     // object was spelled — so a branch that had gone false re-inserted its own
     // disposed nodes, and the app showed run A's page under run B's address.
-    // `./dom.tsx`'s header tells that story; this is the line that keeps it told.
+    // `@odu/face`'s `ui.tsx` header tells that story — the primitives moved
+    // there, and the story moved with them; this is the line that keeps it
+    // told for the views that remain here.
     const code = compile(
       "import { Show } from 'solid-js';\n" +
         "export function S(props: { on: boolean }) { return <Show when={props.on}><i>x</i></Show>; }",

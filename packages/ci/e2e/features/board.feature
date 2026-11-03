@@ -34,7 +34,7 @@ Feature: The board answers "what is my CI doing"
     And I open that run
     When I press "Run again"
     Then a status reads "Started"
-    When I press "← Runs"
+    When I press "All runs"
     Then that row shows "1 earlier" in the age cell
     When I show the history
     Then the board lists two runs of the fixture project

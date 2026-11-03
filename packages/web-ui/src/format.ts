@@ -9,15 +9,13 @@
  */
 
 import type { SurfaceReadout, SurfaceReadoutStatus } from "@kolu/surface/solid";
-/** The five semantic hues, spelled here rather than imported.
+/** The five semantic hues, from the package that OWNS the vocabulary.
  *
- *  The canonical union is `@odu/run-client/surface`'s (re-exported by the ci
- *  row's `board` module), and this is a no-row package: a file that is not a
- *  root may not import a row, which the fence checks. What keeps the two
- *  spellings equal is the STYLESHEET — every hue here is a `hue-*` class in
- *  `styles.css`, and `./palette.test.ts` reads that file — so a renamed hue is
- *  one failing suite away from being noticed rather than silently colourless. */
-type StatusHue = "grey" | "amber" | "green" | "red" | "violet";
+ *  `@odu/face` names no row, so the shell may import the union from there
+ *  where it may not import `@odu/run-client`'s canonical one — and the two
+ *  are held equal by a type-level assertion in `@odu/ci/face`'s `format`,
+ *  which is a file that can see both. */
+import type { StatusHue } from "@odu/face/ui";
 
 export const CONNECTION: Record<
   SurfaceReadoutStatus,
@@ -56,12 +54,12 @@ export function wireText(readout: SurfaceReadout): {
 }
 
 export function faviconSvg(hue: "red" | "amber"): string {
-  const dot = hue === "red" ? "#ff7d74" : "#f5c451";
+  const dot = hue === "red" ? "#ff6b5e" : "#f2c14e";
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">` +
-    `<rect width="32" height="32" rx="7" fill="#080b0a"/>` +
+    `<rect width="32" height="32" rx="7" fill="#0a0d0c"/>` +
     `<text x="6" y="23" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" ` +
-    `font-size="18" font-weight="700" fill="#7d8e87">$</text>` +
+    `font-size="18" font-weight="700" fill="#7a8982">$</text>` +
     `<circle cx="24" cy="24" r="6" fill="${dot}"/>` +
     `</svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;

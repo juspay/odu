@@ -9,7 +9,7 @@ Feature: Retrying a run that has already finished
     And I open that run
     When I press "Retry" on "beta@"
     Then a status reads "This run had finished, so odu started a linked replay"
-    When I press "← Runs"
+    When I press "All runs"
     # Both runs are of one checkout, and the board collapses a checkout to its
     # latest run unless it is asked for the history. Pressing it is what makes
     # the parent and its replay two rows.

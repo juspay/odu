@@ -6,14 +6,17 @@
  * those things. The shell imports this and hands it the auth client; it holds
  * no run client and reaches no other row.
  *
- * ## Three pieces, and what each may assume
+ * ## Four pieces, and what each may assume
  *
- *   - **`SignIn`** is what an ANONYMOUS browser meets instead of the board. It
- *     is a link and nothing else: GitHub's authorisation page is the form, and
- *     the daemon's `/auth/github` route is what starts the flow.
- *   - **`SignedInHeader`** is the login, its role, the way to the profile, and
- *     sign-out. Sign-out is a real `<form method="post">`, so the cookie the
- *     browser cannot read is the one the server clears.
+ *   - **`SignIn`** is what an ANONYMOUS browser meets INSTEAD OF the whole app
+ *     — no rail and no frame, because there is nothing yet to navigate. It is
+ *     a link and nothing else: GitHub's authorisation page is the form, and the
+ *     daemon's `/auth/github` route is what starts the flow.
+ *   - **`SignedInHeader`** is the RAIL'S ACCOUNT CARD: the login, its role, the
+ *     way to the profile, and sign-out. Sign-out is a real
+ *     `<form method="post">`, so the cookie the browser cannot read is the one
+ *     the server clears. The row switch BESIDE it is the shell's and not this
+ *     file's — the way to the people page included.
  *   - **`ProfileFace`** is sessions and personal tokens: create (the token is
  *     shown once), revoke, and end a session. It reads them when it opens rather
  *     than subscribing — a token list is not a live fact, and `whoami` on the
@@ -26,6 +29,16 @@
 import { createControl } from "@odu/face/control";
 import { ago } from "@odu/cordis/format";
 import { refusalText } from "@odu/face/refusal";
+import {
+  BackLink,
+  Button,
+  CopyButton,
+  PageHead,
+  Panel,
+  Pill,
+  Tag,
+  TextInput,
+} from "@odu/face/ui";
 import type { SurfaceClient } from "@kolu/surface/solid";
 import type { Effect } from "effect";
 import {
@@ -57,72 +70,142 @@ type AuthSpec = (typeof oduAuthSurface)["spec"];
 /** The auth row's client as a VIEW holds it. */
 export type AuthClient = SurfaceClient<AuthSpec>;
 
-/** What the shell renders when this connection has no session. */
+/** HOW MANY CELLS the sign-in's field draws — eighteen columns of twelve at
+ *  the artboard's size. The grid is `auto-fit`, so a narrower pane rewraps the
+ *  same cells rather than being given a different number of them. */
+const SIGN_IN_CELLS = 216;
+
+/**
+ * THE FIELD'S PATTERN, COMPUTED ONCE AND NEVER AGAIN.
+ *
+ * A pure function of the index rather than `Math.random`: a decoration that
+ * reshuffles on every render is a page that FLICKERS, and a page that flickers
+ * while somebody reads "this server answers only to people its operator has
+ * allowed in" looks like it is deciding something about them. Hoisted to the
+ * module so it is one array for the life of the tab.
+ *
+ * The mix is the artboard's — mostly green, a little amber, one red in
+ * twenty-three — because that is what a healthy board looks like, and this is
+ * a picture of a board.
+ */
+const SIGN_IN_PATTERN: readonly string[] = Array.from(
+  { length: SIGN_IN_CELLS },
+  (_unused, index) => {
+    const step = (index * 37 + (index % 7) * 11) % 23;
+    if (step < 13) return "hue-green";
+    if (step < 15) return "hue-amber";
+    if (step === 15) return "hue-red";
+    return "hue-grey";
+  },
+);
+
+/**
+ * WHAT AN ANONYMOUS CONNECTION MEETS — the whole screen, not a panel in one.
+ *
+ * Two panes. The right one is the product's name, what this server is, and the
+ * ONE control. The left one is decoration, and the only decoration this design
+ * has: a field of LANE CELLS, the same eleven pixels the board spends on a
+ * node, so the first thing a stranger sees is the shape of the thing they are
+ * signing in to.
+ */
 export function SignIn(): JSX.Element {
   return (
     <section class="signin" aria-label="sign in">
-      <h1 class="signin-title">{SIGN_IN_COPY.title}</h1>
-      <p class="hint">{SIGN_IN_COPY.hint}</p>
-      {/* A link, not a button: GitHub's authorisation page is the form, and a
-          person may want to open it in a new tab. */}
-      <a class="signin-action" href={AUTH_SIGN_IN_PATH}>
-        {SIGN_IN_COPY.action}
-      </a>
+      {/* `aria-hidden`: the field says nothing a reader needs, and two hundred
+          unnamed cells in the accessibility tree are two hundred things to
+          skip past before reaching the only control on the page. */}
+      <div class="signin-art" aria-hidden="true">
+        <div class="signin-grid">
+          <For each={SIGN_IN_PATTERN}>{(hue) => <span class={`cell ${hue}`} />}</For>
+        </div>
+      </div>
+      <div class="signin-main">
+        <div class="signin-card">
+          <span class="brand-name">odu</span>
+          <div class="stack">
+            <h1 class="signin-title">{SIGN_IN_COPY.title}</h1>
+            <p class="hint">{SIGN_IN_COPY.hint}</p>
+          </div>
+          {/* A link, not a button: GitHub's authorisation page is the form, and
+              a person may want to open it in a new tab. */}
+          <a class="signin-action" href={AUTH_SIGN_IN_PATH}>
+            <svg aria-hidden="true" width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 .2a8 8 0 0 0-2.5 15.6c.4 0 .5-.2.5-.4v-1.5c-2.2.5-2.7-1-2.7-1-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.3 1.9.9 2.4.7 0-.5.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-4 0-.9.3-1.6.8-2.1-.1-.2-.4-1 .1-2.1 0 0 .7-.2 2.2.8a7.5 7.5 0 0 1 4 0c1.5-1 2.2-.8 2.2-.8.4 1.1.2 1.9.1 2.1.5.6.8 1.3.8 2.1 0 3.1-1.9 3.8-3.6 4 .3.3.6.8.6 1.5v2.2c0 .2.1.5.6.4A8 8 0 0 0 8 .2Z" />
+            </svg>
+            {SIGN_IN_COPY.action}
+          </a>
+          {/* WHICH SERVER THIS IS. A person reaches a dozen of these by tailnet
+              name, and the origin is the only thing on the page that says which
+              one is asking them to sign in. */}
+          <p class="signin-foot">{pageOrigin()}</p>
+        </div>
+      </div>
     </section>
   );
 }
 
-/** The header, when somebody is signed in — or when the daemon has no door and
- *  the caller is its local owner. */
+/**
+ * THE RAIL'S ACCOUNT CARD — who you are, what you hold, and the way out.
+ *
+ * It sits at the foot of the shell's sidebar, where an account lives in every
+ * application a person has ever used. It draws the way to the PROFILE and
+ * nothing else: the rows, People included, are the rail's own navigation, and
+ * a second list of them down here was two things to keep in step.
+ */
 export function SignedInHeader(props: {
   who: Who;
   atProfile: boolean;
   onProfile: () => void;
-  /** Draw the way to the people page — the shell's decision, from the role. */
-  canGrant: boolean;
-  atPeople: boolean;
-  onPeople: () => void;
 }): JSX.Element {
   return (
-    <div class="account">
-      <Show when={props.canGrant}>
-        <button
-          type="button"
-          class="link"
-          aria-pressed={props.atPeople}
-          onClick={() => props.onPeople()}
-        >
-          People
-        </button>
-      </Show>
-      <Switch>
-        <Match when={props.who.kind === "user" ? props.who : null}>
-          {(who) => (
-            <button
-              type="button"
-              class="link account-name"
-              aria-pressed={props.atProfile}
-              onClick={() => props.onProfile()}
-            >
-              {who().login}
-              <span class="pill hue-grey">{who().role}</span>
-            </button>
-          )}
-        </Match>
-        <Match when={props.who.kind === "local"}>
-          <span class="account-name">local owner</span>
-        </Match>
-      </Switch>
-      <Show when={props.who.kind === "user"}>
-        {/* A form POST: the session cookie is HttpOnly, so the only thing that
-            can clear it is the server answering a request. */}
-        <form method="post" action={AUTH_SIGN_OUT_PATH} class="account-out">
-          <button type="submit" class="link">
-            Sign out
-          </button>
-        </form>
-      </Show>
-    </div>
+    // ANONYMOUS DRAWS NOTHING, rather than an empty card: a bordered box with
+    // no name in it reads as an account that failed to load.
+    <Show when={props.who.kind !== "anonymous"}>
+      <div class="whoami">
+        <Switch>
+          <Match when={props.who.kind === "user" ? props.who : null}>
+            {(who) => (
+              <>
+                <span class="avatar" aria-hidden="true">
+                  {who().login.slice(0, 1).toUpperCase()}
+                </span>
+                <span class="whoami-who">
+                  <button
+                    type="button"
+                    class="link whoami-name account-name"
+                    aria-pressed={props.atProfile}
+                    onClick={() => props.onProfile()}
+                  >
+                    {who().login}
+                  </button>
+                  <span class="whoami-role">{who().role}</span>
+                </span>
+                {/* A form POST: the session cookie is HttpOnly, so the only
+                    thing that can clear it is the server answering a request. */}
+                <form method="post" action={AUTH_SIGN_OUT_PATH} class="account-out">
+                  <button type="submit" class="link">
+                    Sign out
+                  </button>
+                </form>
+              </>
+            )}
+          </Match>
+          {/* NO DOOR, and the caller is the machine's owner. `$` rather than an
+              initial: there is no login to take one from, and a shell prompt is
+              what this principal actually is. There is no sign-out either —
+              nothing was signed in. */}
+          <Match when={props.who.kind === "local"}>
+            <span class="avatar" aria-hidden="true">
+              $
+            </span>
+            <span class="whoami-who">
+              <span class="whoami-name account-name">local owner</span>
+              <span class="whoami-role">owner · no door</span>
+            </span>
+          </Match>
+        </Switch>
+      </div>
+    </Show>
   );
 }
 
@@ -245,112 +328,154 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
   };
 
   return (
-    <section class="profile" aria-label="profile">
+    <section class="screen profile" aria-label="profile">
       <p class="crumbs">
-        <button type="button" class="link" onClick={() => props.onClose()}>
-          ← runs
-        </button>
+        <BackLink onClick={() => props.onClose()}>runs</BackLink>
       </p>
-      <h2>
-        {props.who.kind === "user" ? props.who.login : "local owner"}
-        <Show when={props.who.kind === "user" ? props.who : null}>
-          {(who) => <span class="pill hue-grey">{who().role}</span>}
-        </Show>
-      </h2>
+      {/* THE LOGIN IS THE HEADING, in mono: it is the string the daemon knows
+          this person by, and the one a `--origin` call will name. A local owner
+          has no login and the page still exists for them — a token is how a
+          machine with no door hands a credential to an agent. The role and the
+          origin ride under it, because a token minted here is a credential FOR
+          THIS SERVER and nothing else. */}
+      <PageHead
+        title={props.who.kind === "user" ? props.who.login : "local owner"}
+        mono
+        sub={`${props.who.kind === "user" ? props.who.role : "owner"} · ${pageOrigin()}`}
+      />
 
       <Show when={control.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+      <Show when={control.done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
       <Show when={refusal()}>{(message) => <p class="fault">{message()}</p>}</Show>
 
-      <Show when={mintedToken()}>
-        {(token) => (
-          <div class="profile-minted">
-            <p>
-              <strong>Copy this token now.</strong> It is shown once; only a hash is kept.
-            </p>
-            <pre class="use-block">{token()}</pre>
-            <p class="hint">
-              <code>odu auth login {pageOrigin()}</code> stores it on a machine, or set{" "}
-              <code>ODU_TOKEN</code> for an agent.
-            </p>
-          </div>
-        )}
-      </Show>
-
-      <h3>Personal access tokens</h3>
-      <div class="profile-create">
-        <label class="search">
-          <span class="sr-only">token name</span>
-          <input
-            type="text"
-            class="input"
-            placeholder="token name, e.g. laptop"
-            value={name()}
-            onInput={(event) => setName(event.currentTarget.value)}
-          />
-        </label>
-        <label class="field-inline">
-          <span>expiry</span>
-          <select
-            class="input"
-            aria-label="token expiry"
-            value={expiry()}
-            onChange={(event) => setExpiry(event.currentTarget.value)}
+      <Panel
+        title="Sessions"
+        note="Every browser signed in as you. Revoking one stops serving its connections at once."
+      >
+        <div class="panel-body">
+          <Show
+            when={sessions().length > 0}
+            fallback={<p class="empty">{readings.loading ? "reading…" : "No sessions."}</p>}
           >
-            <option value="30">30 days</option>
-            <option value="90">90 days</option>
-            <option value="365">1 year</option>
-            <option value="never">never</option>
-          </select>
-        </label>
-        <button type="button" class="btn btn-primary" disabled={control.busy()} onClick={create}>
-          {control.busy() ? "creating…" : "Create token"}
-        </button>
-      </div>
-      <Show when={tokens().length > 0} fallback={<p class="hint">No tokens yet.</p>}>
-        <ul class="tokens">
-          <For each={tokens()}>
-            {(token) => (
-              <li>
-                <span>
-                  <strong>{token.name}</strong>
-                  <span class="hint"> {tokenLife(token, props.now)}</span>
-                </span>
-                <Show when={token.id === mintedId()}>
-                  <span class="pill hue-amber">just created</span>
-                </Show>
-                <Show when={!token.revoked}>
-                  <button type="button" class="text-action" onClick={() => revoke(token.id)}>
-                    revoke
-                  </button>
-                </Show>
-              </li>
-            )}
-          </For>
-        </ul>
-      </Show>
+            <ul class="facts">
+              <For each={sessions()}>
+                {(session) => (
+                  <li>
+                    <span>
+                      <strong>{session.agent ?? "unknown browser"}</strong>
+                      <span class="fact-line bucket-facts">{sessionLife(session, props.now)}</span>
+                    </span>
+                    <button
+                      type="button"
+                      class="text-action"
+                      onClick={() => endSession(session.id)}
+                    >
+                      revoke
+                    </button>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </div>
+      </Panel>
 
-      <h3>Sessions</h3>
-      <Show when={sessions().length > 0} fallback={<p class="hint">No sessions.</p>}>
-        <ul class="sessions">
-          <For each={sessions()}>
-            {(session) => (
-              <li>
-                <span>
-                  <strong>{session.agent ?? "unknown browser"}</strong>
-                  <span class="hint"> {sessionLife(session, props.now)}</span>
+      <Panel
+        title="Personal access tokens"
+        note="A token is shown once, when it is minted — the row keeps only a hash."
+      >
+        {/* THE ONE SHOWING, at the top of the panel that minted it. A console
+            surface rather than a field: it is read, copied and never seen
+            again, and the copy control is beside it because nobody selects
+            forty characters of base64 by hand on a phone. */}
+        <Show when={mintedToken()}>
+          {(token) => (
+            <div class="profile-minted panel-body">
+              <p>
+                <strong>Copy this token now.</strong> It is shown once; only a hash is kept.
+              </p>
+              <pre class="use-block minted-token">{token()}</pre>
+              <div class="control-row">
+                <CopyButton text={token()} label="Copy token" />
+                <span class="hint">
+                  <code>odu auth login {pageOrigin()}</code> stores it on a machine, or set{" "}
+                  <code>ODU_TOKEN</code> for an agent.
                 </span>
-                <button
-                  type="button"
-                  class="text-action"
-                  onClick={() => endSession(session.id)}
+              </div>
+            </div>
+          )}
+        </Show>
+        <div class="panel-body">
+          <div class="stack">
+            <div class="profile-create control-row">
+              {/* The name is sent as typed and the button never greys out: the
+                  ROW refuses an empty one in its own words, and a disabled
+                  control says nothing about why. */}
+              <label class="field-inline">
+                <span class="sr-only">token name</span>
+                <TextInput
+                  id="token-name"
+                  value={name()}
+                  placeholder="token name, e.g. laptop"
+                  onValue={(value) => setName(value)}
+                />
+              </label>
+              <label class="field-inline">
+                <span>expiry</span>
+                <select
+                  class="input"
+                  aria-label="token expiry"
+                  value={expiry()}
+                  onChange={(event) => setExpiry(event.currentTarget.value)}
                 >
-                  end
-                </button>
-              </li>
-            )}
-          </For>
-        </ul>
-      </Show>
+                  <option value="30">30 days</option>
+                  <option value="90">90 days</option>
+                  <option value="365">1 year</option>
+                  <option value="never">never</option>
+                </select>
+              </label>
+              <Button class="btn-primary" disabled={control.busy()} onClick={create}>
+                {control.busy() ? "creating…" : "Create token"}
+              </Button>
+            </div>
+            <Show
+              when={tokens().length > 0}
+              fallback={<p class="empty">{readings.loading ? "reading…" : "No tokens yet."}</p>}
+            >
+              <ul class="tokens">
+                <For each={tokens()}>
+                  {(token) => (
+                    <li>
+                      <span>
+                        <strong>{token.name}</strong>
+                        <span class="fact-line bucket-facts">{tokenLife(token, props.now)}</span>
+                      </span>
+                      <span class="control-row">
+                        <Show when={token.id === mintedId()}>
+                          <Pill hue="amber">just created</Pill>
+                        </Show>
+                        {/* THE ID IS IN THE CONTROL'S NAME. Two tokens may both
+                            be called `laptop`, and "revoke" alone would be two
+                            controls with one name — to a screen reader and to
+                            the acceptance suite alike. */}
+                        <Show when={!token.revoked}>
+                          <button
+                            type="button"
+                            class="text-action"
+                            onClick={() => revoke(token.id)}
+                          >
+                            revoke {token.id}
+                          </button>
+                        </Show>
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
+          </div>
+        </div>
+      </Panel>
     </section>
   );
 }
@@ -446,92 +571,111 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
   };
 
   return (
-    <section class="profile people-page" aria-label="people">
+    <section class="screen people-page" aria-label="people">
       <p class="crumbs">
-        <button type="button" class="link" onClick={() => props.onClose()}>
-          ← runs
-        </button>
+        <BackLink onClick={() => props.onClose()}>runs</BackLink>
       </p>
-      <h2>People</h2>
-      <p class="hint">
-        GitHub decides who may enter; this page decides what each person may do once in.
-      </p>
+      <PageHead
+        title="People"
+        sub="GitHub decides who may enter; this page decides what each person may do once in."
+      />
 
-      <div class="admin-section">
-        <h3>Grant a role</h3>
-        <label class="search">
-          <span class="sr-only">GitHub login</span>
-          <input
-            type="text"
-            class="input"
-            placeholder="GitHub login, e.g. octocat"
-            value={login()}
-            onInput={(event) => setLogin(event.currentTarget.value)}
-          />
-        </label>
-        <label class="field-inline">
-          <span>role</span>
-          <select
-            class="input"
-            aria-label="role to grant"
-            onChange={(event) => {
-              const value = event.currentTarget.value;
-              if (isRole(value)) setRole(value);
-            }}
-          >
-            <RoleOptions held={role()} />
-          </select>
-        </label>
-        <button
-          type="button"
-          class="btn btn-primary"
-          disabled={control.busy()}
-          onClick={() => grant(login(), role())}
-        >
-          {control.busy() ? "granting…" : "Grant"}
-        </button>
-      </div>
-
-      <Show when={control.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
-      <Show when={control.done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
-      <Show when={refusal()}>{(message) => <p class="fault">{message()}</p>}</Show>
-
-      <h3>Who is in</h3>
-      <Show
-        when={listed().length > 0}
-        fallback={
-          <Show when={refusal() === null}>
-            <p class="hint">{people.loading ? "reading…" : "Nobody has signed in yet."}</p>
-          </Show>
-        }
+      <Panel
+        title="Grant a role"
+        note="A grant takes effect at that person's next connection — their open ones end."
       >
-        <ul class="people">
-          <For each={listed()}>
-            {(person) => (
-              <li>
-                <span>
-                  <strong>{person.login}</strong>
-                  <span class="hint"> {personLife(person, props.now)}</span>
-                </span>
-                {/* CHANGING A ROLE IS A GRANT. The select shows the role held;
-                    choosing another one grants it at once, and the list is
-                    re-read so the row says what the daemon now holds. */}
+        <div class="panel-body">
+          <div class="stack">
+            <div class="control-row">
+              <label class="field-inline">
+                <span class="sr-only">GitHub login</span>
+                <TextInput
+                  id="grant-login"
+                  value={login()}
+                  placeholder="GitHub login, e.g. octocat"
+                  onValue={(value) => setLogin(value)}
+                />
+              </label>
+              <label class="field-inline">
+                <span>role</span>
                 <select
                   class="input"
-                  aria-label={`role of ${person.login}`}
-                  disabled={control.busy()}
+                  aria-label="role to grant"
                   onChange={(event) => {
                     const value = event.currentTarget.value;
-                    if (isRole(value) && value !== person.role) grant(person.login, value);
+                    if (isRole(value)) setRole(value);
                   }}
                 >
-                  <RoleOptions held={person.role} />
+                  <RoleOptions held={role()} />
                 </select>
-              </li>
-            )}
-          </For>
-        </ul>
-      </Show>
+              </label>
+              <Button
+                class="btn-primary"
+                disabled={control.busy()}
+                onClick={() => grant(login(), role())}
+              >
+                {control.busy() ? "granting…" : "Grant"}
+              </Button>
+            </div>
+            {/* THE ROW'S OWN SENTENCE, under the control that asked for it:
+                "a grant needs a GitHub login" is the daemon's answer, not a
+                validation message this page invented. */}
+            <Show when={control.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
+            <Show when={control.done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
+            <Show when={refusal()}>{(message) => <p class="fault">{message()}</p>}</Show>
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="Who is in" note="Everyone who has signed in, and what each one holds.">
+        <div class="panel-body">
+          <Show
+            when={listed().length > 0}
+            fallback={
+              <Show when={refusal() === null}>
+                <p class="empty">{people.loading ? "reading…" : "Nobody has signed in yet."}</p>
+              </Show>
+            }
+          >
+            <ul class="people facts">
+              <For each={listed()}>
+                {(person) => (
+                  <li>
+                    <span class="control-row">
+                      <span class="avatar" aria-hidden="true">
+                        {person.login.slice(0, 1).toUpperCase()}
+                      </span>
+                      <span>
+                        <code class="path">{person.login}</code>
+                        <span class="fact-line bucket-facts">{personLife(person, props.now)}</span>
+                      </span>
+                      {/* A ROLE IS A PROPERTY, not a verdict: a square grey tag
+                          and not a hued pill, because every colour this page
+                          owns already means something about a run. */}
+                      <Tag>{person.role}</Tag>
+                    </span>
+                    {/* CHANGING A ROLE IS A GRANT. The select shows the role
+                        held; choosing another one grants it at once, and the
+                        list is re-read so the row says what the daemon now
+                        holds. */}
+                    <select
+                      class="input"
+                      aria-label={`role of ${person.login}`}
+                      disabled={control.busy()}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        if (isRole(value) && value !== person.role) grant(person.login, value);
+                      }}
+                    >
+                      <RoleOptions held={person.role} />
+                    </select>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </div>
+      </Panel>
     </section>
   );
 }

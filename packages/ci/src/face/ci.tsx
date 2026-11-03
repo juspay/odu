@@ -37,9 +37,12 @@ import {
 } from "solid-js";
 import { Board } from "./board";
 import { requestId } from "./format";
-// The shell draws its two switch buttons and its Reload with the SAME control
-// the run views use: one place decides what a control is (`./dom`'s header).
-export { Button } from "./dom";
+// The primitives this face draws with live in `@odu/face/ui` — the package of
+// no row — so the shell and every row's face get one answer to what a control
+// IS. This module used to re-export `Button` for the shell, which made the
+// runs' package the home of a control the cache and the account card also
+// press; the shell imports it from the design system now, and a face that
+// re-exported furniture was a door the fence would eventually have to close.
 import { Create, type CreateState, type PreviewState, type StartForm } from "./create";
 import { Machines, Maintain } from "./ops";
 import { type ControlState, Detail, LOG_PAGE_BYTES, LogPanel } from "./detail";
@@ -667,7 +670,6 @@ export function CiFace(props: CiFaceProps): JSX.Element {
             loading={props.connecting && rows().length === 0}
             onOpen={(id) => props.onRoute({ at: "run", runId: id, log: null })}
             onCreate={() => props.onRoute({ at: "new" })}
-            onMachines={() => props.onRoute({ at: "machines" })}
             onMaintain={() => props.onRoute({ at: "maintain" })}
           />
         </Match>
@@ -677,7 +679,10 @@ export function CiFace(props: CiFaceProps): JSX.Element {
             call={props.call}
             now={now()}
             canRun={props.canRun}
-            onBack={() => props.onRoute({ at: "board" })}
+            // NO `onBack`: Machines is a ROW of the shell's rail now, and the
+            // rail is how a person leaves it. A second way out, drawn inside
+            // the page, would be the one control here that duplicates the
+            // frame around it.
           />
         </Match>
         <Match when={route().at === "maintain"}>

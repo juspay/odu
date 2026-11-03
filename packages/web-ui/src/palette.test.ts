@@ -4,9 +4,9 @@
  * A favicon is an SVG built in TypeScript, because its hue is a function of
  * live state and a build cannot know which state is true. That puts four
  * colours in `format.ts` as hex literals — the dot, the ground, the sigil —
- * that are also tokens in `styles.css`, in a language that cannot import them
- * and is not imported by them. Two restatements of one design choice, agreeing
- * by nobody's promise.
+ * that are also tokens in `@odu/face`'s `theme.css`, in a language that cannot
+ * import them and is not imported by them. Two restatements of one design
+ * choice, agreeing by nobody's promise.
  *
  * A TEST is the receptacle for exactly that shape: two languages that must
  * agree and cannot reach each other. Reading the stylesheet is legal here —
@@ -18,7 +18,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { faviconSvg } from "./format";
 
-const css = readFileSync(join(import.meta.dirname, "styles.css"), "utf-8");
+const css = readFileSync(
+  join(import.meta.dirname, "..", "..", "face", "src", "theme.css"),
+  "utf-8",
+);
 
 function token(name: string): string {
   const hit = new RegExp(`--${name}:\\s*([^;]+);`).exec(css);

@@ -98,6 +98,63 @@ function escapeHtml(text: string): string {
 }
 
 /**
+ * NIGHT SHIFT, HARD-CODED — the one stylesheet these two pages cannot link.
+ *
+ * `@odu/face/theme.css` is in the BUNDLE, and the whole point of the two pages
+ * below is that they are read with no bundle: `curl /` on a gated daemon, and
+ * a browser that GitHub sent back to a refusal. So the palette is spelled out
+ * in hex here rather than taken from a token — the duplication is deliberate
+ * and the values are the design's own (`--canvas`, `--ink`, `--brand`, …).
+ *
+ * BOTH HALVES, because `color-scheme` cannot re-value a literal: the dark
+ * values are the defaults and a `prefers-color-scheme: light` block restates
+ * them. A person whose desktop is light must not be handed a near-black page
+ * by the one screen in this product that ships no stylesheet.
+ */
+const DOOR_STYLE = `
+      :root {
+        color-scheme: dark light;
+        --canvas: #0a0d0c;
+        --line: #1c2420;
+        --ink: #e6ede9;
+        --muted: #93a39b;
+        --quiet: #7a8982;
+        --brand: #e6ede9;
+        --brand-ink: #0a0d0c;
+        --link: #3fd0de;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --canvas: #f4f7f5;
+          --line: #dde5e0;
+          --ink: #10201a;
+          --muted: #48584f;
+          --quiet: #5d6d66;
+          --brand: #10201a;
+          --brand-ink: #f4f7f5;
+          --link: #0a7385;
+        }
+      }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+             background: var(--canvas); color: var(--ink);
+             font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+             -webkit-font-smoothing: antialiased; }
+      main { box-sizing: border-box; width: 100%; max-width: 24rem; padding: 2rem 1.5rem;
+             display: flex; flex-direction: column; gap: 1.5rem; }
+      .mark { font: 600 1.3rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+              letter-spacing: -0.02em; }
+      h1 { margin: 0 0 0.5rem; font-size: 1.7rem; font-weight: 600;
+           letter-spacing: -0.025em; text-wrap: balance; }
+      .hint { margin: 0; color: var(--muted); }
+      a { color: var(--link); text-underline-offset: 0.2em; }
+      .action { display: flex; align-items: center; justify-content: center; min-height: 3rem;
+                border: 1px solid var(--brand); border-radius: 11px; background: var(--brand);
+                color: var(--brand-ink); font-weight: 600; text-decoration: none; }
+      .foot { margin: 0; color: var(--quiet);
+              font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      :focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }`;
+
+/**
  * THE SIGN-IN PAGE THE SERVER RENDERS — what `curl /` meets on a daemon with a
  * door and no session.
  *
@@ -119,21 +176,16 @@ export function signInPageHtml(): string {
     <meta name="viewport" content="width=device-width">
     <meta name="odu-door" content="1">
     <title>${escapeHtml(SIGN_IN_COPY.title)}</title>
-    <style>
-      :root { color-scheme: light dark; }
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-             font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }
-      main { max-width: 26rem; padding: 2rem; text-align: left; }
-      h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
-      .hint { opacity: 0.75; margin: 0 0 1.5rem; }
-      .action { display: inline-block; padding: 0.6rem 1rem; border-radius: 6px;
-                background: #1f6feb; color: #fff; text-decoration: none; font-weight: 600; }
+    <style>${DOOR_STYLE}
     </style>
   </head>
   <body>
     <main>
-      <h1>${escapeHtml(SIGN_IN_COPY.title)}</h1>
-      <p class="hint">${escapeHtml(SIGN_IN_COPY.hint)}</p>
+      <span class="mark">odu</span>
+      <div>
+        <h1>${escapeHtml(SIGN_IN_COPY.title)}</h1>
+        <p class="hint">${escapeHtml(SIGN_IN_COPY.hint)}</p>
+      </div>
       <a class="action" href="${escapeHtml(AUTH_SIGN_IN_PATH)}">${escapeHtml(SIGN_IN_COPY.action)}</a>
     </main>
   </body>
@@ -141,17 +193,28 @@ export function signInPageHtml(): string {
 `;
 }
 
-/** A refusal a person reads, with the way back to try again. */
+/** A refusal a person reads, with the way back to try again. The same face as
+ *  the page they came from: a refusal that looks like a different server is a
+ *  refusal people read as a bug. */
 function refusalPage(status: number, message: string): HttpServerResponse.HttpServerResponse {
   return HttpServerResponse.text(
     `<!doctype html>
 <html lang="en">
-  <head><meta charset="utf-8"><title>odu — sign-in refused</title></head>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width">
+    <title>odu — sign-in refused</title>
+    <style>${DOOR_STYLE}
+    </style>
+  </head>
   <body>
     <main>
-      <h1>Sign-in refused</h1>
-      <p>${escapeHtml(message)}</p>
-      <p><a href="${AUTH_SIGN_IN_PATH}">Try again</a></p>
+      <span class="mark">odu</span>
+      <div>
+        <h1>Sign-in refused</h1>
+        <p class="hint">${escapeHtml(message)}</p>
+      </div>
+      <p class="foot"><a href="${AUTH_SIGN_IN_PATH}">Try again</a></p>
     </main>
   </body>
 </html>`,

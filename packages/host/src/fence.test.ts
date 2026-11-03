@@ -117,6 +117,10 @@ const declaration = {
       "packages/launch/src/webDaemonLaunch.ts": 1,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,
+      // THE SCREENSHOT HARNESS composes all three worlds the way `hooks.ts`
+      // does — a loopback daemon, a door daemon and a tunnel daemon — because
+      // the evidence it takes is every screen of every row.
+      "packages/web-acceptance/board-shots.ts": 7,
     },
     ci: {
       "packages/web-acceptance/support/service.ts": 7,
@@ -139,6 +143,7 @@ const declaration = {
       // browser meets a door, and the stub's environment is the door's.
       "packages/web-acceptance/support/authWorld.ts": 1,
       "packages/web-acceptance/support/hooks.ts": 3,
+      "packages/web-acceptance/board-shots.ts": 1,
     },
     // THE TUNNEL'S WORD, where it is not a row: the NIX protocol's own path
     // `/nix-cache-info` is what a domain is probed for, and "cache" there
@@ -148,6 +153,7 @@ const declaration = {
       // the door's world names the auth stub.
       "packages/web-acceptance/support/cloudflareStub.ts": 2,
       "packages/web-acceptance/support/hooks.ts": 15,
+      "packages/web-acceptance/board-shots.ts": 9,
       // The composed wire: the row's own facts, from which every composed
       // face (the argv face, the MCP bridge) reads the sibling.
       "packages/cli/src/wire.ts": 2,

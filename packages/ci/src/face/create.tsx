@@ -27,7 +27,16 @@
  */
 
 import { createSignal, For, Show, type JSX } from "solid-js";
-import { Button, Field, Receipt, TextInput, Toggle } from "./dom";
+import {
+  BackLink,
+  Button,
+  Field,
+  PageHead,
+  Panel,
+  Receipt,
+  TextInput,
+  Toggle,
+} from "@odu/face/ui";
 import type { Pipeline } from "./types";
 
 /** What the caller filled in. Every optional field is left ABSENT rather than
@@ -118,13 +127,18 @@ export function Create(props: {
   };
 
   return (
-    <section class="create">
-      <header class="detail-head">
-        <Button onClick={props.onBack}>← Runs</Button>
-        <h1>New run</h1>
-      </header>
+    <section class="screen create">
+      {/* The way out, then the title — "All runs" rather than "Runs" because
+          the shell's rail already offers a control by that name, and one
+          accessible name on two buttons is ambiguous to a person and
+          unaddressable to anything that finds a control by what it says. */}
+      <BackLink onClick={props.onBack}>All runs</BackLink>
+      <PageHead
+        title="New run"
+        sub="Every option odu ci run takes, and the refusal is the feature: a checkout that has moved on is declined rather than run."
+      />
       <form
-        class="create-form"
+        class="form"
         onSubmit={(event) => {
           event.preventDefault();
           submit();
@@ -154,30 +168,35 @@ export function Create(props: {
             onValue={setSha}
           />
         </Field>
-        <Field
-          id="selectors"
-          label="Recipes"
-          hint={'Space-separated recipe[@platform] selectors. Empty means the whole [metadata("ci")] DAG.'}
-        >
-          <TextInput
+        {/* PAIRED, where two fields are short and read together — what to run
+            and where to run it. `.form-pair` folds to one column the moment
+            there is not room for two, so nothing is squeezed on a phone. */}
+        <div class="form-pair">
+          <Field
             id="selectors"
-            value={selectors()}
-            placeholder="unit e2e"
-            onValue={setSelectors}
-          />
-        </Field>
-        <Field
-          id="platforms"
-          label="Platforms"
-          hint="Empty means every platform in the fanout."
-        >
-          <TextInput
+            label="Recipes"
+            hint={'Space-separated recipe[@platform] selectors. Empty means the whole [metadata("ci")] DAG.'}
+          >
+            <TextInput
+              id="selectors"
+              value={selectors()}
+              placeholder="unit e2e"
+              onValue={setSelectors}
+            />
+          </Field>
+          <Field
             id="platforms"
-            value={platforms()}
-            placeholder="x86_64-linux"
-            onValue={setPlatforms}
-          />
-        </Field>
+            label="Platforms"
+            hint="Empty means every platform in the fanout."
+          >
+            <TextInput
+              id="platforms"
+              value={platforms()}
+              placeholder="x86_64-linux"
+              onValue={setPlatforms}
+            />
+          </Field>
+        </div>
         <Field
           id="hosts"
           label="Host pins"
@@ -190,25 +209,27 @@ export function Create(props: {
             onValue={setHosts}
           />
         </Field>
-        <Field
-          id="root"
-          label="Justfile root"
-          hint="A module path inside the justfile — the same NAMEPATH odu ci run --root takes. Empty means the top."
-        >
-          <TextInput id="root" value={root()} placeholder="ci" onValue={setRoot} />
-        </Field>
-        <Field
-          id="hosts-file"
-          label="Hosts file"
-          hint="An absolute path to the hosts file to resolve platforms from. Empty means the service's own."
-        >
-          <TextInput
+        <div class="form-pair">
+          <Field
+            id="root"
+            label="Justfile root"
+            hint="A module path inside the justfile — the same NAMEPATH odu ci run --root takes. Empty means the top."
+          >
+            <TextInput id="root" value={root()} placeholder="ci" onValue={setRoot} />
+          </Field>
+          <Field
             id="hosts-file"
-            value={hostsFile()}
-            placeholder="/etc/odu/hosts.json"
-            onValue={setHostsFile}
-          />
-        </Field>
+            label="Hosts file"
+            hint="An absolute path to the hosts file to resolve platforms from. Empty means the service's own."
+          >
+            <TextInput
+              id="hosts-file"
+              value={hostsFile()}
+              placeholder="/etc/odu/hosts.json"
+              onValue={setHostsFile}
+            />
+          </Field>
+        </div>
         <fieldset class="toggles">
           <legend>Options</legend>
           <Toggle id="no-deps" checked={noDeps()} onChecked={setNoDeps}>
@@ -227,25 +248,30 @@ export function Create(props: {
             Keep the run answerable after it settles (linger)
           </Toggle>
         </fieldset>
-        {/* A READ, beside the submit rather than instead of it: what this
-            checkout would run, before anything runs. */}
-        <Button onClick={() => props.onPreview(checkout().trim(), root().trim())}>
-          {props.preview.kind === "reading" ? "Reading…" : "Preview pipeline"}
-        </Button>
-        {/* A SUBMIT button, and with no click handler of its own — see
-            `./dom`'s `ButtonAction`. The form's `onSubmit` above is the single
-            path a start takes, whether it was reached by a mouse or by Enter in
-            a field, so the two ways of asking cannot disagree and one press
-            cannot start two runs. */}
-        <Show when={props.canRun}>
-          <Button
-            type="submit"
-            class="btn-primary"
-            disabled={props.state.kind === "starting"}
-          >
-            {props.state.kind === "starting" ? "Starting…" : "Start run"}
+        {/* THE TWO CONTROLS, on one line. A read and a write: what this
+            checkout WOULD run, and the start itself — side by side rather
+            than stacked, because they are the same decision taken twice and a
+            form whose last two rows are each one button reads as two
+            unrelated endings. */}
+        <div class="control-row">
+          <Button onClick={() => props.onPreview(checkout().trim(), root().trim())}>
+            {props.preview.kind === "reading" ? "Reading…" : "Preview pipeline"}
           </Button>
-        </Show>
+          {/* A SUBMIT button, and with no click handler of its own — see
+              `@odu/face/ui`'s `ButtonAction`. The form's `onSubmit` above is
+              the single path a start takes, whether it was reached by a mouse
+              or by Enter in a field, so the two ways of asking cannot
+              disagree and one press cannot start two runs. */}
+          <Show when={props.canRun}>
+            <Button
+              type="submit"
+              class="btn-primary"
+              disabled={props.state.kind === "starting"}
+            >
+              {props.state.kind === "starting" ? "Starting…" : "Start run"}
+            </Button>
+          </Show>
+        </div>
       </form>
       {/* A refusal INTERRUPTS — `Receipt`'s `refused` tone announces it with
           `alert` rather than `status` — because it is the answer to the thing
@@ -259,25 +285,36 @@ export function Create(props: {
       <Show when={props.preview.kind === "refused" ? props.preview : null}>
         {(refused) => <Receipt tone="refused">{refused().message}</Receipt>}
       </Show>
+      {/* WHAT THIS CHECKOUT WOULD RUN — `odu dump`, before anything runs. A
+          panel rather than a bare section: it is an answer the form produced,
+          and a surface with an edge is how this design says "this block is a
+          thing somebody asked for". `.pipeline-preview` and its `ul.tokens`
+          stay — the stylesheet reads them as a paragraph of chips, and the
+          acceptance suite reads the recipes out of them. */}
       <Show when={props.preview.kind === "read" ? props.preview.pipeline : null}>
         {(pipeline) => (
-          <section class="admin-section pipeline-preview" aria-label="pipeline">
-            <h3>{`${pipeline().name}: ${pipeline().tasks.length} recipes`}</h3>
-            <ul class="tokens">
-              <For each={pipeline().tasks}>
-                {(task) => (
-                  <li>
-                    <span>
-                      <code>{task.id}</code>
-                      <Show when={task.needs.length > 0}>
-                        <span class="hint">{` needs ${task.needs.join(", ")}`}</span>
-                      </Show>
-                    </span>
-                  </li>
-                )}
-              </For>
-            </ul>
-          </section>
+          <Panel
+            class="pipeline-preview"
+            label="pipeline"
+            title={`${pipeline().name}: ${pipeline().tasks.length} recipes`}
+          >
+            <div class="panel-body">
+              <ul class="tokens">
+                <For each={pipeline().tasks}>
+                  {(task) => (
+                    <li>
+                      <span>
+                        <code>{task.id}</code>
+                        <Show when={task.needs.length > 0}>
+                          <span class="hint">{` needs ${task.needs.join(", ")}`}</span>
+                        </Show>
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          </Panel>
         )}
       </Show>
       <Show when={props.state.kind === "refused" ? props.state : null}>

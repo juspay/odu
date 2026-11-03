@@ -127,6 +127,11 @@ let
       pkgs.runCommand "odu-web-ui"
         {
           nativeBuildInputs = [ pkgs.bun ];
+          # The two typefaces the bundle carries, from nixpkgs rather than
+          # from a font CDN — the same derivation the dev shell exports
+          # (`nix/env.nix`), so a developer's bundle and the packaged one name
+          # the same files.
+          ODU_GEIST_FONTS = pkgs.odu-geist-fonts;
           meta.description = "odu's browser bundle";
         } ''
         cp -r ${base} ./tree

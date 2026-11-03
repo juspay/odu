@@ -1,0 +1,74 @@
+/*
+ * THE CACHE'S OWN SCREENS, in Night shift.
+ *
+ * `@odu/face`'s `theme.css` carries the tokens, the primitives `./ui` renders
+ * and the page shell. THIS file carries what only a bucket has: the pin list,
+ * which is the one list on this board that is not a line per thing.
+ *
+ * It is here, beside the view that emits these class names, because a row owns
+ * everything about itself. Loaded by `scripts/build-web-ui.ts`, which finds
+ * every `face.css` under `packages/<row>/src/` and appends it to the design
+ * system's sheet; every rule names its LAYER, because `theme.css` declares the
+ * four and an unlayered rule would beat all of them.
+ */
+
+@layer layout {
+  /* ── a bucket's pins ──────────────────────────────────────────────────────
+   *
+   * A PIN IS THREE FACTS AND A LIST OF ROOTS, and that is why it is not the
+   * `.facts` row every other list here is. `ul.pins` keeps the `.facts`
+   * grammar for the row — the hairline, the control on the right — and this
+   * stacks the left half of it.
+   */
+  .pins .pin {
+    display: grid;
+    gap: 0.3rem;
+    min-width: 0;
+  }
+
+  .pin-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  /* THE REPOSITORY A RUN OF PINS BELONGS TO. A heading inside the list rather
+     than a list per repository: a pin is a pin whichever heading it sits
+     under, and splitting the `<ul>` would split the grammar with it. Caps and
+     letter-spacing carry the size, the way every label strip on this board
+     does. */
+  .pin-group {
+    display: block;
+    padding: 0.9rem 0 0.3rem;
+    border-top: 1px solid var(--line);
+    color: var(--quiet);
+    font: 500 0.72rem var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    overflow-wrap: anywhere;
+  }
+
+  /* The first heading sits under the Pin-closure control, which already has
+     the panel's own spacing above it. */
+  .pins > .pin-group:first-child { padding-top: 0; border-top: 0; }
+
+  /* WHAT THE PIN HOLDS. Each root is a store path: it wraps nowhere and
+     scrolls inside its own line, which is the one sideways scroll this design
+     allows — a store path broken across lines is two strings that look like
+     paths and are not. */
+  .pin-roots {
+    display: grid;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+
+  .pin-roots .path {
+    overflow-x: auto;
+    white-space: nowrap;
+    font-size: 0.75rem;
+    color: var(--quiet);
+    scrollbar-width: thin;
+  }
+}

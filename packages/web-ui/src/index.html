@@ -1,7 +1,7 @@
 <!doctype html>
 <!--
   The SHELL. Served `no-store` and rewritten at build time to name the hashed
-  bundle beside it — the freshness contract `@kolu/surface-app` keeps: the shell
+  assets beside it — the freshness contract `@kolu/surface-app` keeps: the shell
   is always re-fetched, the assets it names are pinned immutable for a year, so
   an installed browser converges on a new build without ever holding a stale
   one. Nothing here is content; everything is in the bundle.
@@ -11,11 +11,42 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>odu</title>
+    <!--
+      WHICH THEME, BEFORE THE FIRST PAINT.
+
+      `@odu/face`'s `./theme` owns this choice, but a module bundle runs after
+      the browser has already painted — so a person who pinned light would see
+      a black frame flash first, on every navigation, forever. Four lines of
+      blocking script is the whole fix, and it is the only script in this file.
+
+      The key is `@odu/face`'s `THEME_KEY` spelled a second time, which is a
+      restatement held equal by `./theme.test.ts` rather than by a comment:
+      a bundle and a boot script cannot import each other.
+    -->
+    <script>
+      try {
+        var t = localStorage.getItem("odu.web.theme");
+        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {
+        /* storage denied: the stylesheet follows the OS, which is the default */
+      }
+    </script>
     <!-- The repo's own logo, hashed and served beside the bundle. SVG rather
          than a .ico: it is the one format that is a single file at every size,
          and the tab is the only place a person sees which of several odu boards
          they are looking at. -->
     <link rel="icon" type="image/svg+xml" href="./logo.svg" />
+    <!--
+      THE TWO TYPEFACES, PRELOADED. They are named from the stylesheet, which
+      the browser only parses after it has fetched it — so without these two
+      lines the fonts start downloading one round trip late and the board paints
+      its first frame in a fallback face. Both hrefs are build placeholders
+      (`scripts/build-web-ui.ts`), and `crossorigin` is REQUIRED on a font
+      preload even same-origin: without it the preload is fetched in a different
+      mode than the `@font-face` request and the file is downloaded twice.
+    -->
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="./geist-sans.woff2" />
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="./geist-mono.woff2" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>

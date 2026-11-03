@@ -388,19 +388,52 @@ function consumerPage(facts: ConsumerFacts): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>${escape(facts.name)} — an odu bucket</title>
-<style>:root{color-scheme:light dark}
-body{font:15px system-ui;max-width:52rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
-pre{background:#f4f4f4;padding:1rem;overflow:auto}code{font-size:.95em}
-h3{margin:1.4rem 0 .3rem;font-size:1rem}
-.block{position:relative;margin:.4rem 0 1rem}
-.block pre{margin:0;padding:2.2rem 1rem 1rem}
-.block button{position:absolute;top:.5rem;right:.5rem;font:inherit;font-size:.8rem;padding:.2rem .55rem;cursor:pointer}
-.served{color:#666;font-size:.9em}
-@media (prefers-color-scheme: dark){
-  body{background:#111;color:#ddd}
-  pre{background:#222}
-  .served{color:#999}
-}</style></head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>/* NIGHT SHIFT, SPELLED OUT. This page ships no stylesheet — it is served
+   at a bucket's own domain to a reader who has no board — so the design
+   system's tokens are hard-coded here rather than imported. The values are
+   the theme.css table of @odu/face, dark half first (dark wins a tie there
+   too) and the light half under prefers-color-scheme. Colour carries STATUS
+   on the board; this page has no status, so its only hue is the link's. */
+:root{
+  color-scheme:dark light;
+  --canvas:#0a0d0c;--panel:#0d1210;--sunken:#070908;--line:#1c2420;--line-strong:#2a342f;
+  --ink:#e6ede9;--ink-2:#c9d4ce;--muted:#93a39b;--quiet:#7a8982;--cyan:#3fd0de;
+  --mono:"Geist Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+  --sans:"Geist",ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+@media (prefers-color-scheme: light){:root{
+  --canvas:#f4f7f5;--panel:#ffffff;--line:#dde5e0;--line-strong:#c3d0c9;
+  --ink:#10201a;--ink-2:#2b3a33;--muted:#48584f;--quiet:#5d6d66;--cyan:#0a7385;
+}}
+*{box-sizing:border-box}
+body{max-width:52rem;margin:0 auto;padding:3rem 1.25rem 4rem;background:var(--canvas);color:var(--ink);font:0.95rem/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--cyan)}
+:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+/* The name is a string a machine chose, so it is mono — the same rule the
+   board's bucket page keeps for its own title. */
+h1{margin:0 0 .4rem;font:600 2rem/1.2 var(--mono);letter-spacing:-.03em;overflow-wrap:anywhere}
+h2{margin:2.25rem 0 .6rem;font:600 1.05rem var(--sans);letter-spacing:-.01em}
+h3{margin:1.4rem 0 .4rem;font:500 .8rem var(--mono);color:var(--muted)}
+p{margin:0 0 .7rem;color:var(--muted)}
+code{font:.82rem var(--mono);color:var(--ink-2);overflow-wrap:anywhere}
+/* The facts a client trusts this bucket by: one panel, a hairline per row. */
+dl{display:grid;grid-template-columns:max-content minmax(0,1fr);margin:1.25rem 0 0;border:1px solid var(--line);border-radius:14px;background:var(--panel);overflow:hidden}
+dt{padding:.7rem 1rem;border-top:1px solid var(--line);color:var(--muted);font-size:.8rem}
+dd{margin:0;padding:.7rem 1rem;border-top:1px solid var(--line);min-width:0;overflow-wrap:anywhere}
+dl>dt:first-child,dl>dt:first-child+dd{border-top:0}
+/* A snippet is copied, so it is never re-wrapped: it scrolls inside its own
+   box and the PAGE never scrolls sideways, which is what makes this readable
+   on a phone. The sunken surface stays dark in both themes — a terminal is a
+   terminal. */
+pre{margin:0;padding:1rem 1.1rem;background:var(--sunken);color:#c9d4ce;font:.78rem/1.7 var(--mono);overflow-x:auto;white-space:pre;scrollbar-width:thin}
+.block{position:relative;margin:.4rem 0 1rem;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.block pre{padding:2.7rem 1.1rem 1rem}
+[data-copy]{position:absolute;top:.5rem;right:.5rem;min-height:2rem;padding:0 .7rem;border:1px solid var(--line-strong);border-radius:9px;background:var(--panel);color:var(--ink);font:500 .75rem var(--mono);cursor:pointer}
+[data-copy]:hover{border-color:var(--cyan)}
+.hint{font-size:.85rem}
+.served{margin:2.5rem 0 0;padding-top:1rem;border-top:1px solid var(--line);color:var(--quiet);font:.78rem var(--mono)}
+</style></head>
 <body>
 <h1>${escape(facts.name)}</h1>
 <p>${facts.public ? "A public bucket." : "A private bucket — this page was answered to a reader."}</p>

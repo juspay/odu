@@ -68,10 +68,16 @@ export interface ServingParts<Svc = never, H extends string = never> {
   middleware?: SurfaceAppHttpMiddleware;
 }
 
-/** The shell's fixed identity: what every odu board installs as. */
+/** The shell's fixed identity: what every odu board installs as.
+ *
+ *  `themeColor` is the ground an installed board's own chrome is painted with
+ *  — the splash, the status bar, the window frame — so it is the design's
+ *  canvas and not a colour of its own. `#0a0d0c` is `--canvas`'s dark half in
+ *  `@odu/face`'s `theme.css`; the DARK half specifically, because a manifest
+ *  takes one value and Night shift is the look this product is designed in. */
 const MANIFEST: NonNullable<ServeSurfaceAppOptions["manifest"]> = {
   name: "odu",
-  themeColor: "#1f6feb",
+  themeColor: "#0a0d0c",
   icons: [],
 };
 

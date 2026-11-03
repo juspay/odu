@@ -25,19 +25,126 @@
  * Usage:  bun scripts/build-web-ui.ts [<distDir>]
  */
 
-import { buildSurfaceClient } from "@kolu/surface-app/bun";
+import { buildSurfaceClient, type SurfaceClientExtraAsset } from "@kolu/surface-app/bun";
 import { transformAsync } from "@babel/core";
 import solid from "babel-preset-solid";
 import typescript from "@babel/preset-typescript";
 import type { BunPlugin } from "bun";
-import { readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const clientDir = join(repoRoot, "packages", "web-ui", "src");
+/** `@odu/face`'s design system: the stylesheet every row's face draws with,
+ *  and the two typefaces it names. Read from the package that owns them. */
+const faceDir = join(repoRoot, "packages", "face", "src");
 const distDir = resolve(process.argv[2] ?? join(repoRoot, "packages", "web-ui", "dist"));
+
+/**
+ * THE TYPEFACES, FROM NIXPKGS — never from a font CDN.
+ *
+ * A tailnet-only or air-gapped board must render the same page as a public
+ * one, so the two Geist variable fonts travel with the bundle. The directory
+ * is `nix/env.nix`'s `ODU_GEIST_FONTS`, which both the dev shell and the
+ * `web-ui` derivation set — and it is REQUIRED rather than defaulted: a build
+ * that silently fell back to whatever the machine has installed would produce
+ * a bundle that looks right where it was built and wrong everywhere else.
+ */
+const fontDir = process.env.ODU_GEIST_FONTS;
+if (fontDir === undefined || fontDir.trim() === "") {
+  throw new Error(
+    "build-web-ui: $ODU_GEIST_FONTS is unset — the bundle carries Geist and " +
+      "Geist Mono, and they come from nixpkgs' `geist-font`. Build inside " +
+      "`nix develop` (or through `.#web-ui`), which sets it.",
+  );
+}
+
+/**
+ * WHERE AN EXTRA ASSET LANDS, predicted — and then checked.
+ *
+ * The stylesheet names the two fonts, so it has to know their HASHED urls,
+ * and `buildSurfaceClient` computes those AFTER each asset's `build()`
+ * returns. There is no hook in between, so this restates its naming rule —
+ * `<prefix><name>-<8 hex of Bun.hash>.<ext>` — and then asserts, once the
+ * build is done, that every prediction equals what the builder actually
+ * emitted. A restated rule that cannot silently rot: the day kolu changes how
+ * it hashes, this build fails with the two hrefs side by side rather than
+ * shipping a stylesheet pointing at a font nobody serves.
+ */
+const ASSET_PREFIX = "/assets/";
+const assetHref = (name: string, ext: string, bytes: Uint8Array): string =>
+  `${ASSET_PREFIX}${name}-${Bun.hash(bytes).toString(16).slice(0, 8)}.${ext}`;
+
+/** Filled by each font's `build()` and read by the stylesheet's, which runs
+ *  after them because `extraAssets` is walked in order. */
+const fontHrefs = new Map<string, string>();
+
+/** One variable font, hashed beside the bundle. woff2 rather than the ttf
+ *  nixpkgs ships, because the asset pipeline precompresses TEXT siblings and
+ *  a `.ttf` would go over the wire raw — 320 KB of font on a cold load.
+ *  `nix/overlay.nix`'s `odu-geist-fonts` does the conversion, and a woff2 IS
+ *  a brotli-compressed TrueType. One file per family covers every weight the
+ *  page draws. */
+const font = (name: string, file: string): SurfaceClientExtraAsset => ({
+  name,
+  ext: "woff2",
+  build: async (): Promise<Uint8Array> => {
+    const bytes = new Uint8Array(await readFile(join(fontDir, file)));
+    fontHrefs.set(name, assetHref(name, "woff2", bytes));
+    return bytes;
+  },
+  htmlPlaceholder: `href="./${name}.woff2"`,
+});
+
+/**
+ * EVERY ROW'S OWN STYLESHEET, found rather than listed.
+ *
+ * A row's screens are drawn by the row's face and dressed by the row's
+ * `face.css`, beside it. This walks `packages/*​/src` for files with that name
+ * and answers them in path order, so the assembled sheet is byte-identical on
+ * every machine and a row that grows a stylesheet is shipped by adding one
+ * file — no list here, no row named in a script that is not a root.
+ */
+async function rowSheets(): Promise<string[]> {
+  const packagesDir = join(repoRoot, "packages");
+  const found: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules") continue;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.name === "face.css") found.push(path);
+    }
+  };
+  for (const pkg of await readdir(packagesDir, { withFileTypes: true })) {
+    if (!pkg.isDirectory()) continue;
+    const src = join(packagesDir, pkg.name, "src");
+    if (!existsSync(src)) continue;
+    await walk(src);
+  }
+  return found.sort();
+}
+
+/**
+ * A SHEET WHOSE COMMENTS END WHERE THEY SAY THEY DO.
+ *
+ * CSS comments do not nest and have no escape, so one asterisk followed by a
+ * slash inside a paragraph of prose — a glob written out, say — closes the
+ * comment early and leaves the rest of it as garbage declarations. The parser
+ * recovers by eating the NEXT rule, which in a stylesheet this size is one
+ * whole `@layer` block silently gone: every rule in it missing, nothing
+ * logged, and a page that still looks like a page.
+ *
+ * That is exactly what happened once here, so it is checked rather than
+ * remembered. Strip every well-formed comment; anything still carrying a
+ * close marker was a comment that closed early.
+ */
+function commentsClose(css: string): boolean {
+  return !css.replace(/\/\*[\s\S]*?\*\//g, "").includes("*" + "/");
+}
 
 /**
  * Solid's JSX compiler, as a `Bun.build` loader.
@@ -91,13 +198,71 @@ const report = await buildSurfaceClient({
   // the staleness the contract exists to make impossible.
   entryHtmlPlaceholder: 'src="./main.tsx"',
   extraAssets: [
+    // THE FONTS FIRST, because the stylesheet below reads the hrefs their
+    // `build()` records. `extraAssets` is walked in order, so this is an
+    // ordering the builder guarantees rather than one this file hopes for.
+    font("geist-sans", "Geist.woff2"),
+    font("geist-mono", "GeistMono.woff2"),
     {
       name: "styles",
       ext: "css",
-      // Plain CSS, read as bytes. No preprocessor: the stylesheet is 300 lines
-      // of custom properties and a grid, and a toolchain for that would cost
-      // more than it saves.
-      build: () => readFile(join(clientDir, "styles.css")),
+      // ONE STYLESHEET, ASSEMBLED FROM THE PACKAGES THAT OWN ITS PARTS.
+      //
+      // `@odu/face`'s `theme.css` first — the tokens, the base, the
+      // primitives `./ui` renders and the page shell every screen sits in —
+      // then every row's own `face.css`, which carries what only that row's
+      // screens have. A shared sheet that knew `.node-track` would change
+      // every time the runs' views did; a row's look belongs in the row,
+      // beside the view that emits the class names.
+      //
+      // FOUND, not listed. This globs `packages/*/src/**/face.css` in path
+      // order rather than naming the rows: a build script is not one of the
+      // four roots the fence lets name them, and a list here would be a fifth
+      // place to remember a row exists. A row ships a sheet by adding a file.
+      //
+      // ORDER is why every row's sheet names its `@layer`: `theme.css`
+      // declares the four up front, so a later `@layer layout { … }` appends
+      // to that layer instead of out-shouting it, and the order rows are
+      // concatenated in cannot decide which rule wins.
+      //
+      // The two font `url()`s are BUILD PLACEHOLDERS, rewritten here to the
+      // hashed hrefs. A miss is a hard stop: a stylesheet shipped still
+      // naming `./geist-sans.woff2` would quietly render the whole board in a
+      // fallback face, which is the kind of failure a screenshot does not
+      // catch because it still looks like a page.
+      build: async (): Promise<Uint8Array> => {
+        const sheets = [join(faceDir, "theme.css"), ...(await rowSheets())];
+        let css = (
+          await Promise.all(
+            sheets.map(async (file) => {
+              const text = await readFile(file, "utf-8");
+              if (!commentsClose(text)) {
+                throw new Error(
+                  `build-web-ui: ${relative(repoRoot, file)} has a comment that ` +
+                    "closes early — the rule after it would be eaten by the " +
+                    "parser and the whole block would go missing silently.",
+                );
+              }
+              return `/* ── ${relative(repoRoot, file)} ── */\n${text}`;
+            }),
+          )
+        ).join("\n");
+        for (const [name, href] of fontHrefs) {
+          const placeholder = `url("./${name}.woff2")`;
+          if (!css.includes(placeholder)) {
+            throw new Error(
+              `build-web-ui: theme.css does not contain ${placeholder} — the ` +
+                `hashed ${name} would never be referenced and the board would ` +
+                "render in a fallback typeface.",
+            );
+          }
+          css = css.replaceAll(placeholder, `url("${href}")`);
+        }
+        process.stdout.write(
+          `  stylesheet: ${sheets.map((file) => relative(repoRoot, file)).join(", ")}\n`,
+        );
+        return new TextEncoder().encode(css);
+      },
       htmlPlaceholder: 'href="./styles.css"',
     },
     {
@@ -118,6 +283,27 @@ const report = await buildSurfaceClient({
   // never-stale — a dev build must not prompt itself to reload forever.
   commitEnvVar: "ODU_COMMIT_HASH",
 });
+
+// THE PREDICTION, CHECKED. See `assetHref`: the stylesheet was written with
+// hrefs this file computed, and these are the hrefs the builder emitted. They
+// are equal or this build is wrong, and a wrong one here ships a page in the
+// wrong typeface rather than failing — so it fails.
+if (report.assetPrefix !== ASSET_PREFIX) {
+  throw new Error(
+    `build-web-ui: assets are served from ${report.assetPrefix}, not ` +
+      `${ASSET_PREFIX} — the font urls baked into the stylesheet are wrong.`,
+  );
+}
+for (const [name, predicted] of fontHrefs) {
+  const emitted = report.assetHrefs[name];
+  if (emitted !== predicted) {
+    throw new Error(
+      `build-web-ui: the stylesheet names ${name} at ${predicted} but the ` +
+        `build emitted it at ${String(emitted)}. kolu's asset naming moved; ` +
+        "update `assetHref` in this file to match it.",
+    );
+  }
+}
 
 process.stdout.write(
   `odu web-ui → ${distDir}\n  entry ${report.jsHref}\n  styles ${report.assetHrefs.styles}\n`,

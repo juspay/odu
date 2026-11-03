@@ -1,10 +1,10 @@
 @narrow
 Feature: A narrow viewport hides nothing
-  # 380 px, which is on the far side of the 44 rem breakpoint `styles.css`
-  # reflows at rather than near it. The assertions are about GEOMETRY, not about
-  # class names: a media query that stopped applying would leave every class
-  # exactly where it was, so a test that read classes would go on passing over a
-  # board scrolling sideways.
+  # 380 px, which is on the far side of the 46 rem breakpoint `@odu/face`'s
+  # `theme.css` reflows the board at rather than near it. The assertions are
+  # about GEOMETRY, not about class names: a media query that stopped applying
+  # would leave every class exactly where it was, so a test that read classes
+  # would go on passing over a board scrolling sideways.
 
   Scenario: The board reflows rather than scrolling sideways
     Given a settled red run of the failing fixture

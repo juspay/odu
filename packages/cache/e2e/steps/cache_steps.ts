@@ -196,7 +196,9 @@ When("a bucket with one path is pushed from the CLI", function (this: OduWorld) 
 
 Given("I open the cache", async function (this: OduWorld) {
   await this.open("#/cache");
-  await this.page.getByRole("heading", { name: "Buckets", exact: true }).waitFor();
+  // THE SCREEN'S ONE HEADING IS THE ROW'S NAME. The buckets under it are a
+  // labelled grid of cards, not a second heading saying "Buckets".
+  await this.page.getByRole("heading", { name: "Cache", exact: true }).waitFor();
 });
 
 When("I open that bucket", async function (this: OduWorld) {
@@ -209,14 +211,11 @@ When("I open that bucket", async function (this: OduWorld) {
 When("I open a bucket the cache does not have", async function (this: OduWorld) {
   await this.open("#/cache/wa-no-such-bucket");
   await this.page.getByRole("heading", { name: "wa-no-such-bucket", exact: true }).waitFor();
-  // THE PAGE HAS TO HAVE ANSWERED before "no page errors" is worth asserting:
-  // the paths read is refused (`unknown_bucket`), and a check that ran before
-  // that refusal settled would grade a page that had not asked yet. The view
-  // draws the refusal and offers a retry, so the refusal itself is what this
-  // waits for.
+  // THE PAGE HAS TO HAVE ANSWERED before "no page errors" is worth asserting.
+  // A bucket the board does not carry has no panels at all — the page says so
+  // in one sentence — so that sentence is what this waits for.
   await this.page
-    .getByRole("button", { name: "try again" })
-    .or(this.page.locator("p.refused"))
+    .locator("p.empty", { hasText: "This bucket is not on the board" })
     .first()
     .waitFor({ timeout: 30_000 });
 });
@@ -282,10 +281,13 @@ Then("a bucket row names it", async function (this: OduWorld) {
 Then("that row says it holds {int} paths", async function (this: OduWorld, count: number) {
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");
-  await this.saysThat(
-    this.page.locator("button.bucket", { hasText: name }).first(),
-    "the bucket row",
-    `${count} paths`,
+  // THE COUNT AND ITS WORD ARE A STAT — a number over the thing it counts — so
+  // the card's text carries them on two lines. The claim is about the pair, not
+  // about how they are stacked, so the row's text is normalised before it.
+  const row = this.page.locator("button.bucket", { hasText: name }).first();
+  await this.waitUntil(
+    async () => (await row.innerText()).replace(/\s+/g, " ").includes(`${count} paths`),
+    `the bucket row to say "${count} paths"`,
   );
 });
 
@@ -411,7 +413,7 @@ async function typeRootTokenIfAsked(page: OduWorld["page"]): Promise<void> {
 
 Given("a bucket created from the board", async function (this: OduWorld) {
   await this.open("#/cache");
-  await this.page.getByRole("heading", { name: "Buckets", exact: true }).waitFor();
+  await this.page.getByRole("heading", { name: "Cache", exact: true }).waitFor();
   await typeRootTokenIfAsked(this.page);
   const name = unique("board");
   this.cacheBucket = name;
@@ -444,7 +446,8 @@ When("I name the bucket {string}", async function (this: OduWorld, domain: strin
 });
 
 Then("the domain answer says {string}", async function (this: OduWorld, text: string) {
-  const answer = this.page.locator("p.hint.done", { hasText: "Named this bucket" });
+  // Every control on this board answers in a RECEIPT, refusals included.
+  const answer = this.page.locator("p.receipt", { hasText: "Named this bucket" });
   await answer.waitFor({ timeout: 30_000 });
   await until(`the domain answer to say ${text}`, async () =>
     (await answer.innerText()).includes(text) ? true : null,
@@ -815,7 +818,7 @@ When("I set the retention to {string} days", async function (this: OduWorld, day
  *  the cache republished — so a number read here is the bucket's, never the
  *  field that was typed into. */
 Then("the bucket's facts say {string}", async function (this: OduWorld, text: string) {
-  await this.saysThat(this.page.locator("p.bucket-facts"), "the bucket's facts", text);
+  await this.saysThat(this.page.locator("p.page-sub"), "the bucket's facts", text);
 });
 
 /** The collection's section — the dry run, the button, and the report the

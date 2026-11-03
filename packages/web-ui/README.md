@@ -64,10 +64,11 @@ adopting a daemon somebody else started.
 ## Two properties that are acceptance gates, not polish
 
 **Keyboard access is not a mode.** Every control is a real `<button>` (see
-`./src/dom.tsx`, where that decision is made once): reachable by Tab, firing on
-Enter and Space, announced as a control, with a disabled state the browser
-enforces. The focus ring is styled up, never off. A filter's *pressed* state
-rides `aria-pressed` rather than only a colour.
+[`@odu/face`](../face/README.md)'s `src/ui.tsx`, where that decision is made
+once for every row's face): reachable by Tab, firing on Enter and Space,
+announced as a control, with a disabled state the browser enforces. The focus
+ring is styled up, never off. A filter's *pressed* state rides `aria-pressed`
+rather than only a colour.
 
 **Narrow viewports work.** The board row is a grid that collapses to two lines
 on a phone rather than a table that scrolls sideways. The one place sideways
@@ -75,17 +76,25 @@ scrolling is right is inside a log box — a log line is a log line, and wrappin
 one changes what it says — so it is scoped there and the page itself never
 scrolls sideways.
 
-## How the two pages use a screen
+## How the screens use a screen
 
-**The board is TWO ROWS, and this package is the SHELL.** The header offers
-*Runs* and *Cache*, two STATES of one page rather than a menu — `aria-pressed`
-says which. The views themselves are not written here: the runs are
-`@odu/ci/face` and the buckets are `@odu/cache/face`, each in the package that
-owns the row it draws. The shell owns the hash router, the wire indicator, the
-switch, the tab, the clock, and the page's single `Effect.runPromise` — handed
-to both faces as `call`. `src/closure.test.ts` holds the split: only `app.tsx`
-opens either face, and `main.tsx` is the only file that names a row's SURFACE,
-because the root dials both through `connectSurfaces`.
+**The board is FOUR ROWS, and this package is the SHELL.** A rail down the
+left offers *Runs*, *Cache*, *Machines*, *Tunnel* and *People* — STATES of one
+page rather than a menu, so `aria-pressed` says which. The views themselves are
+not written here: the runs are `@odu/ci/face`, the buckets `@odu/cache/face`,
+the door `@odu/auth/face` and the tunnel `@odu/cloudflare/face`, each in the
+package that owns the row it draws. The shell owns the hash router, the wire
+indicator, the rail, the tab, the clock, the theme control and the page's
+single `Effect.runPromise` — handed to every face as `call`.
+`src/closure.test.ts` holds the split: only `app.tsx` opens a face, and
+`main.tsx` is the only file that names a row's SURFACE, because the root dials
+them all through `connectSurfaces`.
+
+**The rail carries one count.** "2 failing" beside *Runs* is the ambient
+monitor's own tally — the subscription the shell already keeps for the tab
+title — drawn where a person already looks. There is deliberately no bucket
+count beside *Cache*: a count is a subscription, and a second always-open one
+for a number nobody acts on is a cost the wire pays forever.
 
 **The board is scanned.** One row per checkout by default — the latest run of
 each, with `N earlier` under the age and a *History* toggle for the rest —
@@ -120,12 +129,21 @@ waiting on a machine looks. The geometry is `laneSpan` in
 one box — the row's, which does not vary — measured against the axis by
 `packages/web-acceptance`'s own geometry step rather than asserted here.
 
-**Raw CSS, on purpose.** One stylesheet, in four cascade layers, with a single
-`light-dark()` palette lifted from the website. There is no utility framework
-and no component library: the page has a few dozen class names — every rule
-carries the reason it exists beside it, and the two that declare no rule
-(`.board`, `.create`) are structural anchors the markup hangs on rather than
-dead paint.
+**The design system is `@odu/face`, not this package.** "Night shift" —
+[`packages/face/src/theme.css`](../face/README.md) — is one raw stylesheet in
+four cascade layers with a single `light-dark()` palette: the tokens, the
+primitives and the page shell. A row's OWN screens are dressed by that row's
+`face.css`, beside its views, and `scripts/build-web-ui.ts` concatenates them
+into one hashed asset. There is no utility framework and no component library.
+The shell adds no stylesheet of its own; the rail, the wire and the frame are
+all rules over there.
+
+**The typefaces ship with the bundle.** Geist and Geist Mono come from
+nixpkgs' `geist-font` through `$ODU_GEIST_FONTS`, are content-hashed beside
+the stylesheet, and are preloaded from the shell's `<head>`. Nothing is
+fetched from a font CDN, so a tailnet-only board renders the page a public one
+does. The same `<head>` writes `data-theme` before the first paint, which is
+why a pinned light theme never flashes black.
 
 ## The connection is drawn, not hidden
 

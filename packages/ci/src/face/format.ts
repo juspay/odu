@@ -9,7 +9,8 @@
  * state on the wire is a type error here rather than a blank cell in a browser.
  */
 
-import type { SurfaceReadout, SurfaceReadoutStatus } from "@kolu/surface/solid";
+import type { LaneCell, StatusHue as FaceHue } from "@odu/face/ui";
+import type { StatusHue as WireHue } from "@odu/run-client/surface";
 import {
   BOARD_STATE,
   duration,
@@ -18,11 +19,38 @@ import {
   type StatusHue,
 } from "@odu/service-client/board";
 import { STATUS_META } from "@odu/service-client/surface";
+import type { NodeStatus, RunNode } from "./types";
 
 /** The five semantic hues, from the contract module rather than spelled again
  *  here — so the one place a hue is consumed is a place the compiler can check
  *  and a reader can look up. */
 export type { StatusHue };
+
+/**
+ * THE HUE VOCABULARY, PINNED — and this module is the one place in the tree
+ * that can see both spellings of it.
+ *
+ * `@odu/face` names no row (that is the whole point of the package), so the
+ * design system's `StatusHue` cannot be imported from `@odu/run-client`, where
+ * the canonical union lives beside `STATUS_META`. Two declarations of one
+ * vocabulary is exactly the drift this repo refuses everywhere else — a sixth
+ * hue added to the wire would leave the primitives silently unable to draw it,
+ * and nothing would say so.
+ *
+ * So the equality is ASSERTED here, where both are in scope: `@odu/ci` depends
+ * on the row's client and on the shared face, and no other package does. Two
+ * checks and not one, because a single assignment proves only containment —
+ * `"grey"` is assignable to the five, and a union that had lost a member would
+ * still pass in that direction. The shell's own `format.ts` points at this
+ * line; it is the reason it may use the face's spelling without a second table.
+ *
+ * Zero runtime: a constraint on a type parameter is checked and then erased.
+ */
+type Assignable<A extends B, B> = A;
+export type StatusHuesAgree = [
+  Assignable<FaceHue, WireHue>,
+  Assignable<WireHue, FaceHue>,
+];
 
 /** What a run is called, and what colour it carries. Not this app's assignment:
  *  `@odu/service-client/board` owns it, because a board is not one face's idea
@@ -37,19 +65,30 @@ export { BOARD_STATE, OUTCOME };
 export const NODE_STATUS = STATUS_META;
 
 /**
- * What the connection indicator says.
+ * WHAT A NODE'S STATE IS CALLED, for a reader.
  *
- * `degraded` is the one the transport cannot see — a live socket over a
- * subscription that has stopped — and it NAMES what stopped, so the sentence
- * can never come out with a hole in it. The framework decides which state is
- * true; these are odu's words for them.
+ * `STATUS_META` carries the glyph and the hue but no English: its `progress`
+ * field is the `--progress json` wording, a machine's vocabulary with a `null`
+ * for the two states that have no JSON event, and `ok` is a key rather than a
+ * word anybody says. A board that labelled a cell "ok" or left it blank would
+ * be a board whose legend it does not match.
  *
- * The HUE rides the table beside the words, for the reason every other mapping
- * here does: which colour "reconnecting" carries is an assignment of meaning,
- * and a total `Record` is the only spelling of it a compiler can check. It used
- * to be a list of `.wire-*` selectors in the stylesheet, where a sixth readout
- * state would have been a colourless sentence rather than a type error.
+ * Total, so a new node state is a type error here rather than an unnamed cell.
  */
+export const NODE_WORD: Record<NodeStatus, string> = {
+  pending: "pending",
+  running: "running",
+  ok: "passed",
+  failed: "failed",
+  skipped: "skipped",
+  errored: "errored",
+  cancelled: "cancelled",
+};
+
+/** The connection indicator's words and the tab's icon used to live here. They
+ *  are the SHELL's — every face is drawn under one wire indicator and one tab —
+ *  so they moved to `@odu/web-ui`'s own `format.ts` with the chrome they belong
+ *  to, and this module stayed what its header says it is. */
 export function runRef(sha: string, seq: number | null): string {
   const sha7 = sha.slice(0, 7);
   return seq === null ? sha7 : `${sha7}#${seq}`;
@@ -61,6 +100,83 @@ export function runRef(sha: string, seq: number | null): string {
 export function projectOf(repoRoot: string): string {
   const parts = repoRoot.split("/").filter((p) => p !== "");
   return parts[parts.length - 1] ?? repoRoot;
+}
+
+// ── what a LANE is, read off the node ids ───────────────────────────────────
+//
+// A run's nodes arrive as one flat list whose only clue about which machine a
+// row belongs to is the `@platform` suffix at the end of an id that is already
+// too long to scan. Two views group them: the board draws one strip per
+// platform in its pipeline column, and the run view heads each platform's
+// nodes with the machine they landed on. One reading, here, because two
+// spellings of "which lane is this node in" is how a board and a run come to
+// draw a different number of lanes for the same work.
+
+/** The platform half of `<namepath>@<platform>`. Read from the id rather than
+ *  carried beside it — the id is the address and every face in this tree
+ *  already reads it that way.
+ *
+ *  NOT `@odu/run-client`'s `splitFanId`, deliberately: that one answers
+ *  `"unknown"` for an id with no `@`, which is right for a caller that must
+ *  name a platform and wrong for a view. An empty string is a lane a person
+ *  can be TOLD has no platform, and it is also what stops the lane's cancel
+ *  button being drawn — `run.cancel` addresses a lane BY platform, so a button
+ *  there would name nothing. */
+export function platformOf(nodeId: string): string {
+  const at = nodeId.lastIndexOf("@");
+  return at < 0 ? "" : nodeId.slice(at + 1);
+}
+
+/** A platform triple at the width a board row has for it — `x86_64-linux`
+ *  becomes `linux`, `aarch64-darwin` becomes `darwin`. The WHOLE triple rides
+ *  the strip's cells as their accessible names, so nothing is lost: this is
+ *  the label in front of eleven pixels, where four characters of architecture
+ *  would crowd out the thing being labelled. */
+export function platformShort(platform: string): string {
+  if (platform === "") return "lane";
+  const dash = platform.lastIndexOf("-");
+  return dash < 0 ? platform : platform.slice(dash + 1);
+}
+
+/** One platform's nodes, in the order the frame first mentions each platform —
+ *  the coordinator's own order, which is stable between ticks, unlike a sort
+ *  that would re-order the lanes as nodes appear under them. */
+export interface Lane {
+  readonly platform: string;
+  readonly nodes: RunNode[];
+}
+
+export function lanesOf(nodes: readonly RunNode[]): Lane[] {
+  const byPlatform = new Map<string, RunNode[]>();
+  for (const node of nodes) {
+    const platform = platformOf(node.id);
+    const lane = byPlatform.get(platform);
+    if (lane === undefined) byPlatform.set(platform, [node]);
+    else lane.push(node);
+  }
+  return [...byPlatform].map(([platform, lane]) => ({ platform, nodes: lane }));
+}
+
+/**
+ * A LANE'S NODES AS CELLS — the signature element's content.
+ *
+ * One cell per node, in the pipeline's own order, each named in words because
+ * eleven pixels cannot say `e2e-web@x86_64-linux, failed`. The three
+ * distinctions the drawing makes are made here:
+ *
+ *   - a PENDING node has no hue at all — nothing has happened to it, and grey
+ *     with an edge would be a verdict about work that has not run;
+ *   - a SKIPPED one is an absence with an edge rather than a colour: a skip is
+ *     not a verdict about the work, it is the work not happening;
+ *   - everything else takes `STATUS_META`'s hue, so a cell and the glyph on
+ *     the node row under it cannot disagree.
+ */
+export function laneCells(nodes: readonly RunNode[]): LaneCell[] {
+  return nodes.map((node) => ({
+    label: `${node.id}, ${NODE_WORD[node.status]}`,
+    hue: node.status === "pending" ? null : NODE_STATUS[node.status].hue,
+    ...(node.status === "skipped" ? { skipped: true } : {}),
+  }));
 }
 
 /** A duration, at the precision a person reads it — `@odu/service-client/board`
@@ -92,27 +208,6 @@ export { duration };
  *  and so a link that hands somebody else's board a qualifier spells the scope
  *  the same way this one does. */
 export { scopeLabel };
-
-/**
- * THE TAB'S OWN ICON, drawn — the one place this app draws a picture.
- *
- * Everywhere else a status is words and a shape, because that is the only
- * spelling a colour-blind reader, a screen reader and a test can all read. A
- * browser tab is the one surface with room for none of those: it is sixteen
- * pixels of icon and a title that is usually clipped, and it is also where a
- * person looks when this page is NOT the page they are on. So the tab is the
- * ambient monitor — a dot on the mark, said again in words in `document.title`
- * beside it, which is what keeps the rule above intact.
- *
- * The mark is `logo.svg`'s own idea rather than a second drawing of it: a slate
- * `$` on a dark rounded square, because odu is a shell prompt you attach to. It
- * is built here rather than shipped as two more assets because the hue is a
- * function of live state, and a build cannot know which of them is true.
- *
- * Returns the whole `data:` URI, ready to assign to a `<link rel="icon">`, so
- * the encoding lives in one place — `#` in an unencoded SVG would truncate the
- * URI at the first colour.
- */
 
 /** A request id a repeat of this page's own click cannot duplicate. The service
  *  makes a request id mandatory precisely so a lost reply is reconcilable, and
