@@ -806,6 +806,9 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "`readsFrom: \"store\"` and a substituter URL on that domain, which keeps",
   "serving while odu is down. Everything else has `readsFrom: \"odu\"`, and a",
   "NAR on an S3 store is answered with a 307 to a presigned URL that expires.",
+  "A PRIVATE bucket may not live on a store with a `publicUrl`: the bound",
+  "domain serves every prefix in it, so `cache_bucket_create` and",
+  "`cache_bucket_migrate` refuse that combination with `bad_input`.",
 ].join("\n");
 
 // ── the row ─────────────────────────────────────────────────────────────────

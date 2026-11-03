@@ -72,13 +72,7 @@ import {
   type CacheOutcome,
 } from "./cache";
 import type { GcCollection, GcRemoval, GcReport } from "./gc";
-import {
-  frontedStores,
-  objectStores,
-  storeEndpoints,
-  type StoreDeclarations,
-  storeFacts,
-} from "./stores";
+import { objectStores, type StoreDeclarations, storeFacts } from "./stores";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
@@ -159,15 +153,19 @@ export interface CacheServer {
   /** The substituter URL for one bucket, as the cache row publishes it — the
    *  same string the board's row carries, for a route that takes no root token. */
   readonly substituterUrl: (name: string) => string;
-  /** ANNOUNCE WHAT A FINISHED STORE-TO-STORE MOVE LET GO (PLAN 2.8). The
-   *  CACHE names the paths — it is the only thing that knows which object was
-   *  deleted — and the ROW turns them into the addresses they were served at. */
+  /** ANNOUNCE WHAT CHANGED OR WENT (PLAN 2.8): a finished store-to-store
+   *  move, or a re-push that rewrote a text object. The CACHE names what it
+   *  touched — it is the only thing that knows — and the ROW turns that into
+   *  the addresses it was served at. */
   readonly announceMoved: (input: {
     bucket: string;
+    /** A store the bucket is no longer on, whose domain served these objects
+     *  a moment ago; for a re-push, the one it still lives on. */
     store: string;
-    /** Why: a finished MOVE, or a RE-PUSH that rewrote a narinfo object. */
     reason: "migrate" | "repush";
     removals: readonly GcRemoval[];
+    /** The bucket's own `nix-cache-info`, which no removal names. */
+    cacheInfo?: boolean;
   }) => void;
 }
 
@@ -225,6 +223,41 @@ export function collectEvery(
   return Effect.forever(Effect.flatMap(Effect.sleep(Duration.millis(everyMs)), () => once));
 }
 
+/**
+ * WHICH PRIVATE BUCKETS A BOUND DOMAIN EXPOSES — a read of what is declared,
+ * asked at mount.
+ *
+ * `create` and `migrate` refuse the combination, so this names only what was
+ * already there when the operator bound the domain: its narinfos and NARs
+ * answer at `<publicUrl>/<bucket>/…` to anyone who knows the name, because
+ * the binding covers every prefix in the store and cannot ask who is asking.
+ *
+ * Not part of the probe below, though both run at mount: this is a fact about
+ * the operator's CONFIGURATION and that one is a fact about the NETWORK, and
+ * they go wrong for different reasons on different days.
+ */
+export function exposedBuckets(input: {
+  stores: readonly CacheStore[];
+  buckets: readonly { name: string; public: boolean; store: string }[];
+  log?: (event: string, fields: Record<string, unknown>) => void;
+}): readonly { bucket: string; store: string; url: string }[] {
+  const exposed: { bucket: string; store: string; url: string }[] = [];
+  for (const store of input.stores) {
+    if (store.publicUrl === null) continue;
+    for (const row of input.buckets) {
+      if (row.public || row.store !== store.name) continue;
+      const found = {
+        bucket: row.name,
+        store: store.name,
+        url: publicBucketUrl(store.publicUrl, row.name),
+      };
+      exposed.push(found);
+      input.log?.("cache.bucket.exposed", found);
+    }
+  }
+  return exposed;
+}
+
 /** A store whose public URL did not answer what a Nix client needs. */
 export interface UnreachableStore {
   store: string;
@@ -258,19 +291,6 @@ export async function probePublicStores(input: {
   const unreachable: UnreachableStore[] = [];
   for (const store of input.stores) {
     if (store.publicUrl === null) continue;
-    // A PRIVATE BUCKET ON A FRONTED STORE is the dangerous combination, and
-    // `create`/`migrate` refuse it now — but a bucket that was already there
-    // when the operator bound the domain is exposed with nobody told. Its
-    // narinfos and NARs answer at `<publicUrl>/<bucket>/…` to anyone who
-    // knows the name, because the binding covers every prefix in the store.
-    for (const row of input.buckets) {
-      if (row.public || row.store !== store.name) continue;
-      input.log?.("cache.bucket.exposed", {
-        bucket: row.name,
-        store: store.name,
-        url: publicBucketUrl(store.publicUrl, row.name),
-      });
-    }
     // ONE BUCKET IS THE PROBE for the whole store: the question is whether
     // the domain is bound and serving, not whether each bucket is.
     const bucket = input.buckets.find((row) => row.public && row.store === store.name);
@@ -306,16 +326,17 @@ export function probeStoreEndpoints(input: {
   buckets: readonly { store: string }[];
   log?: (event: string, fields: Record<string, unknown>) => void;
 }): readonly { store: string; endpoint: string; host: string }[] {
+  // `URL.hostname` keeps an IPv6 literal's brackets and drops the port, so
+  // these are the whole of what a loopback or link-local endpoint looks like.
   const local = (host: string): boolean =>
     host === "localhost" ||
-    host === "::1" ||
     host === "[::1]" ||
     /^127\./.test(host) ||
     /^169\.254\./.test(host) ||
     host.startsWith("[fe80:");
   const found: { store: string; endpoint: string; host: string }[] = [];
   for (const store of input.stores) {
-    if (!local(store.endpoint.hostname) && !local(store.endpoint.host)) continue;
+    if (!local(store.endpoint.hostname)) continue;
     if (!input.buckets.some((bucket) => bucket.store === store.name)) continue;
     const refusal = {
       store: store.name,
@@ -428,87 +449,87 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
   };
 
   /**
-   * WHAT A COLLECTION REMOVED, AS URLS — the one place a deleted row becomes
-   * an address, because the row is the one thing here that knows where a
-   * bucket is reachable from (its domain, or the mount under the origin).
+   * WHAT CHANGED, AS URLS — the one place a bucket's object becomes an
+   * address, because the row is the one thing here that knows where a bucket
+   * is reachable from (its domain, the mount under the origin, the store's
+   * own public name).
    *
-   * EVERY SPELLING OF A BUCKET'S ADDRESS is announced: the path form, the
-   * bucket's own domain when it has one, and — since 2.8 — the STORE's public
-   * URL, where an R2 custom domain now serves the very objects a collection
-   * just deleted. An edge may hold `https://cache.example.org/<hash>.narinfo`
-   * AND `https://odu.example.org/cache/<bucket>/<hash>.narinfo`, and purging
-   * one of them leaves the other serving a path the origin has forgotten.
+   * EVERY SPELLING IS ANNOUNCED. An edge may hold
+   * `https://cache.example.org/<hash>.narinfo` AND
+   * `https://odu.example.org/cache/<bucket>/<hash>.narinfo`, and purging one
+   * of them leaves the other serving a path the origin has forgotten.
    *
-   * NOTHING IS BUILT WHEN NOBODY FRONTS THESE URLS. The broker knows whether
-   * anybody does, and on a daemon with no CDN — most of them — a nightly
-   * collection must not compose two URLs per evicted path for a no-op.
+   * TWO KINDS OF SPELLING, and the difference is what `./narinfo`'s own note
+   * warns about: odu's addresses are PROTOCOL PATHS, while a store's are
+   * OBJECT KEYS, which are free to move apart from them. So the protocol
+   * spelling is composed here and the store's comes from the key builders
+   * through `publicObjectUrl`, never by hand.
    *
-   * ODU'S OWN SPELLINGS are here; the store's come from the key builders
-   * below. `alsoStore` is a store the bucket is NO LONGER on — what a
-   * finished move left behind.
+   * `alsoStore` is a store the bucket is NO LONGER on — what a finished move
+   * left behind, whose domain served these very objects a moment ago.
    */
-  const basesFor = (name: string, alsoStore: string | null): Set<string> => {
-    const facts = cache.bucket(name);
+  const urlsFor = (input: {
+    bucket: string;
+    alsoStore: string | null;
+    removals: readonly GcRemoval[];
+    cacheInfo?: boolean;
+  }): string[] => {
+    const facts = cache.bucket(input.bucket);
     // THE READ ADDRESS, not the push API's. They are the same string today
-    // and they are different facts: one is where Nix asks, the other is
-    // where a client uploads.
-    const bases = new Set([`${opts.publicOrigin}${opts.mount}/${name}`]);
+    // and they are different facts: one is where Nix asks, the other is where
+    // a client uploads.
+    const bases = new Set([`${opts.publicOrigin}${opts.mount}/${input.bucket}`]);
     if (facts?.domain != null) bases.add(`${scheme}//${facts.domain}`);
-    return bases;
-  };
-
-  /** THE STORE DOMAINS this bucket's OBJECTS answer at: the one it lives on
-   *  and, for a finished move, the one it has just left. A bucket that was
-   *  public yesterday may be private today, and the edge still holds what it
-   *  cached then, so neither is filtered by `public`. */
-  const frontsFor = (name: string, alsoStore: string | null): string[] => {
-    const facts = cache.bucket(name);
-    const fronts: string[] = [];
-    for (const store of [facts?.store ?? null, alsoStore]) {
-      const fronted = store === null ? undefined : storeUrls.get(store);
-      if (fronted !== undefined && !fronts.includes(fronted)) fronts.push(fronted);
-    }
-    return fronts;
-  };
-
-  /**
-   * THE ADDRESSES ONE BUCKET'S REMOVED PATHS WERE SERVED AT.
-   *
-   * Two kinds, and the difference is the one `./narinfo`'s note warns about:
-   * odu's own addresses are PROTOCOL PATHS, while a store's are OBJECT KEYS,
-   * which are free to move. So the protocol spelling is composed here and the
-   * store spelling comes from the key builders through `publicObjectUrl` —
-   * never by hand, or a purge announces an address the store does not serve.
-   */
-  const urlsFor = (name: string, alsoStore: string | null, removed: readonly GcRemoval[]): string[] => {
     const urls: string[] = [];
-    for (const base of basesFor(name, alsoStore)) {
-      for (const removal of removed) {
+    for (const base of bases) {
+      for (const removal of input.removals) {
         urls.push(`${base}/${removal.hash}.narinfo`);
         if (removal.narFile !== null) urls.push(`${base}/nar/${removal.narFile}`);
       }
+      if (input.cacheInfo === true) urls.push(`${base}/nix-cache-info`);
     }
-    for (const front of frontsFor(name, alsoStore)) {
-      for (const removal of removed) {
-        urls.push(publicObjectUrl(front, narinfoKey(name, removal.hash)));
+    // THE STORE DOMAINS these objects answer at: the one the bucket lives on
+    // and the one it has just left. Not filtered by `public` — a bucket that
+    // was public yesterday may be private today, and the edge still holds
+    // what it cached then.
+    const fronts = new Set(
+      [facts?.store ?? null, input.alsoStore].flatMap((store) => {
+        const fronted = store === null ? undefined : storeUrls.get(store);
+        return fronted === undefined ? [] : [fronted];
+      }),
+    );
+    for (const front of fronts) {
+      for (const removal of input.removals) {
+        urls.push(publicObjectUrl(front, narinfoKey(input.bucket, removal.hash)));
         if (removal.narFile !== null) {
-          urls.push(publicObjectUrl(front, narFileKey(name, removal.narFile)));
+          urls.push(publicObjectUrl(front, narFileKey(input.bucket, removal.narFile)));
         }
       }
+      if (input.cacheInfo === true) urls.push(publicObjectUrl(front, cacheInfoKey(input.bucket)));
     }
     return urls;
   };
 
+  /**
+   * EVERY ANNOUNCEMENT GOES THROUGH HERE: a collection, a finished move, a
+   * re-push that rewrote a text object.
+   *
+   * NOTHING IS BUILT WHEN NOBODY FRONTS THESE URLS. The broker knows whether
+   * anybody does, and on a daemon with no CDN — most of them — a nightly
+   * collection must not compose two URLs per evicted path for a no-op.
+   */
+  const announceUrls = (event: string, bucket: string, urls: readonly string[]): void => {
+    if (urls.length === 0) return;
+    opts.log?.(event, { bucket, urls: urls.length });
+    opts.purge.announce([...urls]);
+  };
+
   const announce = (collected: GcCollection): void => {
     if (!opts.purge.listening()) return;
-    const urls: string[] = [];
-    for (const [name, removed] of collected.removed) {
-      if (removed.length === 0) continue;
-      urls.push(...urlsFor(name, null, removed));
+    for (const [bucket, removals] of collected.removed) {
+      if (removals.length === 0) continue;
+      announceUrls("cache.gc.purge", bucket, urlsFor({ bucket, alsoStore: null, removals }));
     }
-    if (urls.length === 0) return;
-    opts.log?.("cache.gc.purge", { urls: urls.length });
-    opts.purge.announce(urls);
   };
 
   /**
@@ -516,23 +537,21 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    *
    * A finished MOVE: the objects are identical in the new store, but the old
    * store's domain is about to answer 404 for every one of them. A RE-PUSH:
-   * the narinfo object was rewritten, and the text it replaced is cacheable
-   * for a day while odu's own render is already correct.
+   * the text object was rewritten, and what it replaced is cacheable for a
+   * day while odu's own render is already correct.
    */
-  const announceMoved = (input: {
-    bucket: string;
-    store: string;
-    reason: "migrate" | "repush";
-    removals: readonly GcRemoval[];
-  }): void => {
-    if (!opts.purge.listening() || input.removals.length === 0) return;
-    const urls = urlsFor(input.bucket, input.store, input.removals);
-    if (urls.length === 0) return;
-    opts.log?.(`cache.${input.reason === "migrate" ? "bucket.migrate" : "narinfo"}.purge`, {
-      bucket: input.bucket,
-      urls: urls.length,
-    });
-    opts.purge.announce(urls);
+  const announceMoved: CacheServer["announceMoved"] = (input) => {
+    if (!opts.purge.listening()) return;
+    announceUrls(
+      input.reason === "migrate" ? "cache.bucket.migrate.purge" : "cache.narinfo.purge",
+      input.bucket,
+      urlsFor({
+        bucket: input.bucket,
+        alsoStore: input.store,
+        removals: input.removals,
+        ...(input.cacheInfo === true ? { cacheInfo: true } : {}),
+      }),
+    );
   };
 
   /** A collection, announced. BOTH doors go through this — the verb and the
@@ -909,6 +928,10 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // the row's URL builder. Null until the server below exists, which is
     // before any verb can start a move.
     let announceMoved: CacheServer["announceMoved"] | null = null;
+    // THE DECLARED STORES AS FACTS, read once: what the `stores` cell
+    // publishes, which of them the world reads directly, and what the boot
+    // probe asks. Three readers, one reading.
+    const stores = storeFacts(declared);
     const cache = createCache({
       stateRoot: stateDir,
       rootToken,
@@ -917,7 +940,11 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       stores: objectStores(declared, join(stateDir, "cache")),
       // AND WHICH OF THEM THE WORLD READS DIRECTLY: a private bucket may not
       // be created on, or moved onto, a store with a bound domain.
-      frontedStores: frontedStores(declared),
+      frontedStores: new Set(
+        stores.flatMap((declaredStore) =>
+          declaredStore.publicUrl === null ? [] : [declaredStore.name],
+        ),
+      ),
       // THE OLD NIX STORE is read ONLY by the one-time object migration. A
       // fresh deployment leaves this null and the cache never shells out.
       // `NixStore` NULL IS THE HOST'S OWN /nix/store (the contract): a module
@@ -976,7 +1003,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       // substituter that works for nobody.
       publicOrigin: publicOrigin ?? boundOrigin,
       mount: CACHE_MOUNT,
-      stores: storeFacts(declared),
+      stores,
       purge: purges,
       log: (event, fields) => log.info(fields, `odu cache: ${event}`),
     });
@@ -1036,30 +1063,25 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // from the old one and should finish as soon as the row is up.
     yield* Effect.forkScoped(Effect.promise(() => cache.resumeMigrations()));
 
-    // AND IS THE STORE'S DOMAIN SERVING? A `publicUrl` is advertised as the
-    // substituter URL of every public bucket on that store, so a daemon that
-    // never checked would publish an address only its operator can discover
-    // is wrong. Forked, because a DNS name that is still propagating must not
-    // hold the mount.
-    yield* Effect.forkScoped(
-      Effect.promise(() =>
-        probePublicStores({
-          stores: storeFacts(declared),
-          buckets: cache.snapshot(),
-          log: (event, fields) => log.info(fields, `odu cache: ${event}`),
-        }),
-      ),
-    );
-
-    // AND IS EVERY STORE'S ENDPOINT AN ADDRESS A CLIENT CAN DIAL? Since 2.8
-    // it is signed into the URL a 307 hands to `nix build`, which runs
-    // somewhere else. Synchronous: it reads the declarations and nothing
-    // else.
+    // THREE QUESTIONS ABOUT THE DECLARED STORES, asked once the row is up and
+    // all of them answered with a log line rather than a refused boot.
+    //
+    // The first two are READS of what the operator declared — which private
+    // buckets a bound domain exposes, and whether an endpoint a client now
+    // has to dial is a loopback address — so they are answered here and now.
+    // The third DIALS the domain and is forked, because a DNS name that is
+    // still propagating must not hold the mount.
+    const say = (event: string, fields: Record<string, unknown>): void =>
+      log.info(fields, `odu cache: ${event}`);
+    exposedBuckets({ stores, buckets: cache.snapshot(), log: say });
     probeStoreEndpoints({
-      stores: storeEndpoints(declared),
+      stores: [...declared].map(([name, store]) => ({ name, endpoint: store.target.endpoint })),
       buckets: cache.snapshot(),
-      log: (event, fields) => log.info(fields, `odu cache: ${event}`),
+      log: say,
     });
+    yield* Effect.forkScoped(
+      Effect.promise(() => probePublicStores({ stores, buckets: cache.snapshot(), log: say })),
+    );
 
     // (The schedule is forked below, after the finalizers — see why there.)
 

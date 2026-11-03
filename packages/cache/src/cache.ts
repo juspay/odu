@@ -600,6 +600,9 @@ export interface CacheOptions {
     store: string;
     reason: "migrate" | "repush";
     removals: readonly GcRemoval[];
+    /** The bucket's `nix-cache-info`, when that is what changed — a move
+     *  deletes it with everything else, and a `Priority:` edit rewrites it. */
+    cacheInfo?: boolean;
   }) => void;
 }
 
@@ -837,58 +840,71 @@ export function createCache(options: CacheOptions): Cache {
     return "rewritten";
   }
 
-  /** The bucket's narinfo object for one row, written or confirmed. A rewrite
-   *  is announced to whatever fronts the store: the superseded text is
-   *  cacheable for a day, and odu's own render is already correct. */
-  async function keepNarinfoObject(
+  /**
+   * ONE OF THE PROTOCOL'S TEXT OBJECTS, written or confirmed.
+   *
+   * A FAILURE HERE NEVER FAILS THE CALLER. The row is the truth and odu
+   * renders from it; the object is the store's copy, and the backfill writes
+   * what a failed put left behind. The caller announces a `"rewritten"`,
+   * because only it knows which address changed.
+   */
+  async function keepTextObject(
     bucket: BucketRow,
-    row: ObjectRow,
+    what: { key: string; text: string; contentType: string },
   ): Promise<WriteOutcome | "failed"> {
     try {
-      const outcome = await writeText(
-        storeOf(bucket),
-        narinfoKey(bucket.name, row.hash),
-        narinfoFor(bucket, row),
-        NARINFO_CONTENT_TYPE,
-      );
-      // THE SUPERSEDED TEXT IS STILL OUT THERE. One narinfo, no NAR: the NAR
-      // is named by its own bytes and did not change, so purging it would be
-      // a cold cache for nothing.
-      if (outcome === "rewritten") {
-        options.purged?.({
-          bucket: bucket.name,
-          store: bucket.store,
-          reason: "repush",
-          removals: [{ storePath: row.storePath, hash: row.hash, narFile: null }],
-        });
-      }
-      return outcome;
+      return await writeText(storeOf(bucket), what.key, what.text, what.contentType);
     } catch (err) {
       options.log?.("cache.narinfo.object_failed", {
         bucket: bucket.name,
-        path: row.storePath,
+        path: what.key,
         reason: String((err as Error).message ?? err),
       });
       return "failed";
     }
   }
 
+  /** The bucket's narinfo object for one row. A rewrite is announced: the
+   *  superseded text is cacheable for a day, and odu's own render is already
+   *  correct. One narinfo, no NAR — a NAR is named by its own bytes and never
+   *  changes, so purging it would be a cold cache for nothing. */
+  async function keepNarinfoObject(
+    bucket: BucketRow,
+    row: ObjectRow,
+  ): Promise<WriteOutcome | "failed"> {
+    const outcome = await keepTextObject(bucket, {
+      key: narinfoKey(bucket.name, row.hash),
+      text: narinfoFor(bucket, row),
+      contentType: NARINFO_CONTENT_TYPE,
+    });
+    if (outcome === "rewritten") {
+      options.purged?.({
+        bucket: bucket.name,
+        store: bucket.store,
+        reason: "repush",
+        removals: [{ storePath: row.storePath, hash: row.hash, narFile: null }],
+      });
+    }
+    return outcome;
+  }
+
   /** `nix-cache-info` for one bucket. Written when the bucket is created and
    *  confirmed by the backfill; its text is a constant, so this is a no-op
-   *  after the first time. */
+   *  after the first time — and on the day that constant changes (a
+   *  `Priority:` edit), the rewrite is announced like any other. */
   async function keepCacheInfoObject(bucket: BucketRow): Promise<void> {
-    try {
-      await writeText(
-        storeOf(bucket),
-        cacheInfoKey(bucket.name),
-        NIX_CACHE_INFO,
-        CACHE_INFO_CONTENT_TYPE,
-      );
-    } catch (err) {
-      options.log?.("cache.narinfo.object_failed", {
+    const outcome = await keepTextObject(bucket, {
+      key: cacheInfoKey(bucket.name),
+      text: NIX_CACHE_INFO,
+      contentType: CACHE_INFO_CONTENT_TYPE,
+    });
+    if (outcome === "rewritten") {
+      options.purged?.({
         bucket: bucket.name,
-        path: cacheInfoKey(bucket.name),
-        reason: String((err as Error).message ?? err),
+        store: bucket.store,
+        reason: "repush",
+        removals: [],
+        cacheInfo: true,
       });
     }
   }

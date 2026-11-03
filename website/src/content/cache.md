@@ -547,10 +547,13 @@ Watch these lines on a foreground `odu web` (it prints a row's operational `info
 - `cache.nar.unavailable` — no object and the old store lacks it; served as 404 once per path.
 - `cache.boot.orphans`, `cache.boot.ca` — sweep and metadata-CA counts at boot.
 - `cache.import.recorded`, `cache.request.refused`, `cache.object.put_failed`.
-- `cache.gc` — one line per collection, scheduled or asked for: `evicted`, `kept` (rows whose bytes a twin still names), `orphans`, `bytes`. `cache.gc.purge` says how many URLs were announced and whether anything was `listening`; `cache.gc.failed` is a scheduled pass that hit something, with the next one still scheduled.
-- `cache.narinfo.backfill` — the boot pass that writes missing narinfo objects: `bucket`, `written`, `remaining`, one line per five hundred rows and one at the end. `cache.narinfo.object_failed` names a row whose narinfo object could not be written.
+- `cache.gc` — one line per collection, scheduled or asked for: `evicted`, `kept` (rows whose bytes a twin still names), `orphans`, `bytes`. `cache.gc.purge` says, per bucket, how many URLs were announced; `cache.gc.failed` is a scheduled pass that hit something, with the next one still scheduled.
+- `cache.narinfo.backfill` — the boot pass that writes missing narinfo objects: `bucket`, `written`, `remaining`, one line per five hundred rows and one at the end. `cache.narinfo.object_failed` names a text object that could not be written (`bucket`, `path`, `reason`).
+- `cache.narinfo.purge` — a re-push rewrote a narinfo object, so the address it was cacheable at is announced to the edge (`bucket`, `urls`). The NAR is never in it: it is named by its own bytes and cannot change.
 - `cache.store.public.unreachable` — a store's `publicUrl` did not answer `nix-cache-info` at boot (`store`, `url`, `status`). Odu goes on serving; readers pointed at that domain do not.
-- `cache.bucket.migrate.purge` — a finished store move, and how many old URLs it asked the edge to drop.
+- `cache.store.endpoint.unreachable` — a store's `endpoint` is a loopback or link-local address and a bucket lives on it (`store`, `endpoint`, `host`). Clients follow a redirect to that address since reads left odu, so this is every NAR read failing on the client's side.
+- `cache.bucket.exposed` — a PRIVATE bucket sits on a store with a bound `publicUrl` (`bucket`, `store`, `url`), so its objects are readable by anyone who knows the name. New ones are refused; this names the ones that predate the binding.
+- `cache.bucket.migrate.start` / `.progress` / `.flipped` / `.done` / `.failed` — a store move, with `copied`, `total` and `bytes`. `cache.bucket.migrate.purge` is the old store's URLs it asked the edge to drop.
 
 ## Protocol
 

@@ -117,6 +117,7 @@ export interface MigrationDeps {
     store: string;
     reason: "migrate" | "repush";
     removals: readonly GcRemoval[];
+    cacheInfo?: boolean;
   }) => void;
   /** True once the row is closing: every loop here checks it, so a move does
    *  not hold a database that is about to go. */
@@ -263,6 +264,9 @@ export async function runMigration(row: MigrationRow, deps: MigrationDeps): Prom
         store: state.fromStore,
         reason: "migrate",
         removals,
+        // `nix-cache-info` went with them: it is a key of the BUCKET rather
+        // than of any path, so no removal names it.
+        cacheInfo: true,
       });
       repo.deleteMigration(state.bucket);
       deps.notify();

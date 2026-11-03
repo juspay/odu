@@ -33,7 +33,7 @@ import { diskObjectStore, type ObjectStore, type S3Declaration, type StoreDeclar
 import { type Cache, createCache } from "./cache";
 import { openCacheRepo } from "./db";
 import { base32, storePathHash } from "./narinfo";
-import { cacheServer, probePublicStores, probeStoreEndpoints } from "./server";
+import { cacheServer, exposedBuckets, probePublicStores, probeStoreEndpoints } from "./server";
 import { cacheInfoKey, narinfoKey, NIX_CACHE_INFO } from "./staging";
 import { storeFacts } from "./stores";
 import type { CacheBucket } from "./surface";
@@ -276,35 +276,51 @@ describe("asking a store's domain whether it serves", () => {
     }
   });
 
-  it("never asks about a store whose buckets are all private, and says they are exposed", async () => {
-    // The domain may not be bound yet, and it would not matter for the PROBE:
-    // nothing on this store is advertised at it. It matters for the BUCKET —
-    // the binding covers every prefix in the store, so a private bucket that
-    // was there before the domain was bound is readable at it by anyone who
-    // knows the name. `create` and `migrate` refuse the combination now; this
-    // is how an operator who already has one finds out.
+  it("never asks about a store whose buckets are all private", async () => {
+    // The domain may not be bound yet, and it would not matter here: nothing
+    // on this store is advertised at it, so a refusal would be noise at every
+    // boot. What it DOES mean for those buckets is the next describe's.
     const seen = await probe(() => new Response("", { status: 404 }), [
       { name: "secret", public: false, store: "r2" },
     ]);
     expect(seen.asked).toEqual([]);
     expect(seen.refusals).toEqual([]);
-    expect(seen.logged).toEqual([
-      {
-        event: "cache.bucket.exposed",
-        fields: { bucket: "secret", store: "r2", url: `${PUBLIC_URL}/secret` },
-      },
+    expect(seen.logged).toEqual([]);
+  });
+});
+
+/**
+ * WHAT A BOUND DOMAIN EXPOSES. The binding covers every prefix in the S3
+ * bucket, so a PRIVATE bucket on a fronted store is readable by anyone who
+ * knows the name. `create` and `migrate` refuse the combination; this is how
+ * an operator who already had one finds out.
+ */
+describe("the private buckets a bound domain exposes", () => {
+  const naming = (
+    stores: StoreDeclarations,
+    buckets: readonly { name: string; public: boolean; store: string }[],
+  ): { found: readonly { bucket: string; store: string; url: string }[]; logged: string[] } => {
+    const logged: string[] = [];
+    const found = exposedBuckets({
+      stores: storeFacts(stores),
+      buckets,
+      log: (event) => logged.push(event),
+    });
+    return { found, logged };
+  };
+
+  it("names a private bucket on a fronted store, with the address it answers at", () => {
+    const seen = naming(declaring(R2), [
+      { name: "secret", public: false, store: "r2" },
+      { name: "kolu", public: true, store: "r2" },
+      { name: "other", public: false, store: "local" },
     ]);
+    expect(seen.found).toEqual([{ bucket: "secret", store: "r2", url: `${PUBLIC_URL}/secret` }]);
+    expect(seen.logged).toEqual(["cache.bucket.exposed"]);
   });
 
-  it("says nothing about a bucket on a store nobody bound a domain to", async () => {
-    const logged: { event: string; fields: Record<string, unknown> }[] = [];
-    await probePublicStores({
-      stores: storeFacts(declaring(PLAIN)),
-      buckets: [{ name: "secret", public: false, store: "r2" }],
-      send: (() => Promise.reject(new Error("nobody should ask"))) as unknown as typeof fetch,
-      log: (event, fields) => logged.push({ event, fields }),
-    });
-    expect(logged).toEqual([]);
+  it("says nothing about a store nobody bound a domain to", () => {
+    expect(naming(declaring(PLAIN), [{ name: "secret", public: false, store: "r2" }]).found).toEqual([]);
   });
 });
 
