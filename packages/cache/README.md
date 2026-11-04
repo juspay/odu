@@ -102,6 +102,14 @@ on the wire and `cache_bucket_create` to an agent.
   the same decision without doing it: the whole count and the whole byte total,
   plus the first `GC_PREVIEW_PATHS` paths oldest want first, so the top line is
   the first to go. It is a READ — an agent may ask it without a confirmation.
+  It alone takes a `retentionDays` (cache surface **4.4**), a whole number of
+  days to plan AS IF every bucket in scope kept a path that long from
+  `lastWanted` — absent is each bucket's own, `0` is what nothing references
+  and no pin holds, and anything else is `bad_input`. The override is a row
+  made up in memory: nothing is written, and `gc.run` deliberately has no such
+  input, so a retention a plan asked about can never be one a collection
+  evicts by. `bucket.retention` is still the only way to change what a bucket
+  keeps.
 - **The row collects itself, daily.** `schedule()` runs a collection of every
   bucket every `GC_EVERY_MS` as a CHAIN OF TIMEOUTS rather than an interval: a
   bucket whose collection outlasts its own period never gets a second one

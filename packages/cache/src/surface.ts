@@ -439,6 +439,27 @@ const GcPlanBucketSchema = Schema.Struct({
     }),
   ),
 });
+
+/**
+ * THE DRY RUN'S OWN INPUT — the collection's, plus a retention it may ask
+ * the question WITH.
+ *
+ * A separate schema rather than one field on {@link GcInputSchema}, because
+ * the split is the guarantee: `gc.run` cannot be handed a retention it would
+ * then evict by, so "this number only ever asks" is a fact about the wire
+ * rather than a promise in a doc. The bucket's own `retentionDays` is
+ * unchanged either way — nothing here writes a row.
+ */
+const GcPlanInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  /** Absent plans for every bucket. */
+  bucket: Schema.optionalKey(Schema.String),
+  /** ASK AS IF the bucket kept a path this many days from `lastWanted`.
+   *  Absent is each bucket's own; `0` is "keep only what a reference or a
+   *  pin holds", which is what makes a plan say what a scratch bucket would
+   *  cost. Whole days, zero or more — the row refuses the rest in words. */
+  retentionDays: Schema.optionalKey(Schema.Int),
+});
 const GcPlanOutputSchema = Schema.Struct({
   buckets: Schema.Array(GcPlanBucketSchema),
   evicted: Schema.Int,
@@ -781,8 +802,9 @@ export const oduCacheSurface = defineSurface({
     },
     gc: {
       run: { input: GcInputSchema, output: GcOutputSchema, error: REFUSES },
-      /** THE DRY RUN, and a READ: it changes nothing. */
-      plan: { input: GcInputSchema, output: GcPlanOutputSchema, error: REFUSES },
+      /** THE DRY RUN, and a READ: it changes nothing — which is why it, and
+       *  only it, takes a `retentionDays` to ask WITH. */
+      plan: { input: GcPlanInputSchema, output: GcPlanOutputSchema, error: REFUSES },
     },
     stats: {
       read: { input: StatsInputSchema, output: StatsOutputSchema, error: REFUSES },
@@ -862,7 +884,11 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "`cache_gc_run` evicts only what retention has expired AND nothing retained",
   "references AND no pin holds; `cache_gc_plan` answers the same decision",
   "WITHOUT doing it — the paths and the bytes the next collection would take,",
-  "which is what to read before running one. `cache_pin_create` keeps a",
+  "which is what to read before running one. `cache_gc_plan` alone also takes",
+  "a `retentionDays` to plan WITH (`0` is \"only what a reference or a pin",
+  "holds\"); it writes nothing, and `cache_gc_run` has no such field, so a",
+  "retention a plan asked about can never be one a collection evicted by.",
+  "`cache_pin_create` keeps a",
   "closure out of collection by name (re-pointing a pin of the same name),",
   "`cache_pin_list` says what each pin holds and who made it, and",
   "`cache_pin_delete` lets one go. A pin a WRITE token made (a push's",
@@ -953,8 +979,13 @@ export const CACHE_KEY = "cache";
  * `bucket.delete`, which purges the bucket's objects from its store and then
  * drops its rows, its tokens and its pins. Nothing a 4.2 reader already reads
  * changed, and a reader that does not know the verb simply never calls it.
+ *
+ * 4.4: THE DRY RUN ASKS ITS OWN QUESTION (PLAN 2.7's open item). Additive:
+ * `gc.plan` takes an optional `retentionDays` to plan WITH — the buckets'
+ * own rows are untouched, and `gc.run` does not take the field, which is why
+ * the two verbs stopped sharing an input schema.
  */
-export const CACHE_CONTRACT_VERSION = "4.3";
+export const CACHE_CONTRACT_VERSION = "4.4";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

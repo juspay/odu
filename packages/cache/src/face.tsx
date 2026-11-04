@@ -1945,16 +1945,44 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
  */
 function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Element {
   const action = createControl(props.call);
+  /** THE RETENTION THE PLAN ASKS WITH, blank for the bucket's own. It is read
+   *  when the button is pressed rather than watched, because a plan that
+   *  re-ran on every keystroke would ask the row a question per digit — and
+   *  because `0` and `01` are the same number typed half way. */
+  const [retention, setRetention] = createSignal("");
+  /** `null` is the bucket's own; `"bad"` is a box this field cannot send —
+   *  the contract's `Int` would fail to encode and never reach the row to be
+   *  refused in words. The RANGE stays the row's: a negative travels. */
+  const asking = createMemo<number | null | "bad">(() => {
+    const typed = retention().trim();
+    if (typed === "") return null;
+    const parsed = Number(typed);
+    return Number.isInteger(parsed) ? parsed : "bad";
+  });
   /** THE DRY RUN IS ASKED FOR, NEVER TAKEN ON ARRIVAL: the key is null until
    *  the button is pressed, because at mount a daemon with no door has an
    *  empty root-token box and an eager plan would greet its local owner with
    *  "the root token does not match" before they had typed anything. */
   const [asked, setAsked] = createSignal(false);
+  /** WHAT THE ANSWER ON SCREEN IS AN ANSWER TO, not what the box says now:
+   *  the sentence below names it, and a number typed after the plan came
+   *  back has not been asked yet. */
+  const [answeredWith, setAnsweredWith] = createSignal<number | null>(null);
   const plan = reading(
     () => (asked() ? props.name : null),
     props.rootToken,
-    (bucket) =>
-      props.call(props.client.procedures.gc.plan({ rootToken: props.rootToken(), bucket })),
+    (bucket) => {
+      const days = asking();
+      const override = days === null || days === "bad" ? null : days;
+      setAnsweredWith(override);
+      return props.call(
+        props.client.procedures.gc.plan({
+          rootToken: props.rootToken(),
+          bucket,
+          ...(override === null ? {} : { retentionDays: override }),
+        }),
+      );
+    },
   );
   /** Ask for it: the button, and what a collection does to its own answer —
    *  but only when somebody had asked, since a collection must not turn a
@@ -1997,9 +2025,24 @@ function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Elemen
             <Button disabled={action.busy()} onClick={collect}>
               {action.busy() ? "collecting…" : "Run GC"}
             </Button>
-            <Button disabled={plan.loading()} onClick={askAgain}>
+            <Button disabled={plan.loading() || asking() === "bad"} onClick={askAgain}>
               {plan.loading() ? "counting…" : "Dry run"}
             </Button>
+            {/* THE DRY RUN'S OWN NUMBER, beside the button it belongs to and
+                nowhere near "Set retention" above: this one asks, that one
+                keeps. Blank is the bucket's own. */}
+            <Field id="gc-retention-days" label="dry run retention days">
+              <input
+                id="gc-retention-days"
+                type="number"
+                class="input"
+                min="0"
+                step="1"
+                placeholder="its own"
+                value={retention()}
+                onInput={(event) => setRetention(event.currentTarget.value)}
+              />
+            </Field>
           </div>
           <Answer control={action} />
           <Show when={plan.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
@@ -2007,9 +2050,15 @@ function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Elemen
             {(would) => (
               <>
                 <p class="hint">
+                  {/* WHICH QUESTION THIS ANSWER IS TO. A plan taken at a
+                      retention the bucket does not have is not what the next
+                      collection would do, and the sentence has to say so. */}
+                  {answeredWith() === null
+                    ? ""
+                    : `At ${answeredWith() as number} day${answeredWith() === 1 ? "" : "s"}' retention — the bucket keeps its own — `}
                   {would().evicted === 0
-                    ? "The next collection would take nothing here: every path is retained, referenced or pinned."
-                    : `The next collection would take ${would().evicted} path${would().evicted === 1 ? "" : "s"} and free ${bytes(would().bytes)}, leaving ${would().remaining} path${would().remaining === 1 ? "" : "s"} here.`}
+                    ? "the next collection would take nothing here: every path is retained, referenced or pinned."
+                    : `the next collection would take ${would().evicted} path${would().evicted === 1 ? "" : "s"} and free ${bytes(would().bytes)}, leaving ${would().remaining} path${would().remaining === 1 ? "" : "s"} here.`}
                 </p>
                 <Show when={would().paths.length > 0}>
                   <ol class="paths">

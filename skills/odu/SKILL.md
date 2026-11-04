@@ -333,7 +333,7 @@ terminal.
 | pin a closure | `odu surface cache pin_create --input '{…}' --json` | `cache_pin_create` | `rootToken`, `bucket`, `name`, `paths[]` | `bucket`, `name`, `rootPaths[]`, `created`, `createdBy` — a name that exists is RE-POINTED |
 | what the pins hold | `odu surface cache pin_list --input '{…}' --json` | `cache_pin_list` | `rootToken`, `bucket` | `pins[]` (`bucket`, `name`, `rootPaths[]`, `created`, `createdBy`: `write` a push made it, `admin` a person did) |
 | drop a pin | `odu surface cache pin_delete --input '{…}' --json` | `cache_pin_delete` | `rootToken`, `bucket`, `name` | `bucket`, `name` — admin only, even where a write token may pin |
-| what a collection WOULD take | `odu surface cache gc_plan --input '{…}' --json` | `cache_gc_plan` | `rootToken`, `bucket?` | `buckets[]` (`evicted`, `bytes`, `remaining`, `paths[]` — a readable head, oldest want first), `evicted`, `bytes`. THE DRY RUN: read it before `gc_run` |
+| what a collection WOULD take | `odu surface cache gc_plan --input '{…}' --json` | `cache_gc_plan` | `rootToken`, `bucket?`, `retentionDays?` (4.4 — plan as if every bucket in scope kept a path that many days from `lastWanted`; absent is each bucket's own, `0` is only what a reference or a pin holds; a non-integer or negative is `bad_input`. Nothing is written, and `gc_run` deliberately has no such field) | `buckets[]` (`evicted`, `bytes`, `remaining`, `paths[]` — a readable head, oldest want first), `evicted`, `bytes`. THE DRY RUN: read it before `gc_run` |
 | reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` (absent collects every bucket, and only then sweeps orphans) | `buckets[]` (`evicted`, `kept`, `bytes`, `orphans`), `evicted`, `kept`, `bytes`, `orphans` |
 | cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastWanted` (the newest renewal anywhere, or null) |
 | the tunnel and its names | `odu surface cloudflare status_read --json` | `cloudflare_status_read` | *(none)* | `tunnel` (`state`, `name`, `id`, `reason`) and `routes[]` (`domain`, `bucket`, `state` `wiring`/`live`/`failed`, `reason`, `updated`) — a route with `bucket: null` is the server's own public origin |
@@ -379,13 +379,14 @@ docs, "Set up an R2 bucket"):
   "auto"; credentialsFile; publicUrl?; }` — `publicUrl` being the custom domain
   bound to that bucket, an origin with no path, which public buckets on the
   store are then advertised at.
-The cache row is at contract 4.3 (3.0 removed `held` and `--wait`; 3.1 added
+The cache row is at contract 4.4 (3.0 removed `held` and `--wait`; 3.1 added
 `store` and the `stores` resource; 4.0 moved retention onto `lastWanted` — the
 old last-access field is gone from a path and from `stats_read` — and added
 `bucket_retention`, `pin_list`, `pin_delete`, `gc_plan` and `orphans`; 4.1 added
 `readsFrom`, `publicUrl` on a store, `migration` on a bucket row and
 `bucket_migrate`; 4.2 added `writesTo` on a bucket row and the push client's
-upload negotiation; 4.3 added `bucket_delete`).
+upload negotiation; 4.3 added `bucket_delete`; 4.4 added `gc_plan`'s
+`retentionDays`, the dry run's own retention, which `gc_run` does not take).
 
 - **WRITES LEAVE ODU TOO, on an S3 store.** `odu cache push` asks the bucket
   where a NAR's bytes go before it sends any. A bucket whose store takes its
@@ -417,7 +418,11 @@ upload negotiation; 4.3 added `bucket_delete`).
   or a pin holds it**, and the reference closure of anything kept is kept. The
   row collects every bucket **once a day on its own**; `cache_gc_run` is that
   same collection asked for sooner, and `cache_gc_plan` is it with nothing
-  done. Ask the plan first and read the count and the bytes.
+  done. Ask the plan first and read the count and the bytes. The plan alone
+  takes `retentionDays` (cache 4.4), a retention to ask about rather than one
+  to keep — `0` is "what is here that nothing references and no pin holds" —
+  and it writes nothing; `cache_gc_run` takes no such field, so a retention a
+  plan asked about can never be one a collection evicts by.
 - **A pin is a name over a closure**, re-pointed by pinning the same name
   again. A WRITE token may create or re-point one over HTTP
   (`POST /_odu/v1/buckets/<bucket>/pin`, and `odu cache push --pin NAME`),
@@ -680,7 +685,9 @@ declares.
 - **GC and pins reach every bucket** (cache 4.0): retention counts from `lastWanted` —
   renewed by a push and by the `missing` query, never by a read, since reads are leaving
   odu — 90 days by default and per bucket with `cache_bucket_retention`; `cache_gc_plan`
-  is the dry run; `cache_pin_list`/`cache_pin_delete` read and drop pins (a write token may pin, and may
+  is the dry run, and takes an optional `retentionDays` of its own (cache 4.4) to plan at a
+  retention it does not write, which `cache_gc_run` has no field for;
+  `cache_pin_list`/`cache_pin_delete` read and drop pins (a write token may pin, and may
   re-point only a pin a write token made, because re-pointing releases what the pin held);
   the row collects
   every bucket daily on its own; and a collection speaks only the object store's `list`
@@ -692,7 +699,7 @@ declares.
   with a domain bound (clear the domain first) and one with a move in flight. Admin only,
   and on the board it is the bucket page's **Delete this bucket**, which makes you type
   the bucket's name first.
-- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 4.3,
+- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 4.4,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
   major of a row **it reads** differs. The refusal names that row
   (`serves the cache row at 4.0; this build reads cache 3.1`): run `odu web --upgrade`.
