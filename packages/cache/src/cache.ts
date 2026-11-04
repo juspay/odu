@@ -23,6 +23,7 @@
 import { statfs } from "node:fs/promises";
 import { join } from "node:path";
 import type {
+  BucketGauge,
   BucketRow,
   BucketTotals,
   MigrationRow,
@@ -45,7 +46,6 @@ import {
   sweepOrphans,
 } from "./gc";
 import { migrationKeys, runMigration } from "./migrateStore";
-import type { BucketGauge } from "./meter";
 import {
   fingerprintOf,
   formatNarinfo,

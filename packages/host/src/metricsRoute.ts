@@ -38,9 +38,10 @@ export function bearerOf(header: string | undefined): string {
 }
 
 export interface MetricsRouteOptions {
-  /** Read per request, not at bind: a row that mounts after the listener is
-   *  bound still contributes to the next scrape. */
-  readonly sources: () => MetricsSources;
+  /** The registry itself, not a thunk over it: it is made once per tenure and
+   *  never replaced, and `contributors()` is already read per scrape — so a row
+   *  that mounts after the listener is bound still answers the next one. */
+  readonly sources: MetricsSources;
   /** The operator's root token, or `null` when none is configured. With no root
    *  token nothing can mint a metrics token either, so the route is shut — and
    *  says which variable opens it. */
@@ -68,7 +69,7 @@ export function metricsRoute(options: MetricsRouteOptions) {
         );
       }
       return Effect.map(
-        Effect.promise(() => scrape(options.sources())),
+        Effect.promise(() => scrape(options.sources)),
         (body) =>
           HttpServerResponse.text(body, {
             contentType: EXPOSITION_CONTENT_TYPE,

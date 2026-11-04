@@ -410,6 +410,37 @@ describe("the runs' metrics reading", () => {
     expect(valueFor(again, "odu_runs_total", { outcome: "failed" })).toBe(1);
   });
 
+  it("counts a run met for the first time once, whatever it did before the process started", () => {
+    // A DAEMON THAT RESTARTS meets a run that already ended twice. Its earlier
+    // verdicts were overwritten — only the latest outcome is on disk — and the
+    // generations before boot are part of the reset a restart already is. So
+    // first sight counts exactly one, and the NEXT terminal still counts.
+    const w = world();
+    const { handle, token } = registerFixtureRun(w, { repoRoot: REPO, sha: "e".repeat(40) });
+    const journal = openJournal(handle, token);
+    journal.append({ kind: "finalized", outcome: "failed" }, T0 + 1);
+    journal.append({ kind: "finalized", outcome: "passed" }, T0 + 2);
+    writeVerdict(handle, token, {
+      runId: handle.runId,
+      outcome: "passed",
+      startedAt: T0,
+      finishedAt: T0 + 45_000,
+      failed: [],
+      errored: [],
+      cancelled: [],
+      unposted: [],
+    });
+
+    const read = runMetricsReader({ catalog: w.catalogRoot, venues: () => null, freshMs: 0 });
+    const first = read();
+    expect(valueFor(first, "odu_runs_total", { outcome: "passed" })).toBe(1);
+    expect(valueFor(first, "odu_runs_total", { outcome: "failed" })).toBe(0);
+
+    // A third generation, after this process was watching: that one counts.
+    journal.append({ kind: "finalized", outcome: "passed" }, T0 + 3);
+    expect(valueFor(read(), "odu_runs_total", { outcome: "passed" })).toBe(2);
+  });
+
   it("reuses one catalog walk until its freshness window expires", () => {
     const w = world();
     finishedRun(w, { outcome: "passed", tookMs: 1_000 });

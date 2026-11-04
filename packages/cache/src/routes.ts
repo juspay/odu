@@ -49,6 +49,7 @@ import {
   CACHE_MOUNT,
   CACHE_ROUTE_PATHS,
   HASH_PATTERN,
+  NARINFO_SUFFIX,
   PARTS_HEADER,
   PUSH_API,
   UPLOAD_SESSION_HEADER,
@@ -353,8 +354,6 @@ function narinfoRoot(cache: Cache) {
       return narinfoAnswer(cache, request, admitted.bucket, hash);
     });
 }
-
-const NARINFO_SUFFIX = ".narinfo";
 
 const bad = (message: string): HttpServerResponse.HttpServerResponse =>
   HttpServerResponse.text(message, { status: 400 });

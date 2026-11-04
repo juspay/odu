@@ -151,6 +151,25 @@ export interface BucketTotals {
   lastPush: number | null;
 }
 
+/** The same totals for ONE NAMED bucket, with its pins — what `/metrics` reads
+ *  per scrape. It lives here, beside the queries that answer it, so the storage
+ *  layer does not have to import the metrics module to describe its own rows.
+ *  A bucket with nothing in it still has one: a cache that stopped reporting a
+ *  bucket and a bucket that went to zero look the same on a graph, and only one
+ *  of them is news. */
+export interface BucketGauge {
+  readonly bucket: string;
+  /** Rows in `object` — the paths this bucket serves. */
+  readonly objects: number;
+  /** Their bytes, as stored. */
+  readonly bytes: number;
+  /** Reads counted against those rows. Falls when a collection deletes rows,
+   *  which is why `/metrics` publishes it as a gauge. */
+  readonly hits: number;
+  /** Pins holding closures on this bucket. */
+  readonly pins: number;
+}
+
 /**
  * WHAT AUTHORITY MADE A PIN — and therefore what may take it back.
  *

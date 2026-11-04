@@ -27,22 +27,10 @@
  */
 
 import type { MetricFamily, MetricLabels, MetricsReading } from "@odu/cordis/metrics";
+import type { BucketGauge } from "./db";
+import { NARINFO_SUFFIX, PUSH_API } from "./paths";
 
-/** What SQL answers for ONE bucket at a scrape. A bucket with nothing in it
- *  still has a row here — a cache that stopped reporting a bucket and a bucket
- *  that went to zero look the same on a graph, and only one of them is news. */
-export interface BucketGauge {
-  readonly bucket: string;
-  /** Rows in `object` — the paths this bucket serves. */
-  readonly objects: number;
-  /** Their bytes, as stored. */
-  readonly bytes: number;
-  /** Reads counted against those rows, since the row was written. DURABLE:
-   *  this one survives a restart, unlike every counter the meter keeps. */
-  readonly hits: number;
-  /** Pins holding closures on this bucket. */
-  readonly pins: number;
-}
+export type { BucketGauge };
 
 /** The row's half of `/metrics`: a sink for the logger's events, and the
  *  reading the contributor answers with. The gauges arrive as an ARGUMENT
@@ -81,15 +69,24 @@ const bucketOf = (fields: Record<string, unknown>): string => textOf(fields, "bu
 /**
  * WHICH PROTOCOL FILE A REFUSED REQUEST WAS AFTER, from its path — the event
  * carries no `kind`, and the path is what the client actually asked for.
- * `other` is the ONE spelling for everything else (a bad upload document, an
- * unknown route under the mount, `nix-cache-info`): refusals that are neither
- * a narinfo nor a NAR are still refusals and still belong in the total.
+ * `other` is the ONE spelling for everything else (an upload, an unknown route
+ * under the mount, `nix-cache-info`): refusals that are neither a narinfo nor a
+ * NAR read are still refusals and still belong in the total.
+ *
+ * THE PUSH API IS TESTED FIRST, and that is not a nicety: its routes are
+ * `/_odu/v1/buckets/<b>/nar/<file>/{parts,complete,upload}`, so a refused push
+ * — a stale write token, an unknown bucket — would otherwise land in
+ * `{kind="nar", outcome="refused"}`, the same series as a refused NAR READ, and
+ * page whoever watches reads for a pusher's expired credential. The prefixes
+ * are the row's own constants rather than literals, so the grammar is spelled
+ * once (`./paths`).
  */
 function kindOfPath(path: string | null): string {
   if (path === null) return "other";
   const bare = path.split("?")[0] ?? path;
+  if (bare.startsWith(`${PUSH_API}/`)) return "other";
   if (bare.includes("/nar/")) return "nar";
-  if (bare.endsWith(".narinfo")) return "narinfo";
+  if (bare.endsWith(NARINFO_SUFFIX)) return "narinfo";
   return "other";
 }
 

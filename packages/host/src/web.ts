@@ -426,14 +426,20 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // nothing itself — a host that read a row's database to publish its hit
     // rate would be the reach `@odu/cordis` exists to prevent.
     const metrics = metricsBroker();
+    // THE OPERATOR'S CREDENTIAL AND THE STATE ROOT, derived ONCE. The tags
+    // below carry them to the rows; the host's own metrics fragment and route
+    // are not plugins and cannot read a tag, so they read these — not the
+    // environment a third and fourth time.
+    const rootToken = configured(process.env.ODU_ROOT_TOKEN);
+    const stateDir = stateRoot(process.env);
     // THE SCRAPE CREDENTIAL. Under the per-user state root, beside the cache's
     // database and the catalog, because it outlives this tenure and a token an
     // operator minted must survive a restart.
-    const metricsTokens = openMetricsTokens(stateRoot(process.env));
+    const metricsTokens = openMetricsTokens(stateDir);
     await run(provide(host, PrincipalBroker, () => principals));
     await run(provide(host, CachePurge, () => purges));
-    await run(provide(host, StateDir, () => stateRoot(process.env)));
-    await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));
+    await run(provide(host, StateDir, () => stateDir));
+    await run(provide(host, RootToken, () => rootToken));
     await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
     await run(provide(host, DaemonHome, () => home.dir));
     await run(provide(host, BoundOrigin, () => origin));
@@ -505,7 +511,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     metricsMounted = runtime.mount(
       METRICS_KEY,
       oduMetricsSurface,
-      metricsFragment({ tokens: metricsTokens, rootToken: configured(process.env.ODU_ROOT_TOKEN) }),
+      metricsFragment({ tokens: metricsTokens, rootToken }),
     );
     // THE SERVED HANDLERS, WITH THE DOOR IN FRONT OF THEM — and only the
     // SERVED ones: the control socket `daemonMain` opens is owner-only and
@@ -580,11 +586,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
         // THE SCRAPE. A host route, authorised by the root token or a metrics
         // token, reading whatever the rows have registered at the moment it is
         // asked.
-        metricsRoute({
-          sources: () => metrics,
-          rootToken: configured(process.env.ODU_ROOT_TOKEN),
-          tokens: metricsTokens,
-        }),
+        metricsRoute({ sources: metrics, rootToken, tokens: metricsTokens }),
       ),
     );
     const composed = routes

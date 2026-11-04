@@ -1067,7 +1067,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // gauges read out of SQL at the moment of the scrape. The contributor
     // holds the CACHE and asks it, so nothing here touches a database handle.
     const withdrawMetrics = metrics.add({
-      name: "cache",
+      name: CACHE_KEY,
       read: () => meter.reading(cache.meterGauges()),
     });
 

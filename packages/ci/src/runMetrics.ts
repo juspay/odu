@@ -116,13 +116,16 @@ function observe(tally: Tally, seconds: number): void {
   tally.overflow += 1;
 }
 
-/** A labelled tally, keyed by its label set. The key is the label VALUES joined
- *  by a byte no label value can contain, so two different label sets can never
- *  collide into one sample — duplicate or merged label sets in one family are a
- *  scrape error, not a rounding. */
+/** A labelled tally, keyed by its own label set: the VALUES joined by a byte no
+ *  label value can contain. One representation, derived where it is used — a
+ *  key kept in step with its labels by hand would eventually merge two label
+ *  sets into one sample or split one into two, and a duplicate label set in a
+ *  family is a scrape error that takes the whole exposition with it. (Label
+ *  order is fixed per family, so the join is stable.) */
 type TallyBook = Map<string, { labels: MetricLabels; tally: Tally }>;
 
-function tallyFor(book: TallyBook, key: string, labels: MetricLabels): Tally {
+function tallyFor(book: TallyBook, labels: MetricLabels): Tally {
+  const key = Object.values(labels).join("\u0000");
   const found = book.get(key);
   if (found !== undefined) return found.tally;
   const made = { labels, tally: emptyTally() };
@@ -209,6 +212,7 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
 
   for (const row of listRuns({ root: catalog, limit })) {
     present.add(row.runId);
+    const fresh = !state.progress.has(row.runId);
     const progress = state.progress.get(row.runId) ?? { seq: 0, counted: 0 };
     state.progress.set(row.runId, progress);
     const handle = handleFor(row.runId, { root: catalog });
@@ -226,13 +230,12 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
       // and `running` carry no duration — so it is NOT an observation. Counting
       // it as zero would pile every start of every node into the first bucket.
       if (event.durationMs === null) continue;
-      const recipe = splitFanId(event.node).namepath;
-      const platform = event.placement.platform;
-      const labels: MetricLabels = { recipe, platform, outcome: event.status };
-      observe(
-        tallyFor(state.nodeDurations, `${recipe}\u0000${platform}\u0000${event.status}`, labels),
-        event.durationMs / 1000,
-      );
+      const labels: MetricLabels = {
+        recipe: splitFanId(event.node).namepath,
+        platform: event.placement.platform,
+        outcome: event.status,
+      };
+      observe(tallyFor(state.nodeDurations, labels), event.durationMs / 1000);
     }
     // The entries are sorted by `seq`, so the last one is the high-water mark —
     // and a journal retention took leaves the watermark where it was rather
@@ -243,20 +246,29 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
     // No verdict, no outcome. A run that is still going is not an outcome this
     // row can report, and folding it into one would be a lie a dashboard draws.
     //
-    // An outcome is counted ONCE PER GENERATION, not once per run. `finalized`
-    // is emitted per generation (`coordinator/history.ts`), so a run that
-    // finished red, took a rerun and finished green really did end twice — and
-    // its second verdict OVERWROTE the first. Counting once per run would
+    // An outcome is counted ONCE PER TERMINAL, not once per run. `finalized` is
+    // emitted per generation (`coordinator/history.ts`), so a run that finished
+    // red, took a rerun and finished green really did end twice — and its
+    // second verdict OVERWROTE the first. Counting once per run would
     // under-report every retried success forever, while the catalog this
-    // mirrors says `passed`. A run first seen already finalized counts once
-    // even if retention has taken its journal, hence the floor of one.
+    // mirrors says `passed`.
+    //
+    // `counted` is TERMINALS ADDED, which is the only thing it may mean: it
+    // moves exactly when the counter does, so `odu_runs_total` and
+    // `odu_run_duration_seconds_count` cannot drift apart, and a run that ended
+    // twice between two walks catches up on the next one. A run met for the
+    // FIRST time counts once whatever its journal says it did before: the
+    // generations before this process started are part of the reset a restart
+    // already is, and only the latest verdict is on disk anyway. The floor of
+    // one keeps a run whose journal retention took countable.
     if (verdict === null) continue;
     const ends = Math.max(1, entries.filter((one) => one.event.kind === "finalized").length);
+    if (fresh) progress.counted = ends - 1;
     if (ends <= progress.counted) continue;
-    progress.counted = ends;
+    progress.counted += 1;
     state.runs.set(verdict.outcome, (state.runs.get(verdict.outcome) ?? 0) + 1);
     observe(
-      tallyFor(state.runDurations, verdict.outcome, { outcome: verdict.outcome }),
+      tallyFor(state.runDurations, { outcome: verdict.outcome }),
       (verdict.finishedAt - verdict.startedAt) / 1000,
     );
   }
@@ -350,15 +362,14 @@ export function runMetricsReader(opts: RunMetricsOptions): () => MetricsReading 
   const now = opts.now ?? Date.now;
 
   const state = emptyAccumulated();
-  let walkedAt = 0;
-  let walked = false;
+  /** Never walked, so the first scrape always does. */
+  let walkedAt = Number.NEGATIVE_INFINITY;
 
   return () => {
     const at = now();
-    if (!walked || at - walkedAt >= freshMs) {
+    if (at - walkedAt >= freshMs) {
       foldCatalog(state, opts.catalog, limit);
       walkedAt = at;
-      walked = true;
     }
 
     const histograms: HistogramFamily[] = [

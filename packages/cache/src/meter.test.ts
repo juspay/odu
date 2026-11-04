@@ -100,6 +100,24 @@ describe("the counters, from the events the cache logs", () => {
     expect(sample(reading, "odu_cache_requests_total", { bucket: "", kind: "narinfo", outcome: "refused" })).toBe(1);
   });
 
+  it("does not file a refused PUSH as a refused NAR read", () => {
+    // The push API's routes carry `/nar/` in the path
+    // (`/_odu/v1/buckets/<b>/nar/<file>/upload`), so a substring match put a
+    // pusher with a stale token into the same series as a client refused a NAR
+    // — and a panel watching reads paged for a credential problem.
+    const meter = cacheMeter();
+    meter.observe("cache.request.refused", {
+      bucket: "main",
+      method: "PUT",
+      path: "/_odu/v1/buckets/main/nar/abc.nar.zst/upload",
+      status: 401,
+      reason: "the token is revoked",
+    });
+    const reading = meter.reading([]);
+    expect(sample(reading, "odu_cache_requests_total", { bucket: "main", kind: "nar", outcome: "refused" })).toBeNull();
+    expect(sample(reading, "odu_cache_requests_total", { bucket: "main", kind: "other", outcome: "refused" })).toBe(1);
+  });
+
   it("counts an upload of each mode, and a failure under the same bucket", () => {
     const meter = cacheMeter();
     meter.observe("cache.nar.uploaded", { bucket: "main", file: "a.nar.zst", mode: "staged", parts: 3, bytes: 300 });

@@ -30,6 +30,11 @@ export const UPLOAD_SESSION_HEADER = "x-odu-upload";
 /** Where the push API lives — odu's own, beside the Nix protocol's mount. */
 export const PUSH_API = "/_odu/v1";
 
+/** What a narinfo request's path ends in — the Nix protocol's own spelling,
+ *  beside the mount for the same reason: the router matches on it and the
+ *  meter reads it off a refused request's path. */
+export const NARINFO_SUFFIX = ".narinfo";
+
 /**
  * WHERE A NAR'S BYTES GO (PLAN 2.9) — the shape of the one question a push
  * asks before it sends any, and of the answer.

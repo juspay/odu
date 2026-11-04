@@ -37,7 +37,7 @@ function world(rootToken: string | null = ROOT) {
   });
   const tokens = openMetricsTokens(scratch);
   const { handler, dispose } = HttpRouter.toWebHandler(
-    metricsRoute({ sources: () => sources, rootToken, tokens }),
+    metricsRoute({ sources, rootToken, tokens }),
     { disableLogger: true },
   );
   const ask = (authorization?: string): Promise<Response> =>
