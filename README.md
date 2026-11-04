@@ -144,10 +144,11 @@ curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:18440/metrics
 Counters (`odu_cache_requests_total`, `odu_cache_bytes_total`,
 `odu_cache_uploads_total`, `odu_cache_gc_*`) are process-local and reset when the
 daemon restarts; gauges (`odu_cache_paths`, `odu_cache_bytes`, `odu_cache_pins`,
-`odu_cache_hits_total`) are read from storage at the scrape and do not.
-`odu_runs_total`, `odu_run_duration_seconds` and `odu_node_duration_seconds` come
-from the on-disk catalog, `odu_lane_reachable`/`odu_lane_held` from the last
-venue probe. Behind the NixOS module the route is proxied beside `/cache/`.
+`odu_cache_hits`) are read from storage at the scrape. `odu_runs_total`,
+`odu_run_duration_seconds` and `odu_node_duration_seconds` accumulate from the
+on-disk catalog — each run folded once, so they never fall — and
+`odu_lane_reachable`/`odu_lane_held` come from the last venue probe. Behind the
+NixOS module the route is proxied beside `/cache/`.
 
 ## Agents and remote access
 

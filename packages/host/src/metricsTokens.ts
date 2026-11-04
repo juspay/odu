@@ -21,6 +21,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { MetricsTokenFacts } from "@odu/cordis/metricsSurface";
 
 /** What the file keeps per token. `hash` never leaves this module. */
 interface StoredToken {
@@ -32,14 +33,11 @@ interface StoredToken {
   revoked: boolean;
 }
 
-/** The public half — what a verb answers and a person reads. */
-export interface MetricsTokenFacts {
-  readonly id: string;
-  readonly label: string;
-  readonly created: number;
-  readonly lastUsed: number | null;
-  readonly revoked: boolean;
-}
+/** THE PUBLIC HALF IS THE WIRE'S, imported rather than restated: it is what
+ *  `token.list` is validated against (`MetricsTokenSchema`), and a second
+ *  declaration that drifted would show up only as a decode failure on a verb.
+ *  Re-exported because this module is where the store's callers look. */
+export type { MetricsTokenFacts };
 
 interface TokenFile {
   readonly version: 1;

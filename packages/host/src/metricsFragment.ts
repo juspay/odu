@@ -46,7 +46,7 @@ export function metricsFragment(options: {
             new MetricsRefused({
               code: "not_permitted",
               message:
-                `odu: minting a metrics token needs an admin — ${principal.login} ` +
+                `odu: the metrics credential is an administrator's — ${principal.login} ` +
                 `is a ${principal.role}`,
             }),
           );
@@ -58,7 +58,7 @@ export function metricsFragment(options: {
             message:
               options.rootToken === null
                 ? "this service was started without a root token, so no metrics " +
-                  "credential can be issued — set $ODU_ROOT_TOKEN and restart it"
+                  "credential can be issued or read — set $ODU_ROOT_TOKEN and restart it"
                 : "the root token does not match this service's $ODU_ROOT_TOKEN",
           }),
         );

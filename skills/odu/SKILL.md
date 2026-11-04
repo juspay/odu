@@ -486,7 +486,7 @@ upload negotiation).
 
 `GET /metrics` is a Prometheus text exposition of the whole daemon — the cache
 row's hit rates, bytes and storage (`odu_cache_requests_total`,
-`odu_cache_bytes_total`, `odu_cache_paths`, `odu_cache_hits_total`, …), the
+`odu_cache_bytes_total`, `odu_cache_paths`, `odu_cache_hits`, …), the
 runs' durations (`odu_runs_total`, `odu_run_duration_seconds`,
 `odu_node_duration_seconds`) and lane use (`odu_lane_reachable`,
 `odu_lane_held`).
@@ -495,9 +495,13 @@ It is never anonymous. A scrape carries `Authorization: Bearer` with the root
 token or a **metrics token** (`metrics_token_mint`), which opens this route and
 nothing else; anything else is `401`. Revocation (`metrics_token_revoke`) takes
 effect at once. Counters are process-local and reset on restart — that is
-standard, and `rate()` handles it; the numbers that must survive a restart are
-gauges read from storage at the scrape. `odu_cache_last_gc_timestamp_seconds` is
-`0` when there has been no collection since boot.
+standard, and `rate()` handles it — and they only ever grow within one process:
+each run and each journal entry is folded once, never recomputed from a sliding
+window. The numbers read from storage are gauges (`odu_cache_paths`,
+`odu_cache_bytes`, `odu_cache_pins`, `odu_cache_hits` — a collection lowers that
+last one, which is why it is not a `_total`).
+`odu_cache_last_gc_timestamp_seconds` is `0` when there has been no collection
+since boot.
 
 ### Signing in
 

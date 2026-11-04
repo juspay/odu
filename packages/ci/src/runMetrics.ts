@@ -19,16 +19,23 @@
  * outcome) would make a run that is still going look like a run that failed to
  * finish.
  *
- * ## A scrape is BOUNDED WORK, not the whole catalog
+ * ## A scrape is BOUNDED WORK, and what it publishes only grows
  *
  * `listRuns` opens several files per run and `readJournal` opens one more. A
  * poller that walked the whole catalog four times a second burned an event loop
  * (juspay/odu#113), and a scrape is the same walk on somebody else's schedule —
  * so it reads at most {@link DEFAULT_SCRAPE_LIMIT} runs, newest first, and the
- * answer is reused for {@link DEFAULT_FRESH_MS}. Two Prometheus servers
- * scraping the same daemon therefore cost one walk, and a catalog with ten
- * thousand runs costs exactly what one with two hundred does. The price is
- * honest and stated here: these are the RECENT runs, not all of history.
+ * walk is repeated at most every {@link DEFAULT_FRESH_MS}. Two Prometheus
+ * servers scraping the same daemon therefore cost one walk, and a catalog with
+ * ten thousand runs costs exactly what one with two hundred does.
+ *
+ * What a scrape PUBLISHES is not that window, though: each run is folded ONCE
+ * into accumulators that only grow (see {@link Accumulated}). A counter read
+ * off a sliding window decreases every time a run falls out of it, and a
+ * scraper reads a decrease as a reset — which turns one slide into a spike in
+ * `rate()` and makes `histogram_quantile` a quantile of nothing. The totals
+ * therefore begin at whatever the window held when this daemon started and
+ * accumulate from there; they reset on restart, like every other counter here.
  *
  * ## The lanes are the service's LAST PROBE, and nothing else
  *
@@ -124,43 +131,87 @@ function tallyFor(book: TallyBook, key: string, labels: MetricLabels): Tally {
   return made.tally;
 }
 
+/** A snapshot of each tally. The arrays are COPIED because the tallies outlive
+ *  the scrape now: they accumulate, and a point handed to the renderer must be
+ *  the numbers as of this scrape. */
 const pointsOf = (book: TallyBook): HistogramPoint[] =>
   [...book.values()].map(({ labels, tally }) => ({
     labels,
-    counts: tally.counts,
+    counts: [...tally.counts],
     overflow: tally.overflow,
     sum: tally.sum,
   }));
 
-/** What one catalog walk produced — everything a scrape can answer WITHOUT
- *  touching the venues, which is exactly the part worth caching. */
-interface CatalogReading {
-  runs: MetricPoint[];
-  runDurations: HistogramPoint[];
-  nodeDurations: HistogramPoint[];
+/**
+ * WHAT THIS PROCESS HAS COUNTED SO FAR — the accumulators a scrape publishes.
+ *
+ * NOT a fold of the current window. `odu_runs_total` and both histograms are
+ * COUNTERS on the wire, and a counter that goes down is read as a reset: a
+ * scraper extrapolates from zero, so "runs per hour" spikes and
+ * `histogram_quantile` over a window that slid is a quantile of nothing. A
+ * window fold decreases twice over — when a run falls out of the newest
+ * `limit`, and when retention or `catalog_prune` removes it from the catalog
+ * altogether.
+ *
+ * So each run is folded ONCE and the totals only ever grow, which is the
+ * process-local contract the rest of this surface already states: they start
+ * from whatever the window held at boot and accumulate from there, and they
+ * reset when the daemon restarts (standard, and `rate()` handles it).
+ */
+interface Accumulated {
+  /** Runs that reached each outcome, by outcome. */
+  readonly runs: Map<string, number>;
+  readonly runDurations: TallyBook;
+  readonly nodeDurations: TallyBook;
+  /** How far each run in the window has been folded. */
+  readonly progress: Map<string, RunProgress>;
 }
 
+/** What has already been taken from ONE run, so a second walk takes only what
+ *  is new. The journal is append-only, so the count of entries already folded
+ *  is a cursor into it; a verdict is written once, so counting it is a flag. */
+interface RunProgress {
+  entries: number;
+  counted: boolean;
+}
+
+const emptyAccumulated = (): Accumulated => ({
+  runs: new Map(RUN_OUTCOMES.map((outcome) => [outcome, 0])),
+  runDurations: new Map(),
+  nodeDurations: new Map(),
+  progress: new Map(),
+});
+
 /**
- * Walk the newest `limit` runs and fold them.
+ * Walk the newest `limit` runs and fold what has not been folded before.
  *
- * One pass, three folds: how many runs reached each outcome, how long those
- * runs took, and how long each node attempt within them took. The journal is
- * read per run because node durations live nowhere else — that is the expensive
- * half of this function, and the reason `limit` exists.
+ * One pass, two folds: how long each new node attempt took, and — once a run
+ * has a verdict — its outcome and how long it took. The journal is read per run
+ * because node durations live nowhere else; that is the expensive half of this
+ * function, and the reason `limit` exists.
+ *
+ * The per-run cursors are then PRUNED to the runs this walk saw, which bounds
+ * them by the same `limit` the walk is bounded by. A run that has left the
+ * window cannot come back: `listRuns` answers newest first, a run leaves only
+ * once `limit` newer ones exist, and retention and `catalog_prune` take the
+ * OLDEST first — so re-entry would need every newer run deleted before it.
  */
-function walkCatalog(catalog: string, limit: number): CatalogReading {
-  const counted = new Map<string, number>(RUN_OUTCOMES.map((o) => [o, 0]));
-  const runDurations: TallyBook = new Map();
-  const nodeDurations: TallyBook = new Map();
+function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
+  const present = new Set<string>();
 
   for (const row of listRuns({ root: catalog, limit })) {
+    present.add(row.runId);
+    const progress = state.progress.get(row.runId) ?? { entries: 0, counted: false };
+    state.progress.set(row.runId, progress);
     const handle = handleFor(row.runId, { root: catalog });
 
     // The journal is read even for a run with no verdict: its nodes have
     // finished attempts with real durations long before the run itself is
     // finalized, and a histogram that waited for the verdict would go quiet for
-    // exactly as long as a slow run is interesting.
-    for (const entry of readJournal(handle).entries) {
+    // exactly as long as a slow run is interesting. Only the entries this
+    // process has not already taken are folded.
+    const entries = readJournal(handle).entries;
+    for (const entry of entries.slice(progress.entries)) {
       const event = entry.event;
       if (event.kind !== "node_status") continue;
       // `durationMs: null` is a transition that measured nothing — `pending`
@@ -171,30 +222,28 @@ function walkCatalog(catalog: string, limit: number): CatalogReading {
       const platform = event.placement.platform;
       const labels: MetricLabels = { recipe, platform, outcome: event.status };
       observe(
-        tallyFor(nodeDurations, `${recipe}\u0000${platform}\u0000${event.status}`, labels),
+        tallyFor(state.nodeDurations, `${recipe}\u0000${platform}\u0000${event.status}`, labels),
         event.durationMs / 1000,
       );
     }
+    progress.entries = entries.length;
 
     const verdict = row.verdict;
     // No verdict, no outcome. A run that is still going is not an outcome this
     // row can report, and folding it into one would be a lie a dashboard draws.
-    if (verdict === null) continue;
-    counted.set(verdict.outcome, (counted.get(verdict.outcome) ?? 0) + 1);
+    // A run already counted is never counted twice, which is the whole point.
+    if (verdict === null || progress.counted) continue;
+    progress.counted = true;
+    state.runs.set(verdict.outcome, (state.runs.get(verdict.outcome) ?? 0) + 1);
     observe(
-      tallyFor(runDurations, verdict.outcome, { outcome: verdict.outcome }),
+      tallyFor(state.runDurations, verdict.outcome, { outcome: verdict.outcome }),
       (verdict.finishedAt - verdict.startedAt) / 1000,
     );
   }
 
-  return {
-    runs: RUN_OUTCOMES.map((outcome) => ({
-      labels: { outcome },
-      value: counted.get(outcome) ?? 0,
-    })),
-    runDurations: pointsOf(runDurations),
-    nodeDurations: pointsOf(nodeDurations),
-  };
+  for (const runId of state.progress.keys()) {
+    if (!present.has(runId)) state.progress.delete(runId);
+  }
 }
 
 /**
@@ -272,36 +321,38 @@ export interface RunMetricsOptions {
  * The `ci` row's metrics reading, as a function the row registers.
  *
  * Returns a closure rather than a value: a contributor is asked at every
- * scrape, and the reuse window it carries is what keeps that affordable.
+ * scrape, and the accumulators and the reuse window it carries are what make
+ * the answer both monotonic and affordable.
  */
 export function runMetricsReader(opts: RunMetricsOptions): () => MetricsReading {
   const limit = opts.limit ?? DEFAULT_SCRAPE_LIMIT;
   const freshMs = opts.freshMs ?? DEFAULT_FRESH_MS;
   const now = opts.now ?? Date.now;
 
-  let kept: CatalogReading | null = null;
-  let keptAt = 0;
+  const state = emptyAccumulated();
+  let walkedAt = 0;
+  let walked = false;
 
   return () => {
     const at = now();
-    if (kept === null || at - keptAt >= freshMs) {
-      kept = walkCatalog(opts.catalog, limit);
-      keptAt = at;
+    if (!walked || at - walkedAt >= freshMs) {
+      foldCatalog(state, opts.catalog, limit);
+      walkedAt = at;
+      walked = true;
     }
-    const catalog = kept;
 
     const histograms: HistogramFamily[] = [
       {
         name: "odu_run_duration_seconds",
         help: "How long a finalized run took, from its verdict's startedAt to its finishedAt.",
         bounds: DURATION_BOUNDS,
-        points: catalog.runDurations,
+        points: pointsOf(state.runDurations),
       },
       {
         name: "odu_node_duration_seconds",
         help: "How long one node attempt took, as its journal recorded it.",
         bounds: DURATION_BOUNDS,
-        points: catalog.nodeDurations,
+        points: pointsOf(state.nodeDurations),
       },
     ];
 
@@ -309,8 +360,13 @@ export function runMetricsReader(opts: RunMetricsOptions): () => MetricsReading 
       counters: [
         {
           name: "odu_runs_total",
-          help: "Runs in the recent catalog that reached each outcome.",
-          points: catalog.runs,
+          help:
+            "Runs this daemon has seen reach each outcome, counted once each " +
+            "since it started.",
+          points: RUN_OUTCOMES.map((outcome) => ({
+            labels: { outcome },
+            value: state.runs.get(outcome) ?? 0,
+          })),
         },
       ],
       // Absent, not zero, when nothing has probed — see the module header.

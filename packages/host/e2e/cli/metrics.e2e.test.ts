@@ -184,7 +184,7 @@ describe("the scrape", () => {
     // AND ITS GAUGES, read from SQLite at the scrape.
     expect(sampleOf(body, "odu_cache_paths", { bucket: "main" })).toBe(1);
     expect(sampleOf(body, "odu_cache_bytes", { bucket: "main" })).toBeGreaterThan(0);
-    expect(sampleOf(body, "odu_cache_hits_total", { bucket: "main" })).toBe(1);
+    expect(sampleOf(body, "odu_cache_hits", { bucket: "main" })).toBe(1);
 
     // BOTH ROWS ANSWERED. A contributor that threw would be a zero here, and
     // the scrape would still have been served — which is why it is asserted.
@@ -194,7 +194,7 @@ describe("the scrape", () => {
     expect(sampleOf(body, "odu_runs_total", { outcome: "passed" })).toBe(0);
   }, 900_000);
 
-  it("is never anonymous, whatever the daemon's door says", async () => {
+  it("answers an anonymous scrape with 401 and a sentence, not a page", async () => {
     const anonymous = await scrape();
     expect(anonymous.status).toBe(401);
     expect(anonymous.headers.get("www-authenticate")).toContain("Bearer");

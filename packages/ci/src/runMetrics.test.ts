@@ -260,6 +260,96 @@ describe("the runs' metrics reading", () => {
     expect(total).toBe(1);
   });
 
+  it("never goes down when the window rolls past a run it already counted", () => {
+    // THE COUNTER CONTRACT. `odu_runs_total` and both histograms are counters
+    // on the wire, and a counter that decreases is read as a RESET — one slide
+    // of the window would spike `rate()` and make `histogram_quantile` a
+    // quantile of nothing. A window of one run makes the roll happen on the
+    // second scrape.
+    const w = world();
+    finishedRun(w, { outcome: "passed", tookMs: 45_000 });
+
+    const read = runMetricsReader({
+      catalog: w.catalogRoot,
+      venues: () => null,
+      limit: 1,
+      freshMs: 0,
+    });
+
+    const first = read();
+    expect(valueFor(first, "odu_runs_total", { outcome: "passed" })).toBe(1);
+    const passedFirst = first.histograms
+      ?.find((h) => h.name === "odu_run_duration_seconds")
+      ?.points.find((p) => p.labels?.outcome === "passed");
+    expect(passedFirst?.sum).toBe(45);
+
+    // A newer run pushes the counted one out of the window entirely.
+    finishedRun(w, { outcome: "failed", tookMs: 5_000 });
+    const second = read();
+
+    expect(valueFor(second, "odu_runs_total", { outcome: "passed" })).toBe(1);
+    expect(valueFor(second, "odu_runs_total", { outcome: "failed" })).toBe(1);
+    const passedSecond = second.histograms
+      ?.find((h) => h.name === "odu_run_duration_seconds")
+      ?.points.find((p) => p.labels?.outcome === "passed");
+    expect(passedSecond?.sum).toBe(45);
+    expect(passedSecond?.counts).toEqual(passedFirst?.counts as number[]);
+
+    // And a third roll leaves both where they are: what left the catalog's
+    // window stays counted.
+    finishedRun(w, { outcome: "failed", tookMs: 5_000 });
+    const third = read();
+    expect(valueFor(third, "odu_runs_total", { outcome: "passed" })).toBe(1);
+    expect(valueFor(third, "odu_runs_total", { outcome: "failed" })).toBe(2);
+  });
+
+  it("counts a run once however many scrapes see it, and takes only new journal entries", () => {
+    const w = world();
+    const { handle, token } = registerFixtureRun(w, { repoRoot: REPO, sha: "c".repeat(40) });
+    const journal = openJournal(handle, token);
+    const node = {
+      kind: "node_status" as const,
+      node: "ci::unit@x86_64-linux",
+      attempt: 1,
+      status: "ok" as const,
+      exitCode: 0,
+      durationMs: 20_000,
+      placement: { platform: "x86_64-linux", host: "localhost" },
+    };
+    journal.append(node, T0);
+
+    const read = runMetricsReader({ catalog: w.catalogRoot, venues: () => null, freshMs: 0 });
+
+    const nodesOf = (reading: MetricsReading) =>
+      reading.histograms
+        ?.find((h) => h.name === "odu_node_duration_seconds")
+        ?.points.find((p) => p.labels?.recipe === "ci::unit");
+
+    // A run with no verdict still contributes its finished node attempts.
+    expect(nodesOf(read())?.counts.reduce((a, b) => a + b, 0)).toBe(1);
+    // Scraped again with nothing new, the same entry is not taken twice.
+    expect(nodesOf(read())?.counts.reduce((a, b) => a + b, 0)).toBe(1);
+
+    journal.append({ ...node, attempt: 2 }, T0 + 1);
+    journal.append({ kind: "finalized", outcome: "passed" }, T0 + 2);
+    writeVerdict(handle, token, {
+      runId: handle.runId,
+      outcome: "passed",
+      startedAt: T0,
+      finishedAt: T0 + 60_000,
+      failed: [],
+      errored: [],
+      cancelled: [],
+      unposted: [],
+    });
+
+    const after = read();
+    expect(nodesOf(after)?.counts.reduce((a, b) => a + b, 0)).toBe(2);
+    expect(valueFor(after, "odu_runs_total", { outcome: "passed" })).toBe(1);
+    // And the verdict is not counted again on the next scrape.
+    expect(valueFor(read(), "odu_runs_total", { outcome: "passed" })).toBe(1);
+  });
+
   it("reuses one catalog walk until its freshness window expires", () => {
     const w = world();
     finishedRun(w, { outcome: "passed", tookMs: 1_000 });

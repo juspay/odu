@@ -4,7 +4,7 @@ Status: living, 2026-11-03.
 - Phase 1 and all of Phase 2 are on master once 2.9 lands: 2.8 is #148, #150
   and #152, and 2.9 is #154.
 - **Next is Phase 3**, orgs.
-- **6.2 landed early, out of order** (#TBD): metrics needed no org model, and a
+- **6.2 landed early, out of order** (#156): metrics needed no org model, and a
   deployment that is already public wanted numbers before it wanted tenancy.
   Nothing in Phase 3–6.1 depends on it.
 - One step is one PR, and the order is a dependency order. There is no schedule.

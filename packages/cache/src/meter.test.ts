@@ -29,8 +29,8 @@ const NOW = 1_700_000_000_000;
 
 /** One sample's value, by family name and the labels it must carry — `null`
  *  when no such sample is in the reading. The families are searched in both
- *  halves, because which half a name lives in is itself part of the contract
- *  (`odu_cache_hits_total` is a COUNTER read from SQL). */
+ *  halves, because which half a name lives in is itself part of the contract,
+ *  and the test above asserts that split by itself. */
 function sample(
   reading: MetricsReading,
   name: string,
@@ -155,15 +155,25 @@ describe("the counters, from the events the cache logs", () => {
     expect(sample(reading, "odu_cache_bytes_total", { bucket: "main", direction: "served", mode: "object" })).toBe(0);
   });
 
-  it("reports the durable hit count as a counter and the rest as gauges", () => {
+  it("reports every SQL-read number as a gauge, the in-memory tallies as counters", () => {
     const reading = cacheMeter().reading([{ bucket: "main", objects: 1, bytes: 2, hits: 3, pins: 4 }]);
-    expect(familyNames(reading, "counters")).toContain("odu_cache_hits_total");
-    expect(familyNames(reading, "gauges")).not.toContain("odu_cache_hits_total");
+    // `odu_cache_hits` is a GAUGE: it sums `hits` over the rows a bucket holds
+    // NOW, so a collection lowers it — which as a `_total` would read as a
+    // counter reset.
+    expect(familyNames(reading, "counters")).not.toContain("odu_cache_hits");
     expect(familyNames(reading, "gauges")).toEqual([
+      "odu_cache_hits",
       "odu_cache_paths",
       "odu_cache_bytes",
       "odu_cache_pins",
       "odu_cache_last_gc_timestamp_seconds",
+    ]);
+    expect(familyNames(reading, "counters")).toEqual([
+      "odu_cache_requests_total",
+      "odu_cache_bytes_total",
+      "odu_cache_uploads_total",
+      "odu_cache_gc_evicted_total",
+      "odu_cache_gc_runs_total",
     ]);
   });
 });
@@ -225,8 +235,7 @@ describe("the gauges, from a real database", () => {
     );
     expect(accepted).toMatchObject({ ok: true });
     expect(await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "keep", paths: [path] })).toMatchObject({ ok: true });
-    // TWO READS, counted on the row itself — the number that survives a
-    // restart, which is why it is reported as a counter.
+    // TWO READS, counted on the object rows themselves.
     cache.touch(row, hashOf(path));
     cache.touch(row, hashOf(path));
 
@@ -234,7 +243,7 @@ describe("the gauges, from a real database", () => {
     expect(sample(reading, "odu_cache_paths", { bucket: "main" })).toBe(1);
     expect(sample(reading, "odu_cache_bytes", { bucket: "main" })).toBe(bytes.length);
     expect(sample(reading, "odu_cache_pins", { bucket: "main" })).toBe(1);
-    expect(sample(reading, "odu_cache_hits_total", { bucket: "main" })).toBe(2);
+    expect(sample(reading, "odu_cache_hits", { bucket: "main" })).toBe(2);
 
     // A BUCKET WITH NOTHING IN IT IS STILL A BUCKET: it is in neither GROUP BY,
     // and a reading that omitted it would make "empty" and "forgotten" the
@@ -242,7 +251,7 @@ describe("the gauges, from a real database", () => {
     expect(sample(reading, "odu_cache_paths", { bucket: "empty" })).toBe(0);
     expect(sample(reading, "odu_cache_bytes", { bucket: "empty" })).toBe(0);
     expect(sample(reading, "odu_cache_pins", { bucket: "empty" })).toBe(0);
-    expect(sample(reading, "odu_cache_hits_total", { bucket: "empty" })).toBe(0);
+    expect(sample(reading, "odu_cache_hits", { bucket: "empty" })).toBe(0);
 
     // AND NOTHING HAS COLLECTED SINCE BOOT.
     expect(sample(reading, "odu_cache_last_gc_timestamp_seconds")).toBe(0);

@@ -237,14 +237,19 @@ export function cacheMeter(now: () => number = Date.now): CacheMeter {
             help: "Collections this daemon has run.",
             points: [{ value: gcRuns }],
           },
-          // A COUNTER, NOT A GAUGE, AND NOT IN-MEMORY: every read a bucket has
-          // ever answered, counted on the object rows themselves. It is the one
-          // total here that survives a restart — the five above start at zero
-          // every boot — which is why it is read from SQL at scrape time and
-          // reported beside them rather than among the gauges.
-          { name: "odu_cache_hits_total", help: "Reads counted against a bucket's paths.", points: hits },
         ],
         gauges: [
+          // A GAUGE, AND IT HAS TO BE: the number is `SUM(hits)` over the
+          // object rows a bucket holds NOW, and a collection deletes rows. A
+          // `_total` that fell every time a bucket was collected would read as
+          // a counter reset, which is a worse lie than the one it was trying to
+          // tell ("reads since forever"). What it honestly says is: reads
+          // attributable to the paths this bucket currently holds.
+          {
+            name: "odu_cache_hits",
+            help: "Reads counted against the paths a bucket currently holds.",
+            points: hits,
+          },
           { name: "odu_cache_paths", help: "Store paths a bucket holds.", points: paths },
           { name: "odu_cache_bytes", help: "Bytes a bucket's paths occupy.", points: stored },
           { name: "odu_cache_pins", help: "Pins holding closures on a bucket.", points: pinned },
