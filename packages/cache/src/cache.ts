@@ -734,6 +734,25 @@ const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const DOMAIN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
+/**
+ * A NUMBER OF DAYS, CHECKED ONCE.
+ *
+ * Three verbs take one — a bucket's creation, its change of mind, and the dry
+ * run's "ask as if" — and the rule and the sentence a person reads are one
+ * thing rather than three copies to drift apart. `null` is "not asked",
+ * which only the plan can mean.
+ */
+function checkedDays(days: number | null): CacheOutcome<null> {
+  if (days !== null && (!Number.isSafeInteger(days) || days < 0)) {
+    return {
+      ok: false,
+      code: "bad_input",
+      message: "retention must be a whole number of days, zero or more",
+    };
+  }
+  return { ok: true, value: null };
+}
+
 export function createCache(options: CacheOptions): Cache {
   const now = options.now ?? (() => Date.now());
   const dir = join(options.stateRoot, "cache");
@@ -1229,13 +1248,8 @@ export function createCache(options: CacheOptions): Cache {
               : `"${input.name}" is not a bucket name — lowercase letters, digits and dashes`,
         };
       }
-      if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 0) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message: "retention must be a whole number of days, zero or more",
-        };
-      }
+      const days = checkedDays(input.retentionDays);
+      if (!days.ok) return days;
       if (repo.bucket(input.name) !== null) {
         return { ok: false, code: "bucket_exists", message: `bucket "${input.name}" already exists` };
       }
@@ -1402,13 +1416,8 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 0) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message: "retention must be a whole number of days, zero or more",
-        };
-      }
+      const days = checkedDays(input.retentionDays);
+      if (!days.ok) return days;
       const next: BucketRow = { ...bucket, retentionDays: input.retentionDays };
       repo.putBucket(next);
       notify();
@@ -1657,16 +1666,8 @@ export function createCache(options: CacheOptions): Cache {
       const root = requireRoot(input);
       if (!root.ok) return root;
       const { retentionDays } = input;
-      if (
-        retentionDays !== null &&
-        (!Number.isSafeInteger(retentionDays) || retentionDays < 0)
-      ) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message: "retention must be a whole number of days, zero or more",
-        };
-      }
+      const days = checkedDays(retentionDays);
+      if (!days.ok) return days;
       const chosen = bucketsFor(input.bucket);
       if (!chosen.ok) return chosen;
       // THE OVERRIDE IS A ROW THIS CALL MADE UP, and never one it kept: the
