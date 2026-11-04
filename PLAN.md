@@ -203,8 +203,13 @@ What each step delivers:
     odu, kolu and agent-distro hold theirs; olai's follow #684.
   - **Every bucket advertises `Priority: 41`**, so cache.nixos.org (40) wins
     for any path both hold, whatever the user's substituter order.
-  - **Open:** the GC proof (a dry run at a short retention keeps every pin)
-    needs a dry-run-only retention override on `gc_plan`.
+  - **The GC proof:** `gc_plan` takes a dry-run-only `retentionDays` (cache
+    4.4), so `administration.feature` can prove the thing a collection must
+    never be asked to prove — a bucket at 90-day retention with two pushed
+    paths, the first pinned, a plan at `retentionDays: 0` naming only the
+    unpinned one, and the `gc_run` that follows evicting nothing. The
+    override is the plan's alone and writes nothing; `gc_run` has no such
+    field.
 - **2.8 ✅ Reads leave odu.** Every byte used to cross the odu machine's
   uplink, which caps reads on the pod at ~2.5 MiB/s.[^bench] The store now
   holds the whole protocol — `<bucket>/nar/<file>`, `<bucket>/<hash>.narinfo`

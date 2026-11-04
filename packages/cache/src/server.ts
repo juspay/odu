@@ -846,6 +846,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
               cache.admin.gcPlan({
                 authority,
                 bucket: input.bucket ?? null,
+                retentionDays: input.retentionDays ?? null,
               }),
             (preview) => ({
               ...preview,

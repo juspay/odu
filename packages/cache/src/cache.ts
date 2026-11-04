@@ -358,10 +358,18 @@ export interface CacheAdmin {
     bucket: string | null;
   }): Promise<CacheOutcome<GcCollection>>;
   /** THE SAME DECISION, WITHOUT DOING IT — what the next collection would
-   *  evict, path by path, and what it would reclaim. */
+   *  evict, path by path, and what it would reclaim.
+   *
+   *  `retentionDays` asks that question with a retention OTHER than the
+   *  buckets' own, and writes none: `0` answers "what is here that nothing
+   *  references and no pin holds", which is what a person wants before
+   *  deciding what a bucket's retention should be. `null` is each bucket's
+   *  own number. Only `bucket.retention` changes a row, so this cannot be a
+   *  collection under another name. */
   gcPlan(input: {
     authority: Authority;
     bucket: string | null;
+    retentionDays: number | null;
   }): Promise<CacheOutcome<GcPreview>>;
   stats(input: { authority: Authority }): Promise<CacheOutcome<CacheStats>>;
   /**
@@ -725,6 +733,25 @@ const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
  *  last label is alphanumeric so `cache.` and `-x` are refused. */
 const DOMAIN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * A NUMBER OF DAYS, CHECKED ONCE.
+ *
+ * Three verbs take one — a bucket's creation, its change of mind, and the dry
+ * run's "ask as if" — and the rule and the sentence a person reads are one
+ * thing rather than three copies to drift apart. `null` is "not asked",
+ * which only the plan can mean.
+ */
+function checkedDays(days: number | null): CacheOutcome<null> {
+  if (days !== null && (!Number.isSafeInteger(days) || days < 0)) {
+    return {
+      ok: false,
+      code: "bad_input",
+      message: "retention must be a whole number of days, zero or more",
+    };
+  }
+  return { ok: true, value: null };
+}
 
 export function createCache(options: CacheOptions): Cache {
   const now = options.now ?? (() => Date.now());
@@ -1221,13 +1248,8 @@ export function createCache(options: CacheOptions): Cache {
               : `"${input.name}" is not a bucket name — lowercase letters, digits and dashes`,
         };
       }
-      if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 0) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message: "retention must be a whole number of days, zero or more",
-        };
-      }
+      const days = checkedDays(input.retentionDays);
+      if (!days.ok) return days;
       if (repo.bucket(input.name) !== null) {
         return { ok: false, code: "bucket_exists", message: `bucket "${input.name}" already exists` };
       }
@@ -1394,13 +1416,8 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      if (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 0) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message: "retention must be a whole number of days, zero or more",
-        };
-      }
+      const days = checkedDays(input.retentionDays);
+      if (!days.ok) return days;
       const next: BucketRow = { ...bucket, retentionDays: input.retentionDays };
       repo.putBucket(next);
       notify();
@@ -1648,14 +1665,26 @@ export function createCache(options: CacheOptions): Cache {
     async gcPlan(input) {
       const root = requireRoot(input);
       if (!root.ok) return root;
+      const { retentionDays } = input;
+      const days = checkedDays(retentionDays);
+      if (!days.ok) return days;
       const chosen = bucketsFor(input.bucket);
       if (!chosen.ok) return chosen;
+      // THE OVERRIDE IS A ROW THIS CALL MADE UP, and never one it kept: the
+      // planner reads `retentionDays` off each bucket, so asking a different
+      // question is handing it different rows. Nothing writes them, which is
+      // what makes "the dry run cannot collect" structural rather than a
+      // promise — and `gc.run` has no such field on the wire at all.
+      const asked =
+        retentionDays === null
+          ? chosen.value
+          : chosen.value.map((bucket) => ({ ...bucket, retentionDays }));
       // UNDER THE SAME LOCK as the collection it previews: a dry run taken
       // while a push was half-recorded would answer about a state that never
       // existed, and the lock is already how this row reads "what is retained".
       return withWriteLock(async () => ({
         ok: true as const,
-        value: previewGc(planFor(chosen.value), GC_PREVIEW_PATHS),
+        value: previewGc(planFor(asked), GC_PREVIEW_PATHS),
       }));
     },
 

@@ -195,7 +195,7 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       travel(100 * DAY);
       await push(cache, fresh);
 
-      const plan = await cache.admin.gcPlan({ ...asRoot(ROOT), bucket: "main" });
+      const plan = await cache.admin.gcPlan({ ...asRoot(ROOT), bucket: "main", retentionDays: null });
       expect(plan).toMatchObject({ ok: true });
       if (!plan.ok) return;
       expect(plan.value.buckets[0]?.paths.map((path) => path.storePath)).toEqual([doomed]);
@@ -208,6 +208,61 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       expect(report).toMatchObject({ ok: true });
       if (report.ok) expect(report.value.report.evicted).toBe(plan.value.evicted);
       expect(await keysOf(objects)).toEqual(keysOfPaths(fresh));
+      await dispose();
+    });
+
+    it("plans at a retention the bucket does not have, and changes nothing by it", async () => {
+      // THE QUESTION 2.7 LEFT OPEN: "what would I lose if this bucket kept
+      // only what is referenced or pinned?" — asked without first setting a
+      // retention that a collection could then act on. ONE DAY passes and no
+      // more: at zero days that is enough for both paths to be expired, so
+      // the pin is the whole difference between them, while at the bucket's
+      // own thirty it is nothing like enough for either.
+      const { cache, objects, travel, dispose } = await make();
+      const pinned = "/nix/store/pppppppppppppppppppppppppppppppp-pinned";
+      const loose = "/nix/store/llllllllllllllllllllllllllllllll-loose";
+      await push(cache, pinned);
+      await push(cache, loose);
+      expect(
+        await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "release", paths: [pinned] }),
+      ).toMatchObject({ ok: true });
+      travel(DAY);
+      // AT THE BUCKET'S OWN THIRTY DAYS there is nothing to take at all.
+      const own = await cache.admin.gcPlan({ ...asRoot(ROOT), bucket: "main", retentionDays: null });
+      expect(own).toMatchObject({ ok: true });
+      if (own.ok) expect(own.value.evicted).toBe(0);
+
+      const asked = await cache.admin.gcPlan({ ...asRoot(ROOT), bucket: "main", retentionDays: 0 });
+      expect(asked).toMatchObject({ ok: true });
+      if (!asked.ok) return;
+      expect(asked.value.buckets[0]?.paths.map((path) => path.storePath)).toEqual([loose]);
+      expect(asked.value.evicted).toBe(1);
+
+      // AND IT WROTE NOTHING. The bucket still keeps its own thirty days, so
+      // the collection that follows — which has no such field on the wire —
+      // evicts neither path, and both objects are still there.
+      expect(cache.bucket("main")?.retentionDays).toBe(30);
+      const report = await cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
+      expect(report).toMatchObject({ ok: true });
+      if (report.ok) expect(report.value.report.evicted).toBe(0);
+      expect(await keysOf(objects)).toEqual(keysOfPaths(pinned, loose));
+
+      // The same plan a hundred days later is what the collection then does,
+      // which is the other half of "the override is only a question".
+      travel(100 * DAY);
+      const later = await cache.admin.gcPlan({ ...asRoot(ROOT), bucket: "main", retentionDays: null });
+      expect(later.ok && later.value.buckets[0]?.paths.map((path) => path.storePath)).toEqual([loose]);
+      await dispose();
+    });
+
+    it("refuses a retention that is not a whole number of days", async () => {
+      const { cache, dispose } = await make();
+      for (const retentionDays of [-1, 1.5]) {
+        expect({
+          retentionDays,
+          answer: await cache.admin.gcPlan({ ...asRoot(ROOT), bucket: "main", retentionDays }),
+        }).toMatchObject({ retentionDays, answer: { ok: false, code: "bad_input" } });
+      }
       await dispose();
     });
 

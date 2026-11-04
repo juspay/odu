@@ -129,7 +129,7 @@ describe("the root token", () => {
       cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" }),
       cache.admin.pinDelete({ ...asRoot(ROOT), bucket: "main", name: "p" }),
       cache.admin.gc({ ...asRoot(ROOT), bucket: null }),
-      cache.admin.gcPlan({ ...asRoot(ROOT), bucket: null }),
+      cache.admin.gcPlan({ ...asRoot(ROOT), bucket: null, retentionDays: null }),
       cache.admin.stats(asRoot(ROOT)),
     ];
     for (const attempt of attempts) {

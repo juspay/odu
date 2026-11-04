@@ -175,6 +175,31 @@ Feature: An admin administers the cache from the board
     Then the bucket's own stats say "1 paths"
     And there should be no page errors
 
+  # THE QUESTION ASKED WITHOUT ANSWERING IT FIRST. The scenario above had to
+  # SET the retention to zero before it could see what zero would take — which
+  # is the operator editing the bucket in order to ask it a question, and then
+  # living with the answer. The dry run's own retention asks it instead: the
+  # bucket keeps its ninety days throughout, and the collection that follows
+  # the plan takes nothing, because only the plan was ever told about zero.
+  Scenario: The dry run asks at a retention the bucket does not have, and keeps it
+    Given a bucket created from the board
+    And I mint a "write" token
+    And two paths are pushed with that token from the CLI
+    And I pin the first path as "release"
+    Then the cache says "Pinned release"
+    When I set the dry run retention to "0" days
+    And I press "Dry run"
+    Then the dry run says "At 0 days' retention"
+    And the dry run says "would take 1 path"
+    And the dry run names the unpinned path
+    And the dry run does not name the pinned path
+    # NOTHING WAS WRITTEN: the facts line is drawn from the republished row.
+    And the bucket's facts say "90d retention"
+    When I press "Run GC"
+    Then the cache says "Collected: evicted 0 paths"
+    And the bucket's facts say "90d retention"
+    And there should be no page errors
+
   @signed-in:admin
   Scenario: An empty pin is refused by the row, in its words
     Given a bucket created from the board

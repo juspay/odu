@@ -881,6 +881,14 @@ When("I set the retention to {string} days", async function (this: OduWorld, day
   await this.page.getByRole("button", { name: "Set retention", exact: true }).click();
 });
 
+/** THE PLAN'S OWN NUMBER, which is not the bucket's: a different field, with
+ *  no "set" button behind it, read when the dry run is asked for. Addressed
+ *  by its exact label so it can never resolve to the retention control above
+ *  — the two being told apart is most of what this scenario is about. */
+When("I set the dry run retention to {string} days", async function (this: OduWorld, days: string) {
+  await this.page.getByLabel("dry run retention days", { exact: true }).fill(days);
+});
+
 /** THE FACTS LINE at the top of the bucket page, which is drawn from the row
  *  the cache republished — so a number read here is the bucket's, never the
  *  field that was typed into. */

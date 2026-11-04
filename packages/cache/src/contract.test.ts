@@ -30,6 +30,9 @@ const LEDGER: ContractLedger = {
   // 4.3 — `bucket.delete`: a bucket, its objects, its tokens and its pins
   // taken away in one verb. Additive.
   "4.3": "95162ed3ed6003ad",
+  // 4.4 — PLAN 2.7's open item: `gc.plan` takes a `retentionDays` to plan
+  // with, which `gc.run` deliberately does not. Additive.
+  "4.4": "7922ebb8aef0d7da",
 };
 
 describe("the cache row's contract", () => {
@@ -40,5 +43,19 @@ describe("the cache row's contract", () => {
     };
     const mismatch = contractLedgerMismatch("the cache row", "CACHE_CONTRACT_VERSION", current, LEDGER);
     expect(mismatch, mismatch ?? "").toBeNull();
+  });
+
+  /**
+   * THE SPLIT IS THE GUARANTEE, so it is held here rather than described in a
+   * doc: `gc.plan` takes a retention to ask WITH, and `gc.run` has no such
+   * field on the wire at all. A caller cannot hand a collection a retention
+   * it would then evict by, whatever any handler does with its input.
+   */
+  it("offers a retention to plan with, and none to collect by", () => {
+    const fieldsOf = (schema: unknown): string[] =>
+      Object.keys((schema as { fields: Record<string, unknown> }).fields);
+    const gc = oduCacheSurface.spec.procedures.gc;
+    expect(fieldsOf(gc.plan.input)).toContain("retentionDays");
+    expect(fieldsOf(gc.run.input)).not.toContain("retentionDays");
   });
 });
