@@ -89,7 +89,6 @@ import {
   type CacheMigration,
   type CachePath,
   type CachePin,
-  type CacheStats,
   type CacheToken,
   flakeBlock,
   netrcBlock,
@@ -779,74 +778,20 @@ function BucketPage(
   const shown = (): BucketTab => (props.canAdminister ? listing() : "Paths");
 
   /**
-   * A RECOUNT, ASKED FOR BY HAND — what "refresh stats" is now that the facts
-   * line is the only place this bucket's numbers are drawn.
+   * A CLOCK THAT STOPS WHILE ITS PANEL IS AWAY.
    *
-   * That line is the ROW the cache last published, and the publisher is
-   * throttled (one notification a second at most, trailing edge), so for a
-   * moment after a collection the numbers on screen are a second old.
-   * `stats.read` counts the database NOW. What it answers is drawn until the
-   * row publishes again: the subscription stays the source, and the recount is
-   * a look ahead of it rather than a second copy of the truth.
+   * `props.now` ticks once a second for the whole page, and a path row reads
+   * it twice (`created`, `lastWanted`) while a pin row reads it once. Keeping
+   * both panels mounted is what saves the paged-in paths and the half-typed
+   * pin — but a `display: none` subtree redrawing 600 relative times a second
+   * is exactly the invisible DOM work this page exists to cut. One gate, read
+   * twice: the page owns which panel is up, so it hands each the `now` that
+   * applies to it.
    */
-  const [recount, setRecount] = createSignal<CacheBucket | null>(null);
-  const [recounting, setRecounting] = createSignal(false);
-  const [recountFault, setRecountFault] = createSignal<string | null>(null);
-  /** A page that has gone writes nothing: the read below outlives the view
-   *  whenever a reader leaves while it is in flight. */
-  let drawn = true;
-  onCleanup(() => {
-    drawn = false;
-  });
-  const refreshStats = (): void => {
-    // WHAT THIS ANSWER WOULD BE AN ANSWER TO, carried into it: the bucket it
-    // was asked about, and the ROW that was on screen when it was asked. A
-    // count that lands under another bucket's name is not that bucket's, and
-    // a count that lands after the row published again is OLDER than what is
-    // already drawn — writing it would hang a stale number over a live one
-    // until the next publish, which on a quiet bucket is minutes.
-    const asked = props.name;
-    const since = bucket();
-    setRecounting(true);
-    setRecountFault(null);
-    void props.call(props.client.procedures.stats.read({ rootToken: props.rootToken() })).then(
-      (all: CacheStats) => {
-        if (!drawn) return;
-        // THE BUTTON COMES BACK whatever the answer was about: a read that
-        // landed elsewhere must not leave "counting…" disabled on the page
-        // the reader is actually looking at.
-        setRecounting(false);
-        if (asked !== props.name || bucket() !== since) return;
-        setRecount(all.buckets.find((row) => row.name === asked) ?? null);
-      },
-      (err: unknown) => {
-        if (!drawn) return;
-        setRecounting(false);
-        if (asked !== props.name) return;
-        setRecountFault(refusalText(err));
-      },
-    );
-  };
-  // A PUBLISH SUPERSEDES A RECOUNT — the row is the source, so the moment it
-  // says something newer the hand-read answer goes rather than sitting over it.
-  createEffect(on(bucket, () => setRecount(null), { defer: true }));
-  // …and a recount belongs to ONE bucket, like the minted token above it. The
-  // page is mounted by a NON-keyed `Show`, so `props.name` changes in place and
-  // every piece of this — the answer, its refusal and the in-flight state the
-  // button reads — belongs to the bucket that is gone.
-  createEffect(
-    on(
-      () => props.name,
-      () => {
-        setRecount(null);
-        setRecountFault(null);
-        setRecounting(false);
-      },
-      { defer: true },
-    ),
-  );
-  /** The row the facts line draws: the recount while it is the newer answer. */
-  const facts = createMemo<CacheBucket | undefined>(() => recount() ?? bucket());
+  const clockWhile = (which: BucketTab): (() => number) =>
+    createMemo<number>((prev) => (shown() === which ? props.now : prev), props.now);
+  const pathsClock = clockWhile("Paths");
+  const pinsClock = clockWhile("Pins");
 
   /** The push block, computed once: the button copies the string the block
    *  shows, and two calls could not be anything else. */
@@ -884,7 +829,7 @@ function BucketPage(
           </Show>
         }
         sub={
-          <Show when={facts()}>
+          <Show when={bucket()}>
             {(row) => (
               <>
                 {/* THE NUMBER IS THE FACT and the word is what it counts, so
@@ -921,21 +866,6 @@ function BucketPage(
                     ? "no upstream filter"
                     : `skips ${row().upstreamKeys.join(", ")}`}
                 </span>
-                {/* AND THE WAY TO ASK AGAIN, beside the numbers it refreshes
-                    rather than in a panel that repeated them. */}
-                <Show when={props.canAdminister}>
-                  <button
-                    type="button"
-                    class="text-action"
-                    disabled={recounting()}
-                    onClick={refreshStats}
-                  >
-                    {recounting() ? "counting…" : "refresh stats"}
-                  </button>
-                </Show>
-                <Show when={recountFault()}>
-                  {(message) => <span class="fault">{message()}</span>}
-                </Show>
               </>
             )}
           </Show>
@@ -1063,11 +993,15 @@ function BucketPage(
                 </div>
               </Show>
 
+              {/* A TABPANEL ONLY WHERE THERE IS A TABLIST: a member is drawn
+                  no Pins tab, so for them this is a plain box rather than a
+                  panel announced as part of a tab set that does not exist,
+                  named by an IDREF that resolves to nothing. */}
               <div
                 class="tab-host"
-                role="tabpanel"
                 id="bucket-panel-Paths"
-                aria-labelledby="bucket-tab-Paths"
+                role={props.canAdminister ? "tabpanel" : undefined}
+                aria-labelledby={props.canAdminister ? "bucket-tab-Paths" : undefined}
                 hidden={shown() !== "Paths"}
               >
                 <Panel
@@ -1075,12 +1009,27 @@ function BucketPage(
                   title="Paths"
                   label="paths"
                   actions={
-                    <SearchInput
-                      label="filter paths"
-                      value={typed()}
-                      placeholder="filter by path, e.g. openssl"
-                      onValue={setTyped}
-                    />
+                    <>
+                      <SearchInput
+                        label="filter paths"
+                        value={typed()}
+                        placeholder="filter by path, e.g. openssl"
+                        onValue={setTyped}
+                      />
+                      {/* THE LIST IS A SNAPSHOT, and this page's only stale
+                          copy: the facts line above follows the bucket's row
+                          as it publishes, while a page read against this
+                          bucket is a page — a path a build box pushed a
+                          minute ago is not in it until somebody asks. */}
+                      <button
+                        type="button"
+                        class="text-action"
+                        disabled={first.loading}
+                        onClick={() => refetch()}
+                      >
+                        {first.loading ? "reading…" : "refresh paths"}
+                      </button>
+                    </>
                   }
                 >
                   {/* THE FIRST PAGE'S OWN REFUSAL, from the resource's VALUE — see
@@ -1119,11 +1068,11 @@ function BucketPage(
                             </code>
                             <span class="fact-line bucket-facts">
                               <span>{bytes(path.narSize)}</span>
-                              <span>{ago(path.created, props.now)}</span>
+                              <span>{ago(path.created, pathsClock())}</span>
                               <span>{path.hits} reads</span>
                               {/* WANTED, not read: retention counts from here,
                                   and the reads beside it never move it. */}
-                              <span>wanted {ago(path.lastWanted, props.now)}</span>
+                              <span>wanted {ago(path.lastWanted, pathsClock())}</span>
                             </span>
                           </li>
                         )}
@@ -1161,7 +1110,7 @@ function BucketPage(
                       call={props.call}
                       rootToken={props.rootToken}
                       name={name}
-                      now={props.now}
+                      now={pinsClock()}
                     />
                   </div>
                 )}
@@ -1898,21 +1847,6 @@ export function pinGroups(pins: ReadonlyArray<CachePin>): ReadonlyArray<PinGroup
   return loose.length === 0 ? groups : [...groups, { repo: "Pinned by hand", pins: loose }];
 }
 
-/** One pin as the LIST holds it: the row, its split name, and the key both
- *  its identity across a republish and its expansion are held by. */
-interface PinEntry {
-  readonly name: string;
-  readonly pin: CachePin;
-  readonly parsed: PinName;
-}
-
-/** {@link PinGroup}, with the heading under the `name` key {@link keepIdentity}
- *  compares by — a group whose pins did not move is the same group object. */
-interface StablePinGroup {
-  readonly name: string;
-  readonly pins: ReadonlyArray<PinEntry>;
-}
-
 /**
  * `pin.create`, `pin.list` and `pin.delete` for this bucket.
  *
@@ -1938,27 +1872,45 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
    * ROWS THAT SURVIVE A REPUBLISH, and the expansion that rides on them.
    *
    * `pinGroups` mints fresh objects every call, so a refetch — a pin created,
-   * an unrelated pin removed — would hand `<For>` all-new identities and
-   * dispose every row. An audit of a 1 789-root pin would collapse because
-   * somebody unpinned something else. So each row and each group is handed
-   * back as the SAME object when its facts did not change, and the "show all"
-   * a reader asked for is held HERE, by pin NAME, which outlives any object.
+   * one removed — would hand `<For>` all-new identities and dispose every
+   * row: an audit of a 1 789-root pin collapsing because somebody unpinned
+   * something else. Two things keep it open.
+   *
+   * THE HEADING IS THE KEY, not the group. `<For>` keys a string by VALUE, so
+   * a repository whose name is still in the list is still the same item
+   * however its pins moved — where a group OBJECT holding its pins changed
+   * identity whenever any pin under it did, taking the whole repository's
+   * rows with it. The pins hang off a `Map` read by that heading.
+   *
+   * AND EACH ROW KEEPS ITS OWN IDENTITY while its facts hold, so removing one
+   * pin disposes that row and no other. A row IS the pin — `CachePin` already
+   * carries the `name` {@link keepIdentity} compares by, and the split name
+   * is a pure function of it, derived where it is drawn. The `<details>` open
+   * state is the DOM's own and rides on this identity.
    */
-  const stableRow = keepIdentity<PinEntry>();
-  const stableGroup = keepIdentity<StablePinGroup>();
-  const groups = createMemo<ReadonlyArray<StablePinGroup>>(() =>
-    pinGroups(listed()).map((group) =>
-      stableGroup({
-        name: group.repo,
-        pins: group.pins.map((held) =>
-          stableRow({ name: held.pin.name, pin: held.pin, parsed: held.parsed }),
-        ),
-      }),
-    ),
+  const stableRow = keepIdentity<CachePin>();
+  const grouped = createMemo<ReadonlyMap<string, ReadonlyArray<CachePin>>>(
+    () =>
+      new Map(
+        pinGroups(listed()).map((group) => [
+          group.repo,
+          group.pins.map((held) => stableRow(held.pin)),
+        ]),
+      ),
   );
+  const headings = createMemo<readonly string[]>(() => [...grouped().keys()]);
+  /**
+   * WHICH CLOSURES A READER ASKED TO SEE WHOLE — by name AND the moment it
+   * was pinned, because re-pointing a pin keeps the name and replaces the
+   * closure (`db.ts`'s upsert writes `root_paths` and `created` together).
+   * Keyed by name alone, a CI push re-pointing `…@master/x86_64-linux` would
+   * draw all 1 789 roots of a closure nobody asked about; keyed by both, the
+   * list forgets exactly when the `<details>` it rode on does.
+   */
   const [expanded, setExpanded] = createSignal<ReadonlySet<string>>(new Set());
-  const showAll = (name: string): void => {
-    setExpanded((held) => new Set(held).add(name));
+  const closureKey = (pin: CachePin): string => `${pin.name}@${pin.created}`;
+  const showAll = (key: string): void => {
+    setExpanded((held) => new Set(held).add(key));
   };
 
   const create = (): void => {
@@ -2002,6 +1954,19 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
       title="Pins"
       note="A pin holds its roots, and whatever they reference inside this bucket, against every collection — however long nobody wants them — until it is removed here."
       label="pins"
+      actions={
+        /* The other snapshot on this page: this list is read once per bucket
+           and after this page's own create or unpin, so a pin a CI push
+           re-pointed since then is still drawn as it was. */
+        <button
+          type="button"
+          class="text-action"
+          disabled={pins.loading()}
+          onClick={pins.refetch}
+        >
+          {pins.loading() ? "reading…" : "refresh pins"}
+        </button>
+      }
     >
       <div class="panel-body">
         <div class="stack">
@@ -2047,18 +2012,18 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
                 items in it rather than a second list per repo: a pin is a
                 pin whichever heading it sits under. */}
             <ul class="pins facts">
-              <For each={groups()}>
-                {(group) => (
+              <For each={headings()}>
+                {(repo) => (
                   <>
-                    <li class="pin-group">{group.name}</li>
-                    <For each={group.pins}>
+                    <li class="pin-group">{repo}</li>
+                    <For each={grouped().get(repo) ?? []}>
                       {(held) => (
                         <PinnedRow
-                          held={held}
+                          pin={held}
                           now={props.now}
                           busy={action.busy()}
-                          all={expanded().has(held.name)}
-                          onShowAll={showAll}
+                          all={expanded().has(closureKey(held))}
+                          onShowAll={() => showAll(closureKey(held))}
                           onUnpin={unpin}
                         />
                       )}
@@ -2097,39 +2062,41 @@ const PIN_ROOTS_SHOWN = 10;
  * WHETHER IT IS EXPANDED IS THE LIST'S, not this row's: `pin.list` is asked
  * again after every create and unpin, and a row rebuilt by that answer would
  * take its own state with it — an audit of a 1 789-root pin collapsing
- * because somebody removed an unrelated one. The list holds it by NAME, which
- * no republish can change.
+ * because somebody removed an unrelated one.
  */
 function PinnedRow(props: {
-  held: PinEntry;
+  pin: CachePin;
   now: number;
   busy: boolean;
   all: boolean;
-  onShowAll: (name: string) => void;
+  onShowAll: () => void;
   onUnpin: (name: string) => void;
 }): JSX.Element {
+  /** The name, split into the three facts it carries — a pure function of the
+   *  pin, derived where it is drawn rather than carried beside it. */
+  const parsed = createMemo<PinName>(() => pinName(props.pin.name));
   const shown = createMemo<readonly string[]>(() =>
-    props.all ? props.held.pin.rootPaths : props.held.pin.rootPaths.slice(0, PIN_ROOTS_SHOWN),
+    props.all ? props.pin.rootPaths : props.pin.rootPaths.slice(0, PIN_ROOTS_SHOWN),
   );
-  const rest = (): number => props.held.pin.rootPaths.length - shown().length;
+  const rest = (): number => props.pin.rootPaths.length - shown().length;
   return (
     <li>
       <span class="pin">
         <span class="pin-head">
-          <code>{props.held.parsed.ref}</code>
-          <Show when={props.held.parsed.system}>{(system) => <Tag>{system()}</Tag>}</Show>
+          <code>{parsed().ref}</code>
+          <Show when={parsed().system}>{(system) => <Tag>{system()}</Tag>}</Show>
         </span>
         <span class="fact-line">
           <span>
-            {props.held.pin.rootPaths.length} path
-            {props.held.pin.rootPaths.length === 1 ? "" : "s"} in its closure
+            {props.pin.rootPaths.length} path
+            {props.pin.rootPaths.length === 1 ? "" : "s"} in its closure
           </span>
-          <span>pinned {ago(props.held.pin.created, props.now)}</span>
+          <span>pinned {ago(props.pin.created, props.now)}</span>
           {/* WHO MADE IT decides who may re-point it — and an admin who
               re-points a pushed pin TAKES IT OVER: the next push naming it is
               refused and that workflow step goes red, loudly. */}
           <span>
-            {props.held.pin.createdBy === "write"
+            {props.pin.createdBy === "write"
               ? "made by a push, which may re-point it"
               : "made by an administrator: a push can no longer move it"}
           </span>
@@ -2144,12 +2111,8 @@ function PinnedRow(props: {
             <For each={shown()}>{(root) => <code class="path">{root}</code>}</For>
           </span>
           <Show when={rest() > 0}>
-            <button
-              type="button"
-              class="text-action"
-              onClick={() => props.onShowAll(props.held.name)}
-            >
-              show all {props.held.pin.rootPaths.length}
+            <button type="button" class="text-action" onClick={props.onShowAll}>
+              show all {props.pin.rootPaths.length}
             </button>
           </Show>
         </details>
@@ -2157,9 +2120,9 @@ function PinnedRow(props: {
       <button
         type="button"
         class="text-action"
-        aria-label={`unpin ${props.held.pin.name}`}
+        aria-label={`unpin ${props.pin.name}`}
         disabled={props.busy}
-        onClick={() => props.onUnpin(props.held.pin.name)}
+        onClick={() => props.onUnpin(props.pin.name)}
       >
         unpin
       </button>

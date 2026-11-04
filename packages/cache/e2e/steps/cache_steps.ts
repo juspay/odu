@@ -356,6 +356,16 @@ Then("no path is listed", async function (this: OduWorld) {
   await this.page.locator("ol.paths li").first().waitFor({ state: "detached", timeout: 30_000 });
 });
 
+/** WHAT THE LIST HOLDS AFTER A REFRESH — a count, because the question is
+ *  whether the page asked the row again, not which path survived. */
+Then("one path is listed", async function (this: OduWorld) {
+  const rows = this.page.locator("ol.paths li");
+  await this.waitUntil(
+    async () => (await rows.count()) === 1,
+    "the path list to hold exactly one path",
+  );
+});
+
 Then("the page says nothing matches", async function (this: OduWorld) {
   await this.saysThat(
     this.page.locator(".cache-paths"),
@@ -795,6 +805,11 @@ When("I open the pins", async function (this: OduWorld) {
   await this.page.locator('section[aria-label="pins"]').waitFor({ timeout: 30_000 });
 });
 
+When("I open the paths", async function (this: OduWorld) {
+  await this.page.getByRole("tab", { name: "Paths", exact: true }).click();
+  await this.page.locator(".cache-paths").waitFor({ timeout: 30_000 });
+});
+
 async function pinPaths(world: OduWorld, name: string, paths: readonly string[]): Promise<void> {
   await world.page.getByLabel("pin name", { exact: true }).fill(name);
   await world.page.getByLabel("store paths to pin", { exact: true }).fill(paths.join("\n"));
@@ -843,15 +858,14 @@ When("I expand what the pin {string} holds", async function (this: OduWorld, nam
 });
 
 /** WHAT A PIN HOLDS, beside the button that takes it away: a name on its own
- *  says that something is kept, never what, and a pin nobody can read is a pin
- *  nobody dares remove. Behind the disclosure, which this opens — the roots
- *  are an audit somebody asks for, not the row. */
+ *  says that something is kept, never what, and a pin nobody can read is a
+ *  pin nobody dares remove. The disclosure is opened by the `When` above —
+ *  an assertion that acted could not tell "drawn" from "reachable". */
 Then(
   "the pin {string} is listed holding that path",
   async function (this: OduWorld, name: string) {
     const path = this.cachePath;
     assert.ok(path !== undefined, "no path was pushed");
-    await openRoots(this, name);
     await this.saysThat(pinRow(this, name), `the pin ${name}`, path);
   },
 );

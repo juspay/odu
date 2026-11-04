@@ -129,7 +129,8 @@ Feature: An admin administers the cache from the board
     And I open the pins
     And I pin that path as "release"
     Then the cache says "Pinned release"
-    And the pin "release" is listed holding that path
+    When I expand what the pin "release" holds
+    Then the pin "release" is listed holding that path
     When I unpin "release"
     Then the cache says "Unpinned release"
     And the pin list says nothing is pinned
@@ -197,10 +198,14 @@ Feature: An admin administers the cache from the board
     When I press "Run GC"
     Then the cache says "Collected: evicted 1 path"
     And the dry run says "would take nothing here"
-    # THE NUMBERS ARE THE FACTS LINE'S, and "refresh stats" beside them is the
-    # way to ask for a recount rather than wait for the row's next publish.
-    When I press "refresh stats"
+    # THE FACTS LINE FOLLOWS THE ROW, with nothing pressed: the collection
+    # republished the bucket, so the number at the top is already the new one.
     Then the bucket's facts say "1 paths"
+    # THE LIST DOES NOT — it is a page read when the tab was opened, and
+    # **refresh paths** is what asks again.
+    When I open the paths
+    And I press "refresh paths"
+    Then one path is listed
     And there should be no page errors
 
   # THE QUESTION ASKED WITHOUT ANSWERING IT FIRST. The scenario above had to

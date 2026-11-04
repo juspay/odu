@@ -68,8 +68,6 @@ interface Seen {
 
 interface Server {
   origin: string;
-  /** The instance's public origin, as its consumer facts publish it. */
-  board: string;
   seen: Seen[];
   /** How many times each path's nar upload should fail before succeeding. */
   failNar: Map<string, number>;
@@ -121,7 +119,6 @@ interface Server {
 function startServer(): Server {
   const state: Server = {
     origin: "",
-    board: "https://board.example.org",
     seen: [],
     failNar: new Map(),
     narStatus: new Map(),
@@ -157,11 +154,6 @@ function startServer(): Server {
         upload: request.headers.get("x-odu-upload"),
         body,
       });
-      if (request.method === "GET" && url.pathname === "/cache/main") {
-        // THE BUCKET'S CONSUMER FACTS: the push asks where THIS INSTANCE is,
-        // rather than guessing from its own environment.
-        return Response.json({ board: state.board });
-      }
 
       // ── THE STORE, when a test turns direct mode on ───────────────────
       //
