@@ -20,7 +20,11 @@
    * grammar for the row — the hairline, the control on the right — and this
    * stacks the left half of it.
    */
+  /* `flex: 1` because this half is a flex ITEM of `.facts li`, which puts a
+     row's control on the right: without a grow the pin's facts size to their
+     content and "unpin" wraps under them in the wide main column. */
   .pins .pin {
+    flex: 1 1 18rem;
     display: grid;
     gap: 0.3rem;
     min-width: 0;
@@ -54,14 +58,25 @@
      the panel's own spacing above it. */
   .pins > .pin-group:first-child { padding-top: 0; border-top: 0; }
 
-  /* WHAT THE PIN HOLDS. Each root is a store path: it wraps nowhere and
-     scrolls inside its own line, which is the one sideways scroll this design
-     allows — a store path broken across lines is two strings that look like
-     paths and are not. */
+  /* WHAT THE PIN HOLDS, WHEN SOMEBODY ASKS. The roots are a pin's audit —
+     "may this one go?" — and on a CI-pinned closure there are thousands of
+     them, so they sit behind a disclosure and the row above stays one row.
+     Each root is a store path: it wraps nowhere and scrolls inside its own
+     line, which is the one sideways scroll this design allows — a store path
+     broken across lines is two strings that look like paths and are not. */
+  .pin-roots-box > summary {
+    color: var(--quiet);
+    font: 500 0.72rem var(--mono);
+    cursor: pointer;
+  }
+
+  .pin-roots-box > summary:hover { color: var(--ink); }
+
   .pin-roots {
     display: grid;
     gap: 0.15rem;
     min-width: 0;
+    padding-top: 0.3rem;
   }
 
   .pin-roots .path {
@@ -70,5 +85,28 @@
     font-size: 0.75rem;
     color: var(--quiet);
     scrollbar-width: thin;
+  }
+
+  /* ── the end of the settings column ──────────────────────────────────────
+   *
+   * Every control above it changes what a bucket does and can be changed
+   * back; the one below it ends the bucket. A rule and a heading, so a reader
+   * scrolling the sidebar is told what the rest of the column is before they
+   * reach a button — the `btn-danger` inside it is the second telling.
+   */
+  .danger-zone {
+    display: grid;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    padding-top: 1.1rem;
+    border-top: 1px solid var(--line-strong);
+  }
+
+  .danger-zone-head {
+    margin: 0;
+    color: var(--red-ink);
+    font: 500 0.72rem var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
 }

@@ -481,15 +481,20 @@ Then("the page's netrc block names {string}", async function (this: OduWorld, ho
   );
 });
 
-Then("the push block still names the bucket's path", async function (this: OduWorld) {
-  const name = this.cacheBucket;
-  assert.ok(name !== undefined, "no bucket was arranged");
-  const text = await this.page.locator("pre.push-block").innerText();
-  // Naming the bucket is unchanged by a DOMAIN: the push block names the
-  // bucket and the daemon's origin, never the substituter URL.
-  assert.ok(
-    text.includes(`odu cache push ${name} <paths> --origin ${this.service.origin}`),
-    `the push block lost the bucket's origin form: ${text}`,
+/** ONE FACT, AND IT IS THE ONE ABOVE IT. Since `--cache`, a push names the
+ *  substituter URL and the cache states the rest in its own `nix-cache-info`
+ *  — so a bucket that has just been given a DOMAIN has a push block that
+ *  follows it, and the two blocks on the page cannot name two caches. */
+Then("the push block names the same cache the nix.conf block does", async function (
+  this: OduWorld,
+) {
+  const conf = await this.page.locator("pre.consume-block").innerText();
+  const url = /extra-substituters = (\S+)/.exec(conf)?.[1];
+  assert.ok(url !== undefined, `the nix.conf block names no substituter: ${conf}`);
+  await this.saysThat(
+    this.page.locator("pre.push-block"),
+    "the push block",
+    `odu cache push --cache ${url} <paths>`,
   );
 });
 
@@ -728,24 +733,35 @@ When("I revoke the minted token", async function (this: OduWorld) {
  *  talks to the cache's HTTP API with a bucket credential, so a token the page
  *  minted wrongly fails here rather than three steps later. */
 function pushWithMintedToken(world: OduWorld): string {
+  return pushManyWithMintedToken(world, 1)[0] as string;
+}
+
+/** The same push, with `count` leaf paths in one command: a pin over a
+ *  dozen-path closure is what the roots disclosure exists for, and twelve
+ *  `nix store add-file`s in one push is the cheapest honest way to arrange
+ *  one. */
+function pushManyWithMintedToken(world: OduWorld, count: number): string[] {
   const bucket = world.cacheBucket;
   const token = minted(world).token;
   assert.ok(bucket !== undefined && token !== undefined, "no bucket or token");
   const dir = mkdtempSync(join(tmpdir(), "odu-wa-cache-"));
-  const name = unique("pinned");
-  const file = join(dir, name);
-  writeFileSync(file, `odu web acceptance: ${name}\n`);
-  const added = spawnSync("nix", ["store", "add-file", file], {
-    env: world.service.env,
-    encoding: "utf-8",
-  });
-  assert.strictEqual(added.status, 0, `nix store add-file failed: ${added.stderr}`);
-  const path = added.stdout.trim();
-  const pushed = oduCli(world.service, ["cache", "push", bucket, path, "-o", "json"], {
+  const paths: string[] = [];
+  for (let index = 0; index < count; index++) {
+    const name = unique("pinned");
+    const file = join(dir, name);
+    writeFileSync(file, `odu web acceptance: ${name}\n`);
+    const added = spawnSync("nix", ["store", "add-file", file], {
+      env: world.service.env,
+      encoding: "utf-8",
+    });
+    assert.strictEqual(added.status, 0, `nix store add-file failed: ${added.stderr}`);
+    paths.push(added.stdout.trim());
+  }
+  const pushed = oduCli(world.service, ["cache", "push", bucket, ...paths, "-o", "json"], {
     ODU_CACHE_TOKEN: token,
   });
   assert.strictEqual(pushed.status, 0, `odu cache push failed: ${pushed.stderr}`);
-  return path;
+  return paths;
 }
 
 When("a path is pushed with that token from the CLI", function (this: OduWorld) {
@@ -763,12 +779,32 @@ When("two paths are pushed with that token from the CLI", function (this: OduWor
   this.cachePaths = paths;
 });
 
+/** A CLOSURE BIG ENOUGH TO BE A WALL — twelve leaf paths in one push, which
+ *  is two more than a pin row draws before it folds the rest away. */
+When("twelve paths are pushed with that token from the CLI", function (this: OduWorld) {
+  const paths = pushManyWithMintedToken(this, 12);
+  this.cachePath = paths[0] as string;
+  this.cachePaths = paths;
+});
+
+/** THE PINS ARE A TAB NOW, beside the paths: they are both "what is in this
+ *  bucket", and the roots of every pin printed down the sidebar were most of
+ *  this page's DOM. */
+When("I open the pins", async function (this: OduWorld) {
+  await this.page.getByRole("tab", { name: "Pins", exact: true }).click();
+  await this.page.locator('section[aria-label="pins"]').waitFor({ timeout: 30_000 });
+});
+
+async function pinPaths(world: OduWorld, name: string, paths: readonly string[]): Promise<void> {
+  await world.page.getByLabel("pin name", { exact: true }).fill(name);
+  await world.page.getByLabel("store paths to pin", { exact: true }).fill(paths.join("\n"));
+  await world.page.getByRole("button", { name: "Pin closure", exact: true }).click();
+}
+
 async function pinThatPath(world: OduWorld, name: string): Promise<void> {
   const path = world.cachePath;
   assert.ok(path !== undefined, "no path was pushed");
-  await world.page.getByLabel("pin name", { exact: true }).fill(name);
-  await world.page.getByLabel("store paths to pin", { exact: true }).fill(path);
-  await world.page.getByRole("button", { name: "Pin closure", exact: true }).click();
+  await pinPaths(world, name, [path]);
 }
 
 When("I pin that path as {string}", async function (this: OduWorld, name: string) {
@@ -780,21 +816,78 @@ When("I pin the first path as {string}", async function (this: OduWorld, name: s
   await pinThatPath(this, name);
 });
 
+When("I pin every pushed path as {string}", async function (this: OduWorld, name: string) {
+  const paths = this.cachePaths;
+  assert.ok(paths !== undefined && paths.length > 0, "no paths were pushed");
+  await pinPaths(this, name, paths);
+});
+
+/** One pin's row in the list. */
+function pinRow(world: OduWorld, name: string): Locator {
+  return world.page.locator("ul.pins li", { hasText: name }).first();
+}
+
+/** Open what a pin holds, once: `<details>` TOGGLES, so a second click on a
+ *  summary that is already open is a step that closes the thing it is about
+ *  to read. */
+async function openRoots(world: OduWorld, name: string): Promise<void> {
+  const details = pinRow(world, name).locator("details").first();
+  await details.waitFor({ timeout: 30_000 });
+  if ((await details.getAttribute("open")) === null) {
+    await details.locator("summary").click();
+  }
+}
+
+When("I expand what the pin {string} holds", async function (this: OduWorld, name: string) {
+  await openRoots(this, name);
+});
+
 /** WHAT A PIN HOLDS, beside the button that takes it away: a name on its own
  *  says that something is kept, never what, and a pin nobody can read is a pin
- *  nobody dares remove. */
+ *  nobody dares remove. Behind the disclosure, which this opens — the roots
+ *  are an audit somebody asks for, not the row. */
 Then(
   "the pin {string} is listed holding that path",
   async function (this: OduWorld, name: string) {
     const path = this.cachePath;
     assert.ok(path !== undefined, "no path was pushed");
-    await this.saysThat(
-      this.page.locator("ul.pins li", { hasText: name }),
-      `the pin ${name}`,
-      path,
+    await openRoots(this, name);
+    await this.saysThat(pinRow(this, name), `the pin ${name}`, path);
+  },
+);
+
+/** THE WALL THIS PAGE NO LONGER DRAWS, counted in the DOM rather than
+ *  described: a pin of a big closure renders ten store paths, whatever its
+ *  closure holds, until somebody asks for the rest. */
+Then(
+  "the pin {string} renders {int} store paths",
+  async function (this: OduWorld, name: string, count: number) {
+    const roots = pinRow(this, name).locator("code.path");
+    await this.waitUntil(
+      async () => (await roots.count()) === count,
+      `the pin ${name} to render ${count} store paths`,
     );
   },
 );
+
+/** …and they are not merely off the bottom of a long list: they are not drawn
+ *  at all until the disclosure is open. */
+Then("the pin {string} keeps its roots folded away", async function (this: OduWorld, name: string) {
+  const first = pinRow(this, name).locator("code.path").first();
+  await first.waitFor({ state: "attached", timeout: 30_000 });
+  assert.strictEqual(
+    await first.isVisible(),
+    false,
+    `the pin ${name} drew its roots before anybody asked for them`,
+  );
+});
+
+Then("the pin {string} shows its roots", async function (this: OduWorld, name: string) {
+  await pinRow(this, name)
+    .locator("code.path")
+    .first()
+    .waitFor({ state: "visible", timeout: 30_000 });
+});
 
 When("I unpin {string}", async function (this: OduWorld, name: string) {
   await this.page.getByRole("button", { name: `unpin ${name}`, exact: true }).click();
@@ -927,13 +1020,6 @@ Then("the dry run does not name the pinned path", async function (this: OduWorld
     0,
     "the dry run would take the pinned path",
   );
-});
-
-/** THIS BUCKET'S line of the stats, not the cache-wide one beneath it: every
- *  scenario in this worker shares one daemon, so the whole cache's totals are
- *  somebody else's paths and would match a count this scenario never caused. */
-Then("the bucket's own stats say {string}", async function (this: OduWorld, text: string) {
-  await this.saysThat(this.page.locator("dl.stats dd").first(), "this bucket's stats", text);
 });
 
 Then("the push block names the minted token", async function (this: OduWorld) {

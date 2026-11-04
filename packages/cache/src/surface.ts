@@ -669,21 +669,27 @@ export function useCommand(bucket: string): string {
  * example, from one function (the docs quote it; `useCopy.test.ts` holds the
  * two together).
  *
- * The bucket is named, and the ORIGIN is the daemon's public origin, so the
- * command works on a build box that never ran `odu cache login` and through a
- * bucket's domain or the instance's own name alike. `token` is the JUST-MINTED
- * write token while the page can still show it — the once-shown moment is
- * exactly when a person pastes it into a CI secret — and `null` (the
- * placeholder) otherwise.
+ * ONE FACT, THE SUBSTITUTER URL — the same string the `nix.conf` block above
+ * it carries, and the same one {@link actionsPushBlock} names. Since `--cache`
+ * (cache 4.x), the cache states where a push goes in its own
+ * `nix-cache-info` — `Odu-Origin` and `Odu-Bucket` — so a block that spelled
+ * the bucket and the daemon's origin made a reader keep three facts current
+ * for a bucket that may move stores or gain a domain. `token` is the
+ * JUST-MINTED write token while the page can still show it — the once-shown
+ * moment is exactly when a person pastes it into a CI secret — and `null`
+ * (the placeholder) otherwise.
  */
 export function pushBlock(input: {
-  readonly origin: string;
-  readonly bucket: string;
+  /** The substituter URL the bucket publishes: its domain when it has one,
+   *  its store's public URL, or the mount path on this daemon. */
+  readonly url: string;
   readonly token: string | null;
 }): string {
   return `# push — a write token, exported where the build runs (a build secret)
+# --cache is the substituter URL you already read from: this cache's
+# nix-cache-info names the origin a push goes to and the bucket it lands in.
 export ODU_CACHE_TOKEN=${input.token ?? WRITE_TOKEN_PLACEHOLDER}
-odu cache push ${input.bucket} <paths> --origin ${input.origin.replace(/\/$/, "")}
+odu cache push --cache ${input.url.replace(/\/$/, "")} <paths>
 `;
 }
 

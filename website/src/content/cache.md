@@ -111,18 +111,22 @@ The bucket argument is a name resolved against the logged-in origin, or a full `
 
 ```sh
 # push — a write token, exported where the build runs (a build secret)
-export ODU_CACHE_TOKEN=<your-write-token>
-odu cache push main <paths> --origin https://odu.example.com
-```
-
-**Or name only the cache you read from.** `--cache <substituter>` takes the URL that is already in your `nix.conf` and reads the rest off that cache's own `nix-cache-info` — the push origin and the bucket — so a CI job holds one fact instead of three:
-
-```sh
+# --cache is the substituter URL you already read from: this cache's
+# nix-cache-info names the origin a push goes to and the bucket it lands in.
 export ODU_CACHE_TOKEN=<your-write-token>
 odu cache push --cache https://odu.example.com/cache/main <paths>
 ```
 
-It is exclusive with `<bucket> --origin`: the two answer the same question from opposite ends, and the positional form stays for a person in a shell who has both in hand. A cache that does not state both lines, or does not answer, is refused with a sentence naming the URL — a push aimed at a guessed origin is a push at a URL nobody owns. `--output json` is unchanged: it still answers `served` and `substituter`.
+**One fact, not three.** `--cache <substituter>` takes the URL that is already in your `nix.conf` and reads the rest off that cache's own `nix-cache-info` — the push origin and the bucket — so a CI job holds nothing that goes stale when a bucket gains a domain or moves stores.
+
+**Or name the bucket and its origin,** which is the form for a person in a shell who has both in hand:
+
+```sh
+export ODU_CACHE_TOKEN=<your-write-token>
+odu cache push main <paths> --origin https://odu.example.com
+```
+
+The two are exclusive: they answer the same question from opposite ends. A cache that does not state both lines, or does not answer, is refused with a sentence naming the URL — a push aimed at a guessed origin is a push at a URL nobody owns. `--output json` is unchanged: it still answers `served` and `substituter`.
 
 What it says while it works — one preamble, then one line per path as the bucket answers:
 
@@ -284,7 +288,7 @@ A bucket keeps what nobody wants for **90 days** unless it says otherwise. `cach
 
 **Collection also happens on its own, once a day,** over every bucket, so a cache nobody administers still stops growing; `cache gc_run` and **Run GC** are that same collection asked for sooner. An object is evicted only when retention has expired, nothing retained in the bucket references it, and no pin holds it. A collection of *every* bucket also sweeps **orphans** — object keys the store held that no row ever named, a put whose record never landed — and reports them beside what it evicted. It collects with nothing but the store's own `list` and `delete`, so a bucket on R2 collects exactly as one on local disk. Whatever was deleted is announced as URLs: a bucket behind a Cloudflare tunnel has them purged at the edge, and with no CDN in front nothing is purged because nothing was cached.
 
-On the board, a bucket page carries **Retention**, **Pins** (pin a closure, read what each pin holds, delete one), **Garbage collection** — **Dry run** with its **dry run retention days** field, and **Run GC** — **Stats** — the objects, their bytes on disk and hit counts — and, last, **Delete this bucket**. Deleting a pin needs an administrator; a *write* token may create or re-point one it made, which is how a CI push keeps a master pin current (see [Protocol](#protocol)).
+On the board, a bucket page is two columns. The main one is what is IN the bucket: **Use it**, **Push to it**, **Push from GitHub Actions**, and a **Paths | Pins** tablist — the paths it serves, or the pins holding closures against collection (pin a closure, read what each pin holds as one row with its roots behind *what it holds*, delete one). The side column is what the bucket IS: **Tokens**, **Retention**, **A name of its own** (its domain), **Move to another store**, **Garbage collection** — **Dry run** with its **dry run retention days** field, and **Run GC** — and, behind a **Danger zone** rule, **Delete this bucket**. The objects, their bytes and the hit counts are the facts line under the bucket's name, with **refresh stats** beside them for a recount. Deleting a pin needs an administrator; a *write* token may create or re-point one it made, which is how a CI push keeps a master pin current (see [Protocol](#protocol)).
 
 ### Delete a bucket
 
@@ -560,7 +564,7 @@ The connector needs outbound HTTPS from the server and nothing inbound: no port 
 
 `odu web`'s page has **Runs** and **Cache** in the header. `#/cache` lists the buckets — name, public or private, how many paths, how much space, when it last took a push, how many reads — and `#/cache/<bucket>` is one bucket: its substituter URL, its public key, the `nix.conf` / netrc block above ready to copy, and its paths newest first with a filter box. The facts line says who answers a read of it — **reads served from cache.example.com**, or **reads served by odu**.
 
-**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page **Tokens** (mint write or read, shown once; list; revoke), **Retention**, **Move to another store**, **Pins** (pin a closure; what each pin holds; delete one), **Garbage collection** (**Dry run**, the **dry run retention days** field beside it, and **Run GC**), **Stats** and, last, **Delete this bucket** — which asks you to type the bucket's name before its button will do anything, and returns to the list when the bucket is gone. The dry run is asked for rather than taken on arrival, and is asked again after every collection — "what am I about to lose" is a question a report answers too late, and a question nobody asked must not answer in red. The retention field is the dry run's alone: blank is the bucket's own, and nothing you type there changes what the bucket keeps or what **Run GC** would evict. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
+**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page a **Pins** tab beside **Paths** (pin a closure; what each pin holds, roots folded behind *what it holds* and the first ten of them shown when you open it; delete one) and a settings column — **Tokens** (mint write or read, shown once; list; revoke), **Retention**, **A name of its own**, **Move to another store**, **Garbage collection** (**Dry run**, the **dry run retention days** field beside it, and **Run GC**) and, behind a **Danger zone** rule, **Delete this bucket** — which asks you to type the bucket's name before its button will do anything, and returns to the list when the bucket is gone. The dry run is asked for rather than taken on arrival, and is asked again after every collection — "what am I about to lose" is a question a report answers too late, and a question nobody asked must not answer in red. The retention field is the dry run's alone: blank is the bucket's own, and nothing you type there changes what the bucket keeps or what **Run GC** would evict. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
 
 The rows arrive over the wire the page already holds, so a path pushed from a build box appears without a reload; reads are folded into a bucket's counters at most once a second rather than once per NAR.
 

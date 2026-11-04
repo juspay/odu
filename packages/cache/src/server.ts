@@ -1068,13 +1068,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // collected by a host that has to know what a row is. The row answers a
     // bucket's anonymous consumer facts from the same URL builder the board's
     // row uses, so the page and a cURL cannot disagree about the address.
-    routes.add(
-      cacheRoutes(
-        cache,
-        (name) => server.substituterUrl(name),
-        publicOrigin ?? boundOrigin,
-      ),
-    );
+    routes.add(cacheRoutes(cache, (name) => server.substituterUrl(name)));
 
     // AND THE ROW'S NUMBERS, registered beside its routes: the counters the
     // tee has been keeping since this apply started, plus the per-bucket

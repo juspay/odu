@@ -109,21 +109,6 @@ import {
 type CacheSpec = (typeof oduCacheSurface)["spec"];
 
 /**
- * The address a PUSH goes to, from the bucket's advertised `pushUrl`: its
- * origin, so a block names `https://the-instance` rather than a path underneath
- * it, and the bucket is named separately. Both push blocks compute it here so
- * they cannot disagree, and a `pushUrl` that is not a URL is passed through
- * unchanged rather than thrown at.
- */
-function pushOriginOf(pushUrl: string): string {
-  try {
-    return new URL(pushUrl).origin;
-  } catch {
-    return pushUrl;
-  }
-}
-
-/**
  * WHO ANSWERS A READ OF THIS BUCKET, as the facts line says it (PLAN 2.8).
  *
  * `readsFrom` is the row's own answer and the URL beside it is where it
@@ -577,6 +562,12 @@ const FILTER_DEBOUNCE_MS = 200;
 const SNIPPET_TABS = ["nix.conf", "NixOS", "flake.nix", "odu CLI"] as const;
 type SnippetTab = (typeof SNIPPET_TABS)[number];
 
+/** The main column's two lists: what the bucket serves, and what is held in
+ *  it against collection. Administration only — a reader who cannot list pins
+ *  is drawn the paths with no tablist over them. */
+const BUCKET_TABS = ["Paths", "Pins"] as const;
+type BucketTab = (typeof BUCKET_TABS)[number];
+
 function snippetFor(
   where: SnippetTab,
   input: { readonly url: string; readonly publicKey: string; readonly bucket: string },
@@ -779,6 +770,82 @@ function BucketPage(
   const buckets = props.client.collections.buckets.use();
   const bucket = createMemo<CacheBucket | undefined>(() => buckets.byKey(props.name)?.());
 
+  /** WHICH LIST THE MAIN COLUMN DRAWS. The paths and the pins are the same
+   *  kind of thing — what is in this bucket — so they are two tabs over one
+   *  column rather than a list beside a sidebar panel that printed every root
+   *  of every pin. A member is drawn no pins at all, so for them there is one
+   *  tab and the state is ignored. */
+  const [listing, setListing] = createSignal<BucketTab>("Paths");
+  const shown = (): BucketTab => (props.canAdminister ? listing() : "Paths");
+
+  /**
+   * A RECOUNT, ASKED FOR BY HAND — what "refresh stats" is now that the facts
+   * line is the only place this bucket's numbers are drawn.
+   *
+   * That line is the ROW the cache last published, and the publisher is
+   * throttled (one notification a second at most, trailing edge), so for a
+   * moment after a collection the numbers on screen are a second old.
+   * `stats.read` counts the database NOW. What it answers is drawn until the
+   * row publishes again: the subscription stays the source, and the recount is
+   * a look ahead of it rather than a second copy of the truth.
+   */
+  const [recount, setRecount] = createSignal<CacheBucket | null>(null);
+  const [recounting, setRecounting] = createSignal(false);
+  const [recountFault, setRecountFault] = createSignal<string | null>(null);
+  /** A page that has gone writes nothing: the read below outlives the view
+   *  whenever a reader leaves while it is in flight. */
+  let drawn = true;
+  onCleanup(() => {
+    drawn = false;
+  });
+  const refreshStats = (): void => {
+    // THE BUCKET IT WAS ASKED ABOUT, carried into the answer: a count that
+    // lands after the reader opened another bucket must not be drawn under
+    // that one's name.
+    const asked = props.name;
+    setRecounting(true);
+    setRecountFault(null);
+    void props.call(props.client.procedures.stats.read({ rootToken: props.rootToken() })).then(
+      (all: CacheStats) => {
+        if (!drawn || asked !== props.name) return;
+        setRecounting(false);
+        setRecount(all.buckets.find((row) => row.name === asked) ?? null);
+      },
+      (err: unknown) => {
+        if (!drawn || asked !== props.name) return;
+        setRecounting(false);
+        setRecountFault(refusalText(err));
+      },
+    );
+  };
+  // A PUBLISH SUPERSEDES A RECOUNT — the row is the source, so the moment it
+  // says something newer the hand-read answer goes rather than sitting over it.
+  createEffect(on(bucket, () => setRecount(null), { defer: true }));
+  // …and a recount belongs to ONE bucket, like the minted token above it.
+  createEffect(
+    on(
+      () => props.name,
+      () => {
+        setRecount(null);
+        setRecountFault(null);
+      },
+      { defer: true },
+    ),
+  );
+  /** The row the facts line draws: the recount while it is the newer answer. */
+  const facts = createMemo<CacheBucket | undefined>(() => recount() ?? bucket());
+
+  /** The push block, computed once: the button copies the string the block
+   *  shows, and two calls could not be anything else. */
+  const pushText = createMemo<string>(() => {
+    const row = bucket();
+    if (row === undefined) return "";
+    return pushBlock({
+      url: row.url,
+      token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
+    });
+  });
+
   return (
     <section class="screen cache" aria-label={`bucket ${props.name}`}>
       <p class="crumbs">
@@ -804,7 +871,7 @@ function BucketPage(
           </Show>
         }
         sub={
-          <Show when={bucket()}>
+          <Show when={facts()}>
             {(row) => (
               <>
                 {/* THE NUMBER IS THE FACT and the word is what it counts, so
@@ -841,6 +908,21 @@ function BucketPage(
                     ? "no upstream filter"
                     : `skips ${row().upstreamKeys.join(", ")}`}
                 </span>
+                {/* AND THE WAY TO ASK AGAIN, beside the numbers it refreshes
+                    rather than in a panel that repeated them. */}
+                <Show when={props.canAdminister}>
+                  <button
+                    type="button"
+                    class="text-action"
+                    disabled={recounting()}
+                    onClick={refreshStats}
+                  >
+                    {recounting() ? "counting…" : "refresh stats"}
+                  </button>
+                </Show>
+                <Show when={recountFault()}>
+                  {(message) => <span class="fault">{message()}</span>}
+                </Show>
               </>
             )}
           </Show>
@@ -906,23 +988,9 @@ function BucketPage(
                       : "With a write token an admin of this server mints for you."
                 }
                 label="push to it"
-                actions={
-                  <CopyButton
-                    text={pushBlock({
-                      origin: pushOriginOf(row().pushUrl),
-                      bucket: props.name,
-                      token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
-                    })}
-                  />
-                }
+                actions={<CopyButton text={pushText()} />}
               >
-                <pre class="use-block push-block">
-                  {pushBlock({
-                    origin: pushOriginOf(row().pushUrl),
-                    bucket: props.name,
-                    token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
-                  })}
-                </pre>
+                <pre class="use-block push-block">{pushText()}</pre>
               </Panel>
 
               <Panel
@@ -950,85 +1018,124 @@ function BucketPage(
                 </pre>
               </Panel>
 
-              <Panel
-                class="cache-paths"
-                title="Paths"
-                label="paths"
-                actions={
-                  <SearchInput
-                    label="filter paths"
-                    value={typed()}
-                    placeholder="filter by path, e.g. openssl"
-                    onValue={setTyped}
-                  />
-                }
-              >
-                {/* THE FIRST PAGE'S OWN REFUSAL, from the resource's VALUE — see
-                    the fetcher: a rejection would be an unhandled one. */}
-                <Show when={refusal() ?? failure()}>
-                  {(message) => (
-                    <div class="panel-body">
-                      <Receipt tone="refused">{message()}</Receipt>
-                      <button type="button" class="text-action" onClick={() => refetch()}>
-                        try again
+              {/* WHAT IS IN THIS BUCKET — the paths it serves, and (for an
+                  administrator) the pins holding some of them against every
+                  collection. One column, two tabs: a pin is about the paths
+                  beside it, and a sidebar panel printing every root of every
+                  pin was most of this page's DOM. */}
+              <Show when={props.canAdminister}>
+                <div class="tabs" role="tablist" aria-label="what is in it">
+                  <For each={BUCKET_TABS}>
+                    {(which) => (
+                      <button
+                        type="button"
+                        role="tab"
+                        class="tab"
+                        aria-selected={shown() === which}
+                        onClick={() => setListing(which)}
+                      >
+                        {which}
                       </button>
-                    </div>
-                  )}
-                </Show>
-                <Show
-                  when={paths().length > 0}
-                  fallback={
-                    <Show when={refusal() === null && failure() === null}>
-                      <p class="panel-body hint">
-                        {first.loading
-                          ? "reading…"
-                          : filter() === ""
-                            ? "Nothing pushed to this bucket yet."
-                            : "No path matches that filter."}
-                      </p>
-                    </Show>
+                    )}
+                  </For>
+                </div>
+              </Show>
+
+              <Show when={shown() === "Paths"}>
+                <Panel
+                  class="cache-paths"
+                  title="Paths"
+                  label="paths"
+                  actions={
+                    <SearchInput
+                      label="filter paths"
+                      value={typed()}
+                      placeholder="filter by path, e.g. openssl"
+                      onValue={setTyped}
+                    />
                   }
                 >
-                  <ol class="paths">
-                    <For each={paths()}>
-                      {(path) => (
-                        <li>
-                          <code class="path">
-                            <span class="path-hash">{splitStorePath(path.storePath).hash}</span>
-                            {splitStorePath(path.storePath).name}
-                          </code>
-                          <span class="fact-line bucket-facts">
-                            <span>{bytes(path.narSize)}</span>
-                            <span>{ago(path.created, props.now)}</span>
-                            <span>{path.hits} reads</span>
-                            {/* WANTED, not read: retention counts from here,
-                                and the reads beside it never move it. */}
-                            <span>wanted {ago(path.lastWanted, props.now)}</span>
-                          </span>
-                        </li>
-                      )}
-                    </For>
-                  </ol>
-                </Show>
-                <Show when={next()}>
-                  {(after) => (
-                    <div class="panel-foot">
-                      <Button
-                        disabled={loadingMore() || first.loading}
-                        onClick={() => more(after())}
-                      >
-                        {loadingMore() ? "reading…" : `Show ${PATH_PAGE_SIZE} more`}
-                      </Button>
-                    </div>
-                  )}
-                </Show>
-              </Panel>
+                  {/* THE FIRST PAGE'S OWN REFUSAL, from the resource's VALUE — see
+                      the fetcher: a rejection would be an unhandled one. */}
+                  <Show when={refusal() ?? failure()}>
+                    {(message) => (
+                      <div class="panel-body">
+                        <Receipt tone="refused">{message()}</Receipt>
+                        <button type="button" class="text-action" onClick={() => refetch()}>
+                          try again
+                        </button>
+                      </div>
+                    )}
+                  </Show>
+                  <Show
+                    when={paths().length > 0}
+                    fallback={
+                      <Show when={refusal() === null && failure() === null}>
+                        <p class="panel-body hint">
+                          {first.loading
+                            ? "reading…"
+                            : filter() === ""
+                              ? "Nothing pushed to this bucket yet."
+                              : "No path matches that filter."}
+                        </p>
+                      </Show>
+                    }
+                  >
+                    <ol class="paths">
+                      <For each={paths()}>
+                        {(path) => (
+                          <li>
+                            <code class="path">
+                              <span class="path-hash">{splitStorePath(path.storePath).hash}</span>
+                              {splitStorePath(path.storePath).name}
+                            </code>
+                            <span class="fact-line bucket-facts">
+                              <span>{bytes(path.narSize)}</span>
+                              <span>{ago(path.created, props.now)}</span>
+                              <span>{path.hits} reads</span>
+                              {/* WANTED, not read: retention counts from here,
+                                  and the reads beside it never move it. */}
+                              <span>wanted {ago(path.lastWanted, props.now)}</span>
+                            </span>
+                          </li>
+                        )}
+                      </For>
+                    </ol>
+                  </Show>
+                  <Show when={next()}>
+                    {(after) => (
+                      <div class="panel-foot">
+                        <Button
+                          disabled={loadingMore() || first.loading}
+                          onClick={() => more(after())}
+                        >
+                          {loadingMore() ? "reading…" : `Show ${PATH_PAGE_SIZE} more`}
+                        </Button>
+                      </div>
+                    )}
+                  </Show>
+                </Panel>
+              </Show>
+
+              {/* KEYED on the name, for the reason the sidebar is: a half-typed
+                  pin belongs to the bucket it was typed on. */}
+              <Show when={shown() === "Pins" ? props.name : null} keyed>
+                {(name) => (
+                  <BucketPins
+                    client={props.client}
+                    call={props.call}
+                    rootToken={props.rootToken}
+                    name={name}
+                    now={props.now}
+                  />
+                )}
+              </Show>
             </div>
 
-            {/* THE BUCKET'S ADMINISTRATION, drawn for the row's floor and KEYED
-                on the name: a minted token, a pin's fields and a GC report
-                belong to ONE bucket, so opening another one builds these afresh
-                rather than carrying a secret across. */}
+            {/* THE BUCKET'S SETTINGS — what this bucket IS, rather than what is
+                in it. Drawn for the row's floor and KEYED on the name: a minted
+                token and a GC report belong to ONE bucket, so opening another
+                builds these afresh rather than carrying a secret across. */}
             <Show when={props.canAdminister ? props.name : null} keyed>
               {(name) => (
                 <div class="split-side">
@@ -1051,6 +1158,13 @@ function BucketPage(
                     name={name}
                     now={props.now}
                   />
+                  <BucketRetention
+                    client={props.client}
+                    call={props.call}
+                    rootToken={props.rootToken}
+                    name={name}
+                    retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
+                  />
                   <BucketDomain
                     client={props.client}
                     call={props.call}
@@ -1058,13 +1172,6 @@ function BucketPage(
                     name={name}
                     domain={bucket()?.domain ?? null}
                     tunnelRow={props.tunnelRow}
-                  />
-                  <BucketRetention
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    name={name}
-                    retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
                   />
                   <BucketMigrate
                     client={props.client}
@@ -1074,13 +1181,6 @@ function BucketPage(
                     store={bucket()?.store ?? LOCAL_STORE}
                     migration={bucket()?.migration ?? null}
                   />
-                  <BucketPins
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    name={name}
-                    now={props.now}
-                  />
                   <BucketGc
                     client={props.client}
                     call={props.call}
@@ -1088,23 +1188,21 @@ function BucketPage(
                     name={name}
                     now={props.now}
                   />
-                  <BucketStats
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    name={name}
-                    now={props.now}
-                  />
-                  {/* LAST, and the only control on this page that cannot be
-                      undone: it is drawn under the stats a person reads
-                      before deciding, and it asks for the name back. */}
-                  <BucketDelete
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    name={name}
-                    onDeleted={() => props.onOpen(null)}
-                  />
+                  {/* LAST, BEHIND A RULE OF ITS OWN: every control above
+                      changes what this bucket does and can be changed back.
+                      This one ends it, so it is not a seventh panel in the
+                      stack — a reader scrolling the settings meets a heading
+                      that says what the rest of the column is. */}
+                  <div class="danger-zone">
+                    <h2 class="danger-zone-head">Danger zone</h2>
+                    <BucketDelete
+                      client={props.client}
+                      call={props.call}
+                      rootToken={props.rootToken}
+                      name={name}
+                      onDeleted={() => props.onOpen(null)}
+                    />
+                  </div>
                 </div>
               )}
             </Show>
@@ -1823,6 +1921,7 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
 
   return (
     <Panel
+      class="cache-pins"
       title="Pins"
       note="A pin holds its roots, and whatever they reference inside this bucket, against every collection — however long nobody wants them — until it is removed here."
       label="pins"
@@ -1877,49 +1976,12 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
                     <li class="pin-group">{group.repo}</li>
                     <For each={group.pins}>
                       {(held) => (
-                        <li>
-                          <span class="pin">
-                            <span class="pin-head">
-                              <code>{held.parsed.ref}</code>
-                              <Show when={held.parsed.system}>
-                                {(system) => <Tag>{system()}</Tag>}
-                              </Show>
-                            </span>
-                            <span class="fact-line">
-                              <span>
-                                {held.pin.rootPaths.length} path
-                                {held.pin.rootPaths.length === 1 ? "" : "s"} in its closure
-                              </span>
-                              <span>pinned {ago(held.pin.created, props.now)}</span>
-                              {/* WHO MADE IT decides who may re-point it — and
-                                  an admin who re-points a pushed pin TAKES IT
-                                  OVER: the next push naming it is refused and
-                                  that workflow step goes red, loudly. */}
-                              <span>
-                                {held.pin.createdBy === "write"
-                                  ? "made by a push, which may re-point it"
-                                  : "made by an administrator: a push can no longer move it"}
-                              </span>
-                            </span>
-                            {/* WHAT IT HOLDS, rather than that it holds
-                                something: the roots are the whole answer to
-                                "may this one go?". */}
-                            <span class="pin-roots">
-                              <For each={held.pin.rootPaths}>
-                                {(root) => <code class="path">{root}</code>}
-                              </For>
-                            </span>
-                          </span>
-                          <button
-                            type="button"
-                            class="text-action"
-                            aria-label={`unpin ${held.pin.name}`}
-                            disabled={action.busy()}
-                            onClick={() => unpin(held.pin.name)}
-                          >
-                            unpin
-                          </button>
-                        </li>
+                        <PinRow
+                          held={held}
+                          now={props.now}
+                          busy={action.busy()}
+                          onUnpin={unpin}
+                        />
                       )}
                     </For>
                   </>
@@ -1930,6 +1992,88 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
         </div>
       </div>
     </Panel>
+  );
+}
+
+/**
+ * HOW MANY ROOTS A PIN SHOWS BEFORE IT IS ASKED FOR THE REST.
+ *
+ * A pin a CI push takes over a flake's whole output set holds every path in
+ * it: one pin on the production board held 1 789, and seven pins printed
+ * 3 276 store paths — about nine tenths of that page's DOM, with the controls
+ * under it pushed off the screen. Ten is enough to recognise WHAT a pin
+ * holds; the count beside it is the whole of how much, and the rest are one
+ * click away.
+ */
+const PIN_ROOTS_SHOWN = 10;
+
+/**
+ * ONE PIN, ONE ROW — the three facts about it, and its roots behind a
+ * disclosure.
+ *
+ * The expansion is PER PIN and lives here rather than in the list: a reader
+ * opens the one pin they are auditing, and a list that remembered "expanded"
+ * for all of them would be the wall this replaced.
+ */
+function PinRow(props: {
+  held: { readonly pin: CachePin; readonly parsed: PinName };
+  now: number;
+  busy: boolean;
+  onUnpin: (name: string) => void;
+}): JSX.Element {
+  const [all, setAll] = createSignal(false);
+  const shown = createMemo<readonly string[]>(() =>
+    all() ? props.held.pin.rootPaths : props.held.pin.rootPaths.slice(0, PIN_ROOTS_SHOWN),
+  );
+  const hidden = (): number => props.held.pin.rootPaths.length - shown().length;
+  return (
+    <li>
+      <span class="pin">
+        <span class="pin-head">
+          <code>{props.held.parsed.ref}</code>
+          <Show when={props.held.parsed.system}>{(system) => <Tag>{system()}</Tag>}</Show>
+        </span>
+        <span class="fact-line">
+          <span>
+            {props.held.pin.rootPaths.length} path
+            {props.held.pin.rootPaths.length === 1 ? "" : "s"} in its closure
+          </span>
+          <span>pinned {ago(props.held.pin.created, props.now)}</span>
+          {/* WHO MADE IT decides who may re-point it — and an admin who
+              re-points a pushed pin TAKES IT OVER: the next push naming it is
+              refused and that workflow step goes red, loudly. */}
+          <span>
+            {props.held.pin.createdBy === "write"
+              ? "made by a push, which may re-point it"
+              : "made by an administrator: a push can no longer move it"}
+          </span>
+        </span>
+        {/* WHAT IT HOLDS, when somebody asks: the roots are the whole answer
+            to "may this one go?", and the count above is the whole answer to
+            "how much". A native `<details>` because the four behaviours a
+            disclosure needs are the four the platform implements. */}
+        <details class="pin-roots-box">
+          <summary>what it holds</summary>
+          <span class="pin-roots">
+            <For each={shown()}>{(root) => <code class="path">{root}</code>}</For>
+          </span>
+          <Show when={hidden() > 0}>
+            <button type="button" class="text-action" onClick={() => setAll(true)}>
+              show all {props.held.pin.rootPaths.length}
+            </button>
+          </Show>
+        </details>
+      </span>
+      <button
+        type="button"
+        class="text-action"
+        aria-label={`unpin ${props.held.pin.name}`}
+        disabled={props.busy}
+        onClick={() => props.onUnpin(props.held.pin.name)}
+      >
+        unpin
+      </button>
+    </li>
   );
 }
 
@@ -2092,78 +2236,6 @@ function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Elemen
               </>
             )}
           </Show>
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-/** `stats.read` — this bucket beside the whole cache. */
-function BucketStats(props: AdminProps & { name: string; now: number }): JSX.Element {
-  const stats = reading<CacheStats>(
-    () => props.name,
-    props.rootToken,
-    () => props.call(props.client.procedures.stats.read({ rootToken: props.rootToken() })),
-  );
-  const mine = (): CacheBucket | undefined =>
-    stats.value()?.buckets.find((row) => row.name === props.name);
-  return (
-    <Panel
-      title="Stats"
-      label="stats"
-      actions={
-        <button
-          type="button"
-          class="text-action"
-          disabled={stats.loading()}
-          onClick={stats.refetch}
-        >
-          refresh stats
-        </button>
-      }
-    >
-      <div class="panel-body">
-        <div class="stack">
-          <Show when={stats.fault()}>
-            {(message) => <Receipt tone="refused">{message()}</Receipt>}
-          </Show>
-          <Show
-            when={stats.value()}
-            fallback={
-              <Show when={stats.fault() === null}>
-                <p class="hint">reading…</p>
-              </Show>
-            }
-          >
-            {(all) => (
-              <dl class="stats">
-                <dt>this bucket</dt>
-                <dd class="fact-line bucket-facts">
-                  <span>{mine()?.objects ?? 0} paths</span>
-                  <span>{bytes(mine()?.bytes ?? 0)}</span>
-                  <span>{mine()?.hits ?? 0} reads</span>
-                </dd>
-                <dt>whole cache</dt>
-                <dd class="fact-line bucket-facts">
-                  <span>{all().buckets.length} buckets</span>
-                  <span>{all().objects} paths</span>
-                  <span>{bytes(all().bytes)}</span>
-                  <span>{all().hits} reads</span>
-                  <span>
-                    {all().lastWanted === null
-                      ? "nothing wanted yet"
-                      : `last wanted ${ago(all().lastWanted ?? 0, props.now)}`}
-                  </span>
-                </dd>
-              </dl>
-            )}
-          </Show>
-          {/* WANTED is not READ, and the difference is this bucket's whole
-              retention clock, so the page says which one the number is. */}
-          <p class="hint">
-            A path is wanted by a push or by a <code>missing</code> query that
-            names it — never by a read, which is a substitution leaving odu.
-          </p>
         </div>
       </div>
     </Panel>
