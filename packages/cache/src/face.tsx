@@ -799,21 +799,30 @@ function BucketPage(
     drawn = false;
   });
   const refreshStats = (): void => {
-    // THE BUCKET IT WAS ASKED ABOUT, carried into the answer: a count that
-    // lands after the reader opened another bucket must not be drawn under
-    // that one's name.
+    // WHAT THIS ANSWER WOULD BE AN ANSWER TO, carried into it: the bucket it
+    // was asked about, and the ROW that was on screen when it was asked. A
+    // count that lands under another bucket's name is not that bucket's, and
+    // a count that lands after the row published again is OLDER than what is
+    // already drawn — writing it would hang a stale number over a live one
+    // until the next publish, which on a quiet bucket is minutes.
     const asked = props.name;
+    const since = bucket();
     setRecounting(true);
     setRecountFault(null);
     void props.call(props.client.procedures.stats.read({ rootToken: props.rootToken() })).then(
       (all: CacheStats) => {
-        if (!drawn || asked !== props.name) return;
+        if (!drawn) return;
+        // THE BUTTON COMES BACK whatever the answer was about: a read that
+        // landed elsewhere must not leave "counting…" disabled on the page
+        // the reader is actually looking at.
         setRecounting(false);
+        if (asked !== props.name || bucket() !== since) return;
         setRecount(all.buckets.find((row) => row.name === asked) ?? null);
       },
       (err: unknown) => {
-        if (!drawn || asked !== props.name) return;
+        if (!drawn) return;
         setRecounting(false);
+        if (asked !== props.name) return;
         setRecountFault(refusalText(err));
       },
     );
@@ -821,13 +830,17 @@ function BucketPage(
   // A PUBLISH SUPERSEDES A RECOUNT — the row is the source, so the moment it
   // says something newer the hand-read answer goes rather than sitting over it.
   createEffect(on(bucket, () => setRecount(null), { defer: true }));
-  // …and a recount belongs to ONE bucket, like the minted token above it.
+  // …and a recount belongs to ONE bucket, like the minted token above it. The
+  // page is mounted by a NON-keyed `Show`, so `props.name` changes in place and
+  // every piece of this — the answer, its refusal and the in-flight state the
+  // button reads — belongs to the bucket that is gone.
   createEffect(
     on(
       () => props.name,
       () => {
         setRecount(null);
         setRecountFault(null);
+        setRecounting(false);
       },
       { defer: true },
     ),
@@ -1022,7 +1035,14 @@ function BucketPage(
                   administrator) the pins holding some of them against every
                   collection. One column, two tabs: a pin is about the paths
                   beside it, and a sidebar panel printing every root of every
-                  pin was most of this page's DOM. */}
+                  pin was most of this page's DOM.
+
+                  BOTH PANELS STAY MOUNTED and the chosen one is SHOWN, which
+                  is the rule the snippet tablist above keeps for its own
+                  block. A switch that disposed them would throw away three
+                  loaded pages of paths (the DOM work this page exists to
+                  avoid) with the filter's caret, and the half-typed pin whose
+                  store path the reader came to the other tab to copy. */}
               <Show when={props.canAdminister}>
                 <div class="tabs" role="tablist" aria-label="what is in it">
                   <For each={BUCKET_TABS}>
@@ -1031,6 +1051,8 @@ function BucketPage(
                         type="button"
                         role="tab"
                         class="tab"
+                        id={`bucket-tab-${which}`}
+                        aria-controls={`bucket-panel-${which}`}
                         aria-selected={shown() === which}
                         onClick={() => setListing(which)}
                       >
@@ -1041,7 +1063,13 @@ function BucketPage(
                 </div>
               </Show>
 
-              <Show when={shown() === "Paths"}>
+              <div
+                class="tab-host"
+                role="tabpanel"
+                id="bucket-panel-Paths"
+                aria-labelledby="bucket-tab-Paths"
+                hidden={shown() !== "Paths"}
+              >
                 <Panel
                   class="cache-paths"
                   title="Paths"
@@ -1115,19 +1143,27 @@ function BucketPage(
                     )}
                   </Show>
                 </Panel>
-              </Show>
+              </div>
 
-              {/* KEYED on the name, for the reason the sidebar is: a half-typed
-                  pin belongs to the bucket it was typed on. */}
-              <Show when={shown() === "Pins" ? props.name : null} keyed>
+              {/* KEYED ON THE NAME AND NOTHING ELSE: a half-typed pin belongs
+                  to the bucket it was typed on, and to no particular tab. */}
+              <Show when={props.canAdminister ? props.name : null} keyed>
                 {(name) => (
-                  <BucketPins
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    name={name}
-                    now={props.now}
-                  />
+                  <div
+                    class="tab-host"
+                    role="tabpanel"
+                    id="bucket-panel-Pins"
+                    aria-labelledby="bucket-tab-Pins"
+                    hidden={shown() !== "Pins"}
+                  >
+                    <BucketPins
+                      client={props.client}
+                      call={props.call}
+                      rootToken={props.rootToken}
+                      name={name}
+                      now={props.now}
+                    />
+                  </div>
                 )}
               </Show>
             </div>
@@ -1862,6 +1898,21 @@ export function pinGroups(pins: ReadonlyArray<CachePin>): ReadonlyArray<PinGroup
   return loose.length === 0 ? groups : [...groups, { repo: "Pinned by hand", pins: loose }];
 }
 
+/** One pin as the LIST holds it: the row, its split name, and the key both
+ *  its identity across a republish and its expansion are held by. */
+interface PinEntry {
+  readonly name: string;
+  readonly pin: CachePin;
+  readonly parsed: PinName;
+}
+
+/** {@link PinGroup}, with the heading under the `name` key {@link keepIdentity}
+ *  compares by — a group whose pins did not move is the same group object. */
+interface StablePinGroup {
+  readonly name: string;
+  readonly pins: ReadonlyArray<PinEntry>;
+}
+
 /**
  * `pin.create`, `pin.list` and `pin.delete` for this bucket.
  *
@@ -1882,7 +1933,33 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
         .pins,
   );
   const listed = (): readonly CachePin[] => pins.value() ?? [];
-  const groups = createMemo(() => pinGroups(listed()));
+
+  /**
+   * ROWS THAT SURVIVE A REPUBLISH, and the expansion that rides on them.
+   *
+   * `pinGroups` mints fresh objects every call, so a refetch — a pin created,
+   * an unrelated pin removed — would hand `<For>` all-new identities and
+   * dispose every row. An audit of a 1 789-root pin would collapse because
+   * somebody unpinned something else. So each row and each group is handed
+   * back as the SAME object when its facts did not change, and the "show all"
+   * a reader asked for is held HERE, by pin NAME, which outlives any object.
+   */
+  const stableRow = keepIdentity<PinEntry>();
+  const stableGroup = keepIdentity<StablePinGroup>();
+  const groups = createMemo<ReadonlyArray<StablePinGroup>>(() =>
+    pinGroups(listed()).map((group) =>
+      stableGroup({
+        name: group.repo,
+        pins: group.pins.map((held) =>
+          stableRow({ name: held.pin.name, pin: held.pin, parsed: held.parsed }),
+        ),
+      }),
+    ),
+  );
+  const [expanded, setExpanded] = createSignal<ReadonlySet<string>>(new Set());
+  const showAll = (name: string): void => {
+    setExpanded((held) => new Set(held).add(name));
+  };
 
   const create = (): void => {
     // Sent as typed, empty included: the ROW refuses a nameless or pathless
@@ -1973,13 +2050,15 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
               <For each={groups()}>
                 {(group) => (
                   <>
-                    <li class="pin-group">{group.repo}</li>
+                    <li class="pin-group">{group.name}</li>
                     <For each={group.pins}>
                       {(held) => (
-                        <PinRow
+                        <PinnedRow
                           held={held}
                           now={props.now}
                           busy={action.busy()}
+                          all={expanded().has(held.name)}
+                          onShowAll={showAll}
                           onUnpin={unpin}
                         />
                       )}
@@ -2011,21 +2090,28 @@ const PIN_ROOTS_SHOWN = 10;
  * ONE PIN, ONE ROW — the three facts about it, and its roots behind a
  * disclosure.
  *
- * The expansion is PER PIN and lives here rather than in the list: a reader
- * opens the one pin they are auditing, and a list that remembered "expanded"
- * for all of them would be the wall this replaced.
+ * `PinnedRow`, not `PinRow`: `db.ts` already calls a pin's DATABASE row that,
+ * and two things one name inside one package is a reading mistake waiting to
+ * happen.
+ *
+ * WHETHER IT IS EXPANDED IS THE LIST'S, not this row's: `pin.list` is asked
+ * again after every create and unpin, and a row rebuilt by that answer would
+ * take its own state with it — an audit of a 1 789-root pin collapsing
+ * because somebody removed an unrelated one. The list holds it by NAME, which
+ * no republish can change.
  */
-function PinRow(props: {
-  held: { readonly pin: CachePin; readonly parsed: PinName };
+function PinnedRow(props: {
+  held: PinEntry;
   now: number;
   busy: boolean;
+  all: boolean;
+  onShowAll: (name: string) => void;
   onUnpin: (name: string) => void;
 }): JSX.Element {
-  const [all, setAll] = createSignal(false);
   const shown = createMemo<readonly string[]>(() =>
-    all() ? props.held.pin.rootPaths : props.held.pin.rootPaths.slice(0, PIN_ROOTS_SHOWN),
+    props.all ? props.held.pin.rootPaths : props.held.pin.rootPaths.slice(0, PIN_ROOTS_SHOWN),
   );
-  const hidden = (): number => props.held.pin.rootPaths.length - shown().length;
+  const rest = (): number => props.held.pin.rootPaths.length - shown().length;
   return (
     <li>
       <span class="pin">
@@ -2057,8 +2143,12 @@ function PinRow(props: {
           <span class="pin-roots">
             <For each={shown()}>{(root) => <code class="path">{root}</code>}</For>
           </span>
-          <Show when={hidden() > 0}>
-            <button type="button" class="text-action" onClick={() => setAll(true)}>
+          <Show when={rest() > 0}>
+            <button
+              type="button"
+              class="text-action"
+              onClick={() => props.onShowAll(props.held.name)}
+            >
               show all {props.held.pin.rootPaths.length}
             </button>
           </Show>

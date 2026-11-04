@@ -13,6 +13,16 @@
  */
 
 @layer layout {
+  /* ── the main column's two tabs ───────────────────────────────────────────
+   *
+   * BOTH PANELS ARE MOUNTED and the chosen one is shown, so a switch keeps
+   * the paths already paged in and the half-typed pin. `[hidden]` is the UA's
+   * `display: none`, and nothing here may set a `display` on the host or that
+   * rule would lose to it.
+   */
+  .tab-host { min-width: 0; }
+  .tab-host[hidden] { display: none; }
+
   /* ── a bucket's pins ──────────────────────────────────────────────────────
    *
    * A PIN IS THREE FACTS AND A LIST OF ROOTS, and that is why it is not the

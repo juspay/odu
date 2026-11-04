@@ -94,7 +94,10 @@ export const CacheBucketSchema = Schema.Struct({
   url: Schema.String,
   /** WHERE A PUSH ADDRESSES THIS BUCKET: always `<origin>/cache/<name>`, so the
    *  push API works through a bucket domain without the domain needing to name
-   *  a bucket in its path. The page's push block and the docs use this. */
+   *  a bucket in its path. It is the address the cache states in its own
+   *  `nix-cache-info` (`Odu-Origin`/`Odu-Bucket`) and a client resolves from
+   *  `--cache <substituter>`; the page's push block and the docs name the
+   *  SUBSTITUTER (`url`) and let the cache answer with this. */
   pushUrl: Schema.String,
   /** When the last narinfo landed here; `null` for a bucket nothing has been
    *  pushed to. */

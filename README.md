@@ -90,7 +90,7 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 | Keep a closure out of garbage collection, see what each pin holds, let one go | `odu surface cache pin_create\|pin_list\|pin_delete` | a bucket's **Pins** |
 | Evict what retention expired and nothing references or pins — the daily pass, asked for now | `odu surface cache gc_run` | a bucket's **Run GC** |
 | What the next collection would take, without taking it; `retentionDays` plans at a retention of your own, changing nothing | `odu surface cache gc_plan` | a bucket's **Dry run**, and **dry run retention days** beside it |
-| Storage and reads | `odu surface cache stats_read` | a bucket's **Stats** |
+| Storage and reads | `odu surface cache stats_read` | a bucket's facts line, with **refresh stats** beside it |
 | The tunnel and the names it carries | `odu surface cloudflare status_read` | **Tunnel** |
 
 **Keep a bucket on R2, any S3, or local disk.** Declare a store (`services.odu.cache.stores.r2 = { endpoint; bucket; region; credentialsFile; }`), create the bucket on it, and it serves exactly like disk — the [cache page](https://odu.kolu.dev/docs/cache/#keep-a-bucket-on-s3) has the details. **Reads leave odu where they can:** a NAR on an S3 store is a 307 to a presigned URL good for ten minutes, and a store that names the domain you bound to it (`publicUrl`) has its public buckets advertised there, so they keep serving while odu is down. **Writes leave odu too:** `odu cache push` asks where a NAR's bytes go and an S3-backed bucket hands it presigned URLs, so the NAR never crosses the daemon — which then reads the object back, verifies it and copies it into place before it signs anything. The bucket row says which as `writesTo`.

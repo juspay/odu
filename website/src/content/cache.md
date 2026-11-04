@@ -666,4 +666,4 @@ The CLI keeps the three cache commands a shell is the natural place for. Everyth
 | Let a pin go | — | `pin_delete` | bucket → Pins → **unpin** |
 | What the next collection would take, without taking it. `retentionDays` plans at a retention of your own (absent is the bucket's; `0` is what nothing references and no pin holds), and writes nothing — `gc_run` has no such field | — | `gc_plan` | bucket → **Dry run**, **dry run retention days** |
 | Evict objects past retention that nothing references and no pin holds — the daily pass, asked for now | — | `gc_run` | bucket → **Run GC** |
-| Show storage and hit counts | — | `stats_read` | bucket → Stats |
+| Show storage and hit counts | — | `stats_read` | a bucket's facts line, and **refresh stats** beside it for a recount |
