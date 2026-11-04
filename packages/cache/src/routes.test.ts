@@ -1716,6 +1716,41 @@ describe("a direct upload", () => {
     return { plan, complete };
   }
 
+  /**
+   * A STORE THAT LETS A CLIENT RACE THE PROOF: it rewrites the temp object
+   * the moment odu asks to copy it, which is exactly what a client holding
+   * the ten-minute presigned PUT can do between the readback and the copy.
+   * `rewrote` is the bytes it slipped in.
+   */
+  function racingS3(rewrite: Uint8Array): { where: Where; raced: () => number } {
+    let raced = 0;
+    return {
+      where: {
+        name: "s3",
+        store: async () => {
+          const store = await (ON_S3.store as () => Promise<ObjectStore>)();
+          const copy = store.copy;
+          if (copy === undefined) throw new Error("an S3 store copies; this one does not");
+          return {
+            ...store,
+            copy: async (from: string, to: string, options: Parameters<typeof copy>[2]) => {
+              if (from.includes("/.tmp-")) {
+                raced += 1;
+                // The client's own URL would do this; writing it through the
+                // store is the same request with the same effect.
+                await store.delete(from);
+                const put = await store.put(from, new Blob([rewrite as BlobPart]));
+                expect(put.ok).toBe(true);
+              }
+              return copy(from, to, options);
+            },
+          };
+        },
+      },
+      raced: () => raced,
+    };
+  }
+
   it("is what an S3 bucket negotiates", async () => {
     const onS3 = await harness(true, "https://odu.example.org", undefined, ON_S3);
     const begun = await onS3.fetch("/main/nar/whatever.nar.zst/upload", {
@@ -1834,6 +1869,69 @@ describe("a direct upload", () => {
       body: "",
     });
     expect(begun.status).toBe(403);
+    await h.dispose();
+  });
+
+  it("refuses bytes rewritten between the verify and the copy, and keeps none of them", async () => {
+    // THE ONE INVARIANT 2.9 EXISTS FOR. The client holds a presigned PUT for
+    // the temp key for ten minutes, and the copy reads that key once per
+    // part — so without a precondition odu would verify `G`, copy `E`, and
+    // sign `G`'s hash over `E`'s bytes. The copy carries the ETag the verify
+    // read; a source that moved is a refusal.
+    const events: { event: string; fields: Record<string, unknown> }[] = [];
+    const honest = nar("the bytes odu verified");
+    const swapped = new TextEncoder().encode("the bytes a racing client slipped in");
+    const { where, raced } = racingS3(swapped);
+    const h = await harness(
+      true,
+      "https://odu.example.org",
+      (event, fields) => events.push({ event, fields }),
+      where,
+    );
+    const file = `${honest.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    expect((await direct(h, file, honest.bytes)).complete.status).toBe(200);
+
+    const refused = await upload(h.fetch, h.tokens.write, GLIBC, honest, { skipNar: true });
+    expect(raced()).toBe(1);
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain("was rewritten while odu was verifying it");
+    expect(
+      events.find((line) => line.event === "cache.nar.verify_failed")?.fields,
+    ).toMatchObject({ bucket: "main", mode: "direct", reason: "source_changed" });
+    // NOTHING RECORDED AND NOTHING SERVED — in particular no `nar/<file>`
+    // holding the swapped bytes under the honest hash, which `nar/<file>`
+    // being put-if-absent would have made permanent.
+    expect(h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(GLIBC))).toBeNull();
+    expect((await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read))).status).toBe(404);
+    await h.dispose();
+  });
+
+  it("records both of two twin paths that share one NAR name", async () => {
+    // TWO STORE PATHS OF IDENTICAL CONTENT share a NarHash and therefore the
+    // file name — and `runWave` pushes a wave several paths at a time, so
+    // their narinfos can arrive before either proof has run. The first proof
+    // consumes the upload; the second must find the object the first kept,
+    // not "never uploaded".
+    const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
+    const twin = nar("one NAR, two store paths");
+    const file = `${twin.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const other = "/nix/store/zzdhrfdsqgnqrsipbdfg1m1h1i17pmg1-twin-2.0";
+    expect((await direct(h, file, twin.bytes)).complete.status).toBe(200);
+
+    // BOTH AT ONCE, which is what the client does.
+    const [first, second] = await Promise.all([
+      upload(h.fetch, h.tokens.write, GLIBC, twin, { skipNar: true }),
+      upload(h.fetch, h.tokens.write, other, twin, { skipNar: true }),
+    ]);
+    expect({ first: first.status, second: second.status }).toEqual({ first: 200, second: 200 });
+    // ONE ROW EACH, both served, over the one object the first proof kept.
+    for (const path of [GLIBC, other]) {
+      const narinfo = h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(path));
+      expect(narinfo).toContain(`StorePath: ${path}`);
+      // The SERVED extension is the row's compression, not the staged name's.
+      expect(narinfo).toContain(`URL: nar/${twin.narHash.replace(/^sha256:/, "")}.nar`);
+      expect(narinfo).toContain(`NarHash: ${twin.narHash}`);
+    }
     await h.dispose();
   });
 });

@@ -211,8 +211,17 @@ store they no longer do (PLAN 2.9, cache surface **4.2**).
   (`verifyNarStream`, never spooled to disk), and only then — under the write
   lock — `copy`s it to `nar/<file>` with `If-None-Match: *`, records the row
   and deletes the temp. A refusal deletes the temp too and records nothing,
-  and logs `cache.nar.verify_failed {reason}`. Odu signs no hash a client
-  claimed; the ETags it was handed decide nothing.
+  and logs `cache.nar.verify_failed {reason}` with a token for a reason. Odu
+  signs no hash a client claimed; the ETags it was handed decide nothing.
+- **And the proof BINDS the copy.** The client holds a presigned PUT for the
+  temp key for ten minutes, and a copy reads its source once per part — so
+  the readback's ETag (`StoredObject.etag`) rides back into `copy` as
+  `sourceIfMatch`, and `@odu/objects` puts it on every `UploadPartCopy` and on
+  every read window after the first. A key rewritten between the verify and
+  the copy answers `source_changed`: a 400, a
+  `cache.nar.verify_failed {reason:"source_changed"}`, and nothing kept.
+  Without it a client could have odu verify one NAR and sign its hash over
+  another's bytes — permanently, `nar/<file>` being put-if-absent.
 - **The upload record is this daemon's, and in memory.** A handle from before
   a restart is a `404`, which the client answers by beginning the path again
   — as it does for any 4xx at the store, an expired presign included. One

@@ -111,14 +111,22 @@ const conflicted = (key: string, tries: number): PutOutcome => ({
   ok: false,
   refusal: { kind: "conflict", key, tries },
 });
-type Decided = "won" | "lost" | "conflict";
+/** How one conditional request was decided. `source_changed` is a COPY's
+ *  alone: the source carried a precondition and no longer matches it. */
+type Decided = "won" | "lost" | "conflict" | "source_changed";
 const decidedBy = (response: Response): Decided =>
   response.status === 412 ? "lost" : response.status === 409 ? "conflict" : "won";
 
-/** The same three answers in the interface's words, for a write whose bytes
- *  this process is not holding and so cannot send again. */
+/** The same answers in the interface's words, for a write whose bytes this
+ *  process is not holding and so cannot send again. */
 const asDecision = (decided: Decided): WriteDecision =>
-  decided === "won" ? "stored" : decided === "lost" ? "exists" : "conflict";
+  decided === "won"
+    ? "stored"
+    : decided === "lost"
+      ? "exists"
+      : decided === "source_changed"
+        ? "source_changed"
+        : "conflict";
 
 /**
  * THE ETAGS OF A DIRECT UPLOAD'S PARTS, in part order. The writer reports what
@@ -376,6 +384,15 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * known up front: metadata is fixed when an upload is created, and the hash
    * is known only at the end — a multipart put's, or a direct upload's, which
    * this process never read at all.
+   *
+   * `sourceVersion` BINDS IT TO BYTES SOMEBODY MEASURED. Every part is its own
+   * request and S3 resolves the source afresh for each, so a source that can
+   * still be written — a direct upload's temp key, whose presigned PUT the
+   * client holds for ten minutes — could be a different object by the time it
+   * is copied, and the destination would carry the facts of bytes it does not
+   * hold. With it, each `UploadPartCopy` carries
+   * `x-amz-copy-source-if-match` and a `412` ends the copy as
+   * `source_changed`.
    */
   async function copyInto(
     key: string,
@@ -383,6 +400,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     facts: ObjectFacts,
     options: PutOptions | undefined,
     conditional: boolean,
+    sourceVersion?: string,
   ): Promise<Decided> {
     const uploadId = await createUpload(key, { ...metaOf(facts), ...headersOf(options) });
     try {
@@ -394,9 +412,16 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
           headers: {
             "x-amz-copy-source": `/${target.bucket}/${tempKey}`,
             "x-amz-copy-source-range": `bytes=${start}-${end}`,
+            ...(sourceVersion === undefined ? {} : { "x-amz-copy-source-if-match": sourceVersion }),
           },
         });
         const body = await response.text();
+        // THE SOURCE IS NOT WHAT IT WAS. Nothing is kept: the upload is
+        // aborted below and the caller is told which refusal this is.
+        if (response.status === 412) {
+          await abort(key, uploadId);
+          return "source_changed";
+        }
         const etag = response.ok ? xmlValue(body, "ETag") : null;
         if (etag === null) throw new S3Failure(`UploadPartCopy ${key}`, response, body);
         etags.push(etag);
@@ -560,9 +585,20 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     }
   }
 
-  /** One window: a ranged GET of bytes `from`..`to` (inclusive). */
-  const fetchWindow = (key: string, from: number, to: number, signal: AbortSignal): Promise<Response> =>
-    call("GET", key, { headers: { range: `bytes=${from}-${to}` }, signal });
+  /** One window: a ranged GET of bytes `from`..`to` (inclusive). `version` is
+   *  the ETag the read is held to, so a key rewritten mid-read fails the read
+   *  instead of splicing two objects together. */
+  const fetchWindow = (
+    key: string,
+    from: number,
+    to: number,
+    signal: AbortSignal,
+    version?: string,
+  ): Promise<Response> =>
+    call("GET", key, {
+      headers: { range: `bytes=${from}-${to}`, ...(version === undefined ? {} : { "if-match": version }) },
+      signal,
+    });
 
   /** `bytes <first>-<last>/<size>` (a 206), or `bytes *\/<size>` (a 416). */
   const contentRange = (response: Response): { last: number | null; size: number } | null => {
@@ -583,6 +619,12 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * with fewer bytes would truncate the object WITHOUT an error, and the client
    * would see only a hash mismatch. It fails the stream with an `S3Failure`
    * naming the key and the counts instead.
+   *
+   * AND EVERY WINDOW MUST BE THE SAME OBJECT. A read of several windows is
+   * several requests, and S3 resolves each against the key AS IT IS THEN — so
+   * a key rewritten between two of them would hand the reader a splice of two
+   * objects, hashing to nothing either of them has. Each window after the
+   * first carries `If-Match` on the first's ETag, and a `412` fails the read.
    */
   function windowed(
     key: string,
@@ -592,6 +634,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     end: number,
     control: AbortController,
   ): ReadableStream<Uint8Array> {
+    const version = first.headers.get("etag") ?? undefined;
     const short = (response: Response, span: number, got: number): S3Failure =>
       new S3Failure(`GET ${key} (a window)`, response, `answered ${got} of the ${span} bytes asked for`);
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = (first.body as ReadableStream<Uint8Array>).getReader();
@@ -602,7 +645,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       if (position > end) return null;
       const to = Math.min(position + READ_WINDOW, end + 1) - 1;
       const span = to - position + 1;
-      const next = fetchWindow(key, position, to, control.signal).then(async (response) => {
+      const next = fetchWindow(key, position, to, control.signal, version).then(async (response) => {
         if (response.status !== 206) {
           const body = await response.text().catch(() => "");
           throw new S3Failure(`GET ${key} (a window)`, response, body);
@@ -767,11 +810,23 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     // THE BYTES NEVER LEAVE THE SERVICE: UploadPartCopy, part by part, with
     // the caller's facts as the destination's metadata. The source stays
     // where it is, so a `409` is simply copied again — and a copy still
-    // undecided after the last try is a `conflict`, as a put's would be.
+    // undecided after the last try is a `conflict`, as a put's would be. A
+    // `sourceIfMatch` holds every one of those parts to the version the
+    // caller read, and a source that moved is NOT retried: copying it again
+    // would only find the new bytes again.
     copy: (from, to, options) =>
       oneWriter(to, async () =>
         asDecision(
-          await untilDecided(() => copyInto(safeKey(to), safeKey(from), options.facts, options, options.ifAbsent ?? false)),
+          await untilDecided(() =>
+            copyInto(
+              safeKey(to),
+              safeKey(from),
+              options.facts,
+              options,
+              options.ifAbsent ?? false,
+              options.sourceIfMatch,
+            ),
+          ),
         ),
       ),
 
@@ -799,7 +854,13 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         throw new S3Failure(`GET ${key}`, first, body);
       }
       const end = Math.min(range?.end ?? spans.size - 1, spans.size - 1);
-      return { stream: windowed(safeKey(key), first, start, spans.last + 1, end, control), size: spans.size };
+      return {
+        stream: windowed(safeKey(key), first, start, spans.last + 1, end, control),
+        size: spans.size,
+        // WHICH VERSION THESE BYTES ARE: what a caller that proves them binds
+        // its copy to (`CopyOptions.sourceIfMatch`).
+        ...(first.headers.get("etag") === null ? {} : { etag: first.headers.get("etag") as string }),
+      };
     },
 
     head: async (key) => (await headOf(key))?.size ?? null,

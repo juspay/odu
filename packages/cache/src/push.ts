@@ -897,10 +897,16 @@ async function uploadDirect(
   }).catch(asError);
   if (joined instanceof Error) return { ok: false, message: joined.message, retry: true };
   if (!joined.ok) {
+    // EVERY REFUSAL HERE RE-BEGINS THE PATH. The upload this one names is
+    // finished with either way — odu drops it on a refusal — and the reachable
+    // causes are not the client's to correct in place: a store that would not
+    // join the parts, an object that never landed, an id this daemon no longer
+    // holds. A new upload id is the only answer any of them has, and the
+    // attempt budget bounds it.
     return {
       ok: false,
       message: `finishing the upload answered ${joined.status}: ${(await joined.text()).trim()}`,
-      retry: worthRetrying(joined.status) || joined.status === 404,
+      retry: true,
     };
   }
   await joined.body?.cancel().catch(() => {});

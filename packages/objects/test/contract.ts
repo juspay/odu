@@ -667,6 +667,57 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
+    it("refuses a copy whose source changed under the version the caller read", async () => {
+      const { store, dispose } = await make();
+      const direct = directly(store);
+      if (direct === null) {
+        await dispose();
+        return;
+      }
+      // WHAT A PROVER DOES: read the object, learn which version it read,
+      // then copy THAT. A source anybody else can still write — a direct
+      // upload's temp key, which the client holds a presigned PUT for — is
+      // otherwise a different object by the time the copy reads it, once per
+      // part, and the destination would carry facts of bytes it does not hold.
+      const source = `main/nar/${TEMP}versioned`;
+      const proved = patterned(5_000, 18);
+      await fetch(direct.presignPut(source, 600), { method: "PUT", body: proved as Uint8Array<ArrayBuffer> });
+      const opened = await store.get(source);
+      const version = opened?.etag;
+      expect(version).toBeTruthy();
+      await opened?.stream.cancel();
+
+      // The client puts other bytes there, as it still may.
+      const swapped = patterned(5_000, 19);
+      await store.delete(source);
+      await fetch(direct.presignPut(source, 600), { method: "PUT", body: swapped as Uint8Array<ArrayBuffer> });
+
+      const destination = "main/nar/versioned.nar.zst";
+      expect(
+        await direct.copy(source, destination, {
+          facts: factsOf(proved),
+          ifAbsent: true,
+          sourceIfMatch: version,
+        }),
+      ).toBe("source_changed");
+      // NOTHING WAS WRITTEN: the key the swapped bytes would have taken under
+      // the proved bytes' facts is still absent, and `nar/<file>` being
+      // put-if-absent would have made that permanent.
+      expect(await store.head(destination)).toBeNull();
+      // AND THE SAME COPY OF WHAT IS REALLY THERE IS ALLOWED.
+      const now = await store.get(source);
+      await now?.stream.cancel();
+      expect(
+        await direct.copy(source, destination, {
+          facts: factsOf(swapped),
+          ifAbsent: true,
+          sourceIfMatch: now?.etag,
+        }),
+      ).toBe("stored");
+      expect(await store.facts(destination)).toEqual(factsOf(swapped));
+      await dispose();
+    });
+
     it("keeps a direct upload's temp key out of `list`, and lets a sweep remove it", async () => {
       const { store, dispose } = await make();
       const direct = directly(store);

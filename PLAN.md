@@ -536,14 +536,25 @@ Commits and PR bodies use the earlier names.
     the row under the write lock. 200 is stored, 400 names the reason, and the
     temp is deleted either way. The readback costs one store → odu transfer on
     the downlink.
-    - **R2, measured 2026-11-03** (bucket `kolu`): `If-None-Match: *` is
-      IGNORED on the single-request `CopyObject` (200, destination
-      overwritten; Cloudflare's own destination-side condition is
-      `cf-copy-destination-if-none-match`, which does answer 412) but
-      HONOURED on `CompleteMultipartUpload` (412 `PreconditionFailed`). Odu's
-      `copy` is `UploadPartCopy` + a conditional completion, so put-if-absent
-      holds across daemons for a copy of any size. R2 also completes a
-      multipart upload whose only part is well under 5 MiB.
+    - **R2, measured 2026-11-03** — bucket `kolu`, not the `odu-test` this
+      step's brief named: the credentials that could be produced for the probe
+      were scoped to `kolu` (`odu-test` answered `403 AccessDenied`), so the
+      probe ran under a `_probe-29/` prefix there and removed everything it
+      made. `If-None-Match: *` is IGNORED on the single-request `CopyObject`
+      (200, destination overwritten; Cloudflare's own destination-side
+      condition is `cf-copy-destination-if-none-match`, which does answer 412)
+      but HONOURED on `CompleteMultipartUpload` (412 `PreconditionFailed`).
+      Odu's `copy` is `UploadPartCopy` + a conditional completion, so
+      put-if-absent holds across daemons for a copy of any size. R2 also
+      completes a multipart upload whose only part is well under 5 MiB.
+    - **The verify binds the copy.** The client holds a ten-minute presigned
+      PUT for the temp key, and a copy reads its source once per part — so the
+      readback's ETag rides back as `x-amz-copy-source-if-match` on every
+      `UploadPartCopy`, and a windowed read carries `If-Match` on the first
+      window's ETag. A source rewritten in between is `source_changed`: a 400,
+      a `cache.nar.verify_failed {reason:"source_changed"}`, and nothing kept.
+      Without it a client could have odu verify one NAR and sign its hash over
+      another's bytes, permanently, since `nar/<file>` is put-if-absent.
     - A part is 5 MiB at least (S3's floor), the store's own part size, or the
       client's `--part-size` — the largest of the three. In direct mode that
       flag is a FLOOR; staged, it stays the ceiling a proxy imposes.

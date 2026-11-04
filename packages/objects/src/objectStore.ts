@@ -78,6 +78,14 @@ export interface StoredObject {
   stream: ReadableStream<Uint8Array>;
   /** The WHOLE object's size, whatever range was read. */
   size: number;
+  /**
+   * WHICH VERSION OF THE KEY THESE BYTES ARE, when the store names one (S3's
+   * ETag). A reader that must act on what it read — prove it, then copy it —
+   * hands this back as {@link CopyOptions.sourceIfMatch}, so a key rewritten
+   * in between is a refusal rather than a copy of other bytes. A store whose
+   * objects are files it alone writes has no versions and leaves it out.
+   */
+  etag?: string;
 }
 
 /** Why a write did not make an object. A value, naming what happened. */
@@ -120,9 +128,11 @@ export interface UploadedPart {
  * WHAT A CONDITIONAL WRITE CAME TO, for a write whose bytes this process is
  * not holding and therefore cannot send again: `stored`, `exists` (the key was
  * taken — S3's 412), or `conflict` (409 to every try, so nobody is known to
- * have won). The same three answers {@link ObjectRefusal} spells for a put.
+ * have won). The same three answers {@link ObjectRefusal} spells for a put —
+ * plus `source_changed`, which only a copy can meet: the bytes it was told to
+ * move are no longer the bytes the caller measured.
  */
-export type WriteDecision = "stored" | "exists" | "conflict";
+export type WriteDecision = "stored" | "exists" | "conflict" | "source_changed";
 
 /** What a server-side copy writes beside the bytes. The facts are the
  *  CALLER'S — a copy moves bytes it never read, so the store cannot learn
@@ -131,6 +141,14 @@ export interface CopyOptions extends PutOptions {
   readonly facts: ObjectFacts;
   /** Write only if the destination is absent (`If-None-Match: *`). */
   readonly ifAbsent?: boolean;
+  /**
+   * COPY THESE BYTES OR NONE: the source's {@link StoredObject.etag} as the
+   * caller read it. The copy is then bound to the version the caller PROVED,
+   * and a source rewritten in between answers `source_changed` instead of
+   * moving bytes nobody vouched for. A copy reads its source once per part,
+   * so without this the window is the whole copy.
+   */
+  readonly sourceIfMatch?: string;
 }
 
 export interface ObjectStore {

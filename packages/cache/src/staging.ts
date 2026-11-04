@@ -535,7 +535,10 @@ export function createStaging(deps: StagingDeps): Staging {
         ? storePathHash(info.storePath)
         : null;
       const checked = await verifyNarStream(object, info.compression, selfHashPart);
-      if (!checked.ok) return await refuse(`${info.url}: ${checked.message}`, checked.message);
+      // THE REASON IS A TOKEN, the message is the sentence: `reason` is what
+      // an operator groups these lines by, and the decompressor's stderr has
+      // a cardinality of one per upload.
+      if (!checked.ok) return await refuse(`${info.url}: ${checked.message}`, "unreadable");
       if (checked.narHash !== info.narHash) {
         return await refuse(
           `${info.url} hashes to ${checked.narHash} but the narinfo says ` +
@@ -543,11 +546,18 @@ export function createStaging(deps: StagingDeps): Staging {
           "nar_hash_mismatch",
         );
       }
+      // THE BYTES THAT WERE PROVED, AND NO OTHERS. The client still holds a
+      // presigned PUT for this temp key, so the copy below is bound to the
+      // VERSION this verify read: a rewrite between the two is refused, not
+      // copied under the facts of bytes that are gone.
       return await recordSerially(bucket, info, checked.selfHash, (current) =>
-        keepCopied(current, info, direct, {
-          fileHash: checked.fileHash,
-          fileSize: checked.fileSize,
-        }),
+        keepCopied(
+          current,
+          info,
+          direct,
+          { fileHash: checked.fileHash, fileSize: checked.fileSize },
+          object.etag,
+        ),
       );
     } finally {
       await dropUpload(direct);
@@ -843,12 +853,20 @@ export function createStaging(deps: StagingDeps): Staging {
    * staged path hands `put` an `expected`. First kept still wins: the copy is
    * conditional, and an `exists` answers with the object that was already
    * there.
+   *
+   * `version` IS WHAT MAKES THE PROOF BINDING. The temp key is one the client
+   * holds a ten-minute presigned PUT for, and a copy reads its source once
+   * per part — so without a precondition a client could let odu verify `G`
+   * and copy `E`, and odu would sign `G`'s hash over `E`'s bytes. The copy
+   * carries the ETag the verify read; a source that moved is refused here and
+   * nothing is recorded.
    */
   async function keepCopied(
     bucket: BucketRow,
     info: NarInfo,
     direct: DirectUpload,
     file: KeptFile,
+    version: string | undefined,
   ): Promise<KeptFile | Refusal> {
     // THE BUCKET MOVED STORES while this upload was in flight (`bucket.migrate`,
     // PLAN 2.8). The bytes are in the store the move is emptying, and a copy
@@ -882,11 +900,32 @@ export function createStaging(deps: StagingDeps): Staging {
         ifAbsent: true,
         contentType: NAR_CONTENT_TYPE,
         cacheControl: NAR_CACHE_CONTROL,
+        ...(version === undefined ? {} : { sourceIfMatch: version }),
       });
       if (decided === "stored") return file;
       if (decided === "exists") {
         const kept = await direct.store.facts(key);
         return kept === null ? refused : keptFileOf(kept);
+      }
+      // THE SOURCE WAS REWRITTEN between the verify and the copy — somebody
+      // with the presigned URL put other bytes there. Nothing is kept, and
+      // the push is told, because this is the one refusal that is about the
+      // CLIENT rather than about the store.
+      if (decided === "source_changed") {
+        log?.("cache.nar.verify_failed", {
+          bucket: bucket.name,
+          file: basename(info.url),
+          mode: "direct",
+          path: info.storePath,
+          reason: "source_changed",
+        });
+        return {
+          ok: false,
+          status: 400,
+          message:
+            `${info.url} was rewritten while odu was verifying it — ` +
+            "the bytes it proved are not the bytes it was asked to keep",
+        };
       }
       log?.("cache.object.put_failed", {
         bucket: bucket.name,
@@ -1028,6 +1067,15 @@ export function createStaging(deps: StagingDeps): Staging {
       // NO PARTS IS THE SINGLE-OBJECT PUT: there is no multipart upload to
       // join, and the HEAD below is the whole of what completion means.
       if (parts.length > 0) {
+        // A JOIN THAT DID NOT HAPPEN ENDS THE UPLOAD. The record, the temp
+        // object and the open multipart upload go now rather than an hour
+        // from now, so the client's next `begin` — which is what it answers a
+        // refusal with — is not racing an abandoned upload on a key of its
+        // own.
+        const failed = async (message: string): Promise<DirectComplete> => {
+          await dropUpload(direct);
+          return { ok: false, status: 400, message };
+        };
         try {
           // The temp key is this upload's alone, so nothing can be racing for
           // it and the completion needs no precondition.
@@ -1037,10 +1085,10 @@ export function createStaging(deps: StagingDeps): Staging {
             parts,
           );
           if (decided !== "stored") {
-            return { ok: false, status: 400, message: `the store did not join the parts (${decided})` };
+            return await failed(`the store did not join the parts (${decided})`);
           }
         } catch (err) {
-          return { ok: false, status: 400, message: String((err as Error).message ?? err) };
+          return await failed(String((err as Error).message ?? err));
         }
       }
       // WHAT ODU ITSELF SAW. A completion that answers 200 means the object
@@ -1171,17 +1219,25 @@ export function createStaging(deps: StagingDeps): Staging {
         chain = newChain();
         proofs.set(key, chain);
       }
-      // THE BYTES THIS NAME HAS, wherever the client put them: an upload it
-      // finished in the store (2.9), else whatever is staged under the name.
-      // Direct first, because on a direct bucket a staged file for this name
-      // could only be an older client's, and this push's own object is the
-      // one its narinfo is about.
-      const direct = landed.get(key);
-      const proving = serial(chain, () =>
-        direct === undefined
+      const proving = serial(chain, () => {
+        // THE BYTES THIS NAME HAS, wherever the client put them, read INSIDE
+        // the chain: an upload it finished in the store (2.9), else whatever
+        // is staged under the name. Direct first, because on a direct bucket
+        // a staged file for this name could only be an older client's.
+        //
+        // READ HERE AND NOT BEFORE THE QUEUE. Twin store paths share a NarHash
+        // and therefore this file name, and their two narinfos can both arrive
+        // before either proof runs. Captured eagerly, both would hold the SAME
+        // upload: the first proof consumes and deletes its temp object, and
+        // the second would find nothing and refuse a path the cache does have.
+        // Read here, the second finds `landed` empty, falls through to
+        // `prove`, and takes the second proof of possession over the object
+        // the first one kept.
+        const direct = landed.get(key);
+        return direct === undefined
           ? prove(bucket, hash, info, dirForBucket, name)
-          : proveDirect(bucket, hash, info, direct),
-      );
+          : proveDirect(bucket, hash, info, direct);
+      });
       const tail = chain.tail;
       try {
         return await proving;
