@@ -250,10 +250,24 @@ What each step delivers:
     (`UploadPartCopy` + a conditional completion), so first-kept-wins holds
     ACROSS daemons, not just within one. This also corrects what [^objects]
     said while it was undocumented.
-  - **Benchmark:** a 225 MiB NAR closure (105 MiB on the wire, 5 paths) to the
-    production pod took 45.7 s with the old client, bytes through the daemon.
-    The direct number is taken against the same pod once this branch is
-    deployed.
+  - **Benchmark, same pod and the same home uplink** (`kolu-r2`, defaults —
+    concurrency 4, 64 MiB parts). The closures differ because the first push
+    put its paths in the bucket, so the second used a reserved twin:
+
+    | | staged (master, `c4d3772`) | direct (this branch) |
+    | --- | --- | --- |
+    | wall | 45.7 s | **37.4 s** |
+    | paths | 5 | 2 |
+    | NAR bytes | 225.3 MiB | 204.2 MiB |
+    | wire bytes (zstd) | 105.2 MiB | 99.2 MiB |
+    | wire throughput | 2.30 MiB/s | **2.65 MiB/s** |
+
+    Per wire byte that is **13.2 % faster** (the staged run scaled to the
+    direct run's bytes is 43.1 s against 37.4 s). One run each, so read the
+    rate rather than the seconds. The number the table cannot show is the
+    point: the daemon moved 99 MiB of NAR in the first row and none in the
+    second — what it spends now is a readback on its own downlink, which the
+    client never waits on beyond the narinfo.
 - **2.10 The admin CLI is retired.** The board and the API are the product, so
   the CLI keeps only what needs a shell on the machine that holds the paths or
   the checkout: `odu ci …`, `odu cache use|login|push`, `odu auth login`, and
