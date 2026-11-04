@@ -15,6 +15,7 @@ import { HttpRouter, HttpServerResponse } from "effect/http";
 import { authRoutes } from "@odu/auth/server";
 import { cacheRoutes } from "@odu/cache/server";
 import type { ClaimedRoutes, RowRoutes } from "@odu/cordis/services";
+import { METRICS_PATH } from "@odu/cordis/metricsSurface";
 import { isReserved, reservedPaths } from "./reserved";
 
 /** Every path a layer registers, read by building it against a recorder. No
@@ -77,6 +78,15 @@ describe("the door gate's reserved set", () => {
 
   it("claims the cache's push API — the route the hand-kept list forgot", () => {
     expect(isReserved("/_odu/v1/buckets/test/missing", reserved)).toBe(true);
+  });
+
+  it("reserves the host's own scrape, so a door never answers it with the sign-in page", () => {
+    // THE HOST'S paths, with NO row registered — `/metrics` is the host's own
+    // route, and `doorGate` serves the sign-in page for anything unreserved.
+    // That failure is silent: a Prometheus logs an HTML parse error and a
+    // dashboard goes flat, which is exactly how the cache's push API went
+    // missing. Nothing else in the suite fails if it leaves `HOST_PATHS`.
+    expect(isReserved(METRICS_PATH, reservedPaths([]))).toBe(true);
   });
 
   it("claims a bucket domain's root-level protocol paths", () => {

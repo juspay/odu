@@ -120,6 +120,12 @@ export interface OduService {
   /** Re-project the catalog once, out of band — what a mutation calls so its
    *  own effect is on the board before it answers. */
   refresh: () => void;
+  /** The last venue probe of this service's OWN fleet, or `null` when nothing
+   *  has probed since it started — the same value the `venues` cell publishes.
+   *  Exposed so a reader beside the surface (the row's `/metrics` contributor)
+   *  can fold what has ALREADY been dialled instead of dialling a fleet of its
+   *  own on a monitoring system's timer. */
+  venues: () => VenueReading;
   /** Stop the poller and release the runtime. */
   close: () => Promise<void>;
   /** Structural wiring death. A serving site must observe it and treat a
@@ -758,6 +764,7 @@ export function createOduService(opts: ServiceOptions): OduService {
     runtime,
     registry,
     refresh,
+    venues: () => venueStore.get(),
     close: async () => {
       stopPolling();
       await runtime.close();

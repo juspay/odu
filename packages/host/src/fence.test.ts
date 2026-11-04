@@ -105,6 +105,10 @@ const declaration = {
       "packages/web-acceptance/support/cloudflareStub.ts": 1,
       // `cache-control` on three responses — an HTTP header, not a bucket.
       "packages/host/src/principal.ts": 3,
+      // THE SAME HEADER AGAIN, on the scrape's two answers: `cache-control:
+      // no-store` keeps a proxy from serving a stale exposition. An HTTP
+      // header, not a bucket.
+      "packages/host/src/metricsRoute.ts": 2,
       // THE SAME HEADER, in the store layer: `PutOptions.cacheControl` and
       // the `cache-control` an S3 put sends with the bytes (PLAN 2.8, where
       // reads are served by the store itself and nothing of odu's is in the

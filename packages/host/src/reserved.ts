@@ -23,12 +23,18 @@ import {
   SERVICE_DOOR_PATH,
   SERVICE_ROWS_PATH,
 } from "@odu/cordis/services";
+import { METRICS_PATH } from "@odu/cordis/metricsSurface";
 
 /** The paths the HOST'S listener answers itself. `*` means a walk — one or
  *  more characters after the prefix. */
 export const HOST_PATHS: ReadonlyArray<string> = [
   SERVICE_DOOR_PATH,
   SERVICE_ROWS_PATH,
+  // THE SCRAPE. Reserved, so a daemon with a door answers a Prometheus with an
+  // exposition (or a 401 it can report) rather than with the sign-in page —
+  // the failure the cache's push API once had, in a route nobody would see
+  // break until a dashboard went flat.
+  METRICS_PATH,
   "/assets/*",
   "/sw.js",
   "/manifest.webmanifest",

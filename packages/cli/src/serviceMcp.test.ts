@@ -31,8 +31,15 @@ describe("odu mcp's siblings", () => {
     expect(Object.keys(mountedRows(["ci"]))).toEqual([]);
   });
 
-  it("offers the cache while the roster is unanswered, and nothing it would guess", () => {
-    expect(Object.keys(mountedRows(null))).toEqual(["cache"]);
+  it("offers what every daemon mounts while the roster is unanswered, and nothing it would guess", () => {
+    // The cache and the host's metrics fragment, which is what a real roster
+    // answers for these two — so the answer arriving moves nothing, and no
+    // reroster lands under the bridge's own first call.
+    expect(Object.keys(mountedRows(null)).sort()).toEqual(["cache", "metrics"]);
+    expect(Object.keys(mountedRows(["ci", "cache", "metrics"])).sort()).toEqual([
+      "cache",
+      "metrics",
+    ]);
   });
 
   it("exposes the tunnel's status read with no input", () => {

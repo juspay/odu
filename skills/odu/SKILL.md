@@ -24,6 +24,7 @@ cache_token_mint · cache_token_list · cache_token_revoke
 cache_pin_create · cache_pin_list · cache_pin_delete
 cache_gc_plan · cache_gc_run · cache_stats_read
 cloudflare_status_read
+metrics_token_mint · metrics_token_list · metrics_token_revoke
 auth_user_whoami · auth_user_grant · auth_grant_list
 auth_token_create · auth_token_list · auth_token_revoke
 auth_session_list · auth_session_end
@@ -336,6 +337,9 @@ terminal.
 | reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` (absent collects every bucket, and only then sweeps orphans) | `buckets[]` (`evicted`, `kept`, `bytes`, `orphans`), `evicted`, `kept`, `bytes`, `orphans` |
 | cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastWanted` (the newest renewal anywhere, or null) |
 | the tunnel and its names | `odu surface cloudflare status_read --json` | `cloudflare_status_read` | *(none)* | `tunnel` (`state`, `name`, `id`, `reason`) and `routes[]` (`domain`, `bucket`, `state` `wiring`/`live`/`failed`, `reason`, `updated`) — a route with `bucket: null` is the server's own public origin |
+| mint a scrape credential | `odu surface metrics token_mint --input '{…}' --json` | `metrics_token_mint` | `rootToken`, `label?` | `token` (plaintext, ONCE), `facts` — the credential a Prometheus holds for `GET /metrics`, and it opens nothing else |
+| list scrape credentials | `odu surface metrics token_list --input '{…}' --json` | `metrics_token_list` | `rootToken` | `tokens[]` (`id`, `label`, `created`, `lastUsed`, `revoked`) — never a plaintext |
+| revoke a scrape credential | `odu surface metrics token_revoke --input '{…}' --json` | `metrics_token_revoke` | `rootToken`, `id` | `id`, `revoked` — effective at once, with no restart |
 | who am I | `odu surface auth user_whoami --json` | `auth_user_whoami` | *(none)* | `who` — a `user` with a `login` and `role`, or `anonymous` |
 | mint a personal token | `odu surface auth token_create --input '{…}' --json` | `auth_token_create` | `name`, `expiresDays?` (absent = never; the profile form defaults to 90) | `token` (plaintext, ONCE), `facts` |
 | my tokens | `odu surface auth token_list --json` | `auth_token_list` | *(none)* | `tokens[]` — never a plaintext |
@@ -479,6 +483,27 @@ upload negotiation; 4.3 added `bucket_delete`).
   `packages.<system>`, `devShells.<system>` and `checks.<system>` output for
   the runner, enumerated by Nix. Name `paths:` to push exactly those instead.
 
+### Metrics
+
+`GET /metrics` is a Prometheus text exposition of the whole daemon — the cache
+row's hit rates, bytes and storage (`odu_cache_requests_total`,
+`odu_cache_bytes_total`, `odu_cache_paths`, `odu_cache_hits`, …), the
+runs' durations (`odu_runs_total`, `odu_run_duration_seconds`,
+`odu_node_duration_seconds`) and lane use (`odu_lane_reachable`,
+`odu_lane_held`).
+
+It is never anonymous. A scrape carries `Authorization: Bearer` with the root
+token or a **metrics token** (`metrics_token_mint`), which opens this route and
+nothing else; anything else is `401`. Revocation (`metrics_token_revoke`) takes
+effect at once. Counters are process-local and reset on restart — that is
+standard, and `rate()` handles it — and they only ever grow within one process:
+each run and each journal entry is folded once, never recomputed from a sliding
+window. The numbers read from storage are gauges (`odu_cache_paths`,
+`odu_cache_bytes`, `odu_cache_pins`, `odu_cache_hits` — a collection lowers that
+last one, which is why it is not a `_total`).
+`odu_cache_last_gc_timestamp_seconds` is `0` when there has been no collection
+since boot.
+
 ### Signing in
 
 A server may have a **door**: GitHub sign-in, roles, and personal tokens. You are
@@ -541,7 +566,7 @@ error. `code` is what you branch on; `message` is for the human; `resync` and
 | `pipeline_refused` | The checkout's `justfile` could not be resolved into a DAG; the message says what broke. |
 | `no_venue` | No lane matched — the hosts file configures none for that platform. Read `venue_probe`. |
 | `no_credential` | The serving process has no usable `gh`. Authenticate it, or use `dryRun`. |
-| `no_root_token` | The service has no `$ODU_ROOT_TOKEN`, or yours is wrong. Cache administration needs it; the substituter keeps serving without it. |
+| `no_root_token` | The service has no `$ODU_ROOT_TOKEN`, or yours is wrong. Cache administration and the metrics verbs need it; the substituter keeps serving without it. |
 | `unknown_bucket` / `bucket_exists` | No such bucket, or one already exists — creating it again would rotate a key out from under every client that trusts it. |
 
 ## Exits — two vocabularies, and `1` means opposite things
@@ -646,6 +671,10 @@ declares.
 
 ## What changed (state it honestly if asked)
 
+- **The daemon can be scraped** (`metrics` 1.0, PLAN 6.2): `GET /metrics` is a
+  Prometheus exposition of the cache row's hit rates and storage, the runs'
+  durations and lane use. It needs the root token or a `metrics` token
+  (`metrics_token_mint`); there is no anonymous access.
 - **A bucket can live on S3** (cache 3.1): R2, AWS, Garage, versitygw — declared by the
   operator, chosen per bucket with `store`, served exactly like local disk.
 - **GC and pins reach every bucket** (cache 4.0): retention counts from `lastWanted` —

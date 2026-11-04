@@ -40,11 +40,13 @@ import {
   Bundle,
   DaemonHome,
   Log,
+  Metrics,
   type Row,
   type RowAgent,
   RowContracts,
   Shutdown,
 } from "@odu/cordis/services";
+import { runMetricsReader } from "./runMetrics";
 import { webPorts } from "./webPorts";
 
 /** WHAT AN AGENT IS TOLD about the runs — the row's own words, beside the row. */
@@ -56,8 +58,9 @@ export const CI_AGENT: RowAgent = {
 
 export const ciRow = definePlugin({
   name: CI_ROW,
-  needs: [DaemonHome, BoundOrigin, Build, Log, Shutdown, RowContracts],
+  needs: [DaemonHome, BoundOrigin, Build, Log, Shutdown, RowContracts, Metrics],
   apply: Effect.gen(function* () {
+    const metrics = yield* Metrics;
     const home = yield* DaemonHome;
     const origin = yield* BoundOrigin;
     const build = yield* Build;
@@ -95,7 +98,23 @@ export const ciRow = definePlugin({
     // still starting and `settled()` has something to wait for.
     yield* offer(Bundle, () => service.runtime as unknown as RootedSurfacesRuntime<never>);
 
+    // WHAT THIS ROW SAYS AT A SCRAPE — the runs, read from the catalog on disk,
+    // and the lanes as the service last probed them. Built here because the
+    // reading is a face onto THIS service's catalog and THIS service's last
+    // probe; it dials nothing and holds no poller of its own.
+    const withdrawMetrics = metrics.add({
+      name: CI_ROW,
+      read: runMetricsReader({
+        catalog: service.registry.catalog,
+        venues: () => service.venues(),
+      }),
+    });
+
     yield* Effect.addFinalizer(() => Effect.promise(() => service.close()));
+    // ADDED LAST so it RUNS FIRST — finalizers unwind in reverse. The
+    // contributor is withdrawn before the service it reads is closed, so no
+    // scrape can land on a reading whose service has already gone away.
+    yield* Effect.addFinalizer(() => Effect.sync(withdrawMetrics));
   }),
 });
 

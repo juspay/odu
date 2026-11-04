@@ -151,6 +151,25 @@ export interface BucketTotals {
   lastPush: number | null;
 }
 
+/** The same totals for ONE NAMED bucket, with its pins — what `/metrics` reads
+ *  per scrape. It lives here, beside the queries that answer it, so the storage
+ *  layer does not have to import the metrics module to describe its own rows.
+ *  A bucket with nothing in it still has one: a cache that stopped reporting a
+ *  bucket and a bucket that went to zero look the same on a graph, and only one
+ *  of them is news. */
+export interface BucketGauge {
+  readonly bucket: string;
+  /** Rows in `object` — the paths this bucket serves. */
+  readonly objects: number;
+  /** Their bytes, as stored. */
+  readonly bytes: number;
+  /** Reads counted against those rows. Falls when a collection deletes rows,
+   *  which is why `/metrics` publishes it as a gauge. */
+  readonly hits: number;
+  /** Pins holding closures on this bucket. */
+  readonly pins: number;
+}
+
 /**
  * WHAT AUTHORITY MADE A PIN — and therefore what may take it back.
  *
@@ -232,6 +251,10 @@ export interface CacheRepo {
 
   putPin(row: PinRow): void;
   pins(bucket?: string): PinRow[];
+  /** How many pins each bucket holds, COUNTED BY SQL. `/metrics` asks this of
+   *  every bucket at every scrape, and `pins(bucket).length` would deserialise
+   *  every pin's root-path list to learn a number the database already knows. */
+  pinCounts(): Map<string, number>;
   deletePin(bucket: string, name: string): boolean;
 
   /**
@@ -805,6 +828,12 @@ export function openCacheRepo(path: string): CacheRepo {
       bucket === undefined
         ? all("SELECT * FROM pin ORDER BY created", [], pinOf)
         : all("SELECT * FROM pin WHERE bucket = ? ORDER BY created", [bucket], pinOf),
+    pinCounts() {
+      const rows = db
+        .query("SELECT bucket, COUNT(*) AS pins FROM pin GROUP BY bucket")
+        .all() as Row[];
+      return new Map(rows.map((row) => [text(row, "bucket"), integer(row, "pins")]));
+    },
     bucketStats() {
       const rows = db
         .query(

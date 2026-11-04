@@ -296,6 +296,20 @@
     ).strip()
     assert anon_code == "404", f"a private NAR answered {anon_code} anonymously"
 
+    # ── THE SCRAPE, THROUGH NGINX ───────────────────────────────────────────
+    # A HOST route on a cache-only deployment: the module has to proxy it, and
+    # it has to carry a credential. Both halves are asserted, because a
+    # location that was forgotten and a route that answered anonymously look
+    # the same from a dashboard.
+    metrics = client.succeed(
+        f"curl -sS -H 'Authorization: Bearer {ROOT_TOKEN}' http://cache.test/metrics"
+    )
+    assert "odu_cache_paths{" in metrics, metrics[:300]
+    scrape_anon = client.succeed(
+        "curl -sS -o /dev/null -w '%{http_code}' http://cache.test/metrics"
+    ).strip()
+    assert scrape_anon == "401", f"an anonymous scrape answered {scrape_anon}"
+
     # ── A BUCKET'S OWN NAME ─────────────────────────────────────────────────
     # The name is a fact of the bucket; nginx needs a vhost for it (eval time),
     # and the daemon answers by `Host` — no rewrite, no bucket in the path.
@@ -309,7 +323,9 @@
     public_page = client.succeed("curl -sS http://main.test/")
     assert "extra-substituters" in public_page, public_page[:300]
     assert 'aria-label="board rows"' not in public_page, "the board answered a bucket name"
-    for outside in ["/mcp", "/auth/github", "/rpc/ws", "/assets/app.js", "/cache/other"]:
+    # `/metrics` included: a bucket's name forwards every path to this daemon,
+    # and the host's numbers must not be readable at a substituter's address.
+    for outside in ["/mcp", "/auth/github", "/rpc/ws", "/assets/app.js", "/cache/other", "/metrics"]:
         code = client.succeed(
             f"curl -sS -o /dev/null -w '%{{http_code}}' http://main.test{outside}"
         ).strip()

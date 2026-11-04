@@ -157,7 +157,7 @@ The board, the CI runs and the cache are one process, so the flake ships a NixOS
 }
 ```
 
-What that does, in five sentences. The daemon binds loopback and runs as the `odu` system user, with its state in `/var/lib/odu` at mode 0700 — the cache's signing keys are in there. The root token arrives as a systemd credential and is exported into the unit's environment, never written into the Nix store. nginx serves one virtual host that proxies `/cache/` and `/_odu/v1/` and answers 404 to everything else, so **the board and `/mcp`, which have no authentication in this release, stay off the public internet**. `cache.domain` also sets the origin a bucket publishes, so the URL `odu cache use` prints is the one your clients can reach.
+What that does, in five sentences. The daemon binds loopback and runs as the `odu` system user, with its state in `/var/lib/odu` at mode 0700 — the cache's signing keys are in there. The root token arrives as a systemd credential and is exported into the unit's environment, never written into the Nix store. nginx serves one virtual host that proxies `/cache/`, `/_odu/v1/` and `/metrics` and answers 404 to everything else, so **the board and `/mcp`, which have no authentication in this release, stay off the public internet**. `cache.domain` also sets the origin a bucket publishes, so the URL `odu cache use` prints is the one your clients can reach.
 
 Reach the board over a tailnet or an SSH forward to `127.0.0.1:18440`, then create the bucket and mint a token:
 
@@ -199,6 +199,36 @@ A bucket can also have **a name of its own** — `https://cache.kolu.dev` — se
 
 **Disk does not grow forever.** A bucket keeps what nobody wants for 90 days by default (`retentionDays` at `cache bucket_create`, and the bucket page's **Retention** afterwards), counted from the last time somebody *wanted* a path — a push of it, or the `missing` query a push asks first. A read never renews that clock, because reads are leaving odu and a clock a read wound would make the busiest paths the first to look idle. The row collects every bucket once a day on its own, and nothing is evicted while retention holds, something retained references it, or a pin holds it; **Dry run** on a bucket page says what the next collection would take. A pin holds a closure by name and a push re-points it (`pin: true` in the push action, `--pin NAME` from a shell), which is how a repository keeps its default branch's closure. [Keep and reclaim](cache/#keep-and-reclaim) has the rest.
 
+### Metrics
+
+`GET /metrics` is a Prometheus text exposition of the whole daemon. It is never anonymous: a scrape carries `Authorization: Bearer` with either the root token or a **metrics token** — a read-only credential that opens this route and nothing else, so a Prometheus never holds the secret that administers the server.
+
+```sh
+odu surface metrics token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","label":"prometheus-pod"}' --json
+curl -H "Authorization: Bearer $METRICS_TOKEN" https://cache.example.com/metrics
+```
+
+The plaintext is answered once and only a sha256 of it is kept, in `<state>/metrics/tokens.json` (owner-only). `metrics_token_list` names every token and when it was last used; `metrics_token_revoke` ends one immediately, with no restart. All three need the root token, and a daemon started without one serves no metrics at all.
+
+Each row contributes its own numbers; the host renders them.
+
+| Metric | Type | Labels | From |
+| --- | --- | --- | --- |
+| `odu_cache_requests_total` | counter | `bucket`, `kind` (`narinfo`\|`nar`), `outcome` (`hit`\|`miss`\|`redirect`\|`refused`) | the cache row's served requests |
+| `odu_cache_bytes_total` | counter | `bucket`, `direction` (`served`\|`uploaded`), `mode` | NARs served and uploaded |
+| `odu_cache_uploads_total` | counter | `bucket`, `mode`, `outcome` (`recorded`\|`failed`) | pushes and imports |
+| `odu_cache_gc_evicted_total`, `odu_cache_gc_runs_total` | counter | `bucket` / — | collections |
+| `odu_cache_hits` | gauge | `bucket` | `SUM(hits)` over the paths a bucket holds **now** — a collection lowers it, which is why it is not a `_total` |
+| `odu_cache_paths`, `odu_cache_bytes`, `odu_cache_pins` | gauge | `bucket` | SQL, read at the scrape |
+| `odu_cache_last_gc_timestamp_seconds` | gauge | — | the last collection **since boot**; `0` when there has been none |
+| `odu_runs_total` | counter | `outcome` | the on-disk catalog, each run counted once |
+| `odu_run_duration_seconds` | histogram | `outcome` | verdicts, 10s…2h buckets |
+| `odu_node_duration_seconds` | histogram | `recipe`, `platform`, `outcome` | journal `node_status`, each entry folded once |
+| `odu_lane_reachable`, `odu_lane_held` | gauge | `host`, `platform` / `host` | the last venue probe; absent until something has probed |
+| `odu_metrics_contributor_up` | gauge | `contributor` | `0` when a row failed this scrape — the scrape is still served |
+
+**Counters are process-local** and reset when the daemon restarts; that is standard, and `rate()` handles it. The numbers that must survive a restart are gauges read from storage. The catalog walk is bounded (the 200 newest runs, repeated at most every ten seconds), so a scrape costs the same on a catalog of ten thousand runs as on one of two hundred — and what it *publishes* is not that window: each run and each journal entry is folded **once** into totals that only grow, because a counter read off a sliding window falls every time a run leaves it, and a scraper reads a fall as a reset. The run totals therefore start at whatever the window held when the daemon started.
+
 
 ### Upgrading from a store-backed cache
 
@@ -221,6 +251,7 @@ Each row versions its own surface. The daemon publishes the host's version and e
 | `cache` | **4.3** | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
+| `metrics` (the host's own fragment) | **1.0** | `odu surface metrics`, a Prometheus at `/metrics` |
 
 Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource; **4.0** runs retention on `lastWanted` and drops the last-access field a path and `cache_stats_read` used to carry, and adds `cache_bucket_retention`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan` and `orphans` on the GC report (`retentionDays` at creation is now optional, defaulting to 90 days); **4.1** adds `readsFrom` on a bucket row and on `cache_bucket_describe`, `publicUrl` on a declared store, `migration` on a bucket row, and `cache_bucket_migrate`, which moves a bucket's objects between stores; **4.2** adds `writesTo` on a bucket row — `"store"` when `odu cache push` uploads straight into the bucket's store through presigned URLs and odu reads the object back to verify it, `"odu"` when the bytes cross the daemon — and the upload negotiation the push client speaks to learn it; **4.3** adds `cache_bucket_delete`, which takes a bucket's objects out of its store and then deletes the bucket with its paths, pins and its own tokens. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
 

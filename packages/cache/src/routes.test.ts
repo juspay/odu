@@ -673,6 +673,43 @@ describe("operational lines", () => {
     expect(lines.some((line) => line.startsWith("cache.request.refused") && line.includes("not a NAR file name"))).toBe(true);
     await h.dispose();
   });
+
+  it("logs one narinfo line per read — hit and miss, on both of the routes that serve one", async () => {
+    const events: { event: string; fields: Record<string, unknown> }[] = [];
+    const h = await harness(true, "https://odu.example.org", (event, fields) =>
+      events.push({ event, fields }),
+    );
+    expect(
+      await h.cache.admin.domain({ ...asRoot(ROOT), bucket: "main", domain: "cache.example.org" }),
+    ).toMatchObject({ ok: true });
+    const host = (path: string, init: RequestInit = {}): Promise<Response> =>
+      h.raw(path, { ...init, headers: { host: "cache.example.org" } });
+    const absent = hashOf("/nix/store/33333333333333333333333333333333-absent");
+    // THE SEEDING PUSH IS NOT THE SUBJECT: only the reads below are.
+    events.length = 0;
+
+    expect((await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).status).toBe(200);
+    expect((await h.fetch(`/main/${absent}.narinfo`)).status).toBe(404);
+    // A HEAD IS A READ, deliberately — it is how a client asks "do you have
+    // this", and the hit rate that ignored it would be the wrong number.
+    expect((await h.fetch(`/main/${hashOf(HELLO)}.narinfo`, { method: "HEAD" })).status).toBe(200);
+    // And the same two answers at the root of the bucket's own domain.
+    expect((await host(`/${hashOf(HELLO)}.narinfo`)).status).toBe(200);
+    expect((await host(`/${absent}.narinfo`)).status).toBe(404);
+
+    expect(
+      events
+        .filter((line) => line.event === "cache.narinfo.served")
+        .map((line) => ({ bucket: line.fields.bucket, hit: line.fields.hit })),
+    ).toEqual([
+      { bucket: "main", hit: true },
+      { bucket: "main", hit: false },
+      { bucket: "main", hit: true },
+      { bucket: "main", hit: true },
+      { bucket: "main", hit: false },
+    ]);
+    await h.dispose();
+  });
 });
 
 // ODU STREAMS THE DISK ITSELF. Every case below is the whole serving path for

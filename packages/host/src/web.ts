@@ -126,6 +126,7 @@ import {
   CachePurge,
   DaemonHome,
   Log,
+  Metrics,
   type HttpRoutes,
   type ClaimedRoutes,
   type Row,
@@ -140,6 +141,16 @@ import {
   Shutdown,
   StateDir,
 } from "@odu/cordis/services";
+import { metricsBroker } from "@odu/cordis/metrics";
+import {
+  METRICS_AGENT,
+  METRICS_KEY,
+  METRICS_ROW,
+  oduMetricsSurface,
+} from "@odu/cordis/metricsSurface";
+import { metricsFragment } from "./metricsFragment";
+import { metricsRoute } from "./metricsRoute";
+import { openMetricsTokens } from "./metricsTokens";
 import {
   assertPackaged,
   bakedBuild,
@@ -378,6 +389,11 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   /** The `/mcp` adapter, once the rows are composed; `null` before that, and on
    *  every path that never reached a listener. */
   let mcp: Awaited<ReturnType<typeof serveServiceMcpInProcess>> | null = null;
+  /** The host's own metrics fragment on the composed bundle, once there is a
+   *  bundle to mount it on. Dropped with the rows, for the same reason they
+   *  are: a fragment answering out of a runtime nobody drives is a verb that
+   *  reads a token file after the tenure that owned it ended. */
+  let metricsMounted: { drop: () => Promise<void> } | null = null;
   let closed = false;
   const closeHostOnce = async (): Promise<void> => {
     if (closed) return;
@@ -405,10 +421,25 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // nothing, which is how a cache collects on a daemon that has never heard
     // of an edge.
     const purges = purgeBroker();
+    // THE SCRAPE'S CONTRIBUTORS, the same shape for the same reason: many rows
+    // register, one route reads. The host renders `/metrics` and counts
+    // nothing itself — a host that read a row's database to publish its hit
+    // rate would be the reach `@odu/cordis` exists to prevent.
+    const metrics = metricsBroker();
+    // THE OPERATOR'S CREDENTIAL AND THE STATE ROOT, derived ONCE. The tags
+    // below carry them to the rows; the host's own metrics fragment and route
+    // are not plugins and cannot read a tag, so they read these — not the
+    // environment a third and fourth time.
+    const rootToken = configured(process.env.ODU_ROOT_TOKEN);
+    const stateDir = stateRoot(process.env);
+    // THE SCRAPE CREDENTIAL. Under the per-user state root, beside the cache's
+    // database and the catalog, because it outlives this tenure and a token an
+    // operator minted must survive a restart.
+    const metricsTokens = openMetricsTokens(stateDir);
     await run(provide(host, PrincipalBroker, () => principals));
     await run(provide(host, CachePurge, () => purges));
-    await run(provide(host, StateDir, () => stateRoot(process.env)));
-    await run(provide(host, RootToken, () => configured(process.env.ODU_ROOT_TOKEN)));
+    await run(provide(host, StateDir, () => stateDir));
+    await run(provide(host, RootToken, () => rootToken));
     await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
     await run(provide(host, DaemonHome, () => home.dir));
     await run(provide(host, BoundOrigin, () => origin));
@@ -417,12 +448,18 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await run(provide(host, Log, () => log));
     await run(provide(host, Shutdown, () => () => controller.abort()));
     await run(provide(host, Routes, () => routes));
+    await run(provide(host, Metrics, () => metrics));
     // EVERY ROW'S OWN VERSION, by name, for the identity cell — the roster's
     // fields copied, and nothing about them understood here.
     await run(
-      provide(host, RowContracts, () =>
-        Object.fromEntries(ROWS.map((row) => [row.name, row.contract])),
-      ),
+      provide(host, RowContracts, () => ({
+        ...Object.fromEntries(ROWS.map((row) => [row.name, row.contract])),
+        // AND THE HOST'S OWN FRAGMENT, which is mounted on every daemon. Its
+        // record carries its version, like a row's — the roster never spells
+        // one, so that a version cannot be moved here without moving it where
+        // it is declared.
+        [METRICS_ROW.name]: METRICS_ROW.contract,
+      })),
     );
 
     // EVERY ROW IS A PLUGIN, and the runs' row OWNS ITS BUNDLE: its `apply`
@@ -465,6 +502,17 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       process.stderr.write("odu: the ci row offered no runtime — refusing to serve\n");
       return 1;
     }
+    // THE HOST'S OWN FRAGMENT, on the bundle the runs' row offered: the verbs
+    // that mint the credential `/metrics` is read with. It is mounted HERE
+    // rather than by a row because the scrape is the host's — no row owns both
+    // the number of cached paths and the number of runs — and because the
+    // token file is the host's too. Dropped in the teardown below, before the
+    // host closes.
+    metricsMounted = runtime.mount(
+      METRICS_KEY,
+      oduMetricsSurface,
+      metricsFragment({ tokens: metricsTokens, rootToken }),
+    );
     // THE SERVED HANDLERS, WITH THE DOOR IN FRONT OF THEM — and only the
     // SERVED ones: the control socket `daemonMain` opens is owner-only and
     // already local, so it keeps the ungated record.
@@ -501,9 +549,16 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       version: build.oduVersion,
       transport,
       core: coreAgent(),
-      siblings: Object.fromEntries(
-        ROWS.filter((row) => row.key !== null).map((row) => [row.key as string, row.agent]),
-      ),
+      siblings: {
+        ...Object.fromEntries(
+          ROWS.filter((row) => row.key !== null).map((row) => [row.key as string, row.agent]),
+        ),
+        // THE HOST'S FRAGMENT IS A SIBLING TO AN AGENT, because that is what it
+        // is on the wire: `metrics_token_mint` is reached exactly as
+        // `cache_token_mint` is. It is on every daemon — nothing configures it
+        // away — so unlike the door it is never conditionally absent.
+        [METRICS_KEY]: METRICS_AGENT,
+      },
     });
     const agentRoutes = Layer.merge(
       Layer.merge(
@@ -519,10 +574,19 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
         // runs. The browser asks once before it draws anything.
         doorRoute(hasDoor),
       ),
-      // AND WHICH ROWS ARE HERE: a control for a row that is not mounted opens
-      // a subscription nobody answers. The roster is fixed at boot.
-      rowsRoute(
-        ROWS.map((row) => row.key).filter((key): key is string => key !== null),
+      Layer.merge(
+        // AND WHICH ROWS ARE HERE: a control for a row that is not mounted opens
+        // a subscription nobody answers. The roster is fixed at boot — and the
+        // host's own metrics fragment is on it, because the roster is what the
+        // MCP bridge advertises a daemon's verbs from.
+        rowsRoute([
+          ...ROWS.map((row) => row.key).filter((key): key is string => key !== null),
+          METRICS_KEY,
+        ]),
+        // THE SCRAPE. A host route, authorised by the root token or a metrics
+        // token, reading whatever the rows have registered at the moment it is
+        // asked.
+        metricsRoute({ sources: metrics, rootToken, tokens: metricsTokens }),
       ),
     );
     const composed = routes
@@ -608,6 +672,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // stops a poller, and doing that under a listener still accepting would
     // answer a call out of a runtime nobody drives any more.
     await mcp?.close();
+    await metricsMounted?.drop();
     await Effect.runPromise(Scope.close(scope, Exit.void));
     await closeHostOnce();
     gate.release();
