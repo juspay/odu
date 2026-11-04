@@ -27,10 +27,13 @@ import {
  *
  * ONE CASE THE ROSTER CANNOT ANSWER: `null`, a daemon that has not answered yet
  * — the bridge started before there was one, and its first dial boots it. Until
- * then it offers the cache, the row every daemon mounts unconditionally, so a
- * fresh machine's agent sees the cache's tools at `initialize` rather than only
- * after some other call happens to start the daemon. The answer, when it comes,
- * moves the roster to exactly what is mounted.
+ * then it offers the cache and the host's own metrics fragment: the two every
+ * daemon mounts unconditionally, so a fresh machine's agent sees their tools at
+ * `initialize` rather than only after some other call happens to start the
+ * daemon. The answer, when it comes, moves the roster to exactly what is
+ * mounted — and for these two it moves nothing, which is the point: a reroster
+ * re-makes the composition under whatever call is in flight, and a bridge that
+ * rerostered on every cold boot would interrupt its own first tool call.
  */
 export function mountedRows(rows: ReadonlyArray<string> | null): Record<string, RowAgent> {
   const here = rows ?? UNANSWERED;
@@ -43,9 +46,10 @@ export function mountedRows(rows: ReadonlyArray<string> | null): Record<string, 
 }
 
 /** What an unanswered roster offers — see {@link mountedRows}. */
-const UNANSWERED: ReadonlyArray<string> = [CACHE_KEY];
+const UNANSWERED: ReadonlyArray<string> = [CACHE_KEY, METRICS_KEY];
 import { agentInstructions, readRows, type RowAgent } from "@odu/cordis/services";
 import { CACHE_KEY } from "@odu/cache/surface";
+import { METRICS_KEY } from "@odu/cordis/metricsSurface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
 import {
