@@ -3,6 +3,7 @@
  */
 export {
   type ByteRange,
+  type CopyOptions,
   factsCounter,
   type ObjectBody,
   type ObjectFacts,
@@ -12,7 +13,12 @@ export {
   type PutOutcome,
   sameFacts,
   type StoredObject,
+  /** The prefix a key that is not an object yet carries — what a direct
+   *  upload writes to before anybody has proved its bytes. */
+  TEMP,
   UnrecordedObject,
+  type UploadedPart,
+  type WriteDecision,
 } from "./objectStore";
 export { diskObjectStore, type DiskObjectStoreOptions } from "./diskStore";
 export { s3ObjectStore, type S3ObjectStoreOptions } from "./s3Store";

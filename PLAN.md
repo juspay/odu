@@ -1,8 +1,9 @@
 # Odu as a product: Nix cache + CI you run yourself
 
 Status: living, 2026-11-03.
-- Phase 1 and all of Phase 2 but 2.9 are on master: 2.8 is #148, #150 and #152.
-- **Next is 2.9**, uploads going straight to the store.
+- Phase 1 and all of Phase 2 are on master once 2.9 lands: 2.8 is #148, #150
+  and #152, and 2.9 is #PR.
+- **Next is Phase 3**, orgs.
 - One step is one PR, and the order is a dependency order. There is no schedule.
 
 ## Contents
@@ -155,7 +156,7 @@ the read path wherever it can be, behind a board people want to use.
 | 2.6 | The board, redesigned | ✅ #146 |
 | 2.7 | GC and pins on every store | ✅ #145 |
 | 2.8 | Reads leave odu | ✅ #148 |
-| 2.9 | Uploads go straight to the store | |
+| 2.9 | Uploads go straight to the store | ✅ #PR |
 | 2.10 | The admin CLI is retired | ✅ #144 |
 
 What each step delivers:
@@ -236,10 +237,23 @@ What each step delivers:
     store's HEAD could not match `nix-cache-info`'s recorded size and the
     backfill refused to rewrite it. An object's size is its metadata's;
     `content-length` is checked only on an answer that was not re-encoded.
-- **2.9 Uploads go straight to the store.** The client uploads to the store
-  through presigned parts. Odu then reads the object back and verifies it
-  before signing. That is Cachix's upload, but without Cachix's trust in the
-  client's hashes.[^uploads]
+- **2.9 ✅ Uploads go straight to the store.** `odu cache push` asks the
+  bucket where a NAR's bytes go and is answered from the bucket's STORE: an
+  S3-backed bucket hands back presigned URLs, and the client PUTs the NAR to
+  the store itself. Odu then streams the object back, verifies it, copies it
+  into place and records the path. That is Cachix's upload, but without
+  Cachix's trust in the client's hashes.[^uploads]
+  - **Measured on R2** (bucket `kolu`, 2026-11-03): `If-None-Match: *` is
+    IGNORED on the single-request `CopyObject` — 200, and the destination is
+    overwritten — but HONOURED on `CompleteMultipartUpload`, which answers
+    `412 PreconditionFailed`. Odu's `copy` is a multipart copy
+    (`UploadPartCopy` + a conditional completion), so first-kept-wins holds
+    ACROSS daemons, not just within one. This also corrects what [^objects]
+    said while it was undocumented.
+  - **Benchmark:** a 225 MiB NAR closure (105 MiB on the wire, 5 paths) to the
+    production pod took 45.7 s with the old client, bytes through the daemon.
+    The direct number is taken against the same pod once this branch is
+    deployed.
 - **2.10 The admin CLI is retired.** The board and the API are the product, so
   the CLI keeps only what needs a shell on the machine that holds the paths or
   the checkout: `odu ci …`, `odu cache use|login|push`, `odu auth login`, and
@@ -437,9 +451,11 @@ Commits and PR bodies use the earlier names.
     GET answers absence. Reads come in 1 MiB windows with one prefetched into
     a buffer, because Bun's fetch body applies no backpressure. Every window
     is held to its range length. Parts upload four at a time from reused
-    buffers. R2 honours `If-None-Match` on `PutObject` (412, measured) but
-    doesn't document it on `CompleteMultipartUpload`, so objects over 8 MiB
-    are put-if-absent within one daemon only.
+    buffers. R2 honours `If-None-Match` on `PutObject` (412, measured) and, as
+    of 2.9's probe, on `CompleteMultipartUpload` too (412, measured — it is
+    still undocumented), so an object is put-if-absent across daemons at any
+    size. It is IGNORED on the one-request `CopyObject`, which is why odu's
+    `copy` is a multipart copy.
 
 [^bench]: Pod at #143 (`6df8c8e`). The same client and tailnet path for both:
 
@@ -507,13 +523,38 @@ Commits and PR bodies use the earlier names.
       (`server/src/api/binary_cache.rs`). Cachix serves NARs from a CDN. Odu
       doesn't chunk, so every S3 object can redirect.
 
-[^uploads]: The client uploads to `<bucket>/nar/.tmp-<uuid>`. Odu streams the
-    object back, verifies NarHash, size and `CA:`, then server-side copies it
-    into place and writes the signed narinfo, so a path is visible only once
-    verified. The readback costs one store → odu transfer on the downlink.
-    - Measure first whether R2 honours `If-None-Match` on a copy; that decides
-      cross-daemon put-if-absent for large objects.
+[^uploads]: How 2.9 works. The client asks `POST …/nar/<file>/upload` first;
+    the answer is the bucket's STORE's, not a flag: `{mode:"direct", upload,
+    partSize, put}` for an S3 store, `{mode:"staged"}` for disk, and the row
+    carries the same fact as `writesTo` (cache surface 4.2). The client PUTs
+    the NAR to `<bucket>/nar/.tmp-<uuid>` — one presigned object when it fits
+    in one part, else a presigned part at a time, each ETag kept — and
+    `POST …/upload/<id>/complete` joins them and confirms the object. The
+    narinfo PUT is where it is decided: odu streams the temp object back,
+    verifies NarHash, size and `CA:` WITHOUT spooling it to disk, copies it
+    into `nar/<file>` with `If-None-Match: *`, deletes the temp and records
+    the row under the write lock. 200 is stored, 400 names the reason, and the
+    temp is deleted either way. The readback costs one store → odu transfer on
+    the downlink.
+    - **R2, measured 2026-11-03** (bucket `kolu`): `If-None-Match: *` is
+      IGNORED on the single-request `CopyObject` (200, destination
+      overwritten; Cloudflare's own destination-side condition is
+      `cf-copy-destination-if-none-match`, which does answer 412) but
+      HONOURED on `CompleteMultipartUpload` (412 `PreconditionFailed`). Odu's
+      `copy` is `UploadPartCopy` + a conditional completion, so put-if-absent
+      holds across daemons for a copy of any size. R2 also completes a
+      multipart upload whose only part is well under 5 MiB.
+    - A part is 5 MiB at least (S3's floor), the store's own part size, or the
+      client's `--part-size` — the largest of the three. In direct mode that
+      flag is a FLOOR; staged, it stays the ceiling a proxy imposes.
+    - An expired presign or a 4xx at the store re-BEGINS the path: a new
+      upload id, rather than a refresh of a URL for an upload whose state the
+      client cannot see. An upload record is the daemon's, in memory, and is
+      swept after an hour with its temp object and its multipart upload.
     - Disk keeps chunked upload, and the 2.3 action gets the new path for free.
+    - An origin that cannot negotiate (404) is refused by name — no silent
+      fallback to staged, which on an S3 bucket would go on pushing every byte
+      through the daemon.
     - The trust rule is decided: odu reads the object back and verifies it.
       It never signs hashes the client claims.
     - Precedent: Cachix's client opens a multipart upload, PUTs each part to

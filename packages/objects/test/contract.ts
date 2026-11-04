@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
-import type { ObjectFacts, ObjectStore, PutOutcome } from "../src/objectStore";
+import { TEMP, type ObjectFacts, type ObjectStore, type PutOutcome, type UploadedPart } from "../src/objectStore";
 import type { StoreSpec } from "./storeMemory";
 
 export interface ContractSubject {
@@ -81,6 +81,50 @@ const kept = (outcome: PutOutcome): ObjectFacts => {
   if (!outcome.ok) throw new Error(`expected a put to keep, got ${outcome.refusal.kind}`);
   return outcome.facts;
 };
+
+/** The direct upload's members, all of them, or null for a store that
+ *  declines the capability — which is all-or-nothing (see `objectStore.ts`),
+ *  so one check answers for the group. */
+type DirectStore = ObjectStore &
+  Required<Pick<ObjectStore, "partSize" | "presignPut" | "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy">>;
+
+function directly(store: ObjectStore): DirectStore | null {
+  const offered =
+    store.partSize !== undefined &&
+    store.presignPut !== undefined &&
+    store.createUpload !== undefined &&
+    store.presignPart !== undefined &&
+    store.completeUpload !== undefined &&
+    store.abortUpload !== undefined &&
+    store.copy !== undefined;
+  return offered ? (store as DirectStore) : null;
+}
+
+/** Send `chunks` as the parts of `uploadId`, each through a URL of its own,
+ *  and answer what the writer would report: the index it sent and the ETag
+ *  the service answered. */
+async function uploadParts(
+  store: DirectStore,
+  key: string,
+  uploadId: string,
+  chunks: readonly Uint8Array[],
+): Promise<UploadedPart[]> {
+  const parts: UploadedPart[] = [];
+  for (const [index, chunk] of chunks.entries()) {
+    const response = await fetch(store.presignPart(key, uploadId, index, 600), {
+      method: "PUT",
+      body: chunk as Uint8Array<ArrayBuffer>,
+    });
+    const etag = response.headers.get("etag");
+    expect({ index, status: response.status, etag: etag === null ? null : "answered" }).toEqual({
+      index,
+      status: 200,
+      etag: "answered",
+    });
+    parts.push({ index, etag: etag as string });
+  }
+  return parts;
+}
 
 export function objectStoreContract(name: string, make: () => Promise<ContractSubject>): void {
   describe(`${name}: ObjectStore contract`, () => {
@@ -427,6 +471,219 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       } finally {
         rmSync(scratch, { recursive: true, force: true });
       }
+      await dispose();
+    });
+
+    // ── THE DIRECT UPLOAD ────────────────────────────────────────────────
+    //
+    // A STORE THE WRITER ITSELF CAN REACH: the bytes go from whoever holds
+    // them to the service, and never through the process holding the
+    // credentials. Every case below runs on every store: one asserts the
+    // group is all-or-nothing, the rest apply to a store that offers it.
+
+    it("offers the whole direct upload or none of it, and only where a reader has URLs too", async () => {
+      const { store, dispose } = await make();
+      const offered = {
+        partSize: store.partSize !== undefined,
+        presignPut: store.presignPut !== undefined,
+        createUpload: store.createUpload !== undefined,
+        presignPart: store.presignPart !== undefined,
+        completeUpload: store.completeUpload !== undefined,
+        abortUpload: store.abortUpload !== undefined,
+        copy: store.copy !== undefined,
+      };
+      // ALL OF IT OR NONE: half a direct upload is no capability at all —
+      // a caller asks `store.createUpload === undefined` once and uses the
+      // rest. And a store whose WRITERS can reach it is one whose READERS
+      // can: the two are the same reachability, so disk (no `presignGet`)
+      // declines every member and S3 offers every one.
+      const whole = store.presignGet !== undefined;
+      expect(offered).toEqual({
+        partSize: whole,
+        presignPut: whole,
+        createUpload: whole,
+        presignPart: whole,
+        completeUpload: whole,
+        abortUpload: whole,
+        copy: whole,
+      });
+      await dispose();
+    });
+
+    it("takes a whole object through a URL a writer PUTs to itself", async () => {
+      const { store, dispose } = await make();
+      const direct = directly(store);
+      if (direct === null) {
+        await dispose();
+        return;
+      }
+      const payload = bytes("a NAR the writer sent itself");
+      // A PLAIN `fetch`: no Authorization, no client of this store's — the
+      // URL carries every bit of authority the write needs.
+      const sent = await fetch(direct.presignPut("main/nar/sent.nar.zst", 600), {
+        method: "PUT",
+        body: payload as Uint8Array<ArrayBuffer>,
+      });
+      expect({ ok: sent.ok, status: sent.status }).toEqual({ ok: true, status: 200 });
+      expect(Array.from((await read(store, "main/nar/sent.nar.zst")) as Uint8Array)).toEqual(Array.from(payload));
+      await dispose();
+    });
+
+    it("takes a multipart upload a writer sent part by part, in any order it reports them", async () => {
+      const { store, dispose } = await make();
+      const direct = directly(store);
+      if (direct === null) {
+        await dispose();
+        return;
+      }
+      const key = "main/nar/parts.nar.zst";
+      // THE FIRST PART IS EXACTLY `partSize` and the last is short: what the
+      // number is for — S3 refuses a short part anywhere but the end.
+      const chunks = [patterned(direct.partSize, 11), patterned(4_321, 12)];
+      const uploadId = await direct.createUpload(key);
+      const parts = await uploadParts(direct, key, uploadId, chunks);
+      // REPORTED OUT OF ORDER, because a writer uploads parts in parallel and
+      // finishes them in whatever order the network gives: the index says
+      // where each belongs, not the order they arrive in.
+      expect(await direct.completeUpload(key, uploadId, [...parts].reverse())).toBe("stored");
+      const whole = new Uint8Array(Buffer.concat(chunks));
+      expect(factsOf((await read(store, key)) as Uint8Array)).toEqual(factsOf(whole));
+      expect(await store.head(key)).toBe(whole.length);
+      await dispose();
+    });
+
+    it("completes an upload of ONE part far smaller than a part", async () => {
+      // THE COMMON CASE FOR A NAR: a few KiB, one part, nowhere near S3's 5
+      // MiB floor — which applies to every part BUT the last, and a single
+      // part is the last one.
+      const { store, dispose } = await make();
+      const direct = directly(store);
+      if (direct === null) {
+        await dispose();
+        return;
+      }
+      const key = "main/nar/one-part.nar.zst";
+      const payload = patterned(3_000, 13);
+      const uploadId = await direct.createUpload(key);
+      const parts = await uploadParts(direct, key, uploadId, [payload]);
+      expect(await direct.completeUpload(key, uploadId, parts)).toBe("stored");
+      expect(factsOf((await read(store, key)) as Uint8Array)).toEqual(factsOf(payload));
+      await dispose();
+    });
+
+    it("refuses a completion onto a key that is taken, when it is asked to", async () => {
+      const { store, dispose } = await make();
+      const direct = directly(store);
+      if (direct === null) {
+        await dispose();
+        return;
+      }
+      const key = "main/nar/taken.nar.zst";
+      const first = bytes("the object that got there first");
+      await store.put(key, streamOf([first]));
+      const uploadId = await direct.createUpload(key);
+      const parts = await uploadParts(direct, key, uploadId, [patterned(2_500, 18)]);
+      // `ifAbsent` IS A PRECONDITION ON THE COMPLETION (`If-None-Match: *`),
+      // which not every service honours there — versitygw 1.7.0 does, and
+      // answers `412`, which is this `exists`.
+      expect(await direct.completeUpload(key, uploadId, parts, { ifAbsent: true })).toBe("exists");
+      expect(new TextDecoder().decode((await read(store, key)) as Uint8Array)).toBe(
+        "the object that got there first",
+      );
+      await direct.abortUpload(key, uploadId);
+      await dispose();
+    });
+
+    it("refuses a completion whose parts are not 0..n-1", async () => {
+      const { store, dispose } = await make();
+      const direct = directly(store);
+      if (direct === null) {
+        await dispose();
+        return;
+      }
+      const key = "main/nar/gappy.nar.zst";
+      const uploadId = await direct.createUpload(key);
+      const parts = await uploadParts(direct, key, uploadId, [patterned(2_000, 14)]);
+      const gap = [{ index: 1, etag: (parts[0] as UploadedPart).etag }];
+      // NAMED, not silently glued: a gap would make an object out of the
+      // parts that did arrive, with a hash nobody measured.
+      await expect(direct.completeUpload(key, uploadId, gap)).rejects.toThrow("indexes [1]");
+      await expect(direct.completeUpload(key, uploadId, [])).rejects.toThrow("0 arrived");
+      await direct.abortUpload(key, uploadId);
+      await dispose();
+    });
+
+    it("drops an aborted upload: it cannot be completed, and no sweep has it to remove", async () => {
+      const { store, dispose } = await make();
+      const direct = directly(store);
+      if (direct === null) {
+        await dispose();
+        return;
+      }
+      const key = "main/nar/abandoned.nar.zst";
+      const uploadId = await direct.createUpload(key);
+      const parts = await uploadParts(direct, key, uploadId, [patterned(2_000, 15)]);
+      await direct.abortUpload(key, uploadId);
+      // IDEMPOTENT: an upload that is not there is not an error.
+      await direct.abortUpload(key, uploadId);
+      await expect(direct.completeUpload(key, uploadId, parts)).rejects.toThrow();
+      expect(await store.head(key)).toBeNull();
+      // NOTHING LEFT FOR THE SWEEP: the abort removed the upload, so a sweep
+      // of everything older than now finds no dead put of this one's.
+      expect(await store.sweepTemp("main", Number.POSITIVE_INFINITY)).toBe(0);
+      await dispose();
+    });
+
+    it("copies bytes inside the store, with the facts the caller proved", async () => {
+      const { store, dispose } = await make();
+      const direct = directly(store);
+      if (direct === null) {
+        await dispose();
+        return;
+      }
+      // THE SOURCE IS A DIRECT UPLOAD'S TEMP OBJECT: bytes the store never
+      // read, so it knows no facts about them. The prover does, and passes
+      // them to the copy that makes them an object.
+      const source = `main/nar/${TEMP}copied`;
+      const payload = patterned(5_000, 16);
+      await fetch(direct.presignPut(source, 600), { method: "PUT", body: payload as Uint8Array<ArrayBuffer> });
+      const facts = factsOf(payload);
+      const destination = "main/nar/copied.nar.zst";
+      expect(await direct.copy(source, destination, { facts, ifAbsent: true })).toBe("stored");
+      expect(await store.facts(destination)).toEqual(facts);
+      expect(factsOf((await read(store, destination)) as Uint8Array)).toEqual(facts);
+      // ONTO A KEY THAT IS TAKEN: the copy is refused and the object there
+      // is the one that was there.
+      const other = patterned(5_000, 17);
+      await fetch(direct.presignPut(`main/nar/${TEMP}other`, 600), {
+        method: "PUT",
+        body: other as Uint8Array<ArrayBuffer>,
+      });
+      expect(await direct.copy(`main/nar/${TEMP}other`, destination, { facts: factsOf(other), ifAbsent: true })).toBe(
+        "exists",
+      );
+      expect(await store.facts(destination)).toEqual(facts);
+      expect(factsOf((await read(store, destination)) as Uint8Array)).toEqual(facts);
+      await dispose();
+    });
+
+    it("keeps a direct upload's temp key out of `list`, and lets a sweep remove it", async () => {
+      const { store, dispose } = await make();
+      const direct = directly(store);
+      if (direct === null) {
+        await dispose();
+        return;
+      }
+      const temp = `main/nar/${TEMP}unproved`;
+      await fetch(direct.presignPut(temp, 600), {
+        method: "PUT",
+        body: bytes("bytes nobody proved") as Uint8Array<ArrayBuffer>,
+      });
+      // NOT AN OBJECT: a temp name is never listed, whoever wrote it.
+      expect(await store.list("main")).toEqual([]);
+      expect(await store.head(temp)).toBe(19);
+      expect(await store.sweepTemp("main", Number.POSITIVE_INFINITY)).toBe(1);
+      expect(await store.head(temp)).toBeNull();
       await dispose();
     });
 

@@ -112,6 +112,18 @@ export const CacheBucketSchema = Schema.Struct({
    * NAR (disk) or redirects to the store for it (S3).
    */
   readsFrom: Schema.Literals(["store", "odu"]),
+  /**
+   * WHO TAKES A PUSH'S BYTES (PLAN 2.9) — `readsFrom`'s mirror. `"store"`
+   * when the bucket's store takes them itself: `odu cache push` is handed
+   * presigned URLs, the NAR never crosses the daemon, and odu reads the
+   * object back to prove it before the path is recorded. `"odu"` when they
+   * come through the daemon into staging — every disk-backed bucket.
+   *
+   * It is the STORE's capability, not a setting: nothing turns it on or off,
+   * and a client that cannot speak the negotiation is refused rather than
+   * quietly served the old way.
+   */
+  writesTo: Schema.Literals(["store", "odu"]),
   /** The store-to-store move running on this bucket, or `null`. */
   migration: Schema.NullOr(CacheMigrationSchema),
 });
@@ -482,6 +494,33 @@ export const DEFAULT_RETENTION_DAYS = 90;
  */
 export const DEFAULT_NAR_PART_BYTES = 64 * 1024 * 1024;
 export const MAX_NAR_PART_BYTES = 96 * 1024 * 1024;
+
+/**
+ * THE FLOOR UNDER A DIRECT PART (PLAN 2.9).
+ *
+ * When the bytes go straight to an S3 store, odu's 64 MiB is no longer a
+ * ceiling imposed by a proxy — nothing proxies them — but S3's own rule
+ * applies instead: every part of a multipart upload except the last must be
+ * at least 5 MiB. So in direct mode `--part-size` becomes a FLOOR the client
+ * asks for rather than a ceiling it must stay under, and the store's own
+ * part size and this minimum are the other two numbers the maximum is taken
+ * of. A NAR smaller than one part is one presigned PUT and no multipart
+ * upload at all.
+ */
+export const MIN_DIRECT_PART_BYTES = 5 * 1024 * 1024;
+
+/**
+ * HOW LONG A PRESIGNED URL LIVES — ten minutes, Attic's number for the same
+ * redirect, and the same budget for a read and for a write.
+ *
+ * It is a copy budget, not a session: a client that followed the redirect is
+ * already downloading, and a resumed download re-asks odu. Long enough for a
+ * multi-gigabyte NAR on a slow link to start, short enough that a URL
+ * someone pasted out of a log is dead before it is useful. A direct upload's
+ * part URL expires the same way, and an expired one is re-begun by the
+ * client rather than refreshed.
+ */
+export const PRESIGN_SECONDS = 600;
 
 /** What stands where a write token goes, in every block a page or a doc
  *  prints — the netrc line and the push block say the same thing. */
@@ -860,8 +899,16 @@ export const CACHE_KEY = "cache";
  * own domain or odu answers a read), `publicUrl` on a declared store,
  * `migration` on a bucket row, and the new verb `bucket.migrate` that moves
  * a bucket's objects between stores.
+ *
+ * 4.2: UPLOADS GO STRAIGHT TO THE STORE (PLAN 2.9). Additive: `writesTo` on a
+ * bucket row — `"store"` when a push's bytes are presigned into the store and
+ * read back for proof, `"odu"` when they cross the daemon. The push PROTOCOL
+ * grows with it (`POST …/nar/<file>/upload` and the part and completion paths
+ * that hang off the upload it answers), which is why the number moves at all:
+ * a client that speaks 4.2 expects to be able to negotiate, and one that does
+ * not keeps the staged routes, which are unchanged.
  */
-export const CACHE_CONTRACT_VERSION = "4.1";
+export const CACHE_CONTRACT_VERSION = "4.2";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

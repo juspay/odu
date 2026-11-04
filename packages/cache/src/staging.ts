@@ -49,12 +49,12 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { basename, join, relative } from "node:path";
-import type { ObjectStore } from "@odu/objects";
+import { type ObjectStore, TEMP, type UploadedPart } from "@odu/objects";
 import { type KeptFile, keptFileOf, objectFactsOf } from "./fileHash";
 import { writeAll } from "./sink";
-import { verifyNarFile } from "./store";
+import { verifyNarFile, verifyNarStream } from "./store";
 import type { BucketRow } from "./db";
-import { ODU_BUCKET_FIELD, ODU_ORIGIN_FIELD } from "./paths";
+import { ODU_BUCKET_FIELD, ODU_ORIGIN_FIELD, type UploadMode, type UploadPlan } from "./paths";
 import {
   narFileName,
   isDerivationPath,
@@ -66,6 +66,7 @@ import {
   storePathHash,
 } from "./narinfo";
 import { newChain, type Chain, serial } from "./serial";
+import { MIN_DIRECT_PART_BYTES, PRESIGN_SECONDS } from "./surface";
 
 /** A write in progress. `commit` publishes it under the name the narinfo will
  *  name; `discard` removes it. */
@@ -111,6 +112,36 @@ type Refusal = Extract<NarinfoOutcome, { ok: false }>;
 export type CompleteUpload =
   | { ok: true; parts: number }
   | { ok: false; missing: readonly number[] };
+
+/**
+ * WHERE A NAR'S BYTES GO (PLAN 2.9) — the wire's own question, declared in
+ * `./paths` so the client and this file read one spelling of it, and answered
+ * here.
+ *
+ * `direct`: the STORE takes the bytes, through URLs odu signs, and odu reads
+ * the object back, proves it and copies it into place. `staged`: they cross
+ * this process into the staging directory, as every push did before 2.9.
+ *
+ * THE STORE DECIDES, not a flag. A store that cannot presign a write (disk —
+ * its objects are files on odu's own machine) has nobody to send a client to,
+ * so its buckets stay staged; an S3 store's never are. The client is TOLD
+ * which, per path, so there is nothing to guess and nothing to configure.
+ */
+export type { UploadMode, UploadPlan } from "./paths";
+
+/** A presigned part, or why there is none. `status` is the answer the route
+ *  sends: 404 for an upload this daemon does not hold (it restarted, or the
+ *  client is a minute too late), which the client answers by beginning
+ *  again. */
+export type DirectPart =
+  | { ok: true; url: string }
+  | { ok: false; status: 400 | 404; message: string };
+
+/** What a direct upload's completion came to: the object is in the store
+ *  under its temp key, this long, in this many parts. */
+export type DirectComplete =
+  | { ok: true; parts: number; bytes: number }
+  | { ok: false; status: 400 | 404; message: string };
 
 /**
  * What a client reads first from a bucket.
@@ -280,6 +311,29 @@ export interface StagingDeps {
 
 export interface Staging {
   close(): Promise<void>;
+  /** How this bucket's store takes a NAR's bytes. The capability is the
+   *  STORE's, asked here so no route ever peeks at one. */
+  uploadMode(bucket: BucketRow): UploadMode;
+  /**
+   * BEGIN ONE NAR'S UPLOAD. On a staged bucket it answers `{mode:"staged"}`
+   * and holds nothing; on a direct one it reserves a temp key and hands back
+   * the URLs that write it. `floor` is the client's own `--part-size`, which
+   * in direct mode raises the part size rather than capping it.
+   */
+  beginDirect(bucket: BucketRow, file: string, floor: number | null): Promise<UploadPlan>;
+  /** The URL that writes part `index` (0-based) of an upload this daemon
+   *  holds. The store's multipart upload is opened here, on the first part
+   *  asked for — a one-part NAR never opens one. */
+  directPart(bucket: BucketRow, file: string, upload: string, index: number): Promise<DirectPart>;
+  /** Finish a direct upload: complete the store's multipart upload when there
+   *  was one, then CONFIRM the object is there. A `parts` of none is the
+   *  single-object PUT, which has nothing to join. */
+  completeDirect(
+    bucket: BucketRow,
+    file: string,
+    upload: string,
+    parts: readonly UploadedPart[],
+  ): Promise<DirectComplete>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
   beginPart(
     bucket: BucketRow,
@@ -318,6 +372,102 @@ export function createStaging(deps: StagingDeps): Staging {
   const joined = new Map<string, { parts: number; bytes: number; session: string | null }>();
   let lastSweep = 0;
 
+  // ── THE DIRECT UPLOAD (PLAN 2.9) ──────────────────────────────────────
+  //
+  // The bytes never reach this process. What it keeps instead is one record
+  // per upload in flight: which temp key the client is writing, which store
+  // holds it, and — once the client says it is done — that the object is
+  // there, so the narinfo that follows knows what to read back and prove.
+  //
+  // The record is this DAEMON's, not the database's. An upload that outlives
+  // a restart is lost on purpose: the client is told (404) and begins again,
+  // which costs it one NAR and spares a persisted table whose only content is
+  // a minute of other people's intentions. The temp objects such an upload
+  // leaves are what the store's own hourly sweep is for.
+
+  /** A store that takes its own bytes. The capability is all-or-nothing
+   *  (`@odu/objects`), so it is asked once and the narrowed value is what
+   *  every caller holds. */
+  type DirectStore = ObjectStore &
+    Required<
+      Pick<
+        ObjectStore,
+        "presignPut" | "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy"
+      >
+    >;
+  const directStore = (store: ObjectStore): DirectStore | null =>
+    store.presignPut !== undefined &&
+    store.createUpload !== undefined &&
+    store.presignPart !== undefined &&
+    store.completeUpload !== undefined &&
+    store.abortUpload !== undefined &&
+    store.copy !== undefined
+      ? (store as DirectStore)
+      : null;
+
+  interface DirectUpload {
+    readonly id: string;
+    readonly bucket: string;
+    readonly file: string;
+    /** The temp key the client writes. Unique per upload, so two pushers of
+     *  one path never write each other's bytes and no completion needs a
+     *  precondition. */
+    readonly key: string;
+    readonly store: DirectStore;
+    readonly partSize: number;
+    readonly began: number;
+    /** The store's multipart upload, opened on the first part asked for and
+     *  memoised; null while the NAR may still be one object. */
+    upload: Promise<string> | null;
+  }
+
+  /** Uploads in flight, by their handle. */
+  const directs = new Map<string, DirectUpload>();
+  /** The upload whose object is IN THE STORE, by `<bucket>/<file>` — what the
+   *  narinfo that follows reads back. A second upload of one name replaces
+   *  the first: the last bytes the client said it finished are the ones it is
+   *  about to claim. */
+  const landed = new Map<string, DirectUpload>();
+
+  const directKey = (bucket: string, file: string): string => `${bucket}/${file}`;
+
+  /** The record this request names, or null — a handle from before a restart,
+   *  from another bucket, or for another NAR is no upload of ours. */
+  function heldUpload(bucket: BucketRow, file: string, upload: string): DirectUpload | null {
+    const direct = directs.get(upload);
+    return direct !== undefined && direct.bucket === bucket.name && direct.file === file
+      ? direct
+      : null;
+  }
+
+  /** The store's multipart upload for this record, opened once. A failure is
+   *  not memoised: the next part asks again rather than inheriting a rejected
+   *  promise forever. */
+  function openUpload(direct: DirectUpload): Promise<string> {
+    if (direct.upload === null) {
+      direct.upload = direct.store.createUpload(direct.key);
+      direct.upload.catch(() => {
+        direct.upload = null;
+      });
+    }
+    return direct.upload;
+  }
+
+  /** Let an upload go: its record, its claim on the name, and the bytes it
+   *  left in the store. Called when a narinfo has had its answer out of it,
+   *  and when the sweep finds one nobody finished. */
+  async function dropUpload(direct: DirectUpload): Promise<void> {
+    directs.delete(direct.id);
+    if (landed.get(directKey(direct.bucket, direct.file))?.id === direct.id) {
+      landed.delete(directKey(direct.bucket, direct.file));
+    }
+    const opened = await direct.upload?.catch(() => null);
+    if (opened !== null && opened !== undefined) {
+      await direct.store.abortUpload(direct.key, opened).catch(() => {});
+    }
+    await direct.store.delete(direct.key).catch(() => {});
+  }
+
   /**
    * TAKE THE STAGED NAR FOR THIS REQUEST ALONE. Every push of a path names one
    * file — `nar/<narHash>.nar.zst`, whoever sends it — so the shared name is a
@@ -339,6 +489,68 @@ export function createStaging(deps: StagingDeps): Staging {
       openUploads.delete(claimed);
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw err;
+    }
+  }
+
+  /**
+   * THE SAME PROOF, OVER AN OBJECT THE CLIENT PUT IN THE STORE ITSELF (PLAN
+   * 2.9).
+   *
+   * ODU NEVER SIGNS A HASH IT DID NOT TAKE. The bytes went where odu cannot
+   * watch them, so they are read BACK — streamed out of the store, through
+   * the same decompress-and-hash as a staged file — and only then copied into
+   * place and recorded. That readback is the cost of the whole feature, and
+   * it is one store→odu transfer on the downlink against an upload that no
+   * longer crosses the machine at all.
+   *
+   * The temp object is this request's either way: kept bytes are a copy of
+   * it, refused bytes are deleted with it, and nothing under `nar/<file>`
+   * exists until the copy wrote it.
+   */
+  async function proveDirect(
+    bucket: BucketRow,
+    hash: string,
+    info: NarInfo,
+    direct: DirectUpload,
+  ): Promise<NarinfoOutcome> {
+    const refuse = async (message: string, reason: string): Promise<Refusal> => {
+      log?.("cache.nar.verify_failed", {
+        bucket: bucket.name,
+        file: direct.file,
+        mode: "direct",
+        path: info.storePath,
+        reason,
+      });
+      return { ok: false, status: 400, message, detail: await detailOf(bucket, info, hash) };
+    };
+    try {
+      const object = await direct.store.get(direct.key);
+      if (object === null) {
+        return await refuse(
+          `the narinfo names ${info.url}, which was never uploaded to this bucket`,
+          "absent",
+        );
+      }
+      const selfHashPart = info.references.includes(info.storePath)
+        ? storePathHash(info.storePath)
+        : null;
+      const checked = await verifyNarStream(object, info.compression, selfHashPart);
+      if (!checked.ok) return await refuse(`${info.url}: ${checked.message}`, checked.message);
+      if (checked.narHash !== info.narHash) {
+        return await refuse(
+          `${info.url} hashes to ${checked.narHash} but the narinfo says ` +
+            `${info.narHash} — the upload was truncated or corrupted`,
+          "nar_hash_mismatch",
+        );
+      }
+      return await recordSerially(bucket, info, checked.selfHash, (current) =>
+        keepCopied(current, info, direct, {
+          fileHash: checked.fileHash,
+          fileSize: checked.fileSize,
+        }),
+      );
+    } finally {
+      await dropUpload(direct);
     }
   }
 
@@ -436,6 +648,15 @@ export function createStaging(deps: StagingDeps): Staging {
         }
       }
     }
+    // A DIRECT UPLOAD NOBODY FINISHED, the same hour later: its record goes,
+    // its multipart upload is aborted and its temp object deleted. The store's
+    // own sweep would reach the bytes eventually; this reaches the RECORD,
+    // which is this process's and which nothing else would ever free.
+    for (const direct of [...directs.values()]) {
+      if (direct.began >= cutoff) continue;
+      await dropUpload(direct);
+      joined.delete(directKey(direct.bucket, direct.file));
+    }
   }
 
   /** How many parts one NAR may have. A 2 GiB NAR at 64 MiB is 32; the ceiling
@@ -464,7 +685,13 @@ export function createStaging(deps: StagingDeps): Staging {
    * `writeSync` on a raw descriptor 304–325 MiB (blocks the loop);
    * `Bun.file(part).writer()` 299–316 MiB (this).
    */
-  function openAt(path: string, limit: number | null): Upload {
+  function openAt(
+    path: string,
+    limit: number | null,
+    /** What landed, once it is under its final name — the bytes a whole NAR
+     *  upload carried, for the event that says one arrived. */
+    done?: (bytes: number) => void,
+  ): Upload {
     const part = `${path}.${randomUUID()}.part`;
     openUploads.add(part);
     const sink = Bun.file(part).writer({ highWaterMark: 1 << 20 });
@@ -483,6 +710,7 @@ export function createStaging(deps: StagingDeps): Staging {
         await sink.end();
         await rename(part, path);
         release();
+        done?.(written);
       },
       async discard() {
         await Promise.resolve(sink.end()).catch(() => {});
@@ -555,11 +783,9 @@ export function createStaging(deps: StagingDeps): Staging {
     }
     await unlink(uploadMarker(dirForBucket, stem)).catch(() => {});
     const joinedInfo = await stat(target).catch(() => null);
-    joined.set(`${bucket.name}/${file}`, {
-      session,
-      parts: total,
-      bytes: joinedInfo?.size ?? 0,
-    });
+    const bytes = joinedInfo?.size ?? 0;
+    joined.set(`${bucket.name}/${file}`, { session, parts: total, bytes });
+    log?.("cache.nar.uploaded", { bucket: bucket.name, file, mode: "staged", parts: total, bytes });
     return { ok: true, parts: total };
   }
 
@@ -597,6 +823,77 @@ export function createStaging(deps: StagingDeps): Staging {
       // its conditional write never decided — and its refusal names the facts.
       const { kind, ...named } = outcome.refusal;
       log?.("cache.object.put_failed", { bucket: bucket.name, path: info.storePath, reason: kind, ...named });
+      return refused;
+    } catch (err) {
+      log?.("cache.object.put_failed", {
+        bucket: bucket.name,
+        path: info.storePath,
+        reason: String((err as Error).message ?? err),
+      });
+      return refused;
+    }
+  }
+
+  /**
+   * THE SAME STEP FOR A DIRECT UPLOAD: make the proved temp object the
+   * bucket's NAR, inside the store, with the facts THIS proof measured.
+   *
+   * The bytes do not move through odu and the facts are not the store's to
+   * learn — it never read them — so the copy carries them, exactly as the
+   * staged path hands `put` an `expected`. First kept still wins: the copy is
+   * conditional, and an `exists` answers with the object that was already
+   * there.
+   */
+  async function keepCopied(
+    bucket: BucketRow,
+    info: NarInfo,
+    direct: DirectUpload,
+    file: KeptFile,
+  ): Promise<KeptFile | Refusal> {
+    // THE BUCKET MOVED STORES while this upload was in flight (`bucket.migrate`,
+    // PLAN 2.8). The bytes are in the store the move is emptying, and a copy
+    // is one store's operation — so this push is refused rather than landed
+    // somewhere the move will take it. The client's next push finds the new
+    // store and uploads there.
+    const store = storeOf(bucket);
+    if (store !== direct.store) {
+      log?.("cache.object.put_failed", {
+        bucket: bucket.name,
+        path: info.storePath,
+        reason: "store_changed",
+      });
+      return {
+        ok: false,
+        status: 400,
+        message:
+          `${bucket.name} changed stores while ${info.storePath} was uploading — ` +
+          "its bytes went to the old one; push it again",
+      };
+    }
+    const refused: Refusal = {
+      ok: false,
+      status: 400,
+      message: `${info.storePath} could not be stored: the object store refused it`,
+    };
+    const key = objectKey(bucket.name, info.narHash, info.compression);
+    try {
+      const decided = await direct.store.copy(direct.key, key, {
+        facts: objectFactsOf(file),
+        ifAbsent: true,
+        contentType: NAR_CONTENT_TYPE,
+        cacheControl: NAR_CACHE_CONTROL,
+      });
+      if (decided === "stored") return file;
+      if (decided === "exists") {
+        const kept = await direct.store.facts(key);
+        return kept === null ? refused : keptFileOf(kept);
+      }
+      log?.("cache.object.put_failed", {
+        bucket: bucket.name,
+        path: info.storePath,
+        reason: decided,
+        key,
+      });
       return refused;
     } catch (err) {
       log?.("cache.object.put_failed", {
@@ -671,13 +968,114 @@ export function createStaging(deps: StagingDeps): Staging {
       await Promise.all([...proofs.values()].map((chain) => chain.tail));
     },
 
+    uploadMode(bucket) {
+      return directStore(storeOf(bucket)) === null ? "staged" : "direct";
+    },
+
+    async beginDirect(bucket, file, floor) {
+      if (!isStagedFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
+      await sweep();
+      const store = directStore(storeOf(bucket));
+      if (store === null) return { mode: "staged" };
+      // THE PART SIZE IS THE LARGEST OF THREE: what S3 demands of every part
+      // but the last, what this store uses for its own puts, and what the
+      // client asked for. In direct mode `--part-size` is a FLOOR — there is
+      // no proxy body limit to stay under, and a part too SMALL is the only
+      // one a store refuses.
+      const partSize = Math.max(MIN_DIRECT_PART_BYTES, store.partSize ?? 0, floor ?? 0);
+      const direct: DirectUpload = {
+        id: randomUUID(),
+        bucket: bucket.name,
+        file,
+        key: `${bucket.name}/nar/${TEMP}${randomUUID()}`,
+        store,
+        partSize,
+        began: now(),
+        upload: null,
+      };
+      directs.set(direct.id, direct);
+      return {
+        mode: "direct",
+        upload: direct.id,
+        partSize,
+        put: store.presignPut(direct.key, PRESIGN_SECONDS).href,
+      };
+    },
+
+    async directPart(bucket, file, upload, index) {
+      const direct = heldUpload(bucket, file, upload);
+      if (direct === null) {
+        return { ok: false, status: 404, message: `no upload ${upload} for nar/${file}` };
+      }
+      if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_PARTS) {
+        return { ok: false, status: 400, message: `"${index}" is not a part index` };
+      }
+      const uploadId = await openUpload(direct);
+      return {
+        ok: true,
+        url: direct.store.presignPart(direct.key, uploadId, index, PRESIGN_SECONDS).href,
+      };
+    },
+
+    async completeDirect(bucket, file, upload, parts) {
+      const direct = heldUpload(bucket, file, upload);
+      if (direct === null) {
+        return { ok: false, status: 404, message: `no upload ${upload} for nar/${file}` };
+      }
+      if (parts.length > MAX_PARTS) {
+        return { ok: false, status: 400, message: `${parts.length} is more parts than one NAR may have` };
+      }
+      // NO PARTS IS THE SINGLE-OBJECT PUT: there is no multipart upload to
+      // join, and the HEAD below is the whole of what completion means.
+      if (parts.length > 0) {
+        try {
+          // The temp key is this upload's alone, so nothing can be racing for
+          // it and the completion needs no precondition.
+          const decided = await direct.store.completeUpload(
+            direct.key,
+            await openUpload(direct),
+            parts,
+          );
+          if (decided !== "stored") {
+            return { ok: false, status: 400, message: `the store did not join the parts (${decided})` };
+          }
+        } catch (err) {
+          return { ok: false, status: 400, message: String((err as Error).message ?? err) };
+        }
+      }
+      // WHAT ODU ITSELF SAW. A completion that answers 200 means the object
+      // is in the store and this long — not that a client said so.
+      const bytes = await direct.store.head(direct.key).catch(() => null);
+      if (bytes === null) {
+        await dropUpload(direct);
+        return {
+          ok: false,
+          status: 400,
+          message: `nar/${file} is not in the store: the upload never landed`,
+        };
+      }
+      landed.set(directKey(bucket.name, file), direct);
+      // The same two facts a staged join records, for the same refusal line.
+      joined.set(directKey(bucket.name, file), { parts: parts.length, bytes, session: null });
+      log?.("cache.nar.uploaded", {
+        bucket: bucket.name,
+        file,
+        mode: "direct",
+        parts: parts.length,
+        bytes,
+      });
+      return { ok: true, parts: parts.length, bytes };
+    },
+
     async beginUpload(bucket, file) {
       await sweep();
       const dirForBucket = stagedDir(bucket.name);
       await mkdir(join(dirForBucket, "nar"), { recursive: true, mode: 0o700 });
       if (!isStagedFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
       await touchUpload(dirForBucket, file);
-      return openAt(join(dirForBucket, "nar", file), null);
+      return openAt(join(dirForBucket, "nar", file), null, (bytes) => {
+        log?.("cache.nar.uploaded", { bucket: bucket.name, file, mode: "staged", parts: 1, bytes });
+      });
     },
 
     async beginPart(bucket, file, index, limit, session = null) {
@@ -773,7 +1171,17 @@ export function createStaging(deps: StagingDeps): Staging {
         chain = newChain();
         proofs.set(key, chain);
       }
-      const proving = serial(chain, () => prove(bucket, hash, info, dirForBucket, name));
+      // THE BYTES THIS NAME HAS, wherever the client put them: an upload it
+      // finished in the store (2.9), else whatever is staged under the name.
+      // Direct first, because on a direct bucket a staged file for this name
+      // could only be an older client's, and this push's own object is the
+      // one its narinfo is about.
+      const direct = landed.get(key);
+      const proving = serial(chain, () =>
+        direct === undefined
+          ? prove(bucket, hash, info, dirForBucket, name)
+          : proveDirect(bucket, hash, info, direct),
+      );
       const tail = chain.tail;
       try {
         return await proving;

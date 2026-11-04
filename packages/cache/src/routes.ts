@@ -44,7 +44,7 @@ import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { ClaimedRoutes } from "@odu/cordis/services";
 import { type Cache, type NarSource } from "./cache";
-import type { ByteRange } from "@odu/objects";
+import type { ByteRange, UploadedPart } from "@odu/objects";
 import {
   CACHE_MOUNT,
   CACHE_ROUTE_PATHS,
@@ -350,6 +350,55 @@ function uploadSession(request: HttpServerRequest.HttpServerRequest): string | n
 
 const BAD_SESSION = `${UPLOAD_SESSION_HEADER} must be 1–64 letters, digits, '-' or '_'`;
 
+/**
+ * THE PARTS A DIRECT UPLOAD SAYS IT WROTE (PLAN 2.9) — `{"parts":[{"index",
+ * "etag"}]}`, or null when the document is not that.
+ *
+ * The ETags are the STORE's own answers to the client's PUTs, which is the
+ * only thing a client could not have made up — and it would gain nothing by
+ * doing so: the narinfo that follows is proved against the bytes odu reads
+ * back out of the store, not against anything said here. An EMPTY list is
+ * the single-object PUT, which has no parts to join.
+ */
+function partsOf(body: string): readonly UploadedPart[] | null {
+  let document: unknown;
+  try {
+    document = JSON.parse(body) as unknown;
+  } catch {
+    return null;
+  }
+  const parts = (document as { parts?: unknown } | null)?.parts;
+  if (!Array.isArray(parts)) return null;
+  const named: UploadedPart[] = [];
+  for (const part of parts as readonly unknown[]) {
+    const { index, etag } = (part ?? {}) as { index?: unknown; etag?: unknown };
+    if (!Number.isSafeInteger(index) || (index as number) < 0) return null;
+    if (typeof etag !== "string" || etag === "") return null;
+    named.push({ index: index as number, etag });
+  }
+  return named;
+}
+
+/**
+ * THE PART SIZE A CLIENT ASKED FOR, from a `begin`'s body: a number, `null`
+ * when it asked for nothing (an empty body, or a document without the field),
+ * `undefined` when what it sent is not a part size. In DIRECT mode this is a
+ * floor, not a ceiling — see `MIN_DIRECT_PART_BYTES`.
+ */
+function partSizeOf(body: string): number | null | undefined {
+  const text = body.trim();
+  if (text === "") return null;
+  let document: unknown;
+  try {
+    document = JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+  const asked = (document as { partSize?: unknown } | null)?.partSize;
+  if (asked === undefined || asked === null) return null;
+  return Number.isSafeInteger(asked) && (asked as number) >= 1 ? (asked as number) : undefined;
+}
+
 /** ONE line per refused request: method, path, status and the reason. */
 function refused(
   cache: Cache,
@@ -616,6 +665,70 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         return HttpServerResponse.jsonUnsafe({ parts: outcome.parts });
       });
 
+  /** The request's body as text — a small JSON document, read once. Nothing
+   *  here takes a NAR: those go to the store now (PLAN 2.9) or into staging
+   *  as a stream, never through a buffer. */
+  const bodyText = (request: HttpServerRequest.HttpServerRequest): Promise<string> =>
+    new Response(Stream.toReadableStream(request.stream)).text();
+
+  /**
+   * BEGIN ONE NAR'S UPLOAD, and be told where its bytes go.
+   *
+   * The answer is the CACHE's, from the bucket's store: `{mode:"direct", …}`
+   * with the URLs that write the store itself, or `{mode:"staged"}`, which
+   * means the routes below this one. A client sends its own `--part-size` as
+   * a FLOOR; an empty body asks for the store's own.
+   */
+  const beginUpload = (request: HttpServerRequest.HttpServerRequest) =>
+    Effect.gen(function* () {
+      const file = yield* param("file");
+      if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+      const admitted = admit(cache, request, yield* param("bucket"), "write");
+      if (!admitted.ok) return admitted.response;
+      const floor = partSizeOf(yield* Effect.promise(() => bodyText(request)));
+      if (floor === undefined) {
+        return refused(cache, request, "partSize is a whole number of bytes, at least 1");
+      }
+      const plan = yield* Effect.promise(() => cache.beginDirect(admitted.bucket, file, floor));
+      return HttpServerResponse.jsonUnsafe(plan);
+    });
+
+  /** The URL that writes one part. A GET, because it changes nothing a second
+   *  request would mind: the same part asked for twice is the same part. */
+  const directPart = (request: HttpServerRequest.HttpServerRequest) =>
+    Effect.gen(function* () {
+      const file = yield* param("file");
+      if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+      const index = Number(yield* param("index"));
+      const upload = yield* param("upload");
+      const admitted = admit(cache, request, yield* param("bucket"), "write");
+      if (!admitted.ok) return admitted.response;
+      const part = yield* Effect.promise(() =>
+        cache.directPart(admitted.bucket, file, upload, index),
+      );
+      if (!part.ok) return refused(cache, request, part.message, part.status);
+      return HttpServerResponse.jsonUnsafe({ url: part.url });
+    });
+
+  /** The client has sent every part: join them and confirm the object. */
+  const completeDirect = (request: HttpServerRequest.HttpServerRequest) =>
+    Effect.gen(function* () {
+      const file = yield* param("file");
+      if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+      const admitted = admit(cache, request, yield* param("bucket"), "write");
+      if (!admitted.ok) return admitted.response;
+      const upload = yield* param("upload");
+      const parts = partsOf(yield* Effect.promise(() => bodyText(request)));
+      if (parts === null) {
+        return refused(cache, request, 'send {"parts":[{"index":0,"etag":"…"}]} — the parts you uploaded');
+      }
+      const outcome = yield* Effect.promise(() =>
+        cache.completeDirect(admitted.bucket, file, upload, parts),
+      );
+      if (!outcome.ok) return refused(cache, request, outcome.message, outcome.status);
+      return HttpServerResponse.jsonUnsafe({ parts: outcome.parts, bytes: outcome.bytes });
+    });
+
   return Layer.mergeAll(
     /**
      * WHAT TO PASTE INTO A CLIENT — a bucket's consumer facts, with no account
@@ -854,6 +967,45 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
      */
     HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/nar/:file/complete`, completeParts),
     HttpRouter.add("POST", `${CACHE_MOUNT}/:bucket/nar/:file/complete`, completeParts),
+
+    /**
+     * WHERE THIS NAR'S BYTES GO (PLAN 2.9) — asked once per path, before any
+     * of them are sent, and answered from the bucket's store.
+     *
+     * A bucket on a store that takes its own writes answers `direct` with a
+     * single-object PUT URL, a part size and this upload's handle; the parts
+     * and the completion hang off that handle below. A disk-backed bucket
+     * answers `staged`, which means the two routes above — and that is the
+     * whole of the negotiation: no flag, no probe, no version header.
+     */
+    HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/nar/:file/upload`, beginUpload),
+    HttpRouter.add("POST", `${CACHE_MOUNT}/:bucket/nar/:file/upload`, beginUpload),
+
+    /** The presigned URL for one part of a direct upload. Signed here and
+     *  spent at the store, so the bytes never reach this process. */
+    HttpRouter.add(
+      "GET",
+      `${PUSH_API}/buckets/:bucket/nar/:file/upload/:upload/parts/:index`,
+      directPart,
+    ),
+    HttpRouter.add(
+      "GET",
+      `${CACHE_MOUNT}/:bucket/nar/:file/upload/:upload/parts/:index`,
+      directPart,
+    ),
+
+    /** THE PARTS ARE SENT: join them in the store and confirm the object is
+     *  there. The narinfo that follows is what proves it. */
+    HttpRouter.add(
+      "POST",
+      `${PUSH_API}/buckets/:bucket/nar/:file/upload/:upload/complete`,
+      completeDirect,
+    ),
+    HttpRouter.add(
+      "POST",
+      `${CACHE_MOUNT}/:bucket/nar/:file/upload/:upload/complete`,
+      completeDirect,
+    ),
 
     /**
      * The batched "which of these are you missing" query. Not part of the Nix

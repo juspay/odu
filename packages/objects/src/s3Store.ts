@@ -17,8 +17,10 @@ import {
   sameFacts,
   TEMP,
   UnrecordedObject,
+  type UploadedPart,
+  type WriteDecision,
 } from "./objectStore";
-import { presignGet, s3Fetch, type S3Request, type S3Target } from "./s3sign";
+import { presign, presignGet, s3Fetch, type S3Request, type S3Target } from "./s3sign";
 import { newChain, type Chain, serial } from "./serial";
 
 export interface S3ObjectStoreOptions {
@@ -113,6 +115,29 @@ type Decided = "won" | "lost" | "conflict";
 const decidedBy = (response: Response): Decided =>
   response.status === 412 ? "lost" : response.status === 409 ? "conflict" : "won";
 
+/** The same three answers in the interface's words, for a write whose bytes
+ *  this process is not holding and so cannot send again. */
+const asDecision = (decided: Decided): WriteDecision =>
+  decided === "won" ? "stored" : decided === "lost" ? "exists" : "conflict";
+
+/**
+ * THE ETAGS OF A DIRECT UPLOAD'S PARTS, in part order. The writer reports what
+ * it sent, so the set is checked before S3 is told anything: exactly the
+ * indexes `0..n-1`, each once. A gap would make S3 glue the remaining parts
+ * into an object nobody uploaded, with a hash the prover never measured — so a
+ * set that is not that is refused here, naming what arrived.
+ */
+function etagsInOrder(key: string, parts: readonly UploadedPart[]): string[] {
+  const ordered = [...parts].sort((a, b) => a.index - b.index);
+  if (ordered.length === 0 || ordered.some((part, at) => part.index !== at)) {
+    throw new Error(
+      `CompleteMultipartUpload ${key}: an upload's parts are 0..n-1, each exactly once; ` +
+        `${parts.length} arrived, indexes [${parts.map((part) => part.index).join(", ")}]`,
+    );
+  }
+  return ordered.map((part) => part.etag);
+}
+
 /** Run `attempt` until it is not a conflict, pausing between tries; still
  *  `"conflict"` after {@link CONFLICT_TRIES} of them. */
 async function untilDecided<T>(attempt: () => Promise<T | "conflict">): Promise<T | "conflict"> {
@@ -154,7 +179,23 @@ async function untilDecided<T>(attempt: () => Promise<T | "conflict">): Promise<
  *   one key at once could leave the later one's object, its metadata with it.
  * - versitygw (the suite's gateway) checks the precondition and THEN writes,
  *   so two truly concurrent conditional PUTs can both succeed — the
- *   contract's race case failed on that before `oneWriter`.
+ *   contract's race case failed on that before `oneWriter`. It DOES honour
+ *   `If-None-Match: *` on `CompleteMultipartUpload` (a `412`, measured by the
+ *   contract's conditional-completion case), which is what `copy`'s decision
+ *   rests on there.
+ *
+ * A DIRECT UPLOAD IS DECIDED BY THE SAME HEADER, on the same two calls, and
+ * promises exactly as much. `completeUpload(..., { ifAbsent: true })` and
+ * `copy(..., { ifAbsent: true })` both finish a multipart upload, so where a
+ * service honours the precondition on a completion (AWS, versitygw) the first
+ * writer wins across processes and the rest are `exists`; where it documents
+ * none (R2) the answer is `stored` for whoever finishes last, and only
+ * `oneWriter` keeps this process's own writers apart. Neither call measures
+ * anything: a direct upload's bytes never passed through odu, so the facts
+ * recorded at the destination are the CALLER'S (`CopyOptions.facts`), and an
+ * object made by `completeUpload` alone carries no facts at all — `facts()`
+ * refuses it as an {@link UnrecordedObject} until something copies it into
+ * place with them.
  */
 export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   const { target } = options;
@@ -328,12 +369,21 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
 
   /**
    * MAKE `tempKey`'s bytes the object at `key`, with `facts` as metadata —
-   * server-side, part by part, and conditional like any other write. The one
-   * case that needs it is a multipart put whose facts were not known up front:
-   * metadata is fixed when an upload is created, and the hash is known only at
-   * the end.
+   * server-side, part by part. `conditional` sends the `If-None-Match: *`
+   * every other write of this store sends; a caller that has already decided
+   * the key is its own (a `copy` the caller asked for unconditionally) clears
+   * it. The case that needs the copy at all is a write whose facts were not
+   * known up front: metadata is fixed when an upload is created, and the hash
+   * is known only at the end — a multipart put's, or a direct upload's, which
+   * this process never read at all.
    */
-  async function copyInto(key: string, tempKey: string, facts: ObjectFacts, options?: PutOptions): Promise<Decided> {
+  async function copyInto(
+    key: string,
+    tempKey: string,
+    facts: ObjectFacts,
+    options: PutOptions | undefined,
+    conditional: boolean,
+  ): Promise<Decided> {
     const uploadId = await createUpload(key, { ...metaOf(facts), ...headersOf(options) });
     try {
       const etags: string[] = [];
@@ -351,7 +401,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         if (etag === null) throw new S3Failure(`UploadPartCopy ${key}`, response, body);
         etags.push(etag);
       }
-      const decided = await complete(key, uploadId, etags, true);
+      const decided = await complete(key, uploadId, etags, conditional);
       if (decided !== "won") await abort(key, uploadId);
       return decided;
     } catch (err) {
@@ -502,7 +552,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     await complete(uploadKey, uploadId, etags, false);
     try {
       // The temp object stays put, so a conflicted copy is simply started again.
-      const decided = await untilDecided(() => copyInto(key, uploadKey, facts, options));
+      const decided = await untilDecided(() => copyInto(key, uploadKey, facts, options, true));
       if (decided === "conflict") return conflicted(key, CONFLICT_TRIES);
       return decided === "won" ? { ok: true, facts } : await exists(key);
     } finally {
@@ -681,6 +731,49 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     // A URL OF ITS OWN: this store's objects are fetchable by anybody holding
     // a signature, so odu may answer a read with one instead of the bytes.
     presignGet: (key, expiresSeconds) => presignGet(target, safeKey(key), expiresSeconds),
+
+    // ── THE DIRECT UPLOAD ────────────────────────────────────────────────
+    //
+    // WHAT THE WRITER DOES ITSELF, with URLs that carry their own authority:
+    // sends the bytes. What this store still does: open and finish the upload,
+    // and copy the finished bytes into place once somebody has proved them.
+    // Nothing here measures anything — the facts come with the `copy`.
+
+    partSize,
+
+    presignPut: (key, expiresSeconds) => presign(target, "PUT", safeKey(key), expiresSeconds),
+
+    // NO METADATA: these bytes are a temp object whose facts nobody has proved
+    // yet, and an upload's metadata is fixed here, before the first byte.
+    createUpload: (key) => createUpload(safeKey(key), {}),
+
+    // `partNumber` AND `uploadId` ARE SIGNED, so the URL writes that part of
+    // that upload and no other.
+    presignPart: (key, uploadId, index, expiresSeconds) =>
+      presign(target, "PUT", safeKey(key), expiresSeconds, { partNumber: String(index + 1), uploadId }),
+
+    // A COMPLETION MAKES AN OBJECT VISIBLE at the key, so it queues on that
+    // key's writer chain exactly as a put does. `async`, so a part set this
+    // refuses comes back as a rejection like every other failure here.
+    async completeUpload(key, uploadId, parts, options) {
+      const etags = etagsInOrder(key, parts);
+      return oneWriter(key, async () =>
+        asDecision(await complete(safeKey(key), uploadId, etags, options?.ifAbsent ?? false)),
+      );
+    },
+
+    abortUpload: (key, uploadId) => abort(safeKey(key), uploadId),
+
+    // THE BYTES NEVER LEAVE THE SERVICE: UploadPartCopy, part by part, with
+    // the caller's facts as the destination's metadata. The source stays
+    // where it is, so a `409` is simply copied again — and a copy still
+    // undecided after the last try is a `conflict`, as a put's would be.
+    copy: (from, to, options) =>
+      oneWriter(to, async () =>
+        asDecision(
+          await untilDecided(() => copyInto(safeKey(to), safeKey(from), options.facts, options, options.ifAbsent ?? false)),
+        ),
+      ),
 
     // NO HEAD: the first window's GET answers whether the object is there
     // (404), how big it is (`Content-Range`), and its first bytes, in one round

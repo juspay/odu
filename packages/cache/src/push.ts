@@ -46,8 +46,10 @@ import {
   ODU_ORIGIN_FIELD,
   PARTS_HEADER,
   UPLOAD_SESSION_HEADER,
+  type UploadMode,
+  type UploadPlan,
 } from "./paths";
-import { DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES } from "./surface";
+import { CACHE_CONTRACT_VERSION, DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES } from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
 /** The environment slice this client reads. Passed in rather than reached for:
@@ -283,6 +285,13 @@ export interface PushSummary {
   /** Derivations the caller named. A cache serves outputs; a `.drv` is a
    *  recipe, and its references are recipes. */
   skippedDerivation: readonly string[];
+  /**
+   * HOW THE BYTES TRAVELLED (PLAN 2.9) — `direct` when the bucket's store
+   * took them itself through presigned URLs, `staged` when they crossed the
+   * daemon, `null` when this push uploaded nothing. The bucket's store
+   * decides it, so one push is one mode.
+   */
+  mode: UploadMode | null;
   alreadyPresent: number;
   failed: number;
   /** One line per failure, for a caller that wants to say which paths did not
@@ -423,6 +432,8 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     );
   }
   let pushed = 0;
+  /** What the bucket answered the negotiation with — one store, one mode. */
+  let mode: UploadMode | null = null;
 
   /** Upload one dependency depth, reporting refusals as they happen. */
   const runWave = async (wave: readonly string[]): Promise<void> => {
@@ -438,6 +449,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         });
         if (outcome.ok) {
           pushed += 1;
+          mode = outcome.mode ?? mode;
           say(`✅ ${storePath} stored`);
           continue;
         }
@@ -474,6 +486,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
       : await pinClosure(resolved, headers, options.pin, served, say);
   return {
     pushed,
+    mode,
     skippedUpstream: answer.skippedUpstream.length,
     skippedDerivation,
     alreadyPresent,
@@ -626,7 +639,7 @@ function asError(err: unknown): Error {
 }
 
 type UploadOutcome =
-  | { ok: true }
+  | { ok: true; mode: UploadMode | null }
   | { ok: false; message: string };
 
 type NarUpload =
@@ -733,14 +746,176 @@ async function putPart(
 }
 
 /**
- * THE NAR ITSELF, one request or several.
+ * WHERE THIS NAR'S BYTES GO — asked once per path, before any are sent.
+ *
+ * The CACHE answers from the bucket's store, so there is no flag and no
+ * probe: `direct` hands back URLs that write the store itself, `staged` means
+ * the NAR route this client has always used. A 404 is an origin from before
+ * the negotiation, and this client does NOT fall back — a store-backed bucket
+ * would then silently go on pushing every byte through the daemon, which is
+ * the thing 2.9 removes — so it says which version it needs and stops.
+ */
+async function beginUpload(
+  base: string,
+  headers: Record<string, string>,
+  narName: string,
+  partSize: number,
+): Promise<UploadPlan | { error: string; retry: boolean }> {
+  const response = await fetch(`${base}/nar/${narName}/upload`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    // THE CLIENT'S `--part-size`, as a FLOOR: in direct mode there is no
+    // proxy body limit to stay under, and the server raises it to what S3
+    // and the store demand.
+    body: JSON.stringify({ partSize }),
+  }).catch(asError);
+  if (response instanceof Error) return { error: response.message, retry: true };
+  if (response.status === 404) {
+    await response.body?.cancel().catch(() => {});
+    return {
+      error:
+        `${base} does not take uploads this way: it predates cache surface ` +
+        `${CACHE_CONTRACT_VERSION}, which added the upload negotiation — upgrade the cache`,
+      retry: false,
+    };
+  }
+  if (!response.ok) {
+    return {
+      error: `beginning the upload answered ${response.status}: ${(await response.text()).trim()}`,
+      retry: worthRetrying(response.status),
+    };
+  }
+  const plan = (await response.json()) as UploadPlan;
+  if (plan.mode !== "direct" && plan.mode !== "staged") {
+    return { error: `the cache answered an upload mode this client does not know`, retry: false };
+  }
+  return plan;
+}
+
+/** One part, or one whole NAR, PUT to the STORE. No odu header rides along:
+ *  the URL carries its own authority, and an `Authorization` beside a
+ *  presigned signature is what an S3 service refuses. */
+async function putToStore(
+  url: string,
+  body: Uint8Array,
+): Promise<{ ok: true; etag: string | null } | { ok: false; message: string }> {
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: { "content-length": String(body.length) },
+    // Bun's fetch takes the bytes; the DOM `BodyInit` the type names does not
+    // include this `Uint8Array` spelling.
+    body: body as unknown as BodyInit,
+  }).catch(asError);
+  if (response instanceof Error) return { ok: false, message: response.message };
+  if (!response.ok) {
+    return {
+      ok: false,
+      message: `the store answered ${response.status} to a presigned PUT: ${(await response.text()).trim()}`,
+    };
+  }
+  await response.body?.cancel().catch(() => {});
+  return { ok: true, etag: response.headers.get("etag") };
+}
+
+/**
+ * THE NAR, STRAIGHT INTO THE STORE (PLAN 2.9).
+ *
+ * One part is one presigned PUT and nothing else; more than one is a
+ * multipart upload whose parts odu signs one at a time. EVERY failure here
+ * re-begins the path rather than retrying in place: a presign is minted for
+ * ten minutes, so the 4xx a slow part earns is an expiry, and a fresh upload
+ * id costs one `begin` against an upload whose state nobody can inspect.
+ */
+async function uploadDirect(
+  base: string,
+  headers: Record<string, string>,
+  entry: ClosureEntry,
+  platform: PushPlatform,
+  say: (line: string) => void,
+  plan: Extract<UploadPlan, { mode: "direct" }>,
+  narName: string,
+): Promise<NarUpload> {
+  const parts = narParts(platform.dump(entry.storePath), plan.partSize);
+  const first = await parts.next();
+  const second = await parts.next();
+  const done: { index: number; etag: string }[] = [];
+
+  if (second.done) {
+    // THE WHOLE NAR IN ONE OBJECT, which most paths are: no multipart upload
+    // is opened at all, and the store sees one request.
+    const sent = await putToStore(plan.put, first.done ? new Uint8Array(0) : first.value);
+    if (!sent.ok) return { ok: false, message: sent.message, retry: true };
+  } else {
+    let index = 0;
+    let current = first.value as Uint8Array;
+    let ahead: IteratorResult<Uint8Array> = second;
+    for (;;) {
+      const signed = await fetch(`${base}/nar/${narName}/upload/${plan.upload}/parts/${index}`, {
+        headers,
+      }).catch(asError);
+      if (signed instanceof Error) {
+        await parts.return(undefined as never);
+        return { ok: false, message: signed.message, retry: true };
+      }
+      if (!signed.ok) {
+        await parts.return(undefined as never);
+        return {
+          ok: false,
+          message: `signing part ${index + 1} answered ${signed.status}: ${(await signed.text()).trim()}`,
+          retry: worthRetrying(signed.status) || signed.status === 404,
+        };
+      }
+      const { url } = (await signed.json()) as { url: string };
+      const sent = await putToStore(url, current);
+      if (!sent.ok) {
+        await parts.return(undefined as never);
+        return { ok: false, message: sent.message, retry: true };
+      }
+      if (sent.etag === null) {
+        await parts.return(undefined as never);
+        return {
+          ok: false,
+          message: `the store took part ${index + 1} without an ETag, which the join needs`,
+          retry: false,
+        };
+      }
+      done.push({ index, etag: sent.etag });
+      // PROGRESS for a large path: one line per part, so a slow upload reads
+      // as work rather than as the old silence.
+      say(`⏳ ${entry.storePath} part ${index + 1} → store`);
+      index += 1;
+      if (ahead.done) break;
+      current = ahead.value;
+      ahead = await parts.next();
+    }
+  }
+
+  const joined = await fetch(`${base}/nar/${narName}/upload/${plan.upload}/complete`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ parts: done }),
+  }).catch(asError);
+  if (joined instanceof Error) return { ok: false, message: joined.message, retry: true };
+  if (!joined.ok) {
+    return {
+      ok: false,
+      message: `finishing the upload answered ${joined.status}: ${(await joined.text()).trim()}`,
+      retry: worthRetrying(joined.status) || joined.status === 404,
+    };
+  }
+  await joined.body?.cancel().catch(() => {});
+  return { ok: true };
+}
+
+/**
+ * THE NAR ITSELF, one request or several — through odu, into staging.
  *
  * A closure that fits in one part keeps the plain NAR route every Nix client
  * speaks; a larger one is split, each part retried alone, and joined by the
  * server before the narinfo is sent. The stream is inspected one part ahead,
  * so the choice costs one buffered part rather than the whole NAR.
  */
-async function uploadNar(
+async function uploadStaged(
   base: string,
   headers: Record<string, string>,
   entry: ClosureEntry,
@@ -825,7 +1000,7 @@ async function uploadOne(
   options: { partSize: number },
 ): Promise<UploadOutcome> {
   let lastMessage = "no attempt was made";
-  const narinfoOnly = false;
+  let mode: UploadMode | null = null;
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
   // THIS PATH'S OWN PARTS (since the cache row's 2.4): another pusher of the same path, at
   // another zstd level, cannot have its parts joined into ours. ONE session for
@@ -833,22 +1008,33 @@ async function uploadOne(
   // them to the hour-long sweep. An older server ignores the header.
   const session = randomUUID();
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (!narinfoOnly) {
-      const uploaded = await uploadNar(
-        base,
-        headers,
-        entry,
-        platform,
-        attempts,
-        say,
-        options.partSize,
-        session,
-      );
-      if (!uploaded.ok) {
-        lastMessage = uploaded.message;
-        if (!uploaded.retry) break;
-        continue;
-      }
+    // THE NEGOTIATION IS PER ATTEMPT, not per path: a direct upload that
+    // failed is retried by BEGINNING AGAIN, which is what makes an expired
+    // presign or a daemon that restarted a retry rather than a refusal.
+    const plan = await beginUpload(base, headers, narName, options.partSize);
+    if ("error" in plan) {
+      lastMessage = plan.error;
+      if (!plan.retry) break;
+      continue;
+    }
+    mode = plan.mode;
+    const uploaded =
+      plan.mode === "direct"
+        ? await uploadDirect(base, headers, entry, platform, say, plan, narName)
+        : await uploadStaged(
+            base,
+            headers,
+            entry,
+            platform,
+            attempts,
+            say,
+            options.partSize,
+            session,
+          );
+    if (!uploaded.ok) {
+      lastMessage = uploaded.message;
+      if (!uploaded.retry) break;
+      continue;
     }
     const infoResponse = await fetch(`${base}/${storePathHash(entry.storePath)}.narinfo`, {
       method: "PUT",
@@ -862,7 +1048,7 @@ async function uploadOne(
     // 200 IS STORED, and it is the only answer that is. Any other status —
     // a success code this pusher does not know included — is a refusal like any
     // other, said with the server's own words and not repeated.
-    if (infoResponse.status === 200) return { ok: true };
+    if (infoResponse.status === 200) return { ok: true, mode };
     const said = await infoResponse.text();
     lastMessage = `narinfo upload answered ${infoResponse.status}: ${said}`;
     if (infoResponse.ok || !worthRetrying(infoResponse.status)) break;

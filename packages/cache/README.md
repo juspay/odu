@@ -188,6 +188,41 @@ changes), and a collection announces the store's own URLs beside odu's.
 `publicObjectUrl` is the one place a key becomes a public address, so the
 purge set and the key set cannot drift apart.
 
+## Writes leave odu too
+
+A push's bytes crossed this process on their way to the store, and on an S3
+store they no longer do (PLAN 2.9, cache surface **4.2**).
+
+- **The store decides, and the client is told.** `POST …/nar/<file>/upload`
+  answers `{mode:"direct", upload, partSize, put}` or `{mode:"staged"}`, from
+  `Staging.uploadMode(bucket)` — which asks the bucket's `ObjectStore` whether
+  it offers the direct-upload capability (`createUpload` and its five
+  siblings; all-or-nothing, like `presignGet` for reads). No route ever peeks
+  at a store, and the same answer is the row's `writesTo`.
+- **One temp key per upload.** The client writes `<bucket>/nar/.tmp-<uuid>`:
+  one presigned PUT when the NAR fits in one part, else a presigned part at a
+  time (`GET …/upload/<id>/parts/<i>`), each ETag kept and handed back to
+  `POST …/upload/<id>/complete`, which joins them and HEADs the object — so a
+  200 there means odu saw the bytes land. `partSize` is the largest of S3's
+  5 MiB floor, the store's own part size and the client's `--part-size`,
+  which in this mode is a floor rather than a proxy's ceiling.
+- **The narinfo is still the proof.** `proveDirect` streams the temp object
+  back out of the store, runs the SAME `verifyNar` a staged file gets
+  (`verifyNarStream`, never spooled to disk), and only then — under the write
+  lock — `copy`s it to `nar/<file>` with `If-None-Match: *`, records the row
+  and deletes the temp. A refusal deletes the temp too and records nothing,
+  and logs `cache.nar.verify_failed {reason}`. Odu signs no hash a client
+  claimed; the ETags it was handed decide nothing.
+- **The upload record is this daemon's, and in memory.** A handle from before
+  a restart is a `404`, which the client answers by beginning the path again
+  — as it does for any 4xx at the store, an expired presign included. One
+  nobody finished is dropped by the staging sweep an hour on, with its
+  multipart upload aborted and its temp object deleted; `list` never shows a
+  temp key, so the GC's orphan pass cannot take one mid-upload.
+- **`cache.nar.uploaded {bucket, file, mode, parts, bytes}`** is written for
+  both modes, with the bytes THIS process measured or HEADed — never a number
+  a client reported.
+
 ## A bucket changes stores without going down
 
 `bucket.migrate { bucket, store }` (`src/migrateStore.ts`) copies every object
