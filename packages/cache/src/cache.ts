@@ -45,6 +45,7 @@ import {
   sweepOrphans,
 } from "./gc";
 import { migrationKeys, runMigration } from "./migrateStore";
+import { purgeKeys } from "./purge";
 import {
   fingerprintOf,
   formatNarinfo,
@@ -1527,30 +1528,37 @@ export function createCache(options: CacheOptions): Cache {
           hash: row.hash,
           narFile: narFileName(row.narHash, row.compression),
         }));
-        // THE KEYS THE ROWS NAME, AND THE KEYS THE STORE HOLDS. The first set
-        // is what a move would copy; the second also catches an ORPHAN — a put
+        // THE KEYS THE STORE HOLDS, AND THE KEYS THE ROWS NAME. The listing
+        // is what the count is made of, and it also catches an ORPHAN — a put
         // whose record never landed — which no row can name and which would
-        // otherwise outlive the bucket under its own prefix forever.
-        const listed = await store.list(bucket.name);
-        const keys = new Map(listed.map((object) => [object.key, object.size]));
+        // otherwise outlive the bucket under its own prefix forever. The row
+        // keys beyond it are deleted too and counted in nothing: they are
+        // keys nobody ever stored, and a count has to be checkable.
+        const held = new Map((await store.list(bucket.name)).map((one) => [one.key, one.size]));
+        const unlisted = migrationKeys(repo, bucket.name)
+          .map((entry) => entry.key)
+          .filter((key) => !held.has(key));
         let objects = 0;
         let bytes = 0;
-        for (const entry of migrationKeys(repo, bucket.name)) {
-          if (!keys.has(entry.key)) keys.set(entry.key, -1);
-        }
-        await Promise.all(
-          [...keys].map(([key, size]) =>
-            moveSlots.withSlot(async () => {
-              await store.delete(key);
-              // COUNTED ONLY IF THE STORE HELD IT: a key a row names and the
-              // store does not is deleted anyway (idempotent), but counting it
-              // would answer with objects nobody ever stored.
-              if (size < 0) return;
-              objects += 1;
-              bytes += size;
-            }),
-          ),
-        );
+        await purgeKeys({
+          objects: store,
+          keys: [...held.keys(), ...unlisted],
+          slots: moveSlots,
+          removed: (key) => {
+            const size = held.get(key);
+            if (size === undefined) return;
+            objects += 1;
+            bytes += size;
+          },
+          // A KEY THAT WOULD NOT GO ENDS THIS. The answer below is the bytes
+          // this freed and the rows that named them are about to go, so a
+          // purge that reported a key it did not remove would be a number
+          // nobody can check. The rows are untouched, so it can be asked for
+          // again.
+          failed: (_key, reason) => {
+            throw reason;
+          },
+        });
         // AND WHAT A DEAD PUT LEFT: temp names are not objects, so `list`
         // never showed them and only this sweep takes them.
         objects += await store.sweepTemp(bucket.name, now());
@@ -1867,6 +1875,12 @@ export function createCache(options: CacheOptions): Cache {
             references: row.references,
             selfHash: checked.selfHash,
           });
+          // NOT INTO A BUCKET THAT WENT. `putObject` INSERTS, and these rows
+          // are a snapshot taken at pass start: a `bucket.delete` between
+          // this row's read and this write would put back a path nothing
+          // lists — invisible to the pins and to every collection, counted
+          // by `objectTotals`, and a 404 if the name is ever re-created.
+          if (repo.bucket(row.bucket) === null) continue;
           repo.putObject({
             ...row,
             ca,
@@ -2075,9 +2089,21 @@ export function createCache(options: CacheOptions): Cache {
     let rows = 0;
     let written = 0;
     let failures = 0;
-    for (const bucket of buckets) {
+    for (const snapshot of buckets) {
       if (stopping) break;
-      await keepCacheInfoObject(bucket);
+      // THE ROW AS IT IS NOW, and the write under the lock `bucket.delete`
+      // purges inside: this pass is forked on every boot and runs for
+      // minutes on a big bucket, all of it while the row is answering verbs.
+      // A key written after the purge sits under a prefix no row names, and
+      // neither a collection nor an orphan sweep can ever reach it — both
+      // walk `repo.buckets()`.
+      const existing = await withWriteLock(async () => {
+        const bucket = repo.bucket(snapshot.name);
+        if (bucket !== null) await keepCacheInfoObject(bucket);
+        return bucket;
+      });
+      if (existing === null) continue;
+      const bucket = existing;
       const all = repo.objects(bucket.name);
       rows += all.length;
       let done = 0;
@@ -2087,7 +2113,11 @@ export function createCache(options: CacheOptions): Cache {
         // THE BUCKET AS IT IS NOW, like a push's: this pass can run for
         // minutes, and a `bucket.migrate` that flipped in the middle of it
         // would otherwise have objects written into the store it is emptying.
-        const at = repo.bucket(bucket.name) ?? bucket;
+        // The HEAD is outside the lock — it is one round trip per row, and
+        // holding the lock across sixteen thousand of them would be a boot
+        // pass that blocks every push behind it.
+        const at = repo.bucket(bucket.name);
+        if (at === null) return;
         const key = narinfoKey(at.name, row.hash);
         const text = narinfoFor(at, row);
         const size = await storeOf(at).head(key).catch(() => null);
@@ -2098,7 +2128,19 @@ export function createCache(options: CacheOptions): Cache {
         // it. (Guarded here rather than returned, so `done` keeps counting
         // and `remaining` still reaches zero.)
         if (row.fileHash !== null && size !== new TextEncoder().encode(text).length) {
-          const outcome = await keepNarinfoObject(at, row);
+          // UNDER THE LOCK, AND ONLY WHAT A ROW STILL NAMES. Everything that
+          // takes keys away — `bucket.delete`'s purge, a collection's
+          // evictions — does it holding this, so the two reads below are the
+          // whole guarantee that this put is not resurrecting a key its row
+          // is gone from. Outside it they would be true a moment before the
+          // write and false during it.
+          const outcome = await withWriteLock(async () => {
+            const now = repo.bucket(bucket.name);
+            if (now === null || repo.object(now.name, row.storePath) === null) {
+              return "same" as const;
+            }
+            return keepNarinfoObject(now, row);
+          });
           if (outcome === "failed") failures += 1;
           else if (outcome !== "same") {
             written += 1;

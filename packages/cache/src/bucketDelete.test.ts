@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { purgeBroker } from "@odu/cordis/services";
-import { diskObjectStore } from "@odu/objects";
+import { diskObjectStore, type ObjectStore } from "@odu/objects";
 import { type Cache, createCache } from "./cache";
 import { type BucketRow, openCacheRepo } from "./db";
 import { base32 } from "./narinfo";
@@ -55,14 +55,24 @@ afterEach(async () => {
  *  move to. A disk store like `local`: the copier's own suite grades S3. */
 const SECOND_STORE = "gw";
 
+/** A promise the test resolves by hand — how a background pass is held inside
+ *  its store while a verb runs to completion, with no sleep in it. */
+const deferred = (): PromiseWithResolvers<void> => Promise.withResolvers<void>();
+
 function cacheWith(
   options: {
     purged?: (input: { reason: string; bucket: string }) => void;
     /** Declare `gw` beside `local`, for the cases about a move. */
     secondStore?: boolean;
+    /** Put something in front of `local` — a gate, for the cases about a
+     *  background pass that is half way through when a delete lands. */
+    wrapLocal?: (inner: ObjectStore) => ObjectStore;
   } = {},
 ): Cache {
   const stores = new Map(localStores(scratch));
+  if (options.wrapLocal !== undefined) {
+    stores.set("local", options.wrapLocal(stores.get("local") as ObjectStore));
+  }
   if (options.secondStore === true) {
     stores.set(SECOND_STORE, diskObjectStore({ dir: join(scratch, SECOND_STORE) }));
   }
@@ -425,5 +435,70 @@ describe("a delete and the writer it races", () => {
         expect(cache.bucket(name)).not.toBeNull();
       }
     }
+  });
+
+  it("writes nothing for a bucket deleted while the narinfo backfill is inside it", async () => {
+    // THE BACKFILL IS FORKED ON EVERY BOOT and walks a SNAPSHOT of the
+    // buckets and of each one's rows — minutes of wall clock on a big bucket,
+    // all of it while the row is already answering verbs. A delete landing
+    // inside that window used to be answered by writing the bucket's
+    // `nix-cache-info` and a narinfo PER REMAINING ROW back into the prefix
+    // the delete had just purged: keys no row names, which neither a
+    // collection nor an orphan sweep can ever reach, since both walk
+    // `repo.buckets()`. And the delete has already answered its counts, so
+    // they are wrong by whatever landed after it.
+    //
+    // TWO DAEMONS OVER ONE STATE ROOT, which is how the window is held open
+    // without a sleep: the second's pass is suspended inside its store — on
+    // the HEAD of the bucket's FIRST row, so the rest of the walk is still
+    // ahead of it — while the first's delete runs to completion.
+    const arrange = cacheWith();
+    await arrange.admin.create(created("walked"));
+    for (const [index, text] of ["one", "two", "three", "four"].entries()) {
+      await push(arrange, "walked", `/nix/store/0000000000000000000000000000001${index}-w`, text);
+    }
+    // THE OBJECTS THE BACKFILL EXISTS TO WRITE: narinfos a pre-2.8 push never
+    // left behind. Without this it would find every key already correct and
+    // write nothing whatever the guards did.
+    const live = new Map(localStores(scratch)).get("local") as ObjectStore;
+    for (const object of await live.list("walked")) {
+      if (object.key.endsWith(".narinfo")) await live.delete(object.key);
+    }
+
+    const reached = deferred();
+    const release = deferred();
+    let open = false;
+    const backfilling = cacheWith({
+      // EVERY HEAD WAITS, not just the first: the pass walks two rows at a
+      // time, and a gate on one of them would let the other race the delete
+      // on its own — which in this fixture is two daemons, each with its own
+      // write chain, so the lock that makes the check and the write one
+      // moment inside a real daemon is not shared here. What is being graded
+      // is the re-read.
+      wrapLocal: (inner) => ({
+        ...inner,
+        async head(key: string): Promise<number | null> {
+          if (!open) {
+            reached.resolve();
+            await release.promise;
+          }
+          return inner.head(key);
+        },
+      }),
+    });
+    const pass = backfilling.backfillObjects();
+    await reached.promise;
+
+    expect(await arrange.admin.bucketDelete({ ...asRoot(ROOT), bucket: "walked" })).toMatchObject({
+      ok: true,
+    });
+    open = true;
+    release.resolve();
+    await pass;
+
+    // NOT ONE KEY under the purged prefix — including from the rows that were
+    // already past the gate, because the write itself asks again, under the
+    // lock the purge runs inside.
+    expect(await live.list("walked")).toEqual([]);
   });
 });
