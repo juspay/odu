@@ -317,6 +317,36 @@ function narServed(storePath: string): Served[] {
   return lines;
 }
 
+/** One `cache.nar.uploaded` line: how a NAR's bytes reached the bucket. */
+interface Uploaded {
+  bucket: string;
+  file: string;
+  mode: "direct" | "staged";
+  parts: number;
+  bytes: number;
+}
+
+/** Every `cache.nar.uploaded` line for one bucket, in order. */
+function narUploaded(bucket: string): Uploaded[] {
+  let text: string;
+  try {
+    text = readFileSync(world.logPath, "utf-8");
+  } catch {
+    return [];
+  }
+  const lines: Uploaded[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.includes("cache.nar.uploaded")) continue;
+    try {
+      const entry = JSON.parse(line) as Uploaded & { msg?: string };
+      if (entry.msg === "odu cache: cache.nar.uploaded" && entry.bucket === bucket) lines.push(entry);
+    } catch {
+      // A partial last line: the daemon is still writing it.
+    }
+  }
+  return lines;
+}
+
 let main: Bucket;
 let writeToken: string;
 let pinned: string;
@@ -325,6 +355,10 @@ let evictable: string;
  *  scenario and read by the discovery one below it. */
 let priv: Bucket;
 let privToken: string;
+/** The S3-backed bucket, and a write token for it — made by the redirect
+ *  scenario and pushed to again by the direct-upload one (PLAN 2.9). */
+let fronted: Bucket;
+let frontedToken: string;
 
 describe("odu serves a Nix binary cache", () => {
   it("creates a bucket and prints what a client has to trust", () => {
@@ -729,7 +763,7 @@ describe("odu serves a Nix binary cache", () => {
       store: GATEWAY_STORE,
     });
     expect({ status: created.status, stderr: created.stderr }).toMatchObject({ status: 0 });
-    const fronted = JSON.parse(created.stdout) as Bucket;
+    fronted = JSON.parse(created.stdout) as Bucket;
     expect(fronted.store).toBe(GATEWAY_STORE);
     // The store fronts no public URL of its own, so odu is still the address a
     // client is handed: it is the NAR, and only the NAR, that leaves.
@@ -742,11 +776,12 @@ describe("odu serves a Nix binary cache", () => {
       scope: "write",
     });
     expect(minted.status).toBe(0);
-    const token = (JSON.parse(minted.stdout) as { token: string }).token;
+    frontedToken = (JSON.parse(minted.stdout) as { token: string }).token;
+    const token = frontedToken;
 
     const offloaded = build("odu-cache-e2e-fronted");
     const pushed = cli(["cache", "push", "fronted", offloaded], {
-      ODU_CACHE_TOKEN: token,
+      ODU_CACHE_TOKEN: frontedToken,
       NIX_REMOTE: builderStore,
     });
     expect({ status: pushed.status, stderr: pushed.stderr.split("\n")[0] }).toMatchObject({
@@ -844,6 +879,47 @@ describe("odu serves a Nix binary cache", () => {
     });
     expect(served.map((line) => line.source)).not.toContain("object");
     expect(served.every((line) => line.bytes === 0)).toBe(true);
+  });
+
+  it("pushes into an S3-backed bucket without sending odu a single NAR byte", async () => {
+    // PLAN 2.9, END TO END: the bucket from the scenario above lives on a real
+    // S3 service, so its push NEGOTIATES `direct` — the client sends the bytes
+    // to presigned URLs at the gateway, and odu reads the object back to prove
+    // it before the path is recorded.
+    const offloaded = build("odu-cache-e2e-direct");
+    const pushed = cli(["cache", "push", "fronted", offloaded, "-o", "json"], {
+      ODU_CACHE_TOKEN: frontedToken,
+      NIX_REMOTE: builderStore,
+    });
+    expect({ status: pushed.status, stderr: pushed.stderr.split("\n")[0] }).toMatchObject({
+      status: 0,
+    });
+    const summary = JSON.parse(pushed.stdout) as { pushed: number; failed: number; mode: string };
+    expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "direct" });
+
+    // THE DAEMON'S OWN ACCOUNT OF IT: a direct upload of this path, and odu's
+    // NAR upload routes were handed nothing — a staged line for this bucket
+    // would be bytes that crossed the machine. Polled, because the daemon
+    // writes the line after it has answered the client.
+    const uploads = await until(
+      "odu to log the upload it took",
+      () => {
+        const lines = narUploaded("fronted");
+        return lines.length > 0 ? lines : null;
+      },
+      30_000,
+    );
+    expect(uploads.map((line) => line.mode)).not.toContain("staged");
+    expect(uploads.at(-1)).toMatchObject({ bucket: "fronted", mode: "direct" });
+
+    // AND IT IS A PATH THE CACHE SERVES: the narinfo odu signed is there, over
+    // the object its own copy made inside the store — which is the proof that
+    // the readback verified and the copy landed.
+    const narinfo = await fetch(`${fronted.url}/${hashOf(offloaded)}.narinfo`, {
+      headers: { authorization: `Bearer ${frontedToken}` },
+    });
+    expect(narinfo.status).toBe(200);
+    expect(await narinfo.text()).toContain(`StorePath: ${offloaded}`);
   });
 
   it("pushes a two-path closure in dependency order, and substitutes the top path cold", () => {

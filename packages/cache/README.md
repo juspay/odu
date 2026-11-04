@@ -188,6 +188,61 @@ changes), and a collection announces the store's own URLs beside odu's.
 `publicObjectUrl` is the one place a key becomes a public address, so the
 purge set and the key set cannot drift apart.
 
+## Writes leave odu too
+
+A push's bytes crossed this process on their way to the store, and on an S3
+store they no longer do (PLAN 2.9, cache surface **4.2**).
+
+- **The store decides, and the client is told.** `POST …/nar/<file>/upload`
+  answers `{mode:"direct", upload, partSize, part}` or `{mode:"staged"}`, from
+  `Staging.uploadMode(bucket)` — which asks `@odu/objects`' own
+  `directUploads(store)` whether this bucket's store takes its own writes
+  (all-or-nothing, like `presignGet` for reads, and the member list lives
+  with the interface that declares it). No route ever peeks
+  at a store, and the same answer is the row's `writesTo`.
+- **One temp key per upload, and one way into it.** The client writes
+  `<bucket>/nar/.tmp-<uuid>` as the PARTS of a single multipart upload odu
+  opened at `begin` — part 0's URL rides on the plan, so a one-part NAR costs
+  no extra round trip, and the rest come from `GET …/upload/<id>/parts/<i>`.
+  Each ETag is handed back to `POST …/upload/<id>/complete`, which joins them
+  and HEADs the object: a 200 there means odu saw the bytes land. `partSize`
+  is the larger of the store's own part size — which is where S3's 5 MiB
+  floor is kept — and the client's `--part-size`, which in this mode is a
+  floor rather than a proxy's ceiling. Asking for a part also RENEWS the
+  upload's record, so the hour-long sweep reaps only uploads nobody is
+  moving, never a closure that is simply large.
+- **The narinfo is still the proof.** `proveDirect` streams the temp object
+  back out of the store, runs the SAME `verifyNar` a staged file gets
+  (`verifyNarStream`, never spooled to disk), and only then — under the write
+  lock — `copy`s it to `nar/<file>` with `If-None-Match: *`, records the row
+  and deletes the temp. A refusal deletes the temp too and records nothing,
+  and logs `cache.nar.verify_failed {reason}` with a token for a reason. Odu
+  signs no hash a client claimed; the ETags it was handed decide nothing.
+- **And the proof is binding because the key has no writer.** Completing the
+  upload ends every URL odu signed for that key — they were parts of it — so
+  from the completion onwards nothing a client holds can change the object
+  odu is about to read, prove and copy. That is the guarantee, and it holds
+  on every S3 service, because it asks for no conditional feature at all.
+  There is deliberately no presigned plain `PUT`: that would be one request
+  fewer and a key writable for ten minutes.
+  - The readback's ETag still rides into `copy` as `sourceIfMatch` (and onto
+    every read window after the first), so a source that moved answers
+    `source_changed`: a 400, a
+    `cache.nar.verify_failed {reason:"source_changed"}`, nothing kept. It is a
+    SECOND line — **R2 does not implement `x-amz-copy-source-if-match` on
+    `UploadPartCopy`** — and it fails closed: a store that answers a read with
+    no version at all refuses the push (`reason:"unversioned_source"`) rather
+    than copying on trust.
+- **The upload record is this daemon's, and in memory.** A handle from before
+  a restart is a `404`, which the client answers by beginning the path again
+  — as it does for any 4xx at the store, an expired presign included. One
+  nobody finished is dropped by the staging sweep an hour on, with its
+  multipart upload aborted and its temp object deleted; `list` never shows a
+  temp key, so the GC's orphan pass cannot take one mid-upload.
+- **`cache.nar.uploaded {bucket, file, mode, parts, bytes}`** is written for
+  both modes, with the bytes THIS process measured or HEADed — never a number
+  a client reported.
+
 ## A bucket changes stores without going down
 
 `bucket.migrate { bucket, store }` (`src/migrateStore.ts`) copies every object

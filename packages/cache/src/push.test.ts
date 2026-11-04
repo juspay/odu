@@ -99,6 +99,23 @@ interface Server {
    *  `null` answers like a daemon that predates the field. */
   substituter: string | null;
   stop: () => void;
+  /** Answer the negotiation with a 404, the way an origin from before 2.9
+   *  does — it has no such route. */
+  negotiation404: boolean;
+  /** When set, `begin` answers `direct` with this part size, and the same
+   *  server plays the STORE under `/store/…` — what a presigned URL points
+   *  at. `null` answers `staged`, which is every other test here. */
+  directPartSize: number | null;
+  /** Every `begin` this server answered, in order, as `<file>` — so a retry
+   *  is visible as a SECOND one for the same path. */
+  begun: string[];
+  /** What the fake store was handed: its key, and the bytes. */
+  stored: Map<string, string>;
+  /** How many part PUTs the fake store refuses (403, an expired presign)
+   *  before it starts taking them. */
+  storeRefusals: number;
+  /** Direct joins, in order: the upload and the parts it named. */
+  joined: { upload: string; parts: { index: number; etag: string }[] }[];
 }
 
 function startServer(): Server {
@@ -119,6 +136,12 @@ function startServer(): Server {
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
     substituter: null,
+    negotiation404: false,
+    directPartSize: null,
+    begun: [],
+    stored: new Map(),
+    storeRefusals: 0,
+    joined: [],
     stop: () => {},
   };
   const server = Bun.serve({
@@ -138,6 +161,56 @@ function startServer(): Server {
         // THE BUCKET'S CONSUMER FACTS: the push asks where THIS INSTANCE is,
         // rather than guessing from its own environment.
         return Response.json({ board: state.board });
+      }
+
+      // ── THE STORE, when a test turns direct mode on ───────────────────
+      //
+      // A presigned URL is opaque to the client, so the fake mints one that
+      // points back here under `/store/…`. What is asserted of it is what a
+      // real store would hold the client to: the bytes arrive, and a part's
+      // ETag is the store's own answer.
+      if (request.method === "PUT" && url.pathname.startsWith("/store/")) {
+        if (state.storeRefusals > 0) {
+          state.storeRefusals -= 1;
+          return new Response("expired", { status: 403 });
+        }
+        const key = url.pathname.slice("/store/".length);
+        state.stored.set(key, body);
+        return new Response(null, { status: 200, headers: { etag: `"etag-${key}"` } });
+      }
+
+      // ── THE NEGOTIATION ───────────────────────────────────────────────
+      if (request.method === "POST" && url.pathname.endsWith("/upload")) {
+        if (state.negotiation404) return new Response("not found", { status: 404 });
+        const file = url.pathname.slice(
+          url.pathname.lastIndexOf("/nar/") + 5,
+          -"/upload".length,
+        );
+        state.begun.push(file);
+        if (state.directPartSize === null) return Response.json({ mode: "staged" });
+        const upload = `u${state.begun.length}`;
+        return Response.json({
+          mode: "direct",
+          upload,
+          partSize: state.directPartSize,
+          // PART 0, never a plain PUT — the shape the server really answers.
+          part: `${state.origin}/store/${upload}-part-0`,
+        });
+      }
+      if (request.method === "GET" && url.pathname.includes("/upload/")) {
+        const [upload = "", , index = ""] = url.pathname
+          .slice(url.pathname.indexOf("/upload/") + "/upload/".length)
+          .split("/");
+        return Response.json({ url: `${state.origin}/store/${upload}-part-${index}` });
+      }
+      if (request.method === "POST" && url.pathname.includes("/upload/")) {
+        const upload = url.pathname.slice(
+          url.pathname.indexOf("/upload/") + "/upload/".length,
+          -"/complete".length,
+        );
+        const { parts } = JSON.parse(body) as { parts: { index: number; etag: string }[] };
+        state.joined.push({ upload, parts });
+        return Response.json({ parts: parts.length, bytes: 0 });
       }
       if (url.pathname.endsWith("/missing")) {
         state.missingCalls += 1;
@@ -485,6 +558,172 @@ describe("pushing a closure", () => {
         joined += server.parts.get(`${narName}:${index}`) ?? "";
       }
       expect(joined).toBe(payload);
+    } finally {
+      server.stop();
+    }
+  });
+
+  // ── UPLOADS THAT GO STRAIGHT TO THE STORE (PLAN 2.9) ──────────────────
+  //
+  // What the client is held to: it ASKS first, it sends the bytes where it
+  // was told and nowhere else, it reports the ETags the store answered, and
+  // a failure out at the store re-begins the path rather than carrying a
+  // dead upload id forward.
+
+  /** A platform whose NAR is `payload`, delivered in small chunks. */
+  const dumping = (payload: string): PushPlatform => ({
+    closure: async () => [entry(LIBC)],
+    dump: () =>
+      new ReadableStream({
+        start(controller) {
+          for (let at = 0; at < payload.length; at += 7) {
+            controller.enqueue(new TextEncoder().encode(payload.slice(at, at + 7)));
+          }
+          controller.close();
+        },
+      }),
+  });
+
+  it("asks where the bytes go before it sends any, and takes the staged answer", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: dumping("small"),
+        partSize: 64,
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "staged" });
+      // The negotiation comes first, and the NAR still goes through odu.
+      const paths = server.seen.map((seen) => `${seen.method} ${seen.path}`);
+      const begun = paths.findIndex((line) => line.endsWith("/upload"));
+      const sent = paths.findIndex((line) => line.startsWith("PUT") && line.endsWith(".nar.zst"));
+      expect(begun).toBeGreaterThanOrEqual(0);
+      expect(sent).toBeGreaterThan(begun);
+      expect(server.stored.size).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("puts a one-part NAR straight into the store, and odu takes no bytes", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.directPartSize = 1000;
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: dumping("a NAR that fits in one part"),
+        partSize: 64,
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "direct" });
+      // ONE PART, at the URL the plan carried — no extra round trip to sign
+      // it, and still a part, so the key stops being writable the moment the
+      // completion lands.
+      expect([...server.stored.keys()]).toEqual(["u1-part-0"]);
+      expect(server.stored.get("u1-part-0")).toBe("a NAR that fits in one part");
+      expect(server.joined).toEqual([
+        { upload: "u1", parts: [{ index: 0, etag: '"etag-u1-part-0"' }] },
+      ]);
+      // AND NOBODY ASKED ODU TO SIGN ANYTHING: part 0 came with the plan.
+      expect(server.seen.filter((seen) => seen.path.includes("/parts/"))).toEqual([]);
+      // NOT ONE NAR BYTE CROSSED ODU: every body it saw is a narinfo or a
+      // small JSON document.
+      const toOdu = server.seen.filter(
+        (seen) => seen.method === "PUT" && seen.path.includes("/nar/"),
+      );
+      expect(toOdu).toEqual([]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("sends each part to its own presigned URL and reports the store's ETags", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.directPartSize = 10;
+      const payload = "0123456789abcdefghij!";
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: dumping(payload),
+        // THE CLIENT'S `--part-size` IS A FLOOR HERE, and the server's answer
+        // is what the slicing uses: 10 bytes, not this.
+        partSize: 64,
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "direct" });
+      expect(server.stored.get("u1-part-0")).toBe("0123456789");
+      expect(server.stored.get("u1-part-1")).toBe("abcdefghij");
+      expect(server.stored.get("u1-part-2")).toBe("!");
+      // The parts joined in order are the NAR, and the ETags are the ones the
+      // store answered — the only thing the client could not have invented.
+      expect(server.joined).toEqual([
+        {
+          upload: "u1",
+          parts: [
+            { index: 0, etag: '"etag-u1-part-0"' },
+            { index: 1, etag: '"etag-u1-part-1"' },
+            { index: 2, etag: '"etag-u1-part-2"' },
+          ],
+        },
+      ]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("begins the path again when the store refuses a part, rather than reusing the upload", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.directPartSize = 10;
+      // ONE 403 — an expired presign, which is the failure this retry exists
+      // for — and then the store takes everything.
+      server.storeRefusals = 1;
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: dumping("0123456789abcdefghij!"),
+        attempts: 2,
+      });
+      expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "direct" });
+      // TWO BEGINS for the one path, and the join names the SECOND upload's
+      // parts: a retry never completes an upload whose parts it half sent.
+      const narName = `${narHashBase32(entry(LIBC).narHash)}.nar.zst`;
+      expect(server.begun).toEqual([narName, narName]);
+      expect(server.joined.map((join) => join.upload)).toEqual(["u2"]);
+      expect(server.stored.get("u2-part-0")).toBe("0123456789");
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("refuses an origin that cannot negotiate, naming the version it needs", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.negotiation404 = true;
+      // A 404 for the negotiation is a cache from before 2.9. There is no
+      // falling back to staged: on an S3 bucket that would quietly go on
+      // pushing every byte through the daemon.
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: dumping("small"),
+      });
+      expect(summary.failed).toBe(1);
+      expect(summary.failures[0]?.message).toContain("cache surface 4.2");
+      // ONE ATTEMPT: an origin that does not speak it will not speak it twice.
+      expect(server.begun).toEqual([]);
+      expect(server.seen.filter((seen) => seen.path.endsWith("/upload"))).toHaveLength(1);
     } finally {
       server.stop();
     }

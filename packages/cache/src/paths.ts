@@ -31,6 +31,40 @@ export const UPLOAD_SESSION_HEADER = "x-odu-upload";
 export const PUSH_API = "/_odu/v1";
 
 /**
+ * WHERE A NAR'S BYTES GO (PLAN 2.9) — the shape of the one question a push
+ * asks before it sends any, and of the answer.
+ *
+ * Here, beside the mount, for the reason the mount is here: the SERVER
+ * answers it (`./staging`) and the CLIENT reads it (`./push`), and the client
+ * must import no router, no store and no database. One declaration, so the
+ * two halves of the negotiation cannot drift.
+ */
+export type UploadMode = "direct" | "staged";
+
+export type UploadPlan =
+  | { mode: "staged" }
+  | {
+      mode: "direct";
+      /** This upload's handle — the `:upload` of its part and completion
+       *  paths. Odu's own, not the store's. */
+      upload: string;
+      /** What every part but the last must be. The client slices to it, so
+       *  the store is never handed a part it would refuse for being short. */
+      partSize: number;
+      /**
+       * WHERE PART 0 GOES. Every byte of a direct upload is a PART — there is
+       * no plain PUT, because a plain PUT leaves the key writable for as long
+       * as its URL lives and odu has to PROVE that key afterwards. Part URLs
+       * stop writing when the upload is completed.
+       *
+       * The first one rides on the plan so the common case — a NAR that fits
+       * in one part — costs the same three requests a single PUT would have:
+       * begin, the part, the completion. The rest are asked for one at a time.
+       */
+      part: string;
+    };
+
+/**
  * THE TWO LINES A CACHE SAYS ABOUT ITSELF in `nix-cache-info` — where its
  * push API is, and which bucket the reader is looking at.
  *

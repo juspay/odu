@@ -387,9 +387,19 @@
     far_token = json.loads(
         surface(server, admin, "cache", "token_mint", {"bucket": "far", "scope": "write"})
     )["token"]
-    server.succeed(
+    pushed = server.succeed(
         f"runuser -u odu -- env ODU_WEB_ORIGIN=http://127.0.0.1:18440"
-        f" ODU_CACHE_TOKEN={far_token} {odu} cache push far {path}"
+        f" ODU_CACHE_TOKEN={far_token} {odu} cache push far {path} -o json"
+    )
+    # ── THE BYTES NEVER CROSSED THE DAEMON (PLAN 2.9) ──────────────────────
+    # A bucket on an S3 store negotiates `direct`: the client is handed
+    # presigned URLs, PUTs the NAR to the gateway itself, and odu reads the
+    # object back to prove it before recording the path. The client's own
+    # summary says which mode it used, and the daemon's log says what it saw.
+    assert json.loads(pushed)["mode"] == "direct", pushed
+    server.succeed(
+        "journalctl -u odu-web --no-pager | grep -F 'cache.nar.uploaded'"
+        " | grep -E '\"mode\": ?\"direct\"' | grep -E '\"bucket\": ?\"far\"'"
     )
     # THE BYTES ARE IN THE S3 BUCKET, under the odu bucket's prefix — and not
     # on the daemon's disk.

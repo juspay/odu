@@ -9,10 +9,13 @@
  * a multipart upload — and the metadata HEAD are signed here and sent with
  * `fetch`.
  *
- * SIGNATURES ALSO TRAVEL ALONE. `presignGet` puts one in a URL's QUERY rather
- * than a header, so a reader holding no credential of this store's — a Nix
- * client odu redirected — fetches the bytes from the service itself, until the
- * URL's own expiry passes.
+ * SIGNATURES ALSO TRAVEL ALONE. `presign` puts one in a URL's QUERY rather
+ * than a header, so whoever holds the URL and no credential of this store's —
+ * a Nix client odu redirected to the bytes, a writer odu sent to upload them —
+ * makes that ONE request against the service itself, until the URL's own
+ * expiry passes. `presignGet` is its GET; a `PUT`, with a part's `partNumber`
+ * and `uploadId` signed into the query, is how bytes reach the store without
+ * crossing the process that owns the credentials.
  *
  * This module knows WHO is asking and WHERE (endpoint, bucket, region,
  * credentials) and nothing about objects: no streaming, no ranges, no
@@ -132,18 +135,31 @@ export function signedHeaders(
 }
 
 /**
- * A URL THAT FETCHES `key` BY ITSELF, for `expiresSeconds` from `at`. The
- * signature is in the query, so the reader sends no credential and needs none:
- * the service checks the URL. Only `host` is signed — a reader may add any
- * header it likes, `Range` above all, and the payload hash is the literal
- * `UNSIGNED-PAYLOAD` that query auth uses.
+ * A URL THAT MAKES ONE REQUEST BY ITSELF, for `expiresSeconds` from `at`. The
+ * signature is in the query, so whoever holds the URL sends no credential and
+ * needs none: the service checks the URL. Only `host` is signed — the holder
+ * may add any header it likes, `Range` above all on a GET — and the payload
+ * hash is the literal `UNSIGNED-PAYLOAD` that query auth uses, which is also
+ * what lets a PUT's body be anything the holder streams.
+ *
+ * `query` is the request's own parameters, signed with the rest: a part
+ * upload's `partNumber` and `uploadId` cannot be moved to another part or
+ * another upload by whoever holds the URL.
  *
  * Signed against `endpoint`, never `publicUrl`: a signature covers the host it
  * names, and the host odu knows the credentials for is the service's.
  */
-export function presignGet(target: S3Target, key: string, expiresSeconds: number, at: Date = new Date()): URL {
+export function presign(
+  target: S3Target,
+  method: string,
+  key: string,
+  expiresSeconds: number,
+  query: Record<string, string> = {},
+  at: Date = new Date(),
+): URL {
   const { stamp, day } = stampOf(at);
   const url = objectUrl(target, key, {
+    ...query,
     "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
     "X-Amz-Credential": `${target.accessKeyId}/${scopeOf(target, day)}`,
     "X-Amz-Date": stamp,
@@ -151,11 +167,16 @@ export function presignGet(target: S3Target, key: string, expiresSeconds: number
     "X-Amz-SignedHeaders": "host",
     ...(target.sessionToken === undefined ? {} : { "X-Amz-Security-Token": target.sessionToken }),
   });
-  const canonical = ["GET", url.pathname, canonicalQuery(url), `host:${url.host}\n`, "host", "UNSIGNED-PAYLOAD"].join("\n");
+  const canonical = [method, url.pathname, canonicalQuery(url), `host:${url.host}\n`, "host", "UNSIGNED-PAYLOAD"].join("\n");
   // LAST, and not itself signed: the signature is over the other parameters.
   url.searchParams.set("X-Amz-Signature", signature(target, stamp, day, canonical));
   return url;
 }
+
+/** A URL that FETCHES `key` by itself — {@link presign}'s GET, which is what a
+ *  reader odu redirected to the service holds. */
+export const presignGet = (target: S3Target, key: string, expiresSeconds: number, at: Date = new Date()): URL =>
+  presign(target, "GET", key, expiresSeconds, {}, at);
 
 /** What one request carries beyond its method and key. */
 export interface S3Request {

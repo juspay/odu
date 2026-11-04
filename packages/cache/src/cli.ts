@@ -89,9 +89,16 @@ login <origin> [--token T]    save a token for an origin in
 push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [-o json]
 push --cache <substituter> <path>…
                               upload only the paths the bucket is missing.
-                              Talks to the cache directly, from HERE. A NAR
-                              larger than --part-size (64 MiB) is sent in parts,
-                              each retried on its own.
+                              Talks to the cache directly, from HERE. Where a
+                              NAR's bytes go is the BUCKET's answer: on an S3
+                              store they go straight to the store through
+                              presigned URLs odu mints, and odu reads the
+                              object back to verify it; on disk they come
+                              through the daemon. --part-size is a ceiling
+                              there (64 MiB, under a proxy's body cap) and a
+                              FLOOR on an S3 store, where a part is at least
+                              5 MiB whatever is asked for. Each part is
+                              retried on its own.
                               --cache takes the SUBSTITUTER URL a nix.conf
                               already has: the cache names its own push origin
                               and bucket in nix-cache-info, so a workflow keeps

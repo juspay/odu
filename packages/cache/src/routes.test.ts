@@ -55,6 +55,9 @@ const ON_S3: Where = {
 
 const ROOT = "root-token-please";
 const NOW = 1_700_000_000_000;
+/** The harness's clock, movable: the sweep's hour is the one thing in here
+ *  that a test cannot otherwise reach. Reset per test by `beforeEach`. */
+let clock = NOW;
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
 const GLIBC = "/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57";
 
@@ -80,6 +83,7 @@ let scratch: string;
 
 beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), "odu-cache-routes-"));
+  clock = NOW;
 });
 
 afterEach(() => {
@@ -135,7 +139,7 @@ async function harness(
     // The same string the board is at here, as it is on a real deployment.
     publicOrigin: boardOrigin,
     legacyStore: { dump: (path) => store.dump(path) },
-    now: () => NOW,
+    now: () => clock,
     log,
     stores: new Map([
       ...localStores(scratch),
@@ -1674,6 +1678,355 @@ describe("a large NAR stays off the heap", () => {
       expect(response.status).toBe(200);
     });
     expect({ growth, within: growth < LIMIT }).toEqual({ growth, within: true });
+    await h.dispose();
+  });
+});
+
+/**
+ * UPLOADS THAT GO STRAIGHT TO THE STORE (PLAN 2.9).
+ *
+ * These drive the real routes against a real S3 service, and the PUTs go to
+ * the presigned URLs odu minted — through plain `fetch`, with no odu
+ * credential — so what is proved is the thing the client will actually do.
+ *
+ * The invariant under all of it: **odu signs no hash it did not take.** A
+ * narinfo is answered 200 only after odu has streamed the object back out of
+ * the store and hashed it, and the bytes become `nar/<file>` by a copy INSIDE
+ * the store, never by anything the client said.
+ */
+describe("a direct upload", () => {
+  /** Begin, send the bytes to the part URL the plan carries, and join.
+   *  Answers the plan and the completion, so a case can assert on either. */
+  async function direct(
+    h: Harness,
+    file: string,
+    bytes: Uint8Array,
+  ): Promise<{
+    plan: { mode: string; upload?: string; partSize?: number; part?: string };
+    complete: Response;
+  }> {
+    const begun = await h.fetch(`/main/nar/${file}/upload`, {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      body: JSON.stringify({ partSize: 1 }),
+    });
+    expect(begun.status).toBe(200);
+    const plan = (await begun.json()) as { mode: string; upload?: string; part?: string };
+    if (plan.mode !== "direct") throw new Error(`the bucket answered ${plan.mode}`);
+    const put = await fetch(plan.part as string, { method: "PUT", body: body(bytes) });
+    expect(put.status).toBe(200);
+    const complete = await h.fetch(`/main/nar/${file}/upload/${plan.upload}/complete`, {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      body: JSON.stringify({ parts: [{ index: 0, etag: put.headers.get("etag") }] }),
+    });
+    return { plan, complete };
+  }
+
+  /**
+   * A STORE WHOSE TEMP OBJECT CHANGES UNDER THE COPY, however it got there:
+   * it rewrites the source the moment odu asks to copy it. Odu's own shape
+   * makes this unreachable for a client — the only URLs it signs for the key
+   * are parts of an upload the completion closes — so this stages the hazard
+   * the shape removes, and holds the SECOND line of defence to its promise
+   * where the store honours it (AWS, versitygw; R2 does not implement the
+   * source condition on `UploadPartCopy`).
+   */
+  function racingS3(rewrite: Uint8Array): { where: Where; raced: () => number } {
+    let raced = 0;
+    return {
+      where: {
+        name: "s3",
+        store: async () => {
+          const store = await (ON_S3.store as () => Promise<ObjectStore>)();
+          const copy = store.copy;
+          if (copy === undefined) throw new Error("an S3 store copies; this one does not");
+          return {
+            ...store,
+            copy: async (from: string, to: string, options: Parameters<typeof copy>[2]) => {
+              if (from.includes("/.tmp-")) {
+                raced += 1;
+                // The client's own URL would do this; writing it through the
+                // store is the same request with the same effect.
+                await store.delete(from);
+                const put = await store.put(from, new Blob([rewrite as BlobPart]));
+                expect(put.ok).toBe(true);
+              }
+              return copy(from, to, options);
+            },
+          };
+        },
+      },
+      raced: () => raced,
+    };
+  }
+
+  it("is what an S3 bucket negotiates", async () => {
+    const onS3 = await harness(true, "https://odu.example.org", undefined, ON_S3);
+    const begun = await onS3.fetch("/main/nar/whatever.nar.zst/upload", {
+      ...bearer(onS3.tokens.write),
+      method: "POST",
+      body: "",
+    });
+    const plan = (await begun.json()) as Record<string, unknown>;
+    expect(plan.mode).toBe("direct");
+    // THE PART SIZE IS THE STORE'S FLOOR, never the 1 byte a client may ask
+    // for: S3 refuses a short part in the middle of an upload.
+    expect(plan.partSize as number).toBeGreaterThanOrEqual(5 * 1024 * 1024);
+    // A URL THAT CARRIES ITS OWN AUTHORITY, at the store and not at odu —
+    // and it is a PART of one upload, not a plain PUT. That is the whole of
+    // why the object odu proves later cannot be rewritten: completing the
+    // upload ends every URL odu ever signed for the key.
+    const part = new URL(plan.part as string);
+    expect(part.searchParams.get("X-Amz-Signature")).not.toBeNull();
+    expect(part.searchParams.get("partNumber")).toBe("1");
+    expect(part.searchParams.get("uploadId")).not.toBeNull();
+    expect(part.pathname).toContain("/nar/.tmp-");
+    expect(Object.keys(plan).sort()).toEqual(["mode", "part", "partSize", "upload"]);
+    await onS3.dispose();
+  });
+
+  it("is never what a disk bucket negotiates", async () => {
+    const onDisk = await harness(true);
+    const staged = await onDisk.fetch("/main/nar/whatever.nar.zst/upload", {
+      ...bearer(onDisk.tokens.write),
+      method: "POST",
+      body: "",
+    });
+    expect(await staged.json()).toEqual({ mode: "staged" });
+    await onDisk.dispose();
+  });
+
+  it("reads the object back, proves it, copies it into place and records it", async () => {
+    const events: { event: string; fields: Record<string, unknown> }[] = [];
+    const h = await harness(
+      true,
+      "https://odu.example.org",
+      (event, fields) => events.push({ event, fields }),
+      ON_S3,
+    );
+    const payload = nar("a NAR that went straight to the store");
+    const file = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const { complete } = await direct(h, file, payload.bytes);
+    expect(complete.status).toBe(200);
+    expect(await complete.json()).toEqual({ parts: 1, bytes: payload.bytes.length });
+    // THIS NAR's line — the harness seeded a staged one before it, which is
+    // the same event for the other mode.
+    expect(
+      events.find((line) => line.event === "cache.nar.uploaded" && line.fields.file === file)
+        ?.fields,
+    ).toMatchObject({ bucket: "main", file, mode: "direct", parts: 1, bytes: payload.bytes.length });
+
+    // NOTHING IS RECORDED YET: bytes with no proof are not a path.
+    expect(h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(GLIBC))).toBeNull();
+
+    const landed = await upload(h.fetch, h.tokens.write, GLIBC, payload, { skipNar: true });
+    expect(landed.status).toBe(200);
+    // THE PATH IS SERVED, from the object the copy made — and the NAR reads
+    // back through the store exactly as a staged one does.
+    const read = await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read));
+    expect([200, 307]).toContain(read.status);
+    const bytes =
+      read.status === 307
+        ? new Uint8Array(await (await fetch(read.headers.get("location") as string)).arrayBuffer())
+        : new Uint8Array(await read.arrayBuffer());
+    expect(new TextDecoder().decode(bytes)).toBe("a NAR that went straight to the store");
+    // AND THE TEMP OBJECT IS GONE: the copy's source is this request's alone.
+    expect(stagedFiles().filter((name) => name.includes(".tmp-"))).toEqual([]);
+    await h.dispose();
+  });
+
+  it("refuses a narinfo whose hash the object does not carry, and keeps nothing", async () => {
+    const events: { event: string; fields: Record<string, unknown> }[] = [];
+    const h = await harness(
+      true,
+      "https://odu.example.org",
+      (event, fields) => events.push({ event, fields }),
+      ON_S3,
+    );
+    const payload = nar("bytes that are not what the narinfo claims");
+    const claimed = nar("the bytes the narinfo claims");
+    const file = `${claimed.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const { complete } = await direct(h, file, payload.bytes);
+    expect(complete.status).toBe(200);
+
+    const refused = await upload(h.fetch, h.tokens.write, GLIBC, claimed, { skipNar: true });
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain("hashes to");
+    expect(
+      events.find((line) => line.event === "cache.nar.verify_failed")?.fields,
+    ).toMatchObject({ bucket: "main", mode: "direct", reason: "nar_hash_mismatch" });
+    // NOTHING RECORDED, and nothing left in the store: no row, and the NAR
+    // the narinfo named is not there to be read.
+    expect(h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(GLIBC))).toBeNull();
+    const read = await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read));
+    expect(read.status).toBe(404);
+    await h.dispose();
+  });
+
+  it("refuses a part or a completion for an upload it does not hold", async () => {
+    const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
+    const file = "0000000000000000000000000000000000000000000000000000.nar.zst";
+    const part = await h.fetch(`/main/nar/${file}/upload/not-an-upload/parts/0`, bearer(h.tokens.write));
+    expect(part.status).toBe(404);
+    const joined = await h.fetch(`/main/nar/${file}/upload/not-an-upload/complete`, {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      body: JSON.stringify({ parts: [] }),
+    });
+    expect(joined.status).toBe(404);
+    await h.dispose();
+  });
+
+  it("takes no upload from a token that may only read", async () => {
+    const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
+    const begun = await h.fetch("/main/nar/whatever.nar.zst/upload", {
+      ...bearer(h.tokens.read),
+      method: "POST",
+      body: "",
+    });
+    expect(begun.status).toBe(403);
+    await h.dispose();
+  });
+
+  it("hands the client no URL that can rewrite the object it will prove", async () => {
+    // THE FIX FOR THE ONE INVARIANT 2.9 EXISTS FOR, and it is structural
+    // rather than conditional: the plan's only write URL is PART 0 of one
+    // multipart upload, and completing that upload ends it. A precondition
+    // on the copy cannot be the guarantee, because R2 does not implement
+    // `x-amz-copy-source-if-match` on `UploadPartCopy`.
+    const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
+    const payload = nar("bytes the client cannot take back");
+    const file = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const { plan, complete } = await direct(h, file, payload.bytes);
+    expect(complete.status).toBe(200);
+
+    // THE CLIENT STILL HOLDS PART 0'S URL. It no longer writes anything: the
+    // upload it names was consumed by the completion.
+    const again = await fetch(plan.part as string, {
+      method: "PUT",
+      body: body(new TextEncoder().encode("bytes nobody proved")),
+    });
+    expect(again.ok).toBe(false);
+    // AND THE PATH STILL LANDS, over the bytes odu read back.
+    expect((await upload(h.fetch, h.tokens.write, GLIBC, payload, { skipNar: true })).status).toBe(200);
+    const read = await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read));
+    const bytes =
+      read.status === 307
+        ? new Uint8Array(await (await fetch(read.headers.get("location") as string)).arrayBuffer())
+        : new Uint8Array(await read.arrayBuffer());
+    expect(new TextDecoder().decode(bytes)).toBe("bytes the client cannot take back");
+    await h.dispose();
+  });
+
+  it("refuses bytes that changed between the verify and the copy, and keeps none of them", async () => {
+    // THE SECOND LINE OF DEFENCE, held to its promise. No client can reach
+    // the source any more (the case above), so this stages the hazard at the
+    // store and asserts what the copy does WHERE the service honours the
+    // source precondition — versitygw here, AWS too, and NOT R2, which is
+    // exactly why the guarantee rests on the shape rather than on this.
+    const events: { event: string; fields: Record<string, unknown> }[] = [];
+    const honest = nar("the bytes odu verified");
+    const swapped = new TextEncoder().encode("the bytes a racing client slipped in");
+    const { where, raced } = racingS3(swapped);
+    const h = await harness(
+      true,
+      "https://odu.example.org",
+      (event, fields) => events.push({ event, fields }),
+      where,
+    );
+    const file = `${honest.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    expect((await direct(h, file, honest.bytes)).complete.status).toBe(200);
+
+    const refused = await upload(h.fetch, h.tokens.write, GLIBC, honest, { skipNar: true });
+    expect(raced()).toBe(1);
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain("was rewritten while odu was verifying it");
+    expect(
+      events.find((line) => line.event === "cache.nar.verify_failed")?.fields,
+    ).toMatchObject({ bucket: "main", mode: "direct", reason: "source_changed" });
+    // NOTHING RECORDED AND NOTHING SERVED — in particular no `nar/<file>`
+    // holding the swapped bytes under the honest hash, which `nar/<file>`
+    // being put-if-absent would have made permanent.
+    expect(h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(GLIBC))).toBeNull();
+    expect((await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read))).status).toBe(404);
+    await h.dispose();
+  });
+
+  it("records both of two twin paths that share one NAR name", async () => {
+    // TWO STORE PATHS OF IDENTICAL CONTENT share a NarHash and therefore the
+    // file name — and `runWave` pushes a wave several paths at a time, so
+    // their narinfos can arrive before either proof has run. The first proof
+    // consumes the upload; the second must find the object the first kept,
+    // not "never uploaded".
+    const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
+    const twin = nar("one NAR, two store paths");
+    const file = `${twin.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const other = "/nix/store/zzdhrfdsqgnqrsipbdfg1m1h1i17pmg1-twin-2.0";
+    expect((await direct(h, file, twin.bytes)).complete.status).toBe(200);
+
+    // BOTH AT ONCE, which is what the client does.
+    const [first, second] = await Promise.all([
+      upload(h.fetch, h.tokens.write, GLIBC, twin, { skipNar: true }),
+      upload(h.fetch, h.tokens.write, other, twin, { skipNar: true }),
+    ]);
+    expect({ first: first.status, second: second.status }).toEqual({ first: 200, second: 200 });
+    // ONE ROW EACH, both served, over the one object the first proof kept.
+    for (const path of [GLIBC, other]) {
+      const narinfo = h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(path));
+      expect(narinfo).toContain(`StorePath: ${path}`);
+      // The SERVED extension is the row's compression, not the staged name's.
+      expect(narinfo).toContain(`URL: nar/${twin.narHash.replace(/^sha256:/, "")}.nar`);
+      expect(narinfo).toContain(`NarHash: ${twin.narHash}`);
+    }
+    await h.dispose();
+  });
+
+  it("does not reap an upload that is still moving, however long it takes", async () => {
+    // THE SWEEP'S CLOCK IS LITTER, a push's is PROGRESS. A closure big enough
+    // to upload for more than the hour would be reaped mid-flight if the
+    // record aged from when it BEGAN — the temp object deleted and the
+    // multipart upload aborted under a client still sending parts, which no
+    // number of retries can get past. Asking for a part is the sign of life
+    // that keeps the record alive, exactly as the staged path's marker is.
+    const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
+    const payload = nar("a NAR that took its time");
+    const file = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const begun = await h.fetch(`/main/nar/${file}/upload`, {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      body: "",
+    });
+    const plan = (await begun.json()) as { upload: string; part: string };
+
+    // Fifty minutes in, the client asks for its next part…
+    clock += 50 * 60 * 1000;
+    const signed = await h.fetch(
+      `/main/nar/${file}/upload/${plan.upload}/parts/1`,
+      bearer(h.tokens.write),
+    );
+    expect(signed.status).toBe(200);
+    // …and twenty more minutes later — over the hour from BEGIN — another
+    // push runs the sweep. The upload is an hour young by its last part.
+    clock += 20 * 60 * 1000;
+    const other = await h.fetch("/main/nar/other.nar.zst/upload", {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      body: "",
+    });
+    expect(other.status).toBe(200);
+
+    // IT IS STILL THERE: the part lands, the completion joins it, and the
+    // narinfo records the path.
+    const put = await fetch(plan.part, { method: "PUT", body: body(payload.bytes) });
+    expect(put.status).toBe(200);
+    const complete = await h.fetch(`/main/nar/${file}/upload/${plan.upload}/complete`, {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      body: JSON.stringify({ parts: [{ index: 0, etag: put.headers.get("etag") }] }),
+    });
+    expect(complete.status).toBe(200);
+    expect((await upload(h.fetch, h.tokens.write, GLIBC, payload, { skipNar: true })).status).toBe(200);
     await h.dispose();
   });
 });

@@ -24,6 +24,9 @@ const LEDGER: ContractLedger = {
   // `publicUrl` on a declared store, `migration` on a bucket row, and the
   // `bucket.migrate` verb. Every one of them additive.
   "4.1": "75a8d40ef7202061",
+  // 4.2 — PLAN 2.9: `writesTo` on a bucket row, the one fact the push
+  // negotiation answers from. Additive.
+  "4.2": "0d639bc2b90f11e8",
 };
 
 describe("the cache row's contract", () => {

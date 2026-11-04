@@ -61,7 +61,7 @@ import {
 } from "./narinfo";
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT } from "./paths";
-import { LOCAL_STORE, PATH_PAGE_SIZE } from "./surface";
+import { LOCAL_STORE, PATH_PAGE_SIZE, PRESIGN_SECONDS } from "./surface";
 import {
   cacheInfoKey,
   CACHE_INFO_CONTENT_TYPE,
@@ -74,8 +74,12 @@ import {
   nixCacheInfo,
   objectKey,
   type CompleteUpload,
+  type DirectComplete,
+  type DirectPart,
   type NarinfoOutcome,
   type Upload,
+  type UploadMode,
+  type UploadPlan,
 } from "./staging";
 import {
   type ByteRange,
@@ -84,6 +88,7 @@ import {
   type ObjectStore,
   type PutOutcome,
   sameFacts,
+  type UploadedPart,
 } from "@odu/objects";
 import { type KeptFile, keptFileOf } from "./fileHash";
 import { contentAddressOf } from "./storePath";
@@ -120,6 +125,16 @@ export interface BucketFacts {
   hits: number;
   /** The declared store its objects live in. */
   store: string;
+  /**
+   * WHO TAKES A PUSH'S BYTES (PLAN 2.9) — `readsFrom`'s mirror.
+   *
+   * `store` when the bucket's store takes them itself: `odu cache push` is
+   * handed presigned URLs and the NAR never crosses this machine, which then
+   * reads the object back to prove it. `odu` when they come through the
+   * daemon into staging — every disk-backed bucket, and every client older
+   * than the negotiation.
+   */
+  writesTo: "store" | "odu";
   /** THE MOVE RUNNING ON THIS BUCKET, or null. While it is not null the
    *  bucket is still served from `store`; the move's own `to` is where it is
    *  going (PLAN 2.8). */
@@ -453,6 +468,23 @@ export interface Cache {
   /** ONE operational line; the row hands the daemon's logger to the cache. */
   log(event: string, fields: Record<string, unknown>): void;
   narSource(bucket: BucketRow, file: string): Promise<NarSource | null>;
+  /**
+   * WHERE THIS BUCKET'S NEXT NAR GOES, and the URLs that write it (PLAN 2.9).
+   *
+   * The CACHE answers it, from the bucket's store, because a route must never
+   * peek at a store: what a bucket can do is the row's business, and the only
+   * thing the protocol sees is the plan it is handed.
+   */
+  beginDirect(bucket: BucketRow, file: string, floor: number | null): Promise<UploadPlan>;
+  /** The presigned URL for one part (0-based) of an upload in flight. */
+  directPart(bucket: BucketRow, file: string, upload: string, index: number): Promise<DirectPart>;
+  /** The client is done sending: join the parts, and confirm the object. */
+  completeDirect(
+    bucket: BucketRow,
+    file: string,
+    upload: string,
+    parts: readonly UploadedPart[],
+  ): Promise<DirectComplete>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
   /** One part of a chunked NAR, under the part ceiling. A retry overwrites the
    *  same index, so a dropped request costs one part. `session` (2.4) makes
@@ -637,15 +669,11 @@ export interface CacheOptions {
 export const HITS_REFRESH_MS = 1000;
 
 /**
- * HOW LONG A REDIRECTED NAR URL LIVES — ten minutes, Attic's number for the
- * same redirect.
- *
- * It is a copy budget, not a session: a client that followed the redirect is
- * already downloading, and a resumed download re-asks odu. Long enough for a
- * multi-gigabyte NAR on a slow link to start, short enough that a URL
- * someone pasted out of a log is dead before it is useful.
+ * HOW LONG A REDIRECTED NAR URL LIVES — {@link PRESIGN_SECONDS}, spelled in
+ * `./surface` beside the push protocol's other numbers, because a WRITE is
+ * presigned for the same budget (PLAN 2.9) and the two must not drift.
  */
-export const PRESIGN_SECONDS = 600;
+export { PRESIGN_SECONDS } from "./surface";
 
 /** A bucket name is a path segment on the wire, so it is a DNS-ish label and
  *  nothing else: lowercase, digits, dashes. A name with a `/` in it would be a
@@ -783,6 +811,10 @@ export function createCache(options: CacheOptions): Cache {
       lastPush: counts?.lastPush ?? null,
       hits: counts?.hits ?? 0,
       store: bucket.store,
+      // WHAT THE STORE CAN TAKE, asked of the store itself — the same answer
+      // the push negotiation gives a client, so the row and the protocol
+      // cannot disagree about where a bucket's bytes go.
+      writesTo: staging.uploadMode(bucket) === "direct" ? "store" : "odu",
       // THE MOVE, IF ONE IS RUNNING — read per bucket, because a bucket moves
       // between stores perhaps twice in its life and a join for the usual
       // answer would be a cost every page pays for a row that is almost
@@ -2084,6 +2116,11 @@ export function createCache(options: CacheOptions): Cache {
     // The write path is `./staging`'s; this face is the one the routes speak,
     // and it is the same object either way.
     beginUpload: (bucket, file) => staging.beginUpload(bucket, file),
+    beginDirect: (bucket, file, floor) => staging.beginDirect(bucket, file, floor),
+    directPart: (bucket, file, upload, index) =>
+      staging.directPart(bucket, file, upload, index),
+    completeDirect: (bucket, file, upload, parts) =>
+      staging.completeDirect(bucket, file, upload, parts),
     beginPart: (bucket, file, index, limit, session) =>
       staging.beginPart(bucket, file, index, limit, session),
     completeUpload: (bucket, file, total, session) =>

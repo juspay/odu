@@ -40,6 +40,13 @@
  * for, at constant memory: a file read 64 KiB at a time on disk, ranged GETs on
  * S3.
  *
+ * **Writes can leave odu too.** A store that serves its own objects also TAKES
+ * its own objects: `createUpload`, `presignPart`, `completeUpload`,
+ * `abortUpload` and `copy` let a writer that odu has authorised send the
+ * bytes to the store directly, and let odu then prove them
+ * and `copy` them into place. Optional, like `presignGet` and for the same
+ * reason: a store whose objects are local files has nobody to presign for.
+ *
  * The contract suite (`test/contract.ts`) runs against both: disk, and S3
  * through versitygw (`test/versitygw.ts`).
  */
@@ -71,6 +78,14 @@ export interface StoredObject {
   stream: ReadableStream<Uint8Array>;
   /** The WHOLE object's size, whatever range was read. */
   size: number;
+  /**
+   * WHICH VERSION OF THE KEY THESE BYTES ARE, when the store names one (S3's
+   * ETag). A reader that must act on what it read — prove it, then copy it —
+   * hands this back as {@link CopyOptions.sourceIfMatch}, so a key rewritten
+   * in between is a refusal rather than a copy of other bytes. A store whose
+   * objects are files it alone writes has no versions and leaves it out.
+   */
+  etag?: string;
 }
 
 /** Why a write did not make an object. A value, naming what happened. */
@@ -96,6 +111,48 @@ export type PutOutcome = { ok: true; facts: ObjectFacts } | { ok: false; refusal
 export interface PutOptions {
   readonly contentType?: string;
   readonly cacheControl?: string;
+}
+
+/**
+ * ONE PART OF A DIRECT UPLOAD, as the writer that sent it reports it: the
+ * index it was presigned under and the ETag the store answered. `index` is
+ * 0-based, as odu's wire numbers parts; S3's own PartNumber is `index + 1`,
+ * which is the store's business and nobody else's.
+ */
+export interface UploadedPart {
+  readonly index: number;
+  readonly etag: string;
+}
+
+/**
+ * WHAT A CONDITIONAL WRITE CAME TO, for a write whose bytes this process is
+ * not holding and therefore cannot send again: `stored`, `exists` (the key was
+ * taken — S3's 412), or `conflict` (409 to every try, so nobody is known to
+ * have won). The same three answers {@link ObjectRefusal} spells for a put —
+ * plus `source_changed`, which only a copy can meet: the bytes it was told to
+ * move are no longer the bytes the caller measured.
+ */
+export type WriteDecision = "stored" | "exists" | "conflict" | "source_changed";
+
+/** What a server-side copy writes beside the bytes. The facts are the
+ *  CALLER'S — a copy moves bytes it never read, so the store cannot learn
+ *  them, and whoever proved them says what they are. A copy is PUT-IF-ABSENT
+ *  like every other write this interface makes visible: `exists` keeps what
+ *  is there, and no caller has ever wanted the other behaviour. */
+export interface CopyOptions extends PutOptions {
+  readonly facts: ObjectFacts;
+  /**
+   * COPY THESE BYTES OR NONE: the source's {@link StoredObject.etag} as the
+   * caller read it, sent as `x-amz-copy-source-if-match`. A source rewritten
+   * since answers `source_changed`, and nothing is written.
+   *
+   * HOW FAR IT REACHES IS THE SERVICE'S: AWS and versitygw honour it on
+   * `UploadPartCopy`; R2 lists it as NOT IMPLEMENTED there (it implements it
+   * on `CopyObject`, which this store does not use). It is a second line of
+   * defence and never a caller's only one — a caller whose source another
+   * writer can reach must make it unreachable instead.
+   */
+  readonly sourceIfMatch?: string;
 }
 
 export interface ObjectStore {
@@ -141,6 +198,78 @@ export interface ObjectStore {
    *  put. Scoped like `list`, because a store may be shared and only the
    *  caller's prefix is its own. Answers how many it removed. */
   sweepTemp(prefix: string, current: number): Promise<number>;
+
+  // ── THE DIRECT UPLOAD ──────────────────────────────────────────────────
+  //
+  // OPTIONAL, and all of it or none: a store a WRITER can reach itself offers
+  // these, so bytes need not cross the process that owns the credentials. It
+  // is `presignGet`'s mirror — S3 signs them; disk, whose objects are files on
+  // odu's own machine, leaves them out, and `store.createUpload === undefined`
+  // is how a caller asks whether writes can leave odu at all.
+  //
+  // Nothing here records facts or decides what an object MEANS: a writer that
+  // uploaded straight to the store is not trusted, so the bytes land under a
+  // temp key, and whoever proves them `copy`s them into place with the facts
+  // IT measured. That is the whole of why these are separate from `put`.
+  //
+  // AND NOTHING HERE PRESIGNS A PLAIN PUT. A multipart upload is the only way
+  // in: its parts are writable only until the upload is completed, and after
+  // that NO url this store ever signed can write the key — which is what lets
+  // a caller prove an object and then act on the proof. A presigned
+  // `PutObject` would leave the key writable for as long as the URL lived,
+  // and no source precondition closes that everywhere (R2 does not implement
+  // `x-amz-copy-source-if-match` on `UploadPartCopy`).
+
+  /** The length every part but the last must have. S3 refuses a short part in
+   *  the middle of an upload, so the client is told this number rather than
+   *  guessing one the store will reject. */
+  readonly partSize?: number;
+  /** Open a multipart upload at `key`; answers the id its parts and its
+   *  completion carry. The object appears only on {@link completeUpload}. */
+  createUpload?(key: string): Promise<string>;
+  /** A URL that writes part `index` (0-based) of `uploadId`, for the next
+   *  `expiresSeconds`. The writer keeps the ETag the store answers. */
+  presignPart?(key: string, uploadId: string, index: number, expiresSeconds: number): URL;
+  /** Make the uploaded parts the object at `key` — whatever is there. A
+   *  direct upload's key is the writer's own temp name, so there is nothing
+   *  to claim; `copy` is the call that makes an object and decides a race. */
+  completeUpload?(
+    key: string,
+    uploadId: string,
+    parts: readonly UploadedPart[],
+  ): Promise<WriteDecision>;
+  /** Drop an upload and its parts. Idempotent: an upload that is not there
+   *  is not an error. */
+  abortUpload?(key: string, uploadId: string): Promise<void>;
+  /** Copy `from` to `to` inside the store — the bytes never leave it — with
+   *  `options.facts` recorded on the destination. */
+  copy?(from: string, to: string, options: CopyOptions): Promise<WriteDecision>;
+}
+
+/**
+ * A STORE THAT TAKES ITS OWN BYTES, or null — the one question a caller asks
+ * of the direct-upload group, answered beside the interface that declares it.
+ *
+ * The group is ALL-OR-NOTHING, so this is where "which members are in it"
+ * lives: a caller holds the narrowed value and never repeats the list. The
+ * part size comes with it, which is why nobody outside this package needs to
+ * know S3's own 5 MiB floor — `s3ObjectStore` already holds its `partSize`
+ * at or above it.
+ */
+export type DirectStore = ObjectStore &
+  Required<
+    Pick<ObjectStore, "partSize" | "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy">
+  >;
+
+export function directUploads(store: ObjectStore): DirectStore | null {
+  const offered =
+    store.partSize !== undefined &&
+    store.createUpload !== undefined &&
+    store.presignPart !== undefined &&
+    store.completeUpload !== undefined &&
+    store.abortUpload !== undefined &&
+    store.copy !== undefined;
+  return offered ? (store as DirectStore) : null;
 }
 
 /** A KEY HOLDING BYTES THIS STORE DID NOT RECORD: an S3 object with no

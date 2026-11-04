@@ -135,7 +135,9 @@ What it says while it works — one preamble, then one line per path as the buck
 
 A push records each path as it lands. There is no hold to wait for: references are names in the narinfo, not paths the server must already hold. The exit is non-zero only for refusals. The server keeps and serves the upload as it arrived — `nix copy --to` defaults to xz, `?compression=zstd` sends zstd — and `--wait` is deprecated: it returns at once, and `/held` answers an empty list until the cache row's next major.
 
-A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retried on its own; the server reassembles them and the same hash proof decides. That is what makes a push work through a proxy with a request-size ceiling — Cloudflare's is 100 MB.
+Before it sends a NAR's bytes, a push asks the bucket **where they go**, and the answer comes from the bucket's store. On an **S3 store** the answer is `direct`: odu signs URLs, the client PUTs the NAR to the store itself, and **not one NAR byte crosses odu** — which then streams the object back, verifies its `NarHash`, size and `CA:`, copies it into place inside the store and only then records the path. Odu never signs a hash a client claimed. On a **disk store** the answer is `staged` and the NAR comes through the daemon as it always has. The bucket row says which as `writesTo` (`"store"` or `"odu"`), the push's `--output json` says which as `mode`, and there is no flag to set.
+
+A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retried on its own; the server reassembles them and the same hash proof decides. That is what makes a push work through a proxy with a request-size ceiling — Cloudflare's is 100 MB. In **direct** mode nothing proxies the bytes, so `--part-size` is a FLOOR instead: a part is the largest of it, the store's own part size and S3's 5 MiB minimum. Every byte goes as a **part** of one multipart upload, a one-part NAR included — part 0's URL rides on the plan, so that common case costs no extra round trip, and completing the upload ends every URL odu signed for the key, which is what makes the object odu then reads back one nobody can rewrite. A presigned URL lives ten minutes; a part that misses it begins that path again with a new upload rather than refreshing a URL.
 
 `push` asks the bucket which paths it is missing, then uploads only those, with retries. It talks to the cache's HTTP API directly, so it runs on the machine that holds the paths.
 
@@ -173,7 +175,7 @@ The server accepts any username and the token as the password.
 | Closure, batched missing query, retries | yes | yes | yes |
 | Skips paths cache.nixos.org already has | yes | yes | yes: the server drops paths signed by an upstream key, `cache.nixos.org-1` by default — or nothing, with `--no-upstream` (which also stores upstream closures, costing disk, for consumers that cannot reach cache.nixos.org) |
 | Streams NARs, parallel uploads | yes | yes | yes: `nix store dump-path` through zstd, several paths at a time, retry per path |
-| Uploads bypass the server | yes, straight to S3 | no | no; a later release adds it for object storage |
+| Uploads bypass the server | yes, straight to S3 | no | yes on an S3 store: presigned URLs odu mints, and odu reads the object back and verifies it before it signs anything. A disk store takes them through the daemon |
 | Dedup | per NAR | per chunk | per NarHash per bucket |
 | Pushes every build as it happens | `watch-exec`, `watch-store` | `watch-store` | not yet; a later release adds a post-build hook for lane hosts |
 | Client signs with its own key | optional | no | no; the server signs |
@@ -294,10 +296,10 @@ A bucket keeps its objects in a **store**: `local`, the server's own disk (alway
 | `FileHash`/`FileSize` kept | beside the object (`objects/.facts/`) | as object metadata (`x-amz-meta-odu-*`) |
 | A large upload | streamed to a temp file | multipart, 8 MiB parts, four at a time, bounded memory |
 | A read odu does itself (verifying, copying, collecting) | the file, from any offset | ranged GETs, 1 MiB at a time with the next one prefetched; no HEAD first |
-| A NAR a client asks for | odu streams it | **307** to a presigned URL that expires in ten minutes |
 | A name the world may read it at | never | `publicUrl`, an R2 custom domain bound to the bucket |
+| A NAR a client pushes | odu takes the bytes into staging | the CLIENT PUTs it to presigned URLs; odu reads it back, verifies it and copies it into place |
 
-A put is put-if-absent within one daemon on every store. Between two daemons writing one S3 bucket's prefix it holds where the service honours `If-None-Match` on the write that finishes the object: AWS does on both [`PutObject` and `CompleteMultipartUpload`](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html); R2 documents it [on `PutObject` only](https://developers.cloudflare.com/r2/api/s3/api/), so there it covers objects of one 8 MiB part.
+A put is put-if-absent within one daemon on every store. Between two daemons writing one S3 bucket's prefix it holds where the service honours `If-None-Match` on the write that finishes the object: AWS does on both [`PutObject` and `CompleteMultipartUpload`](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html); R2 [documents it on `PutObject`](https://developers.cloudflare.com/r2/api/s3/api/) and, measured against R2 in November 2026, honours it on `CompleteMultipartUpload` too (412) while ignoring it on the one-request `CopyObject` — which is why odu's server-side copy is a multipart copy and is conditional at its completion.
 
 ### Set up an R2 bucket
 
@@ -575,6 +577,9 @@ GET  /cache/<bucket>/<hash>.narinfo
 GET  /cache/<bucket>/nar/<narHash>.<ext>       the object: streamed from a disk store with
                                                Content-Length + Range, or 307 to the S3 store
 PUT  /cache/<bucket>/nar/<narHash>.<ext>         Bearer or Basic; any ext Nix sends
+POST /cache/<bucket>/nar/<file>/upload          where do this NAR's bytes go?
+GET  …/nar/<file>/upload/<id>/parts/<i>         a presigned PUT for one part
+POST …/nar/<file>/upload/<id>/complete          join the parts, confirm the object
 PUT  /cache/<bucket>/<hash>.narinfo             server re-signs with the bucket key
 POST /_odu/v1/buckets/<bucket>/missing          batch "which of these are you missing"
 POST /_odu/v1/buckets/<bucket>/pin              name a closure a WRITE token keeps
@@ -594,6 +599,8 @@ shadow the page's own JavaScript. A bucket called `cache` lives at
 `/cache/cache`.
 
 Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or HTTP Basic with any username and the token as the password. Nix uses the second through curl on every request, uploads included. The `missing` route backs `odu cache push`; it is not part of the Nix protocol. It answers `missing` — the paths to send — and `skippedUpstream`, the paths the bucket will never take because an upstream key signed them, so a push can report the two as different things.
+
+The three `upload` routes are the 2.9 negotiation (cache surface **4.2**): the client asks where a NAR's bytes go, and an S3-backed bucket answers `{mode:"direct", upload, partSize, part}` — part 0's presigned URL at the store, with the rest signed one at a time — while a disk-backed one answers `{mode:"staged"}`, which means the plain `PUT …/nar/<file>` above. Every byte of a direct upload is a part of ONE multipart upload, so completing it leaves the key with no writer odu ever signed for. The narinfo PUT still decides: odu reads the uploaded object back out of the store, verifies it and copies it into place before it records anything. An origin too old to answer the negotiation is refused by name rather than quietly given the old path.
 
 The `pin` route is the one pin verb outside the administrative surface, and it takes write scope rather than admin on purpose: a write token can already keep any closure alive forever by pushing it again, because a stored push renews a path's `lastWanted`. A pin it creates makes that same promise once instead of nightly, and it reads nothing and deletes nothing.
 
