@@ -496,18 +496,12 @@ export const DEFAULT_NAR_PART_BYTES = 64 * 1024 * 1024;
 export const MAX_NAR_PART_BYTES = 96 * 1024 * 1024;
 
 /**
- * THE FLOOR UNDER A DIRECT PART (PLAN 2.9).
- *
- * When the bytes go straight to an S3 store, odu's 64 MiB is no longer a
- * ceiling imposed by a proxy — nothing proxies them — but S3's own rule
- * applies instead: every part of a multipart upload except the last must be
- * at least 5 MiB. So in direct mode `--part-size` becomes a FLOOR the client
- * asks for rather than a ceiling it must stay under, and the store's own
- * part size and this minimum are the other two numbers the maximum is taken
- * of. A NAR smaller than one part is one presigned PUT and no multipart
- * upload at all.
+ * In DIRECT mode (PLAN 2.9) nothing proxies the bytes, so the number above
+ * stops being a ceiling and becomes the FLOOR a client asks for: the part a
+ * store is handed is the larger of its own part size and that ask. S3's own
+ * rule — every part but the last at least 5 MiB — is the STORE's to keep,
+ * and `s3ObjectStore` keeps it; nothing here needs to know the number.
  */
-export const MIN_DIRECT_PART_BYTES = 5 * 1024 * 1024;
 
 /**
  * HOW LONG A PRESIGNED URL LIVES — ten minutes, Attic's number for the same

@@ -55,6 +55,9 @@ const ON_S3: Where = {
 
 const ROOT = "root-token-please";
 const NOW = 1_700_000_000_000;
+/** The harness's clock, movable: the sweep's hour is the one thing in here
+ *  that a test cannot otherwise reach. Reset per test by `beforeEach`. */
+let clock = NOW;
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
 const GLIBC = "/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57";
 
@@ -80,6 +83,7 @@ let scratch: string;
 
 beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), "odu-cache-routes-"));
+  clock = NOW;
 });
 
 afterEach(() => {
@@ -135,7 +139,7 @@ async function harness(
     // The same string the board is at here, as it is on a real deployment.
     publicOrigin: boardOrigin,
     legacyStore: { dump: (path) => store.dump(path) },
-    now: () => NOW,
+    now: () => clock,
     log,
     stores: new Map([
       ...localStores(scratch),
@@ -1975,6 +1979,54 @@ describe("a direct upload", () => {
       expect(narinfo).toContain(`URL: nar/${twin.narHash.replace(/^sha256:/, "")}.nar`);
       expect(narinfo).toContain(`NarHash: ${twin.narHash}`);
     }
+    await h.dispose();
+  });
+
+  it("does not reap an upload that is still moving, however long it takes", async () => {
+    // THE SWEEP'S CLOCK IS LITTER, a push's is PROGRESS. A closure big enough
+    // to upload for more than the hour would be reaped mid-flight if the
+    // record aged from when it BEGAN — the temp object deleted and the
+    // multipart upload aborted under a client still sending parts, which no
+    // number of retries can get past. Asking for a part is the sign of life
+    // that keeps the record alive, exactly as the staged path's marker is.
+    const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
+    const payload = nar("a NAR that took its time");
+    const file = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const begun = await h.fetch(`/main/nar/${file}/upload`, {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      body: "",
+    });
+    const plan = (await begun.json()) as { upload: string; part: string };
+
+    // Fifty minutes in, the client asks for its next part…
+    clock += 50 * 60 * 1000;
+    const signed = await h.fetch(
+      `/main/nar/${file}/upload/${plan.upload}/parts/1`,
+      bearer(h.tokens.write),
+    );
+    expect(signed.status).toBe(200);
+    // …and twenty more minutes later — over the hour from BEGIN — another
+    // push runs the sweep. The upload is an hour young by its last part.
+    clock += 20 * 60 * 1000;
+    const other = await h.fetch("/main/nar/other.nar.zst/upload", {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      body: "",
+    });
+    expect(other.status).toBe(200);
+
+    // IT IS STILL THERE: the part lands, the completion joins it, and the
+    // narinfo records the path.
+    const put = await fetch(plan.part, { method: "PUT", body: body(payload.bytes) });
+    expect(put.status).toBe(200);
+    const complete = await h.fetch(`/main/nar/${file}/upload/${plan.upload}/complete`, {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      body: JSON.stringify({ parts: [{ index: 0, etag: put.headers.get("etag") }] }),
+    });
+    expect(complete.status).toBe(200);
+    expect((await upload(h.fetch, h.tokens.write, GLIBC, payload, { skipNar: true })).status).toBe(200);
     await h.dispose();
   });
 });

@@ -136,11 +136,11 @@ export type WriteDecision = "stored" | "exists" | "conflict" | "source_changed";
 
 /** What a server-side copy writes beside the bytes. The facts are the
  *  CALLER'S — a copy moves bytes it never read, so the store cannot learn
- *  them, and whoever proved them says what they are. */
+ *  them, and whoever proved them says what they are. A copy is PUT-IF-ABSENT
+ *  like every other write this interface makes visible: `exists` keeps what
+ *  is there, and no caller has ever wanted the other behaviour. */
 export interface CopyOptions extends PutOptions {
   readonly facts: ObjectFacts;
-  /** Write only if the destination is absent (`If-None-Match: *`). */
-  readonly ifAbsent?: boolean;
   /**
    * COPY THESE BYTES OR NONE: the source's {@link StoredObject.etag} as the
    * caller read it, sent as `x-amz-copy-source-if-match`. A source rewritten
@@ -230,14 +230,13 @@ export interface ObjectStore {
   /** A URL that writes part `index` (0-based) of `uploadId`, for the next
    *  `expiresSeconds`. The writer keeps the ETag the store answers. */
   presignPart?(key: string, uploadId: string, index: number, expiresSeconds: number): URL;
-  /** Make the uploaded parts the object at `key`. `ifAbsent` sends
-   *  `If-None-Match: *`, which not every service honours on a completion
-   *  (see the module header). */
+  /** Make the uploaded parts the object at `key` — whatever is there. A
+   *  direct upload's key is the writer's own temp name, so there is nothing
+   *  to claim; `copy` is the call that makes an object and decides a race. */
   completeUpload?(
     key: string,
     uploadId: string,
     parts: readonly UploadedPart[],
-    options?: { ifAbsent?: boolean },
   ): Promise<WriteDecision>;
   /** Drop an upload and its parts. Idempotent: an upload that is not there
    *  is not an error. */
@@ -245,6 +244,32 @@ export interface ObjectStore {
   /** Copy `from` to `to` inside the store — the bytes never leave it — with
    *  `options.facts` recorded on the destination. */
   copy?(from: string, to: string, options: CopyOptions): Promise<WriteDecision>;
+}
+
+/**
+ * A STORE THAT TAKES ITS OWN BYTES, or null — the one question a caller asks
+ * of the direct-upload group, answered beside the interface that declares it.
+ *
+ * The group is ALL-OR-NOTHING, so this is where "which members are in it"
+ * lives: a caller holds the narrowed value and never repeats the list. The
+ * part size comes with it, which is why nobody outside this package needs to
+ * know S3's own 5 MiB floor — `s3ObjectStore` already holds its `partSize`
+ * at or above it.
+ */
+export type DirectStore = ObjectStore &
+  Required<
+    Pick<ObjectStore, "partSize" | "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy">
+  >;
+
+export function directUploads(store: ObjectStore): DirectStore | null {
+  const offered =
+    store.partSize !== undefined &&
+    store.createUpload !== undefined &&
+    store.presignPart !== undefined &&
+    store.completeUpload !== undefined &&
+    store.abortUpload !== undefined &&
+    store.copy !== undefined;
+  return offered ? (store as DirectStore) : null;
 }
 
 /** A KEY HOLDING BYTES THIS STORE DID NOT RECORD: an S3 object with no

@@ -585,29 +585,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
-    it("refuses a completion onto a key that is taken, when it is asked to", async () => {
-      const { store, dispose } = await make();
-      const direct = directly(store);
-      if (direct === null) {
-        await dispose();
-        return;
-      }
-      const key = "main/nar/taken.nar.zst";
-      const first = bytes("the object that got there first");
-      await store.put(key, streamOf([first]));
-      const uploadId = await direct.createUpload(key);
-      const parts = await uploadParts(direct, key, uploadId, [patterned(2_500, 18)]);
-      // `ifAbsent` IS A PRECONDITION ON THE COMPLETION (`If-None-Match: *`),
-      // which not every service honours there — versitygw 1.7.0 does, and
-      // answers `412`, which is this `exists`.
-      expect(await direct.completeUpload(key, uploadId, parts, { ifAbsent: true })).toBe("exists");
-      expect(new TextDecoder().decode((await read(store, key)) as Uint8Array)).toBe(
-        "the object that got there first",
-      );
-      await direct.abortUpload(key, uploadId);
-      await dispose();
-    });
-
     it("refuses a completion whose parts are not 0..n-1", async () => {
       const { store, dispose } = await make();
       const direct = directly(store);
@@ -663,14 +640,14 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await uploadedTemp(direct, source, payload);
       const facts = factsOf(payload);
       const destination = "main/nar/copied.nar.zst";
-      expect(await direct.copy(source, destination, { facts, ifAbsent: true })).toBe("stored");
+      expect(await direct.copy(source, destination, { facts })).toBe("stored");
       expect(await store.facts(destination)).toEqual(facts);
       expect(factsOf((await read(store, destination)) as Uint8Array)).toEqual(facts);
       // ONTO A KEY THAT IS TAKEN: the copy is refused and the object there
       // is the one that was there.
       const other = patterned(5_000, 17);
       await uploadedTemp(direct, `main/nar/${TEMP}other`, other);
-      expect(await direct.copy(`main/nar/${TEMP}other`, destination, { facts: factsOf(other), ifAbsent: true })).toBe(
+      expect(await direct.copy(`main/nar/${TEMP}other`, destination, { facts: factsOf(other) })).toBe(
         "exists",
       );
       expect(await store.facts(destination)).toEqual(facts);
@@ -709,7 +686,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       expect(
         await direct.copy(source, destination, {
           facts: factsOf(proved),
-          ifAbsent: true,
           sourceIfMatch: version,
         }),
       ).toBe("source_changed");
@@ -723,7 +699,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       expect(
         await direct.copy(source, destination, {
           facts: factsOf(swapped),
-          ifAbsent: true,
           sourceIfMatch: now?.etag,
         }),
       ).toBe("stored");

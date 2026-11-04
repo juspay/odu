@@ -449,7 +449,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         });
         if (outcome.ok) {
           pushed += 1;
-          mode = outcome.mode ?? mode;
+          mode = outcome.mode;
           say(`✅ ${storePath} stored`);
           continue;
         }
@@ -639,7 +639,7 @@ function asError(err: unknown): Error {
 }
 
 type UploadOutcome =
-  | { ok: true; mode: UploadMode | null }
+  | { ok: true; mode: UploadMode }
   | { ok: false; message: string };
 
 type NarUpload =
@@ -864,7 +864,11 @@ async function uploadDirect(
         return {
           ok: false,
           message: `signing part ${index + 1} answered ${signed.status}: ${(await signed.text()).trim()}`,
-          retry: true,
+          // THIS IS ODU ANSWERING, not the store, so the shared rule decides
+          // — plus the one status whose meaning odu defines here: a `404` is
+          // an upload this daemon no longer holds, and beginning again is
+          // exactly its answer. A `403` is a token that will not improve.
+          retry: signed.status === 404 || worthRetrying(signed.status),
         };
       }
       ({ url } = (await signed.json()) as { url: string });
@@ -1007,24 +1011,28 @@ async function uploadOne(
   options: { partSize: number },
 ): Promise<UploadOutcome> {
   let lastMessage = "no attempt was made";
-  let mode: UploadMode | null = null;
+
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
   // THIS PATH'S OWN PARTS (since the cache row's 2.4): another pusher of the same path, at
   // another zstd level, cannot have its parts joined into ours. ONE session for
   // every attempt, so a retry overwrites its own parts rather than abandoning
   // them to the hour-long sweep. An older server ignores the header.
   const session = randomUUID();
+  // WHICH MODE A BUCKET TAKES is a fact about its STORE: it changes when the
+  // bucket is moved between stores, twice in its life, not between attempts.
+  // A DIRECT upload's handle is per attempt, though — a retry is a new upload
+  // id, which is what makes an expired presign or a restarted daemon a retry
+  // rather than a refusal — so only that mode asks again.
+  let plan = await beginUpload(base, headers, narName, options.partSize);
   for (let attempt = 0; attempt < attempts; attempt++) {
-    // THE NEGOTIATION IS PER ATTEMPT, not per path: a direct upload that
-    // failed is retried by BEGINNING AGAIN, which is what makes an expired
-    // presign or a daemon that restarted a retry rather than a refusal.
-    const plan = await beginUpload(base, headers, narName, options.partSize);
+    if (attempt > 0 && ("error" in plan || plan.mode === "direct")) {
+      plan = await beginUpload(base, headers, narName, options.partSize);
+    }
     if ("error" in plan) {
       lastMessage = plan.error;
       if (!plan.retry) break;
       continue;
     }
-    mode = plan.mode;
     const uploaded =
       plan.mode === "direct"
         ? await uploadDirect(base, headers, entry, platform, say, plan, narName)
@@ -1055,7 +1063,7 @@ async function uploadOne(
     // 200 IS STORED, and it is the only answer that is. Any other status —
     // a success code this pusher does not know included — is a refusal like any
     // other, said with the server's own words and not repeated.
-    if (infoResponse.status === 200) return { ok: true, mode };
+    if (infoResponse.status === 200) return { ok: true, mode: plan.mode };
     const said = await infoResponse.text();
     lastMessage = `narinfo upload answered ${infoResponse.status}: ${said}`;
     if (infoResponse.ok || !worthRetrying(infoResponse.status)) break;

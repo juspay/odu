@@ -383,7 +383,7 @@ function partsOf(body: string): readonly UploadedPart[] | null {
  * THE PART SIZE A CLIENT ASKED FOR, from a `begin`'s body: a number, `null`
  * when it asked for nothing (an empty body, or a document without the field),
  * `undefined` when what it sent is not a part size. In DIRECT mode this is a
- * floor, not a ceiling — see `MIN_DIRECT_PART_BYTES`.
+ * floor, not a ceiling: the store's own part size is the other half of it.
  */
 function partSizeOf(body: string): number | null | undefined {
   const text = body.trim();

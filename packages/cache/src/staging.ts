@@ -49,7 +49,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { basename, join, relative } from "node:path";
-import { type ObjectStore, TEMP, type UploadedPart } from "@odu/objects";
+import { type DirectStore, directUploads, type ObjectStore, TEMP, type UploadedPart } from "@odu/objects";
 import { type KeptFile, keptFileOf, objectFactsOf } from "./fileHash";
 import { writeAll } from "./sink";
 import { verifyNarFile, verifyNarStream } from "./store";
@@ -66,7 +66,7 @@ import {
   storePathHash,
 } from "./narinfo";
 import { newChain, type Chain, serial } from "./serial";
-import { MIN_DIRECT_PART_BYTES, PRESIGN_SECONDS } from "./surface";
+import { PRESIGN_SECONDS } from "./surface";
 
 /** A write in progress. `commit` publishes it under the name the narinfo will
  *  name; `discard` removes it. */
@@ -382,24 +382,13 @@ export function createStaging(deps: StagingDeps): Staging {
   // The record is this DAEMON's, not the database's. An upload that outlives
   // a restart is lost on purpose: the client is told (404) and begins again,
   // which costs it one NAR and spares a persisted table whose only content is
-  // a minute of other people's intentions. The temp objects such an upload
-  // leaves are what the store's own hourly sweep is for.
-
-  /** A store that takes its own bytes. The capability is all-or-nothing
-   *  (`@odu/objects`), so it is asked once and the narrowed value is what
-   *  every caller holds. */
-  type DirectStore = ObjectStore &
-    Required<
-      Pick<ObjectStore, "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy">
-    >;
-  const directStore = (store: ObjectStore): DirectStore | null =>
-    store.createUpload !== undefined &&
-    store.presignPart !== undefined &&
-    store.completeUpload !== undefined &&
-    store.abortUpload !== undefined &&
-    store.copy !== undefined
-      ? (store as DirectStore)
-      : null;
+  // a minute of other people's intentions. The temp objects and open uploads
+  // such a restart leaves are the BOOT sweep's, which runs before the mount
+  // and so cannot race a live push (`cache.ts`'s `boot`).
+  //
+  // Which stores can do this at all is `@odu/objects`' question, asked once
+  // through `directUploads` — the list of members lives with the interface
+  // that declares them, not here.
 
   interface DirectUpload {
     readonly id: string;
@@ -420,7 +409,16 @@ export function createStaging(deps: StagingDeps): Staging {
     /** The store's multipart upload, opened when this record was made. */
     readonly upload: string;
     readonly partSize: number;
-    readonly began: number;
+    /**
+     * WHEN THIS UPLOAD LAST MOVED — not when it began. The sweep's clock is
+     * LITTER (an hour since anybody touched a thing), and a push's clock is
+     * PROGRESS (a part at a time, as fast as the client's link allows). A
+     * closure big enough to take longer than the hour would otherwise be
+     * reaped mid-flight, deleting the temp object under a client still
+     * sending parts. The staged path keeps the same distinction with its
+     * `.uploading` marker.
+     */
+    touched: number;
   }
 
   /** Uploads in flight, by their handle. */
@@ -649,7 +647,7 @@ export function createStaging(deps: StagingDeps): Staging {
     // own sweep would reach the bytes eventually; this reaches the RECORD,
     // which is this process's and which nothing else would ever free.
     for (const direct of [...directs.values()]) {
-      if (direct.began >= cutoff) continue;
+      if (direct.touched >= cutoff) continue;
       await dropUpload(direct);
       joined.delete(directKey(direct.bucket, direct.file));
     }
@@ -910,7 +908,6 @@ export function createStaging(deps: StagingDeps): Staging {
     try {
       const decided = await direct.store.copy(direct.key, key, {
         facts: objectFactsOf(file),
-        ifAbsent: true,
         contentType: NAR_CONTENT_TYPE,
         cacheControl: NAR_CACHE_CONTROL,
         sourceIfMatch: version,
@@ -1021,20 +1018,20 @@ export function createStaging(deps: StagingDeps): Staging {
     },
 
     uploadMode(bucket) {
-      return directStore(storeOf(bucket)) === null ? "staged" : "direct";
+      return directUploads(storeOf(bucket)) === null ? "staged" : "direct";
     },
 
     async beginDirect(bucket, file, floor) {
       if (!isStagedFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
       await sweep();
-      const store = directStore(storeOf(bucket));
+      const store = directUploads(storeOf(bucket));
       if (store === null) return { mode: "staged" };
-      // THE PART SIZE IS THE LARGEST OF THREE: what S3 demands of every part
-      // but the last, what this store uses for its own puts, and what the
-      // client asked for. In direct mode `--part-size` is a FLOOR — there is
-      // no proxy body limit to stay under, and a part too SMALL is the only
-      // one a store refuses.
-      const partSize = Math.max(MIN_DIRECT_PART_BYTES, store.partSize ?? 0, floor ?? 0);
+      // THE PART SIZE IS THE LARGER OF TWO: the store's own — never below
+      // what S3 demands of every part but the last, which is the store's
+      // business and not this file's — and what the client asked for. In
+      // direct mode `--part-size` is a FLOOR: there is no proxy body limit
+      // to stay under, and a part too SMALL is the only one a store refuses.
+      const partSize = Math.max(store.partSize, floor ?? 0);
       const key = `${bucket.name}/nar/${TEMP}${randomUUID()}`;
       const direct: DirectUpload = {
         id: randomUUID(),
@@ -1044,7 +1041,7 @@ export function createStaging(deps: StagingDeps): Staging {
         store,
         upload: await store.createUpload(key),
         partSize,
-        began: now(),
+        touched: now(),
       };
       directs.set(direct.id, direct);
       return {
@@ -1066,6 +1063,9 @@ export function createStaging(deps: StagingDeps): Staging {
       if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_PARTS) {
         return { ok: false, status: 400, message: `"${index}" is not a part index` };
       }
+      // STILL MOVING: asking for a part is this upload's sign of life, and
+      // what keeps the sweep's litter clock off a push that is simply long.
+      direct.touched = now();
       return {
         ok: true,
         url: direct.store.presignPart(direct.key, direct.upload, index, PRESIGN_SECONDS).href,

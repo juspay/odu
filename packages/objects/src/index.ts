@@ -4,6 +4,8 @@
 export {
   type ByteRange,
   type CopyOptions,
+  directUploads,
+  type DirectStore,
   factsCounter,
   type ObjectBody,
   type ObjectFacts,

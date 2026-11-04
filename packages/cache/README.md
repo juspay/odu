@@ -195,9 +195,10 @@ store they no longer do (PLAN 2.9, cache surface **4.2**).
 
 - **The store decides, and the client is told.** `POST …/nar/<file>/upload`
   answers `{mode:"direct", upload, partSize, part}` or `{mode:"staged"}`, from
-  `Staging.uploadMode(bucket)` — which asks the bucket's `ObjectStore` whether
-  it offers the direct-upload capability (`createUpload` and its four
-  siblings; all-or-nothing, like `presignGet` for reads). No route ever peeks
+  `Staging.uploadMode(bucket)` — which asks `@odu/objects`' own
+  `directUploads(store)` whether this bucket's store takes its own writes
+  (all-or-nothing, like `presignGet` for reads, and the member list lives
+  with the interface that declares it). No route ever peeks
   at a store, and the same answer is the row's `writesTo`.
 - **One temp key per upload, and one way into it.** The client writes
   `<bucket>/nar/.tmp-<uuid>` as the PARTS of a single multipart upload odu
@@ -205,9 +206,11 @@ store they no longer do (PLAN 2.9, cache surface **4.2**).
   no extra round trip, and the rest come from `GET …/upload/<id>/parts/<i>`.
   Each ETag is handed back to `POST …/upload/<id>/complete`, which joins them
   and HEADs the object: a 200 there means odu saw the bytes land. `partSize`
-  is the largest of S3's 5 MiB floor, the store's own part size and the
-  client's `--part-size`, which in this mode is a floor rather than a proxy's
-  ceiling.
+  is the larger of the store's own part size — which is where S3's 5 MiB
+  floor is kept — and the client's `--part-size`, which in this mode is a
+  floor rather than a proxy's ceiling. Asking for a part also RENEWS the
+  upload's record, so the hour-long sweep reaps only uploads nobody is
+  moving, never a closure that is simply large.
 - **The narinfo is still the proof.** `proveDirect` streams the temp object
   back out of the store, runs the SAME `verifyNar` a staged file gets
   (`verifyNarStream`, never spooled to disk), and only then — under the write

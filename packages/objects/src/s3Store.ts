@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { S3Client } from "bun";
 import {
+  type CopyOptions,
   factsCounter,
   isTemp,
   type ObjectFacts,
@@ -111,22 +112,10 @@ const conflicted = (key: string, tries: number): PutOutcome => ({
   ok: false,
   refusal: { kind: "conflict", key, tries },
 });
-/** How one conditional request was decided. `source_changed` is a COPY's
- *  alone: the source carried a precondition and no longer matches it. */
-type Decided = "won" | "lost" | "conflict" | "source_changed";
-const decidedBy = (response: Response): Decided =>
-  response.status === 412 ? "lost" : response.status === 409 ? "conflict" : "won";
-
-/** The same answers in the interface's words, for a write whose bytes this
- *  process is not holding and so cannot send again. */
-const asDecision = (decided: Decided): WriteDecision =>
-  decided === "won"
-    ? "stored"
-    : decided === "lost"
-      ? "exists"
-      : decided === "source_changed"
-        ? "source_changed"
-        : "conflict";
+/** How one conditional request was decided, in the interface's own words
+ *  ({@link WriteDecision}) — there is no second vocabulary for it. */
+const decidedBy = (response: Response): WriteDecision =>
+  response.status === 412 ? "exists" : response.status === 409 ? "conflict" : "stored";
 
 /**
  * THE ETAGS OF A DIRECT UPLOAD'S PARTS, in part order. The writer reports what
@@ -356,14 +345,14 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       () => {},
     );
 
-  /** Complete an upload: `lost` on `412`, and `conflict` on `409` — after
+  /** Complete an upload: `exists` on `412`, and `conflict` on `409` — after
    *  which AWS wants the upload STARTED AGAIN, never completed again. */
   async function complete(
     key: string,
     uploadId: string,
     etags: readonly string[],
     conditional: boolean,
-  ): Promise<Decided> {
+  ): Promise<WriteDecision> {
     const body =
       "<CompleteMultipartUpload>" +
       etags.map((etag, at) => `<Part><PartNumber>${at + 1}</PartNumber><ETag>${etag}</ETag></Part>`).join("") +
@@ -374,43 +363,39 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       body,
     });
     const text = await response.text();
-    const decided = conditional ? decidedBy(response) : "won";
-    if (decided !== "won") return decided;
+    const decided = conditional ? decidedBy(response) : "stored";
+    if (decided !== "stored") return decided;
     // A COMPLETE CAN FAIL WITH 200: S3 sends the status before it knows, and
     // reports the failure as an `<Error>` body.
     if (!response.ok || text.includes("<Error>")) {
       throw new S3Failure(`CompleteMultipartUpload ${key}`, response, text);
     }
-    return "won";
+    return "stored";
   }
 
   /**
    * MAKE `tempKey`'s bytes the object at `key`, with `facts` as metadata —
-   * server-side, part by part. `conditional` sends the `If-None-Match: *`
-   * every other write of this store sends; a caller that has already decided
-   * the key is its own (a `copy` the caller asked for unconditionally) clears
-   * it. The case that needs the copy at all is a write whose facts were not
-   * known up front: metadata is fixed when an upload is created, and the hash
-   * is known only at the end — a multipart put's, or a direct upload's, which
-   * this process never read at all.
+   * server-side, part by part, and ALWAYS put-if-absent, like every other
+   * write this store makes visible. The case that needs the copy at all is a
+   * write whose facts were not known up front: metadata is fixed when an
+   * upload is created, and the hash is known only at the end — a multipart
+   * put's, or a direct upload's, which this process never read at all.
    *
-   * `sourceVersion` BINDS IT TO BYTES SOMEBODY MEASURED. Every part is its own
-   * request and S3 resolves the source afresh for each, so a source that can
-   * still be written — a direct upload's temp key, whose presigned PUT the
-   * client holds for ten minutes — could be a different object by the time it
-   * is copied, and the destination would carry the facts of bytes it does not
-   * hold. With it, each `UploadPartCopy` carries
+   * `options.sourceIfMatch` BINDS IT TO BYTES SOMEBODY MEASURED. Every part
+   * is its own request and S3 resolves the source afresh for each, so a
+   * source some other writer can reach could be a different object by the
+   * time it is copied, and the destination would carry the facts of bytes it
+   * does not hold. With it, each `UploadPartCopy` carries
    * `x-amz-copy-source-if-match` and a `412` ends the copy as
-   * `source_changed`.
+   * `source_changed` — on the services that implement it (not R2; see the
+   * module header).
    */
   async function copyInto(
     key: string,
     tempKey: string,
     facts: ObjectFacts,
-    options: PutOptions | undefined,
-    conditional: boolean,
-    sourceVersion?: string,
-  ): Promise<Decided> {
+    options?: CopyOptions,
+  ): Promise<WriteDecision> {
     const uploadId = await createUpload(key, { ...metaOf(facts), ...headersOf(options) });
     try {
       const etags: string[] = [];
@@ -421,7 +406,9 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
           headers: {
             "x-amz-copy-source": `/${target.bucket}/${tempKey}`,
             "x-amz-copy-source-range": `bytes=${start}-${end}`,
-            ...(sourceVersion === undefined ? {} : { "x-amz-copy-source-if-match": sourceVersion }),
+            ...(options?.sourceIfMatch === undefined
+              ? {}
+              : { "x-amz-copy-source-if-match": options.sourceIfMatch }),
           },
         });
         const body = await response.text();
@@ -435,8 +422,8 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         if (etag === null) throw new S3Failure(`UploadPartCopy ${key}`, response, body);
         etags.push(etag);
       }
-      const decided = await complete(key, uploadId, etags, conditional);
-      if (decided !== "won") await abort(key, uploadId);
+      const decided = await complete(key, uploadId, etags, true);
+      if (decided !== "stored") await abort(key, uploadId);
       return decided;
     } catch (err) {
       await abort(key, uploadId);
@@ -492,11 +479,11 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         });
         const text = await response.text();
         const decided = decidedBy(response);
-        if (decided === "won" && !response.ok) throw new S3Failure(`PUT ${key}`, response, text);
+        if (decided === "stored" && !response.ok) throw new S3Failure(`PUT ${key}`, response, text);
         return decided;
       });
       if (decided === "conflict") return conflicted(key, CONFLICT_TRIES);
-      return decided === "won" ? { ok: true, facts } : exists(key);
+      return decided === "stored" ? { ok: true, facts } : exists(key);
     }
 
     // MULTIPART. With the facts promised up front the upload goes straight to
@@ -576,7 +563,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     }
     if (direct) {
       const decided = await complete(key, uploadId, etags, true);
-      if (decided === "won") return { ok: true, facts };
+      if (decided === "stored") return { ok: true, facts };
       await abort(key, uploadId);
       // A CONFLICTED UPLOAD must be started again: `put` does that for a body
       // it can read again, and tells a stream's caller.
@@ -586,9 +573,9 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     await complete(uploadKey, uploadId, etags, false);
     try {
       // The temp object stays put, so a conflicted copy is simply started again.
-      const decided = await untilDecided(() => copyInto(key, uploadKey, facts, options, true));
+      const decided = await untilDecided(() => copyInto(key, uploadKey, facts, { ...options, facts }));
       if (decided === "conflict") return conflicted(key, CONFLICT_TRIES);
-      return decided === "won" ? { ok: true, facts } : await exists(key);
+      return decided === "stored" ? { ok: true, facts } : await exists(key);
     } finally {
       await deleteKey(uploadKey).catch(() => {});
     }
@@ -808,37 +795,27 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
 
     // A COMPLETION MAKES AN OBJECT VISIBLE at the key, so it queues on that
     // key's writer chain exactly as a put does. `async`, so a part set this
-    // refuses comes back as a rejection like every other failure here.
-    async completeUpload(key, uploadId, parts, options) {
+    // refuses comes back as a rejection like every other failure here. No
+    // precondition: a direct upload's key is the writer's own temp name, and
+    // `copy` is the call that claims a key somebody else might want.
+    async completeUpload(key, uploadId, parts) {
       const etags = etagsInOrder(key, parts);
-      return oneWriter(key, async () =>
-        asDecision(await complete(safeKey(key), uploadId, etags, options?.ifAbsent ?? false)),
-      );
+      return oneWriter(key, () => complete(safeKey(key), uploadId, etags, false));
     },
 
     abortUpload: (key, uploadId) => abort(safeKey(key), uploadId),
 
     // THE BYTES NEVER LEAVE THE SERVICE: UploadPartCopy, part by part, with
-    // the caller's facts as the destination's metadata. The source stays
-    // where it is, so a `409` is simply copied again — and a copy still
-    // undecided after the last try is a `conflict`, as a put's would be. A
-    // `sourceIfMatch` holds every one of those parts to the version the
-    // caller read, and a source that moved is NOT retried: copying it again
-    // would only find the new bytes again.
+    // the caller's facts as the destination's metadata, put-if-absent like
+    // every other write that makes an object. The source stays where it is,
+    // so a `409` is simply copied again — and a copy still undecided after
+    // the last try is a `conflict`, as a put's would be. A `sourceIfMatch`
+    // holds every one of those parts to the version the caller read, and a
+    // source that moved is NOT retried: copying it again would only find the
+    // new bytes again.
     copy: (from, to, options) =>
-      oneWriter(to, async () =>
-        asDecision(
-          await untilDecided(() =>
-            copyInto(
-              safeKey(to),
-              safeKey(from),
-              options.facts,
-              options,
-              options.ifAbsent ?? false,
-              options.sourceIfMatch,
-            ),
-          ),
-        ),
+      oneWriter(to, () =>
+        untilDecided(() => copyInto(safeKey(to), safeKey(from), options.facts, options)),
       ),
 
     // NO HEAD: the first window's GET answers whether the object is there
