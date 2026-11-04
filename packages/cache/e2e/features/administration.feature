@@ -222,7 +222,7 @@ Feature: An admin administers the cache from the board
     And I pin the first path as "release"
     Then the cache says "Pinned release"
     When I set the dry run retention to "0" days
-    And I press "Dry run"
+    And I press "Dry run at 0 days"
     Then the dry run says "At 0 days' retention"
     And the dry run says "would take 1 path"
     And the dry run names the unpinned path

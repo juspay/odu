@@ -1133,6 +1133,23 @@
     border-right: 1px solid var(--line);
   }
 
+  /* IT STAYS PUT WHILE A SCREEN SCROLLS. The rail is "what is this server
+     doing" — which rows exist, what each is saying, who you are — and the
+     counts on it are the reason a person leaves a page. A bucket page is
+     hundreds of paths long, so a rail that scrolled away took the way out
+     with it. Wide screens only: below that the rail is a band across the
+     top (see `.app`), and a band pinned over a phone screen is a band
+     eating a phone screen. */
+  @media (min-width: 52rem) {
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100dvh;
+      overflow: auto;
+      scrollbar-width: thin;
+    }
+  }
+
   .sidebar-head {
     display: flex;
     align-items: center;

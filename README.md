@@ -89,7 +89,7 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 | Delete a bucket: its objects first, then its rows, pins and tokens. Refused while it has a domain bound or a move in flight | `odu surface cache bucket_delete` | a bucket's **Delete this bucket** |
 | Keep a closure out of garbage collection, see what each pin holds, let one go | `odu surface cache pin_create\|pin_list\|pin_delete` | a bucket's **Pins** |
 | Evict what retention expired and nothing references or pins — the daily pass, asked for now | `odu surface cache gc_run` | a bucket's **Run GC** |
-| What the next collection would take, without taking it; `retentionDays` plans at a retention of your own, changing nothing | `odu surface cache gc_plan` | a bucket's **Dry run**, and **dry run retention days** beside it |
+| What the next collection would take, without taking it; `retentionDays` plans at a retention of your own, changing nothing | `odu surface cache gc_plan` | a bucket's **Dry run**, and the **retention** field beside it |
 | Storage and reads | `odu surface cache stats_read` | a bucket's facts line, from its own published row |
 | The tunnel and the names it carries | `odu surface cloudflare status_read` | **Tunnel** |
 

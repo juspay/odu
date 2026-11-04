@@ -23,6 +23,123 @@
   .tab-host { min-width: 0; }
   .tab-host[hidden] { display: none; }
 
+  /* ── a bucket's paths, as a table ─────────────────────────────────────────
+   *
+   * SIX FACTS ABOUT A HUNDRED PATHS IS A TABLE. The list this replaced drew
+   * each path as a grey pill holding the whole store path and a line of
+   * facts under it: nothing lined up, so nothing could be compared, and a
+   * screen of one package's six builds read as six unrelated things.
+   *
+   * The figures a reader compares down the column are right-aligned and
+   * tabular; the name is the one column that may take the room it needs.
+   */
+  .paths-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+    table-layout: auto;
+  }
+
+  .paths-table th {
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--line);
+    color: var(--quiet);
+    font: 500 0.72rem var(--mono);
+    letter-spacing: 0.06em;
+    text-align: left;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .paths-table td {
+    padding: 0.4rem 1rem;
+    border-top: 1px solid var(--line);
+    vertical-align: baseline;
+  }
+
+  /* RIGHT, AND TABULAR: a column of sizes is read by its digits lining up. */
+  .paths-table .numeric {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .paths-table .path-name {
+    width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .paths-table .name { color: var(--ink); font-weight: 600; }
+
+  /* THE ORDER IS CHOSEN IN THE HEADER, so the header is a button — not a
+     cell with a click handler, which a keyboard never reaches. */
+  .paths-table th .sort {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+  }
+
+  .paths-table th .sort:hover { color: var(--ink); }
+
+  /* WHICH WAY IT IS SORTED. The arrow is a span the markup marks
+     `aria-hidden`, not generated content: CSS `content` lands IN the
+     button's accessible name, so a header pressed once would be a different
+     control from the one a reader pressed. `aria-sort` on the cell is the
+     announcement; this is the drawing of it. */
+  .paths-table th .arrow { margin-left: 0.25rem; }
+  .paths-table th[aria-sort="ascending"],
+  .paths-table th[aria-sort="descending"] { color: var(--ink); }
+
+  /* A PACKAGE'S VERSIONS, open. The name column is empty on these rows, so
+     the hash is what the eye follows down. */
+  .paths-table .version-row td { color: var(--muted); }
+  .paths-table .version-row .path-hash { padding-left: 2rem; }
+
+  .paths-table .disclose,
+  .paths-table .hash {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .paths-table .disclose::before {
+    content: "▸";
+    color: var(--quiet);
+    font-size: 0.7rem;
+  }
+
+  .paths-table .disclose[aria-expanded="true"]::before { content: "▾"; }
+
+  /* HOW MANY BUILDS OF THIS PACKAGE ARE IN THE BUCKET — the fact that makes
+     a grouped row worth reading. */
+  .paths-table .versions {
+    color: var(--quiet);
+    font: 500 0.72rem var(--mono);
+    white-space: nowrap;
+  }
+
+  /* EIGHT CHARACTERS, and the whole path a click away (and in `title`). */
+  .paths-table .hash {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--quiet);
+  }
+
+  .paths-table .hash:hover { color: var(--ink); }
+
   /* ── a bucket's pins ──────────────────────────────────────────────────────
    *
    * A PIN IS THREE FACTS AND A LIST OF ROOTS, and that is why it is not the
@@ -118,5 +235,32 @@
     font: 500 0.72rem var(--mono);
     letter-spacing: 0.08em;
     text-transform: uppercase;
+  }
+
+  /* ARMED OR NOT, SAID IN PAINT. The gate is the whole control here — the
+     button does nothing until the bucket's name has been typed back — and a
+     red outline that looks the same either way makes a person press a dead
+     button to find out. So: grey and outlined while it cannot fire, SOLID
+     red the moment it can. (`.btn-danger` stays outlined everywhere else on
+     the board; "Cancel run" is a warning, this one ends a bucket.) */
+  .danger-zone .btn-danger:disabled {
+    border-color: var(--line-strong);
+    background: transparent;
+    color: var(--muted);
+    opacity: 1;
+  }
+
+  .danger-zone .btn-danger:not(:disabled) {
+    border-color: var(--red);
+    background: var(--red);
+    /* The canvas, not a fixed white: the red is lighter in the dark theme,
+       so the readable label there is the dark one. */
+    color: var(--canvas);
+    font-weight: 600;
+  }
+
+  .danger-zone .btn-danger:not(:disabled):hover {
+    background: color-mix(in srgb, var(--red) 85%, black);
+    color: var(--canvas);
   }
 }

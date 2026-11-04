@@ -54,6 +54,45 @@ Feature: The cache is a row of the board
     Then no path is listed
     And the page says nothing matches
 
+  # ONE ROW PER PACKAGE, because a bucket is mostly one package over and over:
+  # six builds of `odu-base-0.1.0` under six hashes is ONE thing a reader cares
+  # about, with a number beside it. The versions are a click away, and the
+  # switch beside the filter says which view is on.
+  Scenario: Builds of one package are one row, and open to the versions
+    Given a bucket with three builds of one package pushed from the CLI
+    When I open that bucket
+    Then that package is one row saying "3 versions"
+    And the paths table holds 1 rows
+    When I expand that package
+    Then the paths table holds 3 version rows
+    When I press "grouped by name"
+    Then the paths table holds 3 rows
+    And there should be no page errors
+
+  # THE ORDER IS CHOSEN IN THE HEADER, and the header says which way round it
+  # is. The large path is pushed FIRST, so the default order (newest at the
+  # top) is not already the answer a sort by size gives.
+  Scenario: The table sorts by size, and says which way
+    Given a bucket with a large and a small path pushed from the CLI
+    When I open that bucket
+    And I sort the paths by "size"
+    Then the "large" path is first
+    And the "size" column says it is sorted "descending"
+    When I sort the paths by "size"
+    Then the "small" path is first
+    And the "size" column says it is sorted "ascending"
+    And there should be no page errors
+
+  # A PAGE IS A HUNDRED PATHS and the rest are a button — the paging the row
+  # answers with, read through the table rather than around it.
+  Scenario: A bucket with more than one page offers the next hundred
+    Given a bucket with 101 paths pushed from the CLI
+    When I open that bucket
+    Then the paths table holds 100 rows
+    When I press "Show 100 more"
+    Then the paths table holds 101 rows
+    And there should be no page errors
+
   # THE SUBSTITUTER URL IN A BROWSER. It used to render the board's Runs view —
   # the SPA shell at a path it was never routed for — because a bucket's page is
   # server-rendered and `/cache/<bucket>` matched no protocol file. It is the

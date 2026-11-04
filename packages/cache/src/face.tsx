@@ -57,6 +57,8 @@ import {
   BackLink,
   Button,
   CopyButton,
+  type Copied,
+  copyText,
   Choice,
   Field,
   KeyValue,
@@ -583,12 +585,168 @@ function snippetFor(
   }
 }
 
-/** A store path's dim half and its read half: `/nix/store/<hash>-` is furniture
- *  and the name after it is what somebody is looking for. */
-function splitStorePath(storePath: string): { readonly hash: string; readonly name: string } {
-  const dash = storePath.indexOf("-", storePath.lastIndexOf("/") + 1);
-  if (dash === -1) return { hash: "", name: storePath };
-  return { hash: storePath.slice(0, dash + 1), name: storePath.slice(dash + 1) };
+/**
+ * A STORE PATH'S TWO HALVES, as a table draws them: the hash a person
+ * compares two builds by, and the name they are looking for.
+ *
+ * `/nix/store/<32 chars>-<name>` — and a path that is not that shape keeps
+ * all of itself under `name`, because inventing a hash for it would be a
+ * guess printed in a monospace column.
+ */
+export function storePathParts(storePath: string): {
+  readonly hash: string;
+  readonly name: string;
+} {
+  const slash = storePath.lastIndexOf("/");
+  const dash = storePath.indexOf("-", slash + 1);
+  // A STORE PATH HAS A DIRECTORY AND A DASH. Without both, the string is
+  // something else — a filter's leftovers, a row from another cache — and
+  // the first hyphen in it is not a hash boundary.
+  if (slash === -1 || dash === -1) return { hash: "", name: storePath };
+  return { hash: storePath.slice(slash + 1, dash), name: storePath.slice(dash + 1) };
+}
+
+/** How much of a hash a column shows. Eight base-32 characters is 40 bits —
+ *  enough that two builds of one package never collide on this page, and
+ *  short enough that the names beside them line up. */
+export const HASH_SHOWN = 8;
+
+/** What the table can be ordered by. The hash is not among them: it is a
+ *  random string, so sorting by it is sorting by nothing, and `wanted` moves
+ *  under the reader as pushes renew it. */
+export type PathColumn = "name" | "size" | "pushed" | "reads";
+
+/**
+ * ONE LINE OF THE PATHS TABLE — a package, or a single path.
+ *
+ * GROUPED is the default because a bucket is mostly one package over and
+ * over: a screen of `odu-base-0.1.0` six times, `odu-runner` five times and
+ * `odu-web-ui` three times says nothing about what is in the bucket. A group
+ * carries the aggregate a reader decides by (how much of my disk is this
+ * package, when did it last move) and holds its versions for whoever asks.
+ *
+ * UNGROUPED is the same shape with one version each, so the table draws one
+ * kind of row either way.
+ */
+export interface PathRow {
+  /** The package name, which is also the key its disclosure is held by. */
+  readonly name: string;
+  /** The NEWEST version's store path: what the hash cell shows and copies. */
+  readonly storePath: string;
+  readonly hash: string;
+  /** Newest first. One entry when the table is not grouped. */
+  readonly versions: readonly CachePath[];
+  /** Summed over the versions — what this package costs the bucket. */
+  readonly bytes: number;
+  readonly hits: number;
+  /** The newest version's push, and the latest want across all of them. */
+  readonly pushed: number;
+  readonly wanted: number;
+}
+
+/**
+ * THE TABLE, FROM THE PAGE THE ROW ANSWERED — a view, never a second read.
+ *
+ * Grouping and ordering are decisions about what is already on screen, so
+ * they are a pure function of the page plus the two switches above it. A
+ * server-side sort would make every click a round trip and disagree with the
+ * filter's own paging.
+ */
+export function pathRows(
+  paths: readonly CachePath[],
+  view: { readonly grouped: boolean; readonly column: PathColumn; readonly descending: boolean },
+): readonly PathRow[] {
+  const held = new Map<string, CachePath[]>();
+  for (const path of paths) {
+    // UNGROUPED GROUPS BY THE WHOLE PATH, which is unique — one version per
+    // row, and one shape for the renderer.
+    const key = view.grouped ? storePathParts(path.storePath).name : path.storePath;
+    const seen = held.get(key);
+    if (seen === undefined) held.set(key, [path]);
+    else seen.push(path);
+  }
+  const rows = [...held].map(([key, versions]): PathRow => {
+    const ordered = [...versions].sort((a, b) => b.created - a.created);
+    const newest = ordered[0] as CachePath;
+    return {
+      name: view.grouped ? key : storePathParts(newest.storePath).name,
+      storePath: newest.storePath,
+      hash: storePathParts(newest.storePath).hash,
+      versions: ordered,
+      bytes: ordered.reduce((sum, one) => sum + one.narSize, 0),
+      hits: ordered.reduce((sum, one) => sum + one.hits, 0),
+      pushed: newest.created,
+      wanted: ordered.reduce((latest, one) => Math.max(latest, one.lastWanted), 0),
+    };
+  });
+  // THE NAME BREAKS EVERY TIE, and always the same way round: two packages of
+  // one size must not swap places when the list is redrawn, nor when the
+  // reader reverses a column that cannot tell them apart. So the DIRECTION is
+  // applied to the column alone, and the name settles what is left.
+  const column = (a: PathRow, b: PathRow): number =>
+    view.column === "name"
+      ? a.name.localeCompare(b.name)
+      : view.column === "size"
+        ? a.bytes - b.bytes
+        : view.column === "reads"
+          ? a.hits - b.hits
+          : a.pushed - b.pushed;
+  return rows.sort((a, b) => {
+    const decided = column(a, b);
+    if (decided !== 0) return view.descending ? -decided : decided;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/** THE HEADER ROW, once: what each column is called, whether its figures are
+ *  compared down the column (so right-aligned), and what clicking it sorts
+ *  by — `null` for the two that cannot be ordered meaningfully. */
+const PATH_COLUMNS: ReadonlyArray<{
+  readonly label: string;
+  readonly column: PathColumn | null;
+  readonly numeric: boolean;
+}> = [
+  { label: "name", column: "name", numeric: false },
+  { label: "hash", column: null, numeric: false },
+  { label: "size", column: "size", numeric: true },
+  { label: "pushed", column: "pushed", numeric: true },
+  { label: "reads", column: "reads", numeric: true },
+  { label: "wanted", column: null, numeric: true },
+];
+
+/**
+ * THE HASH, AND THE WHOLE PATH BEHIND IT.
+ *
+ * Eight characters is what a person compares two builds by; the other
+ * twenty-four are furniture that pushed the name off the screen in the list
+ * this table replaced. The full store path is the `title` — and a click puts
+ * it on the clipboard, because the reason anybody wants it is to paste it
+ * into `nix path-info`, a pin, or a `nix copy`.
+ */
+function HashCell(props: { storePath: string }): JSX.Element {
+  const [said, setSaid] = createSignal<Copied | null>(null);
+  let reset: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(reset));
+  const press = (): void => {
+    clearTimeout(reset);
+    void copyText(props.storePath).then((answer) => {
+      setSaid(answer);
+      reset = setTimeout(() => setSaid(null), 1400);
+    });
+  };
+  return (
+    <td class="path-hash">
+      <button
+        type="button"
+        class="hash"
+        title={props.storePath}
+        aria-label={`copy ${props.storePath}`}
+        onClick={press}
+      >
+        {said() ?? storePathParts(props.storePath).hash.slice(0, HASH_SHOWN)}
+      </button>
+    </td>
+  );
 }
 
 function BucketPage(
@@ -758,6 +916,46 @@ function BucketPage(
     if (extra() !== null) return extra();
     return answer !== undefined && answer.ok ? (answer.page.next ?? null) : null;
   });
+
+  /**
+   * HOW THE TABLE IS DRAWN — two switches and a column, all of them about
+   * the page already on screen.
+   *
+   * GROUPED BY DEFAULT: a bucket is mostly one package over and over, and the
+   * question a reader arrives with ("what is in here, and what is it costing
+   * me") is answered by the package, not by its eleventh build. PUSHED-NEWEST
+   * by default, because the newest push is what somebody just did.
+   */
+  const [grouped, setGrouped] = createSignal(true);
+  const [column, setColumn] = createSignal<PathColumn>("pushed");
+  const [descending, setDescending] = createSignal(true);
+  /** A click on the column already sorted REVERSES it; a click on another
+   *  takes that column's own natural direction — biggest, newest, most read,
+   *  and A before Z. */
+  const sortBy = (which: PathColumn): void => {
+    if (column() === which) setDescending(!descending());
+    else {
+      setColumn(which);
+      setDescending(which !== "name");
+    }
+  };
+  /** What `aria-sort` says of a header. */
+  const sortOf = (which: PathColumn): "ascending" | "descending" | "none" =>
+    column() !== which ? "none" : descending() ? "descending" : "ascending";
+  /** WHICH PACKAGES ARE OPEN, by NAME — the rows are minted afresh by every
+   *  memo pass, so the disclosure cannot live on them, exactly as a pin's
+   *  does not live on its row. */
+  const [opened, setOpened] = createSignal<ReadonlySet<string>>(new Set());
+  const toggleOpen = (name: string): void => {
+    setOpened((held) => {
+      const next = new Set(held);
+      if (!next.delete(name)) next.add(name);
+      return next;
+    });
+  };
+  const rows = createMemo<readonly PathRow[]>(() =>
+    pathRows(paths(), { grouped: grouped(), column: column(), descending: descending() }),
+  );
 
   /** THE TOKEN JUST MINTED HERE, held by the page so the push block can show
    *  it in its one showing. It belongs to ONE bucket: opening another clears
@@ -1016,6 +1214,17 @@ function BucketPage(
                         placeholder="filter by path, e.g. openssl"
                         onValue={setTyped}
                       />
+                      {/* ONE ROW PER PACKAGE, or one per path. The switch is
+                          beside the filter because they are the same kind of
+                          decision: which of what is here do I want to see. */}
+                      <button
+                        type="button"
+                        class="text-action"
+                        aria-pressed={grouped()}
+                        onClick={() => setGrouped(!grouped())}
+                      >
+                        {grouped() ? "grouped by name" : "every version"}
+                      </button>
                       {/* THE LIST IS A SNAPSHOT, and this page's only stale
                           copy: the facts line above follows the bucket's row
                           as it publishes, while a page read against this
@@ -1058,26 +1267,106 @@ function BucketPage(
                       </Show>
                     }
                   >
-                    <ol class="paths">
-                      <For each={paths()}>
-                        {(path) => (
-                          <li>
-                            <code class="path">
-                              <span class="path-hash">{splitStorePath(path.storePath).hash}</span>
-                              {splitStorePath(path.storePath).name}
-                            </code>
-                            <span class="fact-line bucket-facts">
-                              <span>{bytes(path.narSize)}</span>
-                              <span>{ago(path.created, pathsClock())}</span>
-                              <span>{path.hits} reads</span>
-                              {/* WANTED, not read: retention counts from here,
-                                  and the reads beside it never move it. */}
-                              <span>wanted {ago(path.lastWanted, pathsClock())}</span>
-                            </span>
-                          </li>
-                        )}
-                      </For>
-                    </ol>
+                    {/* A TABLE, because six facts about a hundred paths is a
+                        table: every column lines up, the numbers are right
+                        aligned where they are compared, and the header is
+                        where the ordering is chosen. */}
+                    <table class="paths-table">
+                      <thead>
+                        <tr>
+                          <For each={PATH_COLUMNS}>
+                            {(head) => (
+                              <th
+                                scope="col"
+                                class={head.numeric ? "numeric" : undefined}
+                                aria-sort={head.column === null ? undefined : sortOf(head.column)}
+                              >
+                                <Show when={head.column} fallback={head.label}>
+                                  {(which) => (
+                                    <button
+                                      type="button"
+                                      class="sort"
+                                      onClick={() => sortBy(which())}
+                                    >
+                                      {head.label}
+                                      {/* THE ARROW IS DECORATION: `aria-sort`
+                                          on the cell is what a screen reader
+                                          hears, and a glyph inside the
+                                          button's NAME would rename the
+                                          control every time it was pressed. */}
+                                      <span class="arrow" aria-hidden="true">
+                                        {sortOf(which()) === "ascending"
+                                          ? "↑"
+                                          : sortOf(which()) === "descending"
+                                            ? "↓"
+                                            : ""}
+                                      </span>
+                                    </button>
+                                  )}
+                                </Show>
+                              </th>
+                            )}
+                          </For>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <For each={rows()}>
+                          {(row) => (
+                            <>
+                              <tr class="path-row">
+                                <td class="path-name">
+                                  {/* A PACKAGE WITH ONE VERSION IS A PATH, and
+                                      a disclosure over a single row would be a
+                                      control that answers its own question. */}
+                                  <Show
+                                    when={row.versions.length > 1}
+                                    fallback={<span class="name">{row.name}</span>}
+                                  >
+                                    <button
+                                      type="button"
+                                      class="disclose"
+                                      aria-expanded={opened().has(row.name)}
+                                      onClick={() => toggleOpen(row.name)}
+                                    >
+                                      <span class="name">{row.name}</span>
+                                      <span class="versions">
+                                        {row.versions.length} versions
+                                      </span>
+                                    </button>
+                                  </Show>
+                                </td>
+                                <HashCell storePath={row.storePath} />
+                                <td class="numeric">{bytes(row.bytes)}</td>
+                                <td class="numeric">{ago(row.pushed, pathsClock())}</td>
+                                <td class="numeric">{row.hits}</td>
+                                <td class="numeric">{ago(row.wanted, pathsClock())}</td>
+                              </tr>
+                              <Show when={row.versions.length > 1 && opened().has(row.name)}>
+                                <For each={row.versions}>
+                                  {(version) => (
+                                    <tr class="version-row">
+                                      <td class="path-name" />
+                                      <HashCell storePath={version.storePath} />
+                                      <td class="numeric">{bytes(version.narSize)}</td>
+                                      <td class="numeric">
+                                        {ago(version.created, pathsClock())}
+                                      </td>
+                                      <td class="numeric">{version.hits}</td>
+                                      {/* WANTED, not read: retention counts
+                                          from here, and the reads beside it
+                                          never move it. */}
+                                      <td class="numeric">
+                                        {ago(version.lastWanted, pathsClock())}
+                                      </td>
+                                    </tr>
+                                  )}
+                                </For>
+                              </Show>
+                            </>
+                          )}
+                        </For>
+                      </tbody>
+                    </table>
                   </Show>
                   <Show when={next()}>
                     {(after) => (
@@ -1172,6 +1461,7 @@ function BucketPage(
                     rootToken={props.rootToken}
                     name={name}
                     now={props.now}
+                    retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
                   />
                   {/* LAST, BEHIND A RULE OF ITS OWN: every control above
                       changes what this bucket does and can be changed back.
@@ -2140,7 +2430,9 @@ function PinnedRow(props: {
  * of it as anybody reads first, and they come oldest want first, so the top
  * line is the first to go.
  */
-function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Element {
+function BucketGc(
+  props: AdminProps & { name: string; now: number; retentionDays: number },
+): JSX.Element {
   const action = createControl(props.call);
   /** THE RETENTION THE PLAN ASKS WITH, blank for the bucket's own. It is read
    *  when the button is pressed rather than watched, because a plan that
@@ -2230,20 +2522,29 @@ function BucketGc(props: AdminProps & { name: string; now: number }): JSX.Elemen
             <Button disabled={action.busy()} onClick={collect}>
               {action.busy() ? "collecting…" : "Run GC"}
             </Button>
+            {/* WHAT THE BUTTON WILL ASK, on the button: "dry run retention
+                days / its own" was a label and a placeholder read as one
+                fragment, and the number typed into it changed nothing a
+                reader could see until the answer came back. */}
             <Button disabled={plan.loading() || asking().kind === "bad"} onClick={askAgain}>
-              {plan.loading() ? "counting…" : "Dry run"}
+              {plan.loading()
+                ? "counting…"
+                : asking().kind === "own"
+                  ? "Dry run"
+                  : `Dry run at ${retention().trim()} days`}
             </Button>
             {/* THE DRY RUN'S OWN NUMBER, beside the button it belongs to and
                 nowhere near "Set retention" above: this one asks, that one
-                keeps. Blank is the bucket's own. */}
-            <Field id="gc-retention-days" label="dry run retention days">
+                keeps. Blank is the bucket's own, and the placeholder says
+                which number that is rather than leaving it to be guessed. */}
+            <Field id="gc-retention-days" label="retention">
               <input
                 id="gc-retention-days"
                 type="number"
                 class="input"
                 min="0"
                 step="1"
-                placeholder="its own"
+                placeholder={`bucket's (${props.retentionDays}d)`}
                 value={retention()}
                 onInput={(event) => setRetention(event.currentTarget.value)}
               />

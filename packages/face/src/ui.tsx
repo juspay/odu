@@ -376,13 +376,31 @@ export function KeyValue(props: {
 }
 
 /**
+ * WHAT HAPPENED WHEN SOMETHING WAS COPIED, in a word a control can draw.
+ *
+ * `navigator.clipboard` is the whole implementation, and its refusal is an
+ * ANSWER rather than a swallowed failure: a page served over plain HTTP on a
+ * tailnet name has no clipboard at all, and a control that silently did
+ * nothing there would be the worst one on the page.
+ */
+export type Copied = "copied" | "refused" | "no clipboard";
+
+export async function copyText(text: string): Promise<Copied> {
+  const clipboard = globalThis.navigator?.clipboard;
+  if (clipboard === undefined) return "no clipboard";
+  try {
+    await clipboard.writeText(text);
+    return "copied";
+  } catch {
+    return "refused";
+  }
+}
+
+/**
  * TAKE THIS STRING.
  *
- * `navigator.clipboard` is the whole implementation, and its refusal is drawn
- * rather than swallowed: a page served over plain HTTP on a tailnet name has
- * no clipboard at all, and a button that silently did nothing there would be
- * the worst control on the page. The label says what happened and goes back to
- * itself, so one button is its own receipt.
+ * The label says what happened and goes back to itself, so one button is its
+ * own receipt.
  *
  * `data-copy` rides the element because the acceptance suite counts the copy
  * controls a bucket page offers, and a count is the only way to assert "every
@@ -394,18 +412,10 @@ export function CopyButton(props: { text: string; label?: string }): JSX.Element
   onCleanup(() => clearTimeout(reset));
   const press = (): void => {
     clearTimeout(reset);
-    const clipboard = globalThis.navigator?.clipboard;
-    if (clipboard === undefined) {
-      // No secure context, no clipboard API. Said out loud rather than
-      // swallowed: a board on a plain-HTTP tailnet name is a real deployment.
-      setSaid("no clipboard");
-      return;
-    }
-    void clipboard.writeText(props.text).then(
-      () => setSaid("copied"),
-      () => setSaid("refused"),
-    );
-    reset = setTimeout(() => setSaid(null), 1400);
+    void copyText(props.text).then((answer) => {
+      setSaid(answer);
+      reset = setTimeout(() => setSaid(null), 1400);
+    });
   };
   return (
     <button type="button" class="btn copy" data-copy onClick={press}>

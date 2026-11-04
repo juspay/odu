@@ -235,3 +235,121 @@ describe("a migration counts what it has moved", () => {
     expect(migrationText(moving({ copied: 1, total: 1, bytes: 0 }))).toContain("1 of 1 object,");
   });
 });
+
+/**
+ * THE PATHS TABLE IS A VIEW OVER THE PAGE THE ROW ANSWERED, and the whole of
+ * that view is one pure function: which rows there are, what each one
+ * aggregates, and in what order. A browser can show that the table draws; it
+ * cannot cheaply show that six builds of one package sum to the right number
+ * of bytes, so the arithmetic is pinned here.
+ */
+describe("the paths table groups and orders the page it was given", () => {
+  const path = (
+    name: string,
+    hash: string,
+    over: { narSize?: number; created?: number; hits?: number; lastWanted?: number } = {},
+  ) => ({
+    storePath: `/nix/store/${hash}-${name}`,
+    narSize: over.narSize ?? 1_000,
+    created: over.created ?? 1_000,
+    hits: over.hits ?? 0,
+    lastWanted: over.lastWanted ?? 1_000,
+  });
+  const page = [
+    path("odu-base-0.1.0", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {
+      narSize: 100,
+      created: 10,
+      hits: 1,
+      lastWanted: 10,
+    }),
+    path("odu-base-0.1.0", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", {
+      narSize: 200,
+      created: 30,
+      hits: 2,
+      lastWanted: 50,
+    }),
+    path("zlib-1.3", "cccccccccccccccccccccccccccccccc", {
+      narSize: 900,
+      created: 20,
+      hits: 9,
+      lastWanted: 20,
+    }),
+  ];
+  const grouped = { grouped: true, column: "pushed" as const, descending: true };
+
+  it("sums a package's versions and takes the newest for its hash and push", async () => {
+    const { pathRows } = await import("./face");
+    const [first] = pathRows(page, { ...grouped, column: "name", descending: false });
+    expect(first?.name).toBe("odu-base-0.1.0");
+    expect(first?.versions).toHaveLength(2);
+    // The aggregate is what a reader decides by: all of it, and the latest
+    // want across the lot — a version nobody wants does not make the package
+    // look idle.
+    expect(first?.bytes).toBe(300);
+    expect(first?.hits).toBe(3);
+    expect(first?.pushed).toBe(30);
+    expect(first?.wanted).toBe(50);
+    expect(first?.hash).toBe("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    // Newest version first inside the group, so an open one reads top-down.
+    expect(first?.versions[0]?.created).toBe(30);
+  });
+
+  it("orders by the aggregate, not by any one version", async () => {
+    const { pathRows } = await import("./face");
+    // zlib's single NAR (900) is the biggest, but the PACKAGE odu-base holds
+    // 300 against it — so by size zlib leads, and ungrouped it leads too.
+    expect(pathRows(page, { ...grouped, column: "size" }).map((row) => row.name)).toEqual([
+      "zlib-1.3",
+      "odu-base-0.1.0",
+    ]);
+    expect(pathRows(page, { ...grouped, column: "reads" }).map((row) => row.hits)).toEqual([
+      9, 3,
+    ]);
+    // Pushed-newest is the default, and the group takes its newest version's
+    // push: odu-base at 30 beats zlib at 20.
+    expect(pathRows(page, grouped).map((row) => row.name)).toEqual([
+      "odu-base-0.1.0",
+      "zlib-1.3",
+    ]);
+  });
+
+  it("reverses on demand, and breaks every tie by name", async () => {
+    const { pathRows } = await import("./face");
+    expect(
+      pathRows(page, { ...grouped, column: "size", descending: false }).map((row) => row.name),
+    ).toEqual(["odu-base-0.1.0", "zlib-1.3"]);
+    // Two rows of the same size are still a total order: the name decides,
+    // so a redraw cannot swap them.
+    const tied = [
+      path("b-pkg", "dddddddddddddddddddddddddddddddd"),
+      path("a-pkg", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+    ];
+    expect(pathRows(tied, { ...grouped, column: "size" }).map((row) => row.name)).toEqual([
+      "a-pkg",
+      "b-pkg",
+    ]);
+  });
+
+  it("ungrouped is one row per path, each its own version", async () => {
+    const { pathRows } = await import("./face");
+    const rows = pathRows(page, { grouped: false, column: "size", descending: true });
+    expect(rows).toHaveLength(3);
+    expect(rows.every((row) => row.versions.length === 1)).toBe(true);
+    expect(rows.map((row) => row.bytes)).toEqual([900, 200, 100]);
+    expect(rows[1]?.name).toBe("odu-base-0.1.0");
+  });
+
+  it("splits a store path into the hash a person compares and the name they read", async () => {
+    const { storePathParts } = await import("./face");
+    expect(storePathParts("/nix/store/abcd1234abcd1234abcd1234abcd1234-hello-2.12")).toEqual({
+      hash: "abcd1234abcd1234abcd1234abcd1234",
+      name: "hello-2.12",
+    });
+    // A path that is not that shape keeps all of itself rather than being
+    // given a hash it does not have.
+    expect(storePathParts("not-a-store-path")).toEqual({
+      hash: "",
+      name: "not-a-store-path",
+    });
+  });
+});

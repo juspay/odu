@@ -71,21 +71,39 @@ function mintedToken(answer: { stdout: string }): string {
   return payload.token;
 }
 
-/** THE ARRANGE, registered under two texts: a scenario that pushes BEFORE it
- *  opens the page (the page is then read as it stands), and one that opens the
- *  page FIRST and pushes into it — which is the scenario that grades the
+/** WHAT A SCENARIO WANTS IN A BUCKET: a file's base NAME — which becomes the
+ *  store path's name, and therefore the table's group — and the bytes it
+ *  holds, which decide the NAR's size. Two specs of the same name are two
+ *  builds of one package; two sizes are what a sort by size is about. */
+interface FileSpec {
+  readonly name: string;
+  readonly body: string;
+}
+
+/** THE ARRANGE, registered under several texts: a scenario that pushes BEFORE
+ *  it opens the page (the page is then read as it stands), and one that opens
+ *  the page FIRST and pushes into it — which is the scenario that grades the
  *  property the row exists for, a push arriving with no reload. */
 function arrangePush(world: OduWorld, howMany = 1): void {
+  arrangeFiles(
+    world,
+    Array.from({ length: howMany }, (_, index) => {
+      const name = unique(index === 0 ? "path" : `path-${index}`);
+      return { name, body: `odu web acceptance: ${name}\n` };
+    }),
+  );
+}
+
+function arrangeFiles(world: OduWorld, specs: readonly FileSpec[]): void {
   const bucket = unique("bucket");
   // LEAF FILES, added straight to the store: a path with no references, so the
   // narinfo needs no referrers and the import cannot sit at 202 waiting for
-  // them. More than one when the scenario is about NARROWING a list.
+  // them. A DIRECTORY EACH, because two builds of one package are the same
+  // base name with different bytes and one directory cannot hold both.
   const paths: string[] = [];
-  const dir = mkdtempSync(join(tmpdir(), "odu-wa-cache-"));
-  for (let index = 0; index < howMany; index += 1) {
-    const name = unique(index === 0 ? "path" : `path-${index}`);
-    const file = join(dir, name);
-    writeFileSync(file, `odu web acceptance: ${name}\n`);
+  for (const spec of specs) {
+    const file = join(mkdtempSync(join(tmpdir(), "odu-wa-cache-")), spec.name);
+    writeFileSync(file, spec.body);
     const added = spawnSync("nix", ["store", "add-file", file], {
       env: world.service.env,
       encoding: "utf-8",
@@ -200,6 +218,30 @@ Given("a bucket with two paths pushed from the CLI", function (this: OduWorld) {
   arrangePush(this, 2);
 });
 
+/** THREE BUILDS OF ONE PACKAGE: the same base name, different bytes, so the
+ *  store gives each its own hash and the table has a group to draw. */
+Given(
+  "a bucket with three builds of one package pushed from the CLI",
+  function (this: OduWorld) {
+    const name = unique("widget");
+    arrangeFiles(this, [1, 2, 3].map((build) => ({ name, body: `build ${build}\n` })));
+  },
+);
+
+/** A BIG ONE AND A SMALL ONE, the big one pushed FIRST so the default order
+ *  (newest push at the top) is not already the order a sort by size would
+ *  produce. `cachePathNames[0]` is the large path. */
+Given("a bucket with a large and a small path pushed from the CLI", function (this: OduWorld) {
+  arrangeFiles(this, [
+    { name: unique("large"), body: "x".repeat(400_000) },
+    { name: unique("small"), body: "x\n" },
+  ]);
+});
+
+Given("a bucket with {int} paths pushed from the CLI", function (this: OduWorld, count: number) {
+  arrangePush(this, count);
+});
+
 When("a bucket with one path is pushed from the CLI", function (this: OduWorld) {
   arrangePush(this);
 });
@@ -241,23 +283,31 @@ When("I filter the paths by the first path's name", async function (this: OduWor
   await this.page.getByRole("searchbox", { name: "filter paths" }).fill(name);
 });
 
+/** A ROW OF THE PATHS TABLE — the grouped row for a package, or a version
+ *  under an open one. The GC panel keeps an `ol.paths` of its own, so these
+ *  are addressed through the table rather than by the word "path". */
+function pathRow(world: OduWorld, name: string): Locator {
+  return world.page.locator("table.paths-table tbody tr", { hasText: name }).first();
+}
+
 Then("both pushed paths are listed", async function (this: OduWorld) {
   for (const name of this.cachePathNames ?? []) {
-    await this.page.locator("ol.paths li", { hasText: name }).first().waitFor({ timeout: 30_000 });
+    await pathRow(this, name).waitFor({ timeout: 30_000 });
   }
 });
 
 Then("the first path is listed", async function (this: OduWorld) {
   const name = this.cachePathNames?.[0];
   assert.ok(name !== undefined, "no path was arranged");
-  await this.page.locator("ol.paths li", { hasText: name }).first().waitFor({ timeout: 30_000 });
+  await pathRow(this, name).waitFor({ timeout: 30_000 });
 });
 
 Then("the second path is not listed", async function (this: OduWorld) {
   const name = this.cachePathNames?.[1];
   assert.ok(name !== undefined, "no second path was arranged");
   await this.waitUntil(
-    async () => (await this.page.locator("ol.paths li", { hasText: name }).count()) === 0,
+    async () =>
+      (await this.page.locator("table.paths-table tbody tr", { hasText: name }).count()) === 0,
     "the second path to disappear",
   );
 });
@@ -336,34 +386,104 @@ Then("the page offers the netrc lines a Nix client needs", async function (this:
 Then("the pushed path is listed", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no path was arranged");
-  await this.page.locator("li", { hasText: name }).first().waitFor({ timeout: 30_000 });
+  await pathRow(this, name).waitFor({ timeout: 30_000 });
 });
 
-/** WANTED, not read. The row prints the clock GC decides by, and the push that
- *  arranged this scenario has just renewed it — so what is asserted is the
- *  SHAPE of the fact rather than a number that moves while the page is open. */
+/** WANTED, not read. The table's last column is the clock GC decides by, and
+ *  the push that arranged this scenario has just renewed it — so what is
+ *  asserted is the SHAPE of the fact rather than a number that moves while
+ *  the page is open. The column is read by position because that is what a
+ *  reader compares it by: the one under the `wanted` header. */
 Then("that path says when it was last wanted", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no path was arranged");
-  const row = this.page.locator("ol.paths li", { hasText: name }).first();
-  await row.waitFor({ timeout: 30_000 });
+  const cell = pathRow(this, name).locator("td").last();
+  await cell.waitFor({ timeout: 30_000 });
   await until("the path's row to say when it was last wanted", async () =>
-    /wanted \d+[smhd] ago/.test(await row.innerText()) ? true : null,
+    /^\d+[smhd] ago$/.test((await cell.innerText()).trim()) ? true : null,
   );
 });
 
 Then("no path is listed", async function (this: OduWorld) {
-  await this.page.locator("ol.paths li").first().waitFor({ state: "detached", timeout: 30_000 });
+  await this.page
+    .locator("table.paths-table tbody tr")
+    .first()
+    .waitFor({ state: "detached", timeout: 30_000 });
 });
 
-/** WHAT THE LIST HOLDS AFTER A REFRESH — a count, because the question is
- *  whether the page asked the row again, not which path survived. */
+/** WHAT THE TABLE HOLDS AFTER A REFRESH — a count of grouped rows, because
+ *  the question is whether the page asked the row again, not which path
+ *  survived. */
 Then("one path is listed", async function (this: OduWorld) {
-  const rows = this.page.locator("ol.paths li");
+  const rows = this.page.locator("table.paths-table tbody tr.path-row");
   await this.waitUntil(
     async () => (await rows.count()) === 1,
-    "the path list to hold exactly one path",
+    "the path table to hold exactly one row",
   );
+});
+
+/** THE GROUPED ROWS — one per package, whatever each holds. */
+Then("the paths table holds {int} rows", async function (this: OduWorld, count: number) {
+  const rows = this.page.locator("table.paths-table tbody tr.path-row");
+  await this.waitUntil(
+    async () => (await rows.count()) === count,
+    `the paths table to hold ${count} rows`,
+  );
+});
+
+/** …and the versions under an open one, which are a different kind of row:
+ *  the count is what the group's own line claimed. */
+Then(
+  "the paths table holds {int} version rows",
+  async function (this: OduWorld, count: number) {
+    const rows = this.page.locator("table.paths-table tbody tr.version-row");
+    await this.waitUntil(
+      async () => (await rows.count()) === count,
+      `the paths table to hold ${count} version rows`,
+    );
+  },
+);
+
+Then("that package is one row saying {string}", async function (this: OduWorld, text: string) {
+  const name = this.cachePathName;
+  assert.ok(name !== undefined && name !== "", "no package was arranged");
+  await this.saysThat(pathRow(this, name), `the row for ${name}`, text);
+});
+
+When("I expand that package", async function (this: OduWorld) {
+  const name = this.cachePathName;
+  assert.ok(name !== undefined && name !== "", "no package was arranged");
+  await pathRow(this, name).locator("button.disclose").click();
+});
+
+/** THE ORDER IS CHOSEN IN THE HEADER, so this presses the header — the same
+ *  gesture a person makes, and the one a keyboard can make too. */
+When("I sort the paths by {string}", async function (this: OduWorld, column: string) {
+  await this.page
+    .locator("table.paths-table thead")
+    .getByRole("button", { name: column, exact: true })
+    .click();
+});
+
+Then(
+  "the {string} column says it is sorted {string}",
+  async function (this: OduWorld, column: string, direction: string) {
+    const head = this.page.locator(`table.paths-table th:has(button:text-is("${column}"))`);
+    await this.waitUntil(
+      async () => (await head.getAttribute("aria-sort")) === direction,
+      `the ${column} column to say it is sorted ${direction}`,
+    );
+  },
+);
+
+/** WHICH PATH IS AT THE TOP — by name, because the name is what a person
+ *  reads there, and the arrangement knows which one is the large one. */
+Then("the {string} path is first", async function (this: OduWorld, which: string) {
+  const names = this.cachePathNames ?? [];
+  const wanted = which === "large" ? names[0] : names[1];
+  assert.ok(wanted !== undefined, "no large and small path were arranged");
+  const first = this.page.locator("table.paths-table tbody tr.path-row").first();
+  await this.saysThat(first, "the table's first row", wanted);
 });
 
 Then("the page says nothing matches", async function (this: OduWorld) {
@@ -993,7 +1113,10 @@ When("I set the retention to {string} days", async function (this: OduWorld, day
  *  by its exact label so it can never resolve to the retention control above
  *  — the two being told apart is most of what this scenario is about. */
 When("I set the dry run retention to {string} days", async function (this: OduWorld, days: string) {
-  await this.page.getByLabel("dry run retention days", { exact: true }).fill(days);
+  // `retention` INSIDE the collection's own panel: the settings column has a
+  // `retention days` field of its own, and the two are different questions —
+  // this one asks, that one keeps.
+  await gcSection(this).getByLabel("retention", { exact: true }).fill(days);
 });
 
 /** THE FACTS LINE at the top of the bucket page, which is drawn from the row
