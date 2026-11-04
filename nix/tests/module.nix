@@ -398,7 +398,7 @@
     # summary says which mode it used, and the daemon's log says what it saw.
     assert json.loads(pushed)["mode"] == "direct", pushed
     server.succeed(
-        "journalctl -u odu --no-pager | grep -F 'cache.nar.uploaded'"
+        "journalctl -u odu-web --no-pager | grep -F 'cache.nar.uploaded'"
         " | grep -E '\"mode\": ?\"direct\"' | grep -E '\"bucket\": ?\"far\"'"
     )
     # THE BYTES ARE IN THE S3 BUCKET, under the odu bucket's prefix — and not
