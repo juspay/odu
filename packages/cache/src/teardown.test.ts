@@ -36,6 +36,7 @@ import {
   CachePurge,
   type HttpRoutes,
   Log,
+  Metrics,
   NixStore,
   PublicOrigin,
   purgeBroker,
@@ -44,6 +45,7 @@ import {
   Routes,
   StateDir,
 } from "@odu/cordis/services";
+import { metricsBroker } from "@odu/cordis/metrics";
 import { CACHE_KEY } from "./surface";
 import { cacheRow } from "./server";
 import { diskObjectStore } from "@odu/objects";
@@ -193,6 +195,7 @@ describe("the cache row's teardown", () => {
     // most of them.
     await run(provide(host, CachePurge, () => purgeBroker()));
     await run(provide(host, Routes, () => routesStub));
+    await run(provide(host, Metrics, () => metricsBroker()));
     await run(
       provide(host, Bundle, () => ({
         mount: () => ({
@@ -241,6 +244,7 @@ describe("the cache row's teardown", () => {
     // most of them.
     await run(provide(host, CachePurge, () => purgeBroker()));
     await run(provide(host, Routes, () => routesStub));
+    await run(provide(host, Metrics, () => metricsBroker()));
     await run(provide(host, Bundle, () => ({}) as unknown as RootedSurfacesRuntime<never>));
     await run(mountPlugin(host, cacheRow(new Map())));
     await run(settled(host, [CACHE_KEY]));
@@ -275,6 +279,7 @@ describe("the cache row's teardown", () => {
     // most of them.
     await run(provide(host, CachePurge, () => purgeBroker()));
       await run(provide(host, Routes, () => routesStub));
+      await run(provide(host, Metrics, () => metricsBroker()));
       // THE BUNDLE, as far as this row uses it: it mounts, and it hands back the
       // context to publish through. The drop is OURS, which is the whole point —
       // it is the instant this test has to be standing in.

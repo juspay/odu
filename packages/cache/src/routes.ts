@@ -310,8 +310,39 @@ function readHeaders(bucket: BucketRow): Record<string, string> {
   return bucket.isPublic ? {} : { "cache-control": "private, no-store" };
 }
 
-/** The two root-level narinfo routes share one body: a client that substitutes
- *  from a bucket's DOMAIN asks for `/<hash>.narinfo`, not `/cache/<name>/…`. */
+/**
+ * THE ONE NARINFO ANSWER, shared by the two routes that give it: a client
+ * substituting from a bucket's DOMAIN asks for `/<hash>.narinfo`, one under
+ * the mount asks for `/cache/<bucket>/<hash>.narinfo`, and from here down they
+ * are the same request.
+ *
+ * IT IS ALSO THE ONE PLACE THE HIT RATE IS KNOWN, which is why the line is
+ * written here rather than at either caller: `cache.narinfo.served` is what
+ * `/metrics` counts `odu_cache_requests_total{kind="narinfo"}` from, and a
+ * second emit site is a second chance for the two routes to disagree about
+ * what a hit is.
+ */
+function narinfoAnswer(
+  cache: Cache,
+  request: HttpServerRequest.HttpServerRequest,
+  bucket: BucketRow,
+  hash: string,
+): HttpServerResponse.HttpServerResponse {
+  const text = cache.narinfoText(bucket, hash);
+  cache.log("cache.narinfo.served", { bucket: bucket.name, hash, hit: text !== null });
+  if (text === null) return HttpServerResponse.empty({ status: 404 });
+  // A HEAD is a read: it is how a client asks "do you have this", and a cache
+  // that did not count it would evict what its clients are about to fetch.
+  cache.touch(bucket, hash);
+  return request.method === "HEAD"
+    ? HttpServerResponse.empty({ status: 200, headers: readHeaders(bucket) })
+    : HttpServerResponse.text(text, {
+        contentType: "text/x-nix-narinfo",
+        headers: readHeaders(bucket),
+      });
+}
+
+/** The two root-level narinfo routes share one body. */
 function narinfoRoot(cache: Cache) {
   return (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
@@ -319,15 +350,7 @@ function narinfoRoot(cache: Cache) {
       if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
       const admitted = admitByHost(cache, request, "read");
       if (!admitted.ok) return admitted.response;
-      const text = cache.narinfoText(admitted.bucket, hash);
-      if (text === null) return HttpServerResponse.empty({ status: 404 });
-      cache.touch(admitted.bucket, hash);
-      return request.method === "HEAD"
-        ? HttpServerResponse.empty({ status: 200, headers: readHeaders(admitted.bucket) })
-        : HttpServerResponse.text(text, {
-            contentType: "text/x-nix-narinfo",
-            headers: readHeaders(admitted.bucket),
-          });
+      return narinfoAnswer(cache, request, admitted.bucket, hash);
     });
 }
 
@@ -777,18 +800,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "read");
         if (!admitted.ok) return admitted.response;
-        const text = cache.narinfoText(admitted.bucket, hash);
-        if (text === null) return HttpServerResponse.empty({ status: 404 });
-        // A HEAD is a read: it is how a client asks "do you have this", and a
-        // cache that did not count it would evict what its clients are about to
-        // fetch.
-        cache.touch(admitted.bucket, hash);
-        return request.method === "HEAD"
-          ? HttpServerResponse.empty({ status: 200, headers: readHeaders(admitted.bucket) })
-          : HttpServerResponse.text(text, {
-              contentType: "text/x-nix-narinfo",
-              headers: readHeaders(admitted.bucket),
-            });
+        return narinfoAnswer(cache, request, admitted.bucket, hash);
       }),
     ),
 

@@ -224,6 +224,10 @@ export interface CacheRepo {
 
   putPin(row: PinRow): void;
   pins(bucket?: string): PinRow[];
+  /** How many pins each bucket holds, COUNTED BY SQL. `/metrics` asks this of
+   *  every bucket at every scrape, and `pins(bucket).length` would deserialise
+   *  every pin's root-path list to learn a number the database already knows. */
+  pinCounts(): Map<string, number>;
   deletePin(bucket: string, name: string): boolean;
 
   /**
@@ -796,6 +800,12 @@ export function openCacheRepo(path: string): CacheRepo {
       bucket === undefined
         ? all("SELECT * FROM pin ORDER BY created", [], pinOf)
         : all("SELECT * FROM pin WHERE bucket = ? ORDER BY created", [bucket], pinOf),
+    pinCounts() {
+      const rows = db
+        .query("SELECT bucket, COUNT(*) AS pins FROM pin GROUP BY bucket")
+        .all() as Row[];
+      return new Map(rows.map((row) => [text(row, "bucket"), integer(row, "pins")]));
+    },
     bucketStats() {
       const rows = db
         .query(

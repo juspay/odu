@@ -55,6 +55,7 @@ import {
   type BucketDomains as BucketDomainsFacts,
   CachePurge,
   Log,
+  Metrics,
   NixStore,
   PublicOrigin,
   RootToken,
@@ -72,6 +73,7 @@ import {
   type CacheOutcome,
 } from "./cache";
 import type { GcCollection, GcRemoval, GcReport } from "./gc";
+import { cacheMeter } from "./meter";
 import { objectStores, type StoreDeclarations, storeFacts } from "./stores";
 import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
@@ -911,6 +913,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     PublicOrigin,
     CachePurge,
     Log,
+    Metrics,
   ],
   apply: Effect.gen(function* () {
     const bundle = yield* Bundle;
@@ -925,6 +928,23 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // row's business, and with none registered an announcement is a no-op.
     const purges = yield* CachePurge;
     const log = yield* Log;
+    // WHERE THIS ROW'S NUMBERS GO. The host made one registry for the tenure
+    // and serves `/metrics` from it; the row registers a contributor below and
+    // withdraws it before its database closes.
+    const metrics = yield* Metrics;
+
+    // THE ONE OPERATIONAL LINE, AND THE ONE COUNTER, from the same call. Every
+    // fact the cache states — a NAR served, a request refused, an upload
+    // recorded, a collection run — arrives through this single lambda, so the
+    // meter sees exactly what the log says and nothing instruments the serving
+    // path twice. It is bound into `createCache`, into `cacheServer`, into the
+    // probes and into the collection schedule, which is every place the cache
+    // speaks.
+    const meter = cacheMeter();
+    const say = (event: string, fields: Record<string, unknown>): void => {
+      meter.observe(event, fields);
+      log.info(fields, `odu cache: ${event}`);
+    };
 
     // THE MOVE'S PURGE, LATE-BOUND. The cache is built before the server that
     // knows where a bucket is reachable from, and a finished move needs both:
@@ -962,9 +982,10 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
         dump: (path) => nixDump(path, store),
         pathInfo: (path) => nixPathInfo(path, store),
       },
-      // ONE structured line per operational fact. The Effect logger renders
-      // the fields; no per-chunk lines, no narration.
-      log: (event, fields) => log.info(fields, `odu cache: ${event}`),
+      // ONE structured line per operational fact, and the metrics counter that
+      // reads the same event. The Effect logger renders the fields; no
+      // per-chunk lines, no narration.
+      log: say,
       purged: (moved) => announceMoved?.(moved),
     });
     // BEFORE THE MOUNT: CA proof and the orphan/temp sweep. Nothing is
@@ -1014,7 +1035,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       mount: CACHE_MOUNT,
       stores,
       purge: purges,
-      log: (event, fields) => log.info(fields, `odu cache: ${event}`),
+      log: say,
     });
     announceMoved = server.announceMoved;
 
@@ -1041,6 +1062,15 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       ),
     );
 
+    // AND THE ROW'S NUMBERS, registered beside its routes: the counters the
+    // tee has been keeping since this apply started, plus the per-bucket
+    // gauges read out of SQL at the moment of the scrape. The contributor
+    // holds the CACHE and asks it, so nothing here touches a database handle.
+    const withdrawMetrics = metrics.add({
+      name: "cache",
+      read: () => meter.reading(cache.meterGauges()),
+    });
+
     // AFTER THE MOUNT, AND ROW-OWNED: the migration dumps tens of gigabytes
     // and must not hold `/` or `/cache/*` down while it does. The row's
     // finalizer interrupts it before the database closes.
@@ -1062,8 +1092,6 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // It goes after the self pass because it DIALS a name: a domain still
     // propagating keeps a request open for curl's own patience, and nothing
     // waiting on it should be work this daemon could have finished.
-    const say = (event: string, fields: Record<string, unknown>): void =>
-      log.info(fields, `odu cache: ${event}`);
     yield* Effect.forkScoped(
       Effect.promise(async () => {
         await cache.migrate();
@@ -1118,6 +1146,13 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       }),
     );
     yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
+    // AND THE CONTRIBUTOR GOES FIRST OF ALL — registered LAST, so the reverse
+    // order withdraws it before the mount drops and well before
+    // `cache.close()`. A scrape that arrives after the withdrawal simply has
+    // one fewer row in it; one that reached a closed database would be an
+    // error from the surface an operator consults when things are already
+    // going wrong.
+    yield* Effect.addFinalizer(() => Effect.sync(withdrawMetrics));
     // THE SCHEDULE, ROW-OWNED LIKE THE MIGRATION AND IN THE SAME IDIOM: a
     // cache nobody administers must still stop growing, so the row collects
     // itself daily and the operator's button is that collection asked for
@@ -1128,11 +1163,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // collection still walking a bucket when the database closed would be an
     // error logged on the way out. Interrupting it waits for the collection
     // in flight, because `collectEvery` runs each one uninterruptibly.
-    yield* Effect.forkScoped(
-      collectEvery(GC_EVERY_MS, server.collect, (event, fields) =>
-        log.info(fields, `odu cache: ${event}`),
-      ),
-    );
+    yield* Effect.forkScoped(collectEvery(GC_EVERY_MS, server.collect, say));
 
     log.info(
       { mount: CACHE_MOUNT, buckets: cache.snapshot().length },

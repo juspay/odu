@@ -4,6 +4,9 @@ Status: living, 2026-11-03.
 - Phase 1 and all of Phase 2 are on master once 2.9 lands: 2.8 is #148, #150
   and #152, and 2.9 is #154.
 - **Next is Phase 3**, orgs.
+- **6.2 landed early, out of order** (#TBD): metrics needed no org model, and a
+  deployment that is already public wanted numbers before it wanted tenancy.
+  Nothing in Phase 3–6.1 depends on it.
 - One step is one PR, and the order is a dependency order. There is no schedule.
 
 ## Contents
@@ -17,7 +20,7 @@ Status: living, 2026-11-03.
    - [Phase 3: teams](#phase-3-teams)
    - [Phase 4: CI pushes for you](#phase-4-ci-pushes-for-you)
    - [Phase 5: hosted CI](#phase-5-hosted-ci)
-   - [Phase 6: scale and hosting](#phase-6-scale-and-hosting)
+   - [Phase 6: scale and hosting](#phase-6-scale-and-hosting) (6.2 ✅)
 5. [Risks](#risks)
 6. [Appendix: facts the plan rests on](#appendix-facts-the-plan-rests-on)
 7. [Appendix: old PR names](#appendix-old-pr-names)
@@ -304,8 +307,14 @@ What each step delivers:
 
 - **6.1 Postgres.** Several odu servers share one database behind one domain.
   SQLite stays the default.
-- **6.2 Metrics.** `/metrics` exposes hit rates, storage, run durations and
-  lane use.
+- **6.2 ✅ Metrics.** `GET /metrics`, Prometheus text, on the host — authorised
+  by the root token or a `metrics` token (`metrics_token_mint`/`_list`/`_revoke`),
+  never anonymous. Rows contribute through a cordis registry, so the host opens
+  no row's database: the cache row counts requests, bytes, uploads and
+  collections and reads paths, bytes, pins and lifetime hits from SQL; the runs
+  contribute `odu_runs_total`, `odu_run_duration_seconds`,
+  `odu_node_duration_seconds` and lane use from the on-disk catalog and the last
+  venue probe. Counters are process-local and reset on restart.
 - **6.3 Metering.** Per-org storage, transfer and build minutes, with limits
   and an export for billing.
 

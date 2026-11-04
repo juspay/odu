@@ -151,6 +151,9 @@ export const PORT_SLOT = {
   authStub: 18,
   /** `mcp.e2e.test.ts` — a daemon killed under a live bridge, redialled. */
   bridgeRedial: 19,
+  /** `packages/host/e2e/cli/metrics.e2e.test.ts` — a daemon scraped at
+   *  `/metrics`, with a cache bucket pushed to behind it. */
+  metrics: 20,
 } as const;
 
 /** The port for one named slot in THIS suite's block. */

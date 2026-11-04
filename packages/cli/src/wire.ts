@@ -34,6 +34,7 @@ import {
 import { CACHE_ROW } from "@odu/cache/surface";
 import { AUTH_ROW } from "@odu/auth/surface";
 import { CLOUDFLARE_ROW } from "@odu/cloudflare/surface";
+import { METRICS_ROW } from "@odu/cordis/metricsSurface";
 import { authorizationHeaders } from "@odu/auth/credentials";
 import { connectOrStart } from "@odu/launch/webLauncher";
 import type { ServiceConnection } from "@odu/service-client/dial";
@@ -45,7 +46,17 @@ import type { ServiceConnection } from "@odu/service-client/dial";
  * which of them the `odu mcp` bridge advertises.
  * A second list was a row that could be added to one and forgotten in another.
  */
-export const SIBLING_ROWS: ReadonlyArray<RowFacts> = [CACHE_ROW, AUTH_ROW, CLOUDFLARE_ROW];
+export const SIBLING_ROWS: ReadonlyArray<RowFacts> = [
+  CACHE_ROW,
+  AUTH_ROW,
+  CLOUDFLARE_ROW,
+  // THE HOST'S OWN FRAGMENT, served as a sibling because that is what it is on
+  // the wire: `odu surface metrics token_mint` reaches it exactly as the
+  // cache's token verbs are reached. Its facts come from `@odu/cordis` rather
+  // than from a row's package — the host mounts it, and the host is the one
+  // package a row may not import.
+  METRICS_ROW,
+];
 
 /** Each sibling's surface, under the key it is served at. */
 export const SERVICE_SIBLINGS = Object.fromEntries(

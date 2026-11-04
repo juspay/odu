@@ -105,6 +105,7 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 | `cache` | **4.2** | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
+| `metrics` (the host's own fragment) | 1.0 | `odu surface metrics`, a Prometheus at `/metrics` |
 
 Odu's own builds are served from its own cache. To pull odu and its runners from
 it — and to show a project's own bucket — the flake settings are:
@@ -121,6 +122,32 @@ it — and to show a project's own bucket — the flake settings are:
 `nix copy --to http://127.0.0.1:18440/cache/main ./result` works with no odu code on
 the client. The [cache page](https://odu.kolu.dev/docs/cache/) has the
 protocol and the storage model.
+
+## Scrape it
+
+`GET /metrics` is a Prometheus exposition of the whole daemon — the cache row's
+hit rates, bytes and storage, the runs' durations, and lane use. It carries a
+credential: the root token, or a `metrics` token minted for a scraper and
+revocable on its own.
+
+```sh
+odu surface metrics token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","label":"prometheus-pod"}' --json
+curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:18440/metrics
+```
+
+| What | How | Answers |
+| --- | --- | --- |
+| Mint a scrape credential; the plaintext is shown once | `odu surface metrics token_mint` | the token and its facts |
+| Name every one, and when it was last used | `odu surface metrics token_list` | ids, labels, `lastUsed` |
+| End one immediately, with no restart | `odu surface metrics token_revoke` | the id, revoked |
+
+Counters (`odu_cache_requests_total`, `odu_cache_bytes_total`,
+`odu_cache_uploads_total`, `odu_cache_gc_*`) are process-local and reset when the
+daemon restarts; gauges (`odu_cache_paths`, `odu_cache_bytes`, `odu_cache_pins`,
+`odu_cache_hits_total`) are read from storage at the scrape and do not.
+`odu_runs_total`, `odu_run_duration_seconds` and `odu_node_duration_seconds` come
+from the on-disk catalog, `odu_lane_reachable`/`odu_lane_held` from the last
+venue probe. Behind the NixOS module the route is proxied beside `/cache/`.
 
 ## Agents and remote access
 

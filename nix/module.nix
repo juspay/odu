@@ -742,6 +742,13 @@ in
                   "~ ^/cache/[a-z0-9-]+/nar/" = narLocation;
                   "/cache/" = proxyLocation;
                   "/_odu/v1/" = proxyLocation;
+                  # THE SCRAPE, which is the HOST's route rather than the
+                  # cache's: without this location a Prometheus on a
+                  # cache-only deployment meets the `/` 404 below and a
+                  # dashboard goes flat with nothing to read. It carries its
+                  # own credential (the root token or a metrics token), so
+                  # proxying it opens nothing a 401 does not shut.
+                  "/metrics" = proxyLocation;
                   "/" = { return = "404"; };
                 };
             };

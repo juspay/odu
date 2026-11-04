@@ -25,6 +25,7 @@ import type { ExposeMap } from "@kolu/surface/expose";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import type { ServeSurfaceAppOptions } from "@kolu/surface-app/serve";
 import { type Plugin, serviceTag } from "@olai/effect-cordis";
+import type { MetricsSources } from "./metrics";
 
 // ── what the host provides ──────────────────────────────────────────────────
 
@@ -248,6 +249,12 @@ export interface HttpRoutes {
  *  contract: twelve tags, four types and two pure helpers, with no state to
  *  outlive a call. */
 export const Routes = serviceTag<HttpRoutes>("odu:httpRoutes");
+
+/** THE SCRAPE'S CONTRIBUTORS — the same shape as {@link Routes} and for the
+ *  same reason: many rows register, one host reads, and the registry is made
+ *  once per tenure by whoever owns the tenure. The numbers themselves are the
+ *  rows'; see `./metrics`. */
+export const Metrics = serviceTag<MetricsSources>("odu:metrics");
 
 /**
  * WHAT WAS DELETED, FOR WHOEVER IS CACHING IT — the port a collection announces

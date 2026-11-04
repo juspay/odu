@@ -45,6 +45,7 @@ import {
   sweepOrphans,
 } from "./gc";
 import { migrationKeys, runMigration } from "./migrateStore";
+import type { BucketGauge } from "./meter";
 import {
   fingerprintOf,
   formatNarinfo,
@@ -522,6 +523,17 @@ export interface Cache {
    * no more.
    */
   snapshot(): readonly BucketFacts[];
+  /**
+   * WHAT `/metrics` READS, per bucket and counted by SQL — paths, bytes, reads
+   * and pins, for EVERY bucket including the empty ones.
+   *
+   * Its own accessor rather than `admin.stats`, because a scrape is not an
+   * administrator: `stats` demands an `Authority` carrying the root token, and
+   * a daemon started without one would answer `/metrics` with a refusal
+   * instead of its numbers. And its own shape rather than `snapshot()`,
+   * because the gauges need a pin COUNT, which no bucket row carries.
+   */
+  meterGauges(): readonly BucketGauge[];
   /**
    * SOMETHING A SUBSCRIBER WOULD SEE MOVED — a narinfo landed, a bucket was
    * created, a closure was pinned or collected, or reads accumulated.
@@ -1669,6 +1681,16 @@ export function createCache(options: CacheOptions): Cache {
         kept: report.kept,
         orphans: report.orphans,
         bytes: report.bytes,
+        // AND THE SPLIT, because the totals cannot be apportioned afterwards:
+        // `/metrics` counts evictions per bucket, and a run that took a
+        // thousand paths is only actionable once the line says which bucket
+        // gave them up. The report already has it; this is it flattened to the
+        // three fields a reader of the line (or of the counter) acts on.
+        buckets: report.buckets.map((one) => ({
+          bucket: one.bucket,
+          evicted: one.evicted,
+          bytes: one.bytes,
+        })),
       });
       return collected;
     });
@@ -2172,6 +2194,26 @@ export function createCache(options: CacheOptions): Cache {
     snapshot: () => {
       const counted = repo.bucketStats();
       return repo.buckets().map((bucket) => factsOf(bucket, counted));
+    },
+
+    // TWO AGGREGATE QUERIES FOR THE WHOLE SCRAPE, and the BUCKET LIST comes
+    // from the bucket table rather than from either of them: a bucket that has
+    // never been pushed to appears in neither GROUP BY, and a scrape that
+    // omitted it would make an empty bucket indistinguishable from one the
+    // daemon has forgotten.
+    meterGauges: () => {
+      const counted = repo.bucketStats();
+      const pinned = repo.pinCounts();
+      return repo.buckets().map((bucket) => {
+        const counts = counted.get(bucket.name);
+        return {
+          bucket: bucket.name,
+          objects: counts?.objects ?? 0,
+          bytes: counts?.bytes ?? 0,
+          hits: counts?.hits ?? 0,
+          pins: pinned.get(bucket.name) ?? 0,
+        };
+      });
     },
 
     async boot() {
