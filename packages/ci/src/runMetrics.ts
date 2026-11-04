@@ -53,7 +53,6 @@ import type {
   HistogramPoint,
   MetricFamily,
   MetricLabels,
-  MetricPoint,
   MetricsReading,
 } from "@odu/cordis/metrics";
 import { splitFanId } from "@odu/run-client/nodeId";
@@ -168,11 +167,20 @@ interface Accumulated {
 }
 
 /** What has already been taken from ONE run, so a second walk takes only what
- *  is new. The journal is append-only, so the count of entries already folded
- *  is a cursor into it; a verdict is written once, so counting it is a flag. */
+ *  is new.
+ *
+ *  `seq` is a WATERMARK, not a position: `readJournal` skips lines it cannot
+ *  decode and sorts what is left by `seq`, so an entry that arrives below one
+ *  already folded (an imported record, a displaced coordinator's last append)
+ *  shifts an index cursor and makes it fold one entry twice.
+ *
+ *  `counted` is how many TERMINALS of this run have been counted, because a run
+ *  can end more than once: `run_retry` on a live coordinator resets nodes in
+ *  the same run, the coordinator finalizes again, and the new verdict
+ *  overwrites the old one. */
 interface RunProgress {
-  entries: number;
-  counted: boolean;
+  seq: number;
+  counted: number;
 }
 
 const emptyAccumulated = (): Accumulated => ({
@@ -201,7 +209,7 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
 
   for (const row of listRuns({ root: catalog, limit })) {
     present.add(row.runId);
-    const progress = state.progress.get(row.runId) ?? { entries: 0, counted: false };
+    const progress = state.progress.get(row.runId) ?? { seq: 0, counted: 0 };
     state.progress.set(row.runId, progress);
     const handle = handleFor(row.runId, { root: catalog });
 
@@ -211,7 +219,7 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
     // exactly as long as a slow run is interesting. Only the entries this
     // process has not already taken are folded.
     const entries = readJournal(handle).entries;
-    for (const entry of entries.slice(progress.entries)) {
+    for (const entry of entries.filter((one) => one.seq > progress.seq)) {
       const event = entry.event;
       if (event.kind !== "node_status") continue;
       // `durationMs: null` is a transition that measured nothing — `pending`
@@ -226,14 +234,26 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
         event.durationMs / 1000,
       );
     }
-    progress.entries = entries.length;
+    // The entries are sorted by `seq`, so the last one is the high-water mark —
+    // and a journal retention took leaves the watermark where it was rather
+    // than resetting it to zero.
+    progress.seq = entries.at(-1)?.seq ?? progress.seq;
 
     const verdict = row.verdict;
     // No verdict, no outcome. A run that is still going is not an outcome this
     // row can report, and folding it into one would be a lie a dashboard draws.
-    // A run already counted is never counted twice, which is the whole point.
-    if (verdict === null || progress.counted) continue;
-    progress.counted = true;
+    //
+    // An outcome is counted ONCE PER GENERATION, not once per run. `finalized`
+    // is emitted per generation (`coordinator/history.ts`), so a run that
+    // finished red, took a rerun and finished green really did end twice — and
+    // its second verdict OVERWROTE the first. Counting once per run would
+    // under-report every retried success forever, while the catalog this
+    // mirrors says `passed`. A run first seen already finalized counts once
+    // even if retention has taken its journal, hence the floor of one.
+    if (verdict === null) continue;
+    const ends = Math.max(1, entries.filter((one) => one.event.kind === "finalized").length);
+    if (ends <= progress.counted) continue;
+    progress.counted = ends;
     state.runs.set(verdict.outcome, (state.runs.get(verdict.outcome) ?? 0) + 1);
     observe(
       tallyFor(state.runDurations, verdict.outcome, { outcome: verdict.outcome }),

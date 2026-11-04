@@ -89,6 +89,17 @@ function finishedRun(
   });
 }
 
+/** Wait for the wall clock to move. A run id's sort key is its millisecond
+ *  (`mintRunId`), so two runs minted inside one tick are ordered by a random
+ *  tail — which is a flake in any test that cares which run is newest. */
+function tick(): void {
+  const started = Date.now();
+  while (Date.now() === started) {
+    // Busy for under a millisecond, which is cheaper than any sleep that would
+    // have to be awaited.
+  }
+}
+
 const family = (
   families: readonly MetricFamily[] | undefined,
   name: string,
@@ -283,7 +294,11 @@ describe("the runs' metrics reading", () => {
       ?.points.find((p) => p.labels?.outcome === "passed");
     expect(passedFirst?.sum).toBe(45);
 
-    // A newer run pushes the counted one out of the window entirely.
+    // A newer run pushes the counted one out of the window entirely. The clock
+    // is advanced first: a run id is a millisecond plus eight random digits
+    // (`mintRunId`), so two runs minted in the SAME millisecond are ordered by
+    // the random tail — and "which run is newest" would be a coin toss.
+    tick();
     finishedRun(w, { outcome: "failed", tookMs: 5_000 });
     const second = read();
 
@@ -297,6 +312,7 @@ describe("the runs' metrics reading", () => {
 
     // And a third roll leaves both where they are: what left the catalog's
     // window stays counted.
+    tick();
     finishedRun(w, { outcome: "failed", tookMs: 5_000 });
     const third = read();
     expect(valueFor(third, "odu_runs_total", { outcome: "passed" })).toBe(1);
@@ -348,6 +364,50 @@ describe("the runs' metrics reading", () => {
     expect(valueFor(after, "odu_runs_total", { outcome: "passed" })).toBe(1);
     // And the verdict is not counted again on the next scrape.
     expect(valueFor(read(), "odu_runs_total", { outcome: "passed" })).toBe(1);
+  });
+
+  it("counts a run that was retried and finished again, once per generation", () => {
+    // A LIVE RETRY ENDS THE SAME RUN TWICE. `run_retry` resets nodes in place,
+    // the coordinator finalizes again, and `writeVerdict` OVERWRITES the
+    // verdict — so a run that went red and was retried green reports `passed`
+    // in the catalog. Counting once per run would leave that success
+    // uncounted forever and under-report every dashboard's pass rate.
+    const w = world();
+    const { handle, token } = registerFixtureRun(w, { repoRoot: REPO, sha: "d".repeat(40) });
+    const journal = openJournal(handle, token);
+    const verdict = (outcome: "passed" | "failed", tookMs: number) => {
+      journal.append({ kind: "finalized", outcome }, T0 + tookMs);
+      writeVerdict(handle, token, {
+        runId: handle.runId,
+        outcome,
+        startedAt: T0,
+        finishedAt: T0 + tookMs,
+        failed: [],
+        errored: [],
+        cancelled: [],
+        unposted: [],
+      });
+    };
+
+    const read = runMetricsReader({ catalog: w.catalogRoot, venues: () => null, freshMs: 0 });
+
+    verdict("failed", 20_000);
+    expect(valueFor(read(), "odu_runs_total", { outcome: "failed" })).toBe(1);
+
+    // The retry's own generation: a second terminal, a new verdict over the old.
+    verdict("passed", 45_000);
+    const after = read();
+    expect(valueFor(after, "odu_runs_total", { outcome: "passed" })).toBe(1);
+    // The red generation really happened, so it stays counted.
+    expect(valueFor(after, "odu_runs_total", { outcome: "failed" })).toBe(1);
+    const durations = after.histograms?.find((h) => h.name === "odu_run_duration_seconds");
+    expect(durations?.points.find((p) => p.labels?.outcome === "passed")?.sum).toBe(45);
+    expect(durations?.points.find((p) => p.labels?.outcome === "failed")?.sum).toBe(20);
+
+    // And neither generation is counted a third time.
+    const again = read();
+    expect(valueFor(again, "odu_runs_total", { outcome: "passed" })).toBe(1);
+    expect(valueFor(again, "odu_runs_total", { outcome: "failed" })).toBe(1);
   });
 
   it("reuses one catalog walk until its freshness window expires", () => {
