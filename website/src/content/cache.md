@@ -579,6 +579,7 @@ Watch these lines on a foreground `odu web` (it prints a row's operational `info
 - `cache.store.endpoint.unreachable` — a store's `endpoint` is a loopback or link-local address and a bucket lives on it (`store`, `endpoint`, `host`). Clients follow a redirect to that address since reads left odu, so this is every NAR read failing on the client's side.
 - `cache.bucket.exposed` — a PRIVATE bucket sits on a store with a bound `publicUrl` (`bucket`, `store`, `url`), so its objects are readable by anyone who knows the name. New ones are refused; this names the ones that predate the binding.
 - `cache.bucket.migrate.start` / `.progress` / `.flipped` / `.done` / `.failed` — a store move, with `copied`, `total` and `bytes`. `cache.bucket.migrate.purge` is the old store's URLs it asked the edge to drop.
+- `cache.bucket.deleted` — a bucket was taken away (`bucket`, `objects`, `bytes`: the store objects removed under its prefix and what they weighed). The one record of a bucket whose own rows are gone, so it is what an operator reads afterwards. `cache.bucket.delete.purge` is the addresses it served, announced to the edge (`bucket`, `urls`).
 
 ## Protocol
 

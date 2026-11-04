@@ -25,8 +25,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { purgeBroker } from "@odu/cordis/services";
+import { diskObjectStore } from "@odu/objects";
 import { type Cache, createCache } from "./cache";
-import { openCacheRepo } from "./db";
+import { type BucketRow, openCacheRepo } from "./db";
 import { base32 } from "./narinfo";
 import { cacheServer } from "./server";
 import { storeFacts } from "./stores";
@@ -50,11 +51,25 @@ afterEach(async () => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-function cacheWith(options: { purged?: (input: { reason: string; bucket: string }) => void } = {}): Cache {
+/** `gw`, a second declared store — what a `bucket.migrate` needs somewhere to
+ *  move to. A disk store like `local`: the copier's own suite grades S3. */
+const SECOND_STORE = "gw";
+
+function cacheWith(
+  options: {
+    purged?: (input: { reason: string; bucket: string }) => void;
+    /** Declare `gw` beside `local`, for the cases about a move. */
+    secondStore?: boolean;
+  } = {},
+): Cache {
+  const stores = new Map(localStores(scratch));
+  if (options.secondStore === true) {
+    stores.set(SECOND_STORE, diskObjectStore({ dir: join(scratch, SECOND_STORE) }));
+  }
   const cache = createCache({
     publicOrigin: ORIGIN,
     stateRoot: scratch,
-    stores: localStores(scratch),
+    stores,
     rootToken: ROOT,
     now: () => NOW,
     ...(options.purged === undefined ? {} : { purged: options.purged }),
@@ -85,28 +100,42 @@ const stream = (text: string): ReadableStream<Uint8Array> =>
     },
   });
 
+/** What a push's narinfo claims about the NAR beside it. */
+const narinfoText = (storePath: string, payload: { narHash: string }): string =>
+  [
+    `StorePath: ${storePath}`,
+    `URL: nar/${payload.narHash.slice("sha256:".length)}.nar.zst`,
+    "Compression: none",
+    `NarHash: ${payload.narHash}`,
+    "NarSize: 1",
+    "References: ",
+    "",
+  ].join("\n");
+
+/** THE FIRST HALF OF A PUSH: the bytes, staged and committed, with nothing
+ *  recorded yet. Split out because the narinfo that records them is a SECOND
+ *  request, and the gap between the two is where a delete can land. */
+async function stageNar(
+  cache: Cache,
+  bucket: BucketRow,
+  text: string,
+): Promise<{ narHash: string }> {
+  const payload = nar(text);
+  const upload = await cache.beginUpload(bucket, `${payload.narHash.slice("sha256:".length)}.nar.zst`);
+  await upload.write(payload.bytes);
+  await upload.commit();
+  return payload;
+}
+
 /** One real push: the object, then the narinfo that proves it. */
 async function push(cache: Cache, bucket: string, storePath: string, text: string): Promise<void> {
   const row = cache.bucket(bucket);
   if (row === null) throw new Error(`no bucket ${bucket}`);
-  const payload = nar(text);
-  const upload = await cache.beginUpload(row, `${payload.narHash.slice("sha256:".length)}.nar.zst`);
-  await upload.write(payload.bytes);
-  await upload.commit();
+  const payload = await stageNar(cache, row, text);
   const outcome = await cache.acceptNarinfo(
     row,
     hashOf(storePath),
-    stream(
-      [
-        `StorePath: ${storePath}`,
-        `URL: nar/${payload.narHash.slice("sha256:".length)}.nar.zst`,
-        "Compression: none",
-        `NarHash: ${payload.narHash}`,
-        "NarSize: 1",
-        "References: ",
-        "",
-      ].join("\n"),
-    ),
+    stream(narinfoText(storePath, payload)),
   );
   if (!outcome.ok) throw new Error(`push was refused: ${outcome.message}`);
 }
@@ -323,5 +352,78 @@ describe("the row the board follows", () => {
     await cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: "watched" });
     expect([...published.keys()]).toEqual(["other"]);
     server.detach();
+  });
+});
+
+describe("a delete and the writer it races", () => {
+  it("refuses a narinfo whose bucket went while its NAR was being verified", async () => {
+    // THE ROW THE REQUEST WAS ADMITTED AGAINST, held across the delete: this
+    // is a push past `admit` whose proof took long enough for the bucket to
+    // go. Recording it against that stale row would write an object and a
+    // row under a name no listing reaches — never collected, never swept,
+    // and served again under a new key if the name is ever re-created.
+    const cache = cacheWith();
+    await cache.admin.create(created("racing"));
+    const admitted = cache.bucket("racing");
+    expect(admitted).not.toBeNull();
+    if (admitted === null) return;
+    const path = "/nix/store/00000000000000000000000000000007-seven";
+    const payload = await stageNar(cache, admitted, "seven");
+
+    expect(await cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: "racing" })).toMatchObject({
+      ok: true,
+    });
+
+    const late = await cache.acceptNarinfo(
+      admitted,
+      hashOf(path),
+      stream(narinfoText(path, payload)),
+    );
+    // 404, which is what `admit` would have answered the same request one
+    // moment later — not a 200 with nothing reachable behind it.
+    expect(late).toMatchObject({ ok: false, status: 404 });
+
+    // AND NOTHING WAS WRITTEN: no row, and not one key under the prefix.
+    const repo = repoNow();
+    const left = repo.objects("racing");
+    repo.close();
+    expect(left).toEqual([]);
+    expect(await new Map(localStores(scratch)).get("local")?.list("racing")).toEqual([]);
+  });
+
+  it("lets exactly one of a move and a delete win, whichever asks first", async () => {
+    // BOTH DECIDE UNDER THE WRITE LOCK, so the second to reach it reads what
+    // the first did. Either order is a legal outcome; what must never happen
+    // is both succeeding — a copier writing a deleted bucket's keys into the
+    // store this purge never touches.
+    for (const deleteFirst of [true, false]) {
+      const cache = cacheWith({ secondStore: true });
+      const name = deleteFirst ? "delete-first" : "move-first";
+      await cache.admin.create(created(name));
+      await push(cache, name, `/nix/store/0000000000000000000000000000000${deleteFirst ? 8 : 9}-x`, name);
+
+      const remove = (): Promise<unknown> =>
+        cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: name });
+      const move = (): Promise<unknown> =>
+        cache.admin.migrateStore({ ...asRoot(ROOT), bucket: name, store: SECOND_STORE });
+      // ISSUED IN ONE TICK, so both are queued on the lock before either runs.
+      const [deleted, moved] = (deleteFirst
+        ? await Promise.all([remove(), move()])
+        : await Promise.all([move(), remove()]).then(([first, second]) => [second, first])) as [
+        { ok: boolean; code?: string },
+        { ok: boolean; code?: string },
+      ];
+
+      expect([deleted.ok, moved.ok].filter(Boolean)).toHaveLength(1);
+      if (deleteFirst) {
+        // The bucket went; the move has nothing to move.
+        expect(moved).toMatchObject({ ok: false, code: "unknown_bucket" });
+        expect(cache.bucket(name)).toBeNull();
+      } else {
+        // The move was recorded; the delete reads that row and waits.
+        expect(deleted).toMatchObject({ ok: false, code: "bad_input" });
+        expect(cache.bucket(name)).not.toBeNull();
+      }
+    }
   });
 });

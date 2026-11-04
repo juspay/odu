@@ -324,14 +324,15 @@ export interface CacheAdmin {
    * store gave up (`objects` keys, `bytes`), which is the only count a person
    * can check afterwards — the rows it names are gone.
    *
-   * Refused for a bucket with a DOMAIN bound to it, so no DNS record is left
-   * pointing at a bucket that is not there, and for one with a move in
-   * flight, whose copier is writing into the other store as we read.
+   * Refused — from INSIDE that lock, with every guard re-read there — for a
+   * bucket with a DOMAIN bound to it, so no DNS record is left pointing at a
+   * bucket that is not there, and for one with a move in flight, whose
+   * copier is writing into the other store this purge never touches.
    */
   bucketDelete(input: {
     authority: Authority;
     bucket: string;
-  }): Promise<CacheOutcome<{ name: string; objects: number; bytes: number }>>;
+  }): Promise<CacheOutcome<BucketDeleted>>;
   pin(input: { authority: Authority;
     bucket: string;
     name: string;
@@ -374,6 +375,15 @@ export interface CacheAdmin {
     filter: string | null;
     after: string | null;
   }): Promise<CacheOutcome<{ paths: readonly PathPageRow[]; next: string | null }>>;
+}
+
+/** WHAT A DELETED BUCKET'S STORE GAVE UP: the keys removed under its prefix
+ *  and their bytes. The only count a person can check afterwards, since every
+ *  row that named them went with the bucket. */
+export interface BucketDeleted {
+  name: string;
+  objects: number;
+  bytes: number;
 }
 
 /** One stored path, as `paths` lists it. */
@@ -1387,10 +1397,6 @@ export function createCache(options: CacheOptions): Cache {
     async migrateStore(input) {
       const root = requireRoot(input);
       if (!root.ok) return root;
-      const bucket = repo.bucket(input.bucket);
-      if (bucket === null) {
-        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
-      }
       if (!stores.has(input.store)) {
         return {
           ok: false,
@@ -1398,92 +1404,121 @@ export function createCache(options: CacheOptions): Cache {
           message: `no store "${input.store}" — this daemon declares ${[...stores.keys()].join(", ")}`,
         };
       }
-      if (input.store === bucket.store) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message: `"${bucket.name}" already keeps its objects in "${input.store}"`,
-        };
-      }
-      const exposed = exposure(bucket.isPublic, input.store);
-      if (exposed !== null) return exposed;
-      // ONE MOVE PER BUCKET. A second one would be two copiers writing the
-      // same keys into two stores and one of them flipping the bucket under
-      // the other; a refusal says which one is running.
-      const running = repo.migration(bucket.name);
-      if (running !== null) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message:
-            `"${bucket.name}" is already moving to "${running.toStore}" ` +
-            `(${running.copied} of ${running.total} objects copied)`,
-        };
-      }
-      const row: MigrationRow = {
-        bucket: bucket.name,
-        fromStore: bucket.store,
-        toStore: input.store,
-        state: "copying",
-        copied: 0,
-        total: migrationKeys(repo, bucket.name).length,
-        bytes: 0,
-        started: now(),
-      };
-      repo.putMigration(row);
-      options.log?.("cache.bucket.migrate.start", {
-        bucket: row.bucket,
-        from: row.fromStore,
-        to: row.toStore,
-        total: row.total,
-      });
-      notify();
+      // UNDER THE WRITE LOCK, every read this decision rests on. The bucket
+      // may be DELETED and a move may be RECORDED while this call waits for
+      // somebody else's push to finish recording, and both of those are
+      // decided by rows read here: a check taken in the caller's own tick is
+      // a check about a state the insert below may no longer be part of.
+      // `bucket.delete` reads the same two rows under the same lock, so of a
+      // move and a delete that arrive together, exactly one is refused.
+      const started = await withWriteLock(
+        async (): Promise<CacheOutcome<MigrationRow>> => {
+          const bucket = repo.bucket(input.bucket);
+          if (bucket === null) {
+            return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+          }
+          if (input.store === bucket.store) {
+            return {
+              ok: false,
+              code: "bad_input",
+              message: `"${bucket.name}" already keeps its objects in "${input.store}"`,
+            };
+          }
+          const exposed = exposure(bucket.isPublic, input.store);
+          if (exposed !== null) return exposed;
+          // ONE MOVE PER BUCKET. A second one would be two copiers writing the
+          // same keys into two stores and one of them flipping the bucket under
+          // the other; a refusal says which one is running.
+          const running = repo.migration(bucket.name);
+          if (running !== null) {
+            return {
+              ok: false,
+              code: "bad_input",
+              message:
+                `"${bucket.name}" is already moving to "${running.toStore}" ` +
+                `(${running.copied} of ${running.total} objects copied)`,
+            };
+          }
+          const row: MigrationRow = {
+            bucket: bucket.name,
+            fromStore: bucket.store,
+            toStore: input.store,
+            state: "copying",
+            copied: 0,
+            total: migrationKeys(repo, bucket.name).length,
+            bytes: 0,
+            started: now(),
+          };
+          repo.putMigration(row);
+          options.log?.("cache.bucket.migrate.start", {
+            bucket: row.bucket,
+            from: row.fromStore,
+            to: row.toStore,
+            total: row.total,
+          });
+          notify();
+          return { ok: true, value: row };
+        },
+      );
+      if (!started.ok) return started;
+      // OUTSIDE THE LOCK: the copier takes it for its own flip, and starting
+      // it from inside would queue that flip behind a lock this call still
+      // holds.
+      //
       // THE ANSWER IS THE ROW, NOT THE OUTCOME: the copy is minutes of work
       // on a bucket of any size, and a verb that waited for it would be a
       // board control that times out. Progress is on the row.
-      startMigration(row);
-      return { ok: true, value: factsOf(repo.bucket(bucket.name) as BucketRow) };
+      startMigration(started.value);
+      return { ok: true, value: factsOf(repo.bucket(started.value.bucket) as BucketRow) };
     },
 
     async bucketDelete(input) {
       const root = requireRoot(input);
       if (!root.ok) return root;
-      const bucket = repo.bucket(input.bucket);
-      if (bucket === null) {
-        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
-      }
-      // A NAME FIRST. A domain is a DNS record somebody else made point here,
-      // and deleting the bucket under it would leave that name answering 404
-      // for a bucket nobody can recreate under it without noticing — so the
-      // operator takes the name away first, which is one control above this
-      // one on the same page.
-      if (bucket.domain !== null) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message:
-            `"${bucket.name}" answers to "${bucket.domain}" — clear its domain ` +
-            "before deleting it, so no DNS record is left pointing at nothing",
-        };
-      }
-      // AND NOT WHILE IT IS MOVING: the copier is writing this bucket's keys
-      // into the other store as we read, so a delete would race it and leave
-      // the copy it had already made behind.
-      const moving = repo.migration(bucket.name);
-      if (moving !== null) {
-        return {
-          ok: false,
-          code: "bad_input",
-          message:
-            `"${bucket.name}" is moving to "${moving.toStore}" ` +
-            `(${moving.copied} of ${moving.total} objects copied) — wait for the move`,
-        };
-      }
-      // UNDER THE WRITE LOCK, and the OBJECTS GO FIRST: a push taking the
-      // lock next finds no bucket, and a crash between the two halves leaves
-      // rows that still name every key — which is a delete that can be asked
-      // for again, where the other order is a prefix nothing can name.
-      return withWriteLock(async () => {
+      // EVERY READ THIS DECISION RESTS ON IS INSIDE THE LOCK, and so is the
+      // purge it authorises. A guard taken in the caller's own tick is a
+      // guard about a state that can change while `withWriteLock` WAITS —
+      // which is exactly when it matters, because the thing being waited on
+      // is a push recording. `bucket.migrate` reads the same two rows under
+      // the same lock, so of a move and a delete that arrive together,
+      // exactly one is refused.
+      //
+      // AND THE OBJECTS GO FIRST: a push taking the lock next finds no
+      // bucket, and a crash between the two halves leaves rows that still
+      // name every key — a delete that can be asked for again, where the
+      // other order is a prefix nothing can name.
+      return withWriteLock(async (): Promise<CacheOutcome<BucketDeleted>> => {
+        const bucket = repo.bucket(input.bucket);
+        if (bucket === null) {
+          return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+        }
+        // A NAME FIRST. A domain is a DNS record somebody else made point
+        // here, and deleting the bucket under it would leave that name
+        // answering 404 for a bucket nobody can recreate under it without
+        // noticing — so the operator takes the name away first, which is one
+        // control above this one on the same page.
+        if (bucket.domain !== null) {
+          return {
+            ok: false,
+            code: "bad_input",
+            message:
+              `"${bucket.name}" answers to "${bucket.domain}" — clear its domain ` +
+              "before deleting it, so no DNS record is left pointing at nothing",
+          };
+        }
+        // AND NOT WHILE IT IS MOVING: the copier is writing this bucket's
+        // keys into the other store, which this purge never touches, so a
+        // delete would leave the copy it had already made behind.
+        const moving = repo.migration(bucket.name);
+        if (moving !== null) {
+          return {
+            ok: false,
+            code: "bad_input",
+            message:
+              `"${bucket.name}" is moving to "${moving.toStore}" ` +
+              `(${moving.copied} of ${moving.total} objects copied) — wait for the move`,
+          };
+        }
         const store = storeOf(bucket);
         // WHAT THE ADDRESSES WERE, read before the rows go: the row below
         // turns these into the URLs an edge is holding.
