@@ -124,6 +124,7 @@ describe("the root token", () => {
       cache.admin.tokenList({ ...asRoot(ROOT), bucket: null }),
       cache.admin.tokenRevoke({ ...asRoot(ROOT), id: "x" }),
       cache.admin.retention({ ...asRoot(ROOT), bucket: "main", retentionDays: 7 }),
+      cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: "main" }),
       cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "p", paths: ["/nix/store/x"] }),
       cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" }),
       cache.admin.pinDelete({ ...asRoot(ROOT), bucket: "main", name: "p" }),

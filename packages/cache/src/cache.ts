@@ -315,6 +315,23 @@ export interface CacheAdmin {
     bucket: string;
     store: string;
   }): Promise<CacheOutcome<BucketFacts>>;
+  /**
+   * TAKE THIS BUCKET AWAY — the objects, the paths, the tokens and the pins.
+   *
+   * The purge is the FIRST half and the rows are the second, both under the
+   * write lock: a bucket whose rows went first would leave a store prefix
+   * nothing can name, and therefore nothing can ever delete. Answers what the
+   * store gave up (`objects` keys, `bytes`), which is the only count a person
+   * can check afterwards — the rows it names are gone.
+   *
+   * Refused for a bucket with a DOMAIN bound to it, so no DNS record is left
+   * pointing at a bucket that is not there, and for one with a move in
+   * flight, whose copier is writing into the other store as we read.
+   */
+  bucketDelete(input: {
+    authority: Authority;
+    bucket: string;
+  }): Promise<CacheOutcome<{ name: string; objects: number; bytes: number }>>;
   pin(input: { authority: Authority;
     bucket: string;
     name: string;
@@ -646,8 +663,9 @@ export interface CacheOptions {
    * AN ADDRESS WHOSE BYTES ARE NO LONGER WHAT THEY WERE, so whoever fronts
    * the store can be told.
    *
-   * Two callers. A finished MOVE leaves the previous store's copies deleted;
-   * a RE-PUSH rewrites a narinfo object that was cacheable for a day. The ROW
+   * Three callers. A finished MOVE leaves the previous store's copies
+   * deleted; a RE-PUSH rewrites a narinfo object that was cacheable for a
+   * day; a DELETED BUCKET gives up every address it ever served. The ROW
    * knows where a bucket is reachable from and the cache does not, so the
    * cache names the paths and the row builds the URLs — the same division the
    * collector's announcement uses.
@@ -655,7 +673,7 @@ export interface CacheOptions {
   purged?: (input: {
     bucket: string;
     store: string;
-    reason: "migrate" | "repush";
+    reason: "migrate" | "repush" | "delete";
     removals: readonly GcRemoval[];
     /** The bucket's `nix-cache-info`, when that is what changed — a move
      *  deletes it with everything else, and a `Priority:` edit rewrites it. */
@@ -1425,6 +1443,99 @@ export function createCache(options: CacheOptions): Cache {
       // board control that times out. Progress is on the row.
       startMigration(row);
       return { ok: true, value: factsOf(repo.bucket(bucket.name) as BucketRow) };
+    },
+
+    async bucketDelete(input) {
+      const root = requireRoot(input);
+      if (!root.ok) return root;
+      const bucket = repo.bucket(input.bucket);
+      if (bucket === null) {
+        return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
+      }
+      // A NAME FIRST. A domain is a DNS record somebody else made point here,
+      // and deleting the bucket under it would leave that name answering 404
+      // for a bucket nobody can recreate under it without noticing — so the
+      // operator takes the name away first, which is one control above this
+      // one on the same page.
+      if (bucket.domain !== null) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message:
+            `"${bucket.name}" answers to "${bucket.domain}" — clear its domain ` +
+            "before deleting it, so no DNS record is left pointing at nothing",
+        };
+      }
+      // AND NOT WHILE IT IS MOVING: the copier is writing this bucket's keys
+      // into the other store as we read, so a delete would race it and leave
+      // the copy it had already made behind.
+      const moving = repo.migration(bucket.name);
+      if (moving !== null) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message:
+            `"${bucket.name}" is moving to "${moving.toStore}" ` +
+            `(${moving.copied} of ${moving.total} objects copied) — wait for the move`,
+        };
+      }
+      // UNDER THE WRITE LOCK, and the OBJECTS GO FIRST: a push taking the
+      // lock next finds no bucket, and a crash between the two halves leaves
+      // rows that still name every key — which is a delete that can be asked
+      // for again, where the other order is a prefix nothing can name.
+      return withWriteLock(async () => {
+        const store = storeOf(bucket);
+        // WHAT THE ADDRESSES WERE, read before the rows go: the row below
+        // turns these into the URLs an edge is holding.
+        const removals: GcRemoval[] = repo.objects(bucket.name).map((row) => ({
+          storePath: row.storePath,
+          hash: row.hash,
+          narFile: narFileName(row.narHash, row.compression),
+        }));
+        // THE KEYS THE ROWS NAME, AND THE KEYS THE STORE HOLDS. The first set
+        // is what a move would copy; the second also catches an ORPHAN — a put
+        // whose record never landed — which no row can name and which would
+        // otherwise outlive the bucket under its own prefix forever.
+        const listed = await store.list(bucket.name);
+        const keys = new Map(listed.map((object) => [object.key, object.size]));
+        let objects = 0;
+        let bytes = 0;
+        for (const entry of migrationKeys(repo, bucket.name)) {
+          if (!keys.has(entry.key)) keys.set(entry.key, -1);
+        }
+        await Promise.all(
+          [...keys].map(([key, size]) =>
+            moveSlots.withSlot(async () => {
+              await store.delete(key);
+              // COUNTED ONLY IF THE STORE HELD IT: a key a row names and the
+              // store does not is deleted anyway (idempotent), but counting it
+              // would answer with objects nobody ever stored.
+              if (size < 0) return;
+              objects += 1;
+              bytes += size;
+            }),
+          ),
+        );
+        // AND WHAT A DEAD PUT LEFT: temp names are not objects, so `list`
+        // never showed them and only this sweep takes them.
+        objects += await store.sweepTemp(bucket.name, now());
+        // THE EDGE IS TOLD BEFORE THE ROW GOES, because the row is where the
+        // URLs come from: its store, and the mount it is served under.
+        options.purged?.({
+          bucket: bucket.name,
+          store: bucket.store,
+          reason: "delete",
+          removals,
+          cacheInfo: true,
+        });
+        // THE ROWS: the bucket, its objects, its pins, any migration record —
+        // and the TOKENS minted for this bucket alone, which `deleteBucket`
+        // takes with it.
+        repo.deleteBucket(bucket.name);
+        options.log?.("cache.bucket.deleted", { bucket: bucket.name, objects, bytes });
+        notify();
+        return { ok: true as const, value: { name: bucket.name, objects, bytes } };
+      });
     },
 
     async pin(input) {

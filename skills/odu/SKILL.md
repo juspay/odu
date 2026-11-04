@@ -19,7 +19,7 @@ run_start · run_wait · run_read · run_list · run_retry · run_cancel · log_
 catalog_import · catalog_prune · pipeline_read
 venue_probe · venue_hold · venue_release · protect_apply
 cache_bucket_create · cache_bucket_list · cache_bucket_describe · cache_bucket_paths
-cache_bucket_domain · cache_bucket_retention · cache_bucket_migrate
+cache_bucket_domain · cache_bucket_retention · cache_bucket_migrate · cache_bucket_delete
 cache_token_mint · cache_token_list · cache_token_revoke
 cache_pin_create · cache_pin_list · cache_pin_delete
 cache_gc_plan · cache_gc_run · cache_stats_read
@@ -321,6 +321,7 @@ terminal.
 | give a bucket a DNS name | `odu surface cache bucket_domain --input '{…}' --json` | `cache_bucket_domain` | `rootToken`, `bucket`, `domain` (omit to clear) | the bucket row; `url` becomes the name and `pushUrl` stays the path |
 | change a bucket's retention | `odu surface cache bucket_retention --input '{…}' --json` | `cache_bucket_retention` | `rootToken`, `bucket`, `retentionDays` (days from `lastWanted`; `0` keeps only what is referenced or pinned) | the bucket row |
 | move a bucket to another store | `odu surface cache bucket_migrate --input '{…}' --json` | `cache_bucket_migrate` | `rootToken`, `bucket`, `store` (a name from the `stores` resource) | the bucket row, with `migration` on it. The copy runs in the background and the bucket keeps serving from the OLD store until it is done; refused for an undeclared store, the store it is already on, a bucket already moving, and a PRIVATE bucket onto a store with a `publicUrl` |
+| delete a bucket | `odu surface cache bucket_delete --input '{…}' --json` | `cache_bucket_delete` | `rootToken`, `bucket` | `name`, `objects`, `bytes` — the store objects removed and what they weighed. The objects go first, then the bucket's rows, its paths, its pins and the tokens scoped to exactly this name (a wider glob like `team-*` is left alone); refused for a bucket with a DOMAIN bound (clear the domain first, so no DNS record points at nothing) and for one with a move in flight |
 | one bucket's paths | `odu surface cache bucket_paths --input '{…}' --json` | `cache_bucket_paths` | `bucket`, `filter?`, `after?` — **no root token** | `paths[]` (`storePath`, `narSize`, `created`, `hits`, `lastWanted`), `next?` — newest first, 100 a page |
 | the last venue probe, kept | `odu surface get venues` | the `venues` resource | *(none)* | `null`, or `at`, `platforms[]`, `source`, `warnings[]`, `rows[]` — what `venue_probe` last answered for the service's own fleet (a probe naming your own `hostsFile` is answered, not kept), so a reader need not dial every machine again |
 | the rows a board follows | `odu surface watch cache buckets` | the `buckets` resource | *(none)* | `name`, `public`, `retentionDays`, `keyName`, `publicKey`, `upstreamKeys[]`, `objects`, `bytes`, `created`, `domain`, `url`, `pushUrl`, `lastPush`, `hits`, `store`, `readsFrom`, `writesTo`, `migration` (`{to, state: copying\|flipping\|deleting, copied, total, bytes}`, or `null`) — one row per bucket, published as it moves |
@@ -374,13 +375,13 @@ docs, "Set up an R2 bucket"):
   "auto"; credentialsFile; publicUrl?; }` — `publicUrl` being the custom domain
   bound to that bucket, an origin with no path, which public buckets on the
   store are then advertised at.
-The cache row is at contract 4.2 (3.0 removed `held` and `--wait`; 3.1 added
+The cache row is at contract 4.3 (3.0 removed `held` and `--wait`; 3.1 added
 `store` and the `stores` resource; 4.0 moved retention onto `lastWanted` — the
 old last-access field is gone from a path and from `stats_read` — and added
 `bucket_retention`, `pin_list`, `pin_delete`, `gc_plan` and `orphans`; 4.1 added
 `readsFrom`, `publicUrl` on a store, `migration` on a bucket row and
 `bucket_migrate`; 4.2 added `writesTo` on a bucket row and the push client's
-upload negotiation).
+upload negotiation; 4.3 added `bucket_delete`).
 
 - **WRITES LEAVE ODU TOO, on an S3 store.** `odu cache push` asks the bucket
   where a NAR's bytes go before it sends any. A bucket whose store takes its
@@ -656,7 +657,13 @@ declares.
   every bucket daily on its own; and a collection speaks only the object store's `list`
   and `delete`, so an R2 bucket collects exactly as one on disk. The old
   last-access field is gone from a path and from `cache_stats_read`.
-- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 4.0,
+- **A bucket can be deleted** (cache 4.3): `cache_bucket_delete` takes its objects out of
+  its store, then the bucket row, its paths, its pins and the tokens scoped to exactly
+  that name, and answers how many objects went and what they weighed. It refuses a bucket
+  with a domain bound (clear the domain first) and one with a move in flight. Admin only,
+  and on the board it is the bucket page's **Delete this bucket**, which makes you type
+  the bucket's name first.
+- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 4.3,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
   major of a row **it reads** differs. The refusal names that row
   (`serves the cache row at 4.0; this build reads cache 3.1`): run `odu web --upgrade`.

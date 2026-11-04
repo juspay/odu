@@ -100,6 +100,7 @@ export interface WebWorld {
  */
 export const SHARED_TOOLS = [
   "cache_bucket_create",
+  "cache_bucket_delete",
   "cache_bucket_describe",
   "cache_bucket_domain",
   "cache_bucket_list",

@@ -282,7 +282,21 @@ A bucket keeps what nobody wants for **90 days** unless it says otherwise. `cach
 
 **Collection also happens on its own, once a day,** over every bucket, so a cache nobody administers still stops growing; `cache gc_run` and **Run GC** are that same collection asked for sooner. An object is evicted only when retention has expired, nothing retained in the bucket references it, and no pin holds it. A collection of *every* bucket also sweeps **orphans** — object keys the store held that no row ever named, a put whose record never landed — and reports them beside what it evicted. It collects with nothing but the store's own `list` and `delete`, so a bucket on R2 collects exactly as one on local disk. Whatever was deleted is announced as URLs: a bucket behind a Cloudflare tunnel has them purged at the edge, and with no CDN in front nothing is purged because nothing was cached.
 
-On the board, a bucket page carries **Retention**, **Pins** (pin a closure, read what each pin holds, delete one), **Dry run**, **Run GC** and **Stats** — the objects, their bytes on disk and hit counts. Deleting a pin needs an administrator; a *write* token may create or re-point one it made, which is how a CI push keeps a master pin current (see [Protocol](#protocol)).
+On the board, a bucket page carries **Retention**, **Pins** (pin a closure, read what each pin holds, delete one), **Dry run**, **Run GC**, **Stats** — the objects, their bytes on disk and hit counts — and, last, **Delete this bucket**. Deleting a pin needs an administrator; a *write* token may create or re-point one it made, which is how a CI push keeps a master pin current (see [Protocol](#protocol)).
+
+### Delete a bucket
+
+```sh
+odu surface cache bucket_delete --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"r2test"}' --json
+```
+
+On the board it is the last panel on a bucket page's admin side, **Delete this bucket**: type the bucket's name into the field beside the button and **Delete bucket** lights up. Nothing else confirms it, and when it is done the board is back on the bucket list.
+
+**The objects go first, then the rows.** Every NAR, every narinfo beside one, the bucket's own `nix-cache-info`, and anything else left under its prefix — an orphan no row ever named, a temp a dead put left — is deleted from the bucket's store, and what the verb answers is that count and those bytes: `objects` and `bytes` are store objects removed, not paths. Only then do the rows go: the bucket, its paths, its pins and the tokens whose bucket glob is exactly this name. A wider glob — `team-*` — is left alone, because it was never this bucket's token. There is no pin guard: a pin is a name over a closure in a bucket that will not exist.
+
+**A bucket with a domain is refused until you clear the domain.** `bucket_domain` with no `domain` takes the name away; deleting the bucket under it would leave a DNS record pointing at nothing. A bucket with a [move](#move-a-bucket-to-another-store) in flight is refused too — let the copy finish, or the delete would race it. Both refusals say so in a sentence, and the board shows that sentence in place.
+
+Whatever was deleted is announced for purging at the edge, as a collection's evictions are. To an agent the verb is `cache_bucket_delete`; there is no `odu cache delete` — a cache is administered from the board and from `odu surface cache`.
 
 ## Keep a bucket on S3
 
@@ -544,7 +558,7 @@ The connector needs outbound HTTPS from the server and nothing inbound: no port 
 
 `odu web`'s page has **Runs** and **Cache** in the header. `#/cache` lists the buckets — name, public or private, how many paths, how much space, when it last took a push, how many reads — and `#/cache/<bucket>` is one bucket: its substituter URL, its public key, the `nix.conf` / netrc block above ready to copy, and its paths newest first with a filter box. The facts line says who answers a read of it — **reads served from cache.example.com**, or **reads served by odu**.
 
-**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page **Tokens** (mint write or read, shown once; list; revoke), **Retention**, **Move to another store**, **Pins** (pin a closure; what each pin holds; delete one), **Dry run**, **Run GC** and **Stats**. The dry run is asked for rather than taken on arrival, and is asked again after every collection — "what am I about to lose" is a question a report answers too late, and a question nobody asked must not answer in red. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
+**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page **Tokens** (mint write or read, shown once; list; revoke), **Retention**, **Move to another store**, **Pins** (pin a closure; what each pin holds; delete one), **Dry run**, **Run GC**, **Stats** and, last, **Delete this bucket** — which asks you to type the bucket's name before its button will do anything, and returns to the list when the bucket is gone. The dry run is asked for rather than taken on arrival, and is asked again after every collection — "what am I about to lose" is a question a report answers too late, and a question nobody asked must not answer in red. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
 
 The rows arrive over the wire the page already holds, so a path pushed from a build box appears without a reload; reads are folded into a bucket's counters at most once a second rather than once per NAR.
 
@@ -636,6 +650,7 @@ The CLI keeps the three cache commands a shell is the natural place for. Everyth
 | Give a bucket a DNS name of its own, or take it away (omit `domain`) | — | `bucket_domain` | bucket → **Domain** |
 | Change how long a bucket keeps what nobody wants | — | `bucket_retention` | bucket → **Retention** |
 | Move a bucket's objects to another declared store; answers the row, and `migration` on it is the progress. Serves from the old store until the copy is done | — | `bucket_migrate` | bucket → **Move to another store** → **Start move** |
+| Delete a bucket: its objects out of its store first, then the bucket, its paths, its pins and the tokens scoped to exactly its name. Answers the objects removed and their bytes. Refused while a domain is bound to it or a move is in flight | — | `bucket_delete` | bucket → **Delete this bucket** |
 | Mint a token, answered once (`scope`: `read`, `write` or `admin`) | — | `token_mint` | bucket → **Mint token** (write or read) |
 | List tokens with scope, expiry and last use | — | `token_list` | bucket → Tokens |
 | Revoke one token | — | `token_revoke` | bucket → Tokens → **revoke** |

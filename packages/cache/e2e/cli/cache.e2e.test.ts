@@ -414,6 +414,21 @@ describe("odu serves a Nix binary cache", () => {
     expect(refused.stderr).toContain("root token");
   });
 
+  // THE DESTRUCTIVE VERB HAS THE SAME FLOOR, and has to be refused BEFORE it
+  // takes anything — so the bucket is read back after the refusal rather than
+  // taken on the exit code's word.
+  it("refuses a bucket delete without the root token, and keeps the bucket", () => {
+    const refused = surface("bucket_delete", { rootToken: "wrong", bucket: "main" });
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain("root token");
+
+    const listed = surface("bucket_list", { rootToken: ROOT_TOKEN });
+    expect(listed.status).toBe(0);
+    expect(
+      (JSON.parse(listed.stdout) as { buckets: Bucket[] }).buckets.map((b) => b.name),
+    ).toContain("main");
+  });
+
   it("mints a write token, and shows it once", () => {
     const minted = surface("token_mint", {
       rootToken: ROOT_TOKEN,

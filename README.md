@@ -86,6 +86,7 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 | Give a bucket a DNS name of its own through a Cloudflare tunnel | `odu surface cache bucket_domain` | bucket → **Domain** |
 | How long a path outlives the last time anything wanted it, in days | `odu surface cache bucket_retention` | a bucket's **Retention** |
 | Move a bucket's objects to another declared store, serving from the old one until the copy is done | `odu surface cache bucket_migrate` | a bucket's **Move to another store** |
+| Delete a bucket: its objects first, then its rows, pins and tokens. Refused while it has a domain bound or a move in flight | `odu surface cache bucket_delete` | a bucket's **Delete this bucket** |
 | Keep a closure out of garbage collection, see what each pin holds, let one go | `odu surface cache pin_create\|pin_list\|pin_delete` | a bucket's **Pins** |
 | Evict what retention expired and nothing references or pins — the daily pass, asked for now | `odu surface cache gc_run` | a bucket's **Run GC** |
 | What the next collection would take, without taking it | `odu surface cache gc_plan` | a bucket's **Dry run** |
@@ -96,13 +97,13 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 
 **A bucket keeps what nobody wants for 90 days.** Retention counts from `lastWanted` — renewed by a push and by the `missing` query a push asks first, never by a read, because reads are leaving odu and a clock a read wound would make the busiest paths look idle first. A pin holds a closure past that — CI takes one with `pin: ${{ github.ref_name == github.event.repository.default_branch }}` in the push action, under a name derived from the repository, the ref and the system — and the reference closure of anything kept is kept. The row collects every bucket once a day on its own; the bucket page's **Run GC** (`cache gc_run`) is that same collection asked for sooner, and its **Dry run** (`cache gc_plan`) says what it would take before you press it. Retention, pins and collection are the board and the API; the CLI's only word in this is `--pin` on a push.
 
-**Each row versions its own surface.** A client is admitted on the host's major and the majors of the rows it reads, so a cache change never refuses a client that reads only runs. Cache **3.0** removed the deprecated `held` list and `odu cache push --wait`; **3.1** adds a bucket's `store`; **4.0** moves retention onto `lastWanted` and drops the old last-access field a path and `stats.read` used to carry, and adds `bucket.retention`, `pin.list`, `pin.delete` and `gc.plan`; **4.1** adds `readsFrom`, a store's `publicUrl`, a bucket's `migration` and `bucket.migrate`; **4.2** adds `writesTo` — whether a push's bytes go straight into the bucket's store — and the upload negotiation that answers it. A chunked push names its parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
+**Each row versions its own surface.** A client is admitted on the host's major and the majors of the rows it reads, so a cache change never refuses a client that reads only runs. Cache **3.0** removed the deprecated `held` list and `odu cache push --wait`; **3.1** adds a bucket's `store`; **4.0** moves retention onto `lastWanted` and drops the old last-access field a path and `stats.read` used to carry, and adds `bucket.retention`, `pin.list`, `pin.delete` and `gc.plan`; **4.1** adds `readsFrom`, a store's `publicUrl`, a bucket's `migration` and `bucket.migrate`; **4.2** adds `writesTo` — whether a push's bytes go straight into the bucket's store — and the upload negotiation that answers it; **4.3** adds `bucket.delete` (`cache_bucket_delete` to an agent), which takes a bucket's objects out of its store and then the bucket itself. A chunked push names its parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
 
 | Row | Contract | Who reads it |
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
 | `ci` (runs) | 2.4 | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
-| `cache` | **4.2** | `odu cache`, `odu surface cache`, the board |
+| `cache` | **4.3** | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
 

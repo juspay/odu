@@ -258,4 +258,32 @@ describe("signed in: the role is the rule", () => {
       await close();
     }
   });
+
+  it("lets an admin delete a bucket, and refuses a member the same verb", async () => {
+    const { client, close } = face(ROOT);
+    try {
+      const made = await ask(client.surface.bucket.create({ ...bucketInput, rootToken: ROOT }));
+      expect(made.ok).toBe(true);
+      // A MEMBER MAY READ THE BOARD AND NOT EMPTY IT: `bucket.delete` sits at
+      // the row's administration floor, like every other verb that writes.
+      const refused = await ask(
+        client.surface.bucket.delete({ bucket: bucketInput.name, rootToken: "" }),
+        signedIn("member"),
+      );
+      expect(refused.ok).toBe(false);
+      if (refused.ok) return;
+      expect(refusedWith(refused.error).code).toBe("not_permitted");
+      const deleted = await ask(
+        client.surface.bucket.delete({ bucket: bucketInput.name, rootToken: "" }),
+        signedIn("admin"),
+      );
+      expect(deleted.ok).toBe(true);
+      if (!deleted.ok) return;
+      expect(deleted.value.name).toBe(bucketInput.name);
+      const listed = await ask(client.surface.bucket.list({ rootToken: ROOT }));
+      expect(listed.ok && listed.value.buckets).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
 });

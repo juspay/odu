@@ -811,6 +811,63 @@ Then("the pin list says nothing is pinned", async function (this: OduWorld) {
   );
 });
 
+function deleteSection(world: OduWorld): Locator {
+  return world.page.locator('section[aria-label="delete"]');
+}
+
+/** THE GATE IS THE CONTROL. A delete has no undo, so the button is dead until
+ *  the bucket's own name has been typed — graded here, before it is, because a
+ *  confirm field nobody has to satisfy is decoration. */
+Then("the delete button is disabled until the name is typed", async function (this: OduWorld) {
+  const button = deleteSection(this).getByRole("button", { name: "Delete bucket", exact: true });
+  await button.waitFor({ timeout: 30_000 });
+  assert.strictEqual(
+    await button.isDisabled(),
+    true,
+    "the delete button was live before the bucket's name was typed",
+  );
+});
+
+When("I type the bucket's name to confirm", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  await deleteSection(this).getByLabel(`type ${name} to confirm`, { exact: true }).fill(name);
+});
+
+/** EVERY READ ON THAT PAGE IS ABOUT TO REFUSE, so a delete that worked leaves
+ *  it: the list is the only page left that can say anything true about this
+ *  bucket. */
+Then("the page returns to the cache list", async function (this: OduWorld) {
+  await this.page.getByRole("heading", { name: "Cache", exact: true }).waitFor({ timeout: 30_000 });
+  await this.waitUntil(
+    async () => new URL(this.page.url()).hash === "#/cache",
+    `the page to return to "#/cache" (it is at ${this.page.url()})`,
+  );
+});
+
+Then("that bucket is no longer listed", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
+  await this.page
+    .locator("button.bucket", { hasText: name })
+    .first()
+    .waitFor({ state: "detached", timeout: 30_000 });
+});
+
+/** THE SAME ADDRESS THAT ANSWERED 200 two steps ago, asked with the same
+ *  token: an unknown bucket is a 404 before anything is authorized, so this is
+ *  the objects being GONE rather than a credential being refused. */
+Then("the bucket's narinfo answers 404", async function (this: OduWorld) {
+  const path = this.cachePath;
+  assert.ok(path !== undefined && this.cacheBucket !== undefined, "nothing was pushed");
+  const hash = (path.split("/").pop() ?? "").slice(0, 32);
+  const answer = await fetch(
+    new URL(`/cache/${this.cacheBucket}/${hash}.narinfo`, this.service.origin),
+    { headers: { authorization: `Bearer ${minted(this).token}` } },
+  );
+  assert.strictEqual(answer.status, 404, `the narinfo answered ${answer.status}`);
+});
+
 Then("the retention form defaults to 90 days", async function (this: OduWorld) {
   assert.strictEqual(
     await this.page.getByLabel("retention days", { exact: true }).inputValue(),

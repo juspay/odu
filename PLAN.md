@@ -1,8 +1,8 @@
 # Odu as a product: Nix cache + CI you run yourself
 
 Status: living, 2026-11-03.
-- Phase 1 and all of Phase 2 are on master once 2.9 lands: 2.8 is #148, #150
-  and #152, and 2.9 is #154.
+- Phase 1 and all of Phase 2 are on master: 2.8 is #148, #150 and #152, and
+  2.9 is #154.
 - **Next is Phase 3**, orgs.
 - One step is one PR, and the order is a dependency order. There is no schedule.
 
@@ -74,7 +74,8 @@ object storage plus a lane pool. Hosting comes later, at a monthly price.
 - **`kolu` moved to R2 by pushing afresh**, not by copying: the bucket is
   `kolu-r2` on the R2 bucket `kolu`, read at `https://cache.kolu.dev/kolu-r2`
   by odu, kolu, olai and agent-distro. The old `kolu` bucket (24 GiB on the
-  PVC) and `r2test` linger until a `bucket_delete` verb exists.
+  PVC) and `r2test` are still there: `bucket_delete` has landed, and the
+  operator deletes the two of them once it is deployed.
 - **Pushes go to odu over Tailscale Funnel**, not through the tunnel:
   `https://odu-k3s.rooster-blues.ts.net` is public, the board behind GitHub
   sign-in, so no second hostname and no 100 MB body cap stand in a push's way.
@@ -377,7 +378,8 @@ Commits and PR bodies use the earlier names.
     store; it is deleted after `cache.migration.complete`. Buckets: `kolu-r2`
     (production, on `r2`, skips `cache.nixos.org-1`), the old `kolu` (local,
     no longer advertised) and `r2test` (its objects in the retired R2 bucket
-    `odu-test`); the last two wait for a delete verb.
+    `odu-test`); `bucket_delete` exists now, and the last two go when the
+    operator runs it after the deploy.
 
 [^parity]: Parity is checked by each row's own e2e: one scenario per verb,
     driven through the face.
