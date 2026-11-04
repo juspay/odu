@@ -2,7 +2,7 @@
 
 Status: living, 2026-11-03.
 - Phase 1 and all of Phase 2 are on master once 2.9 lands: 2.8 is #148, #150
-  and #152, and 2.9 is #PR.
+  and #152, and 2.9 is #154.
 - **Next is Phase 3**, orgs.
 - One step is one PR, and the order is a dependency order. There is no schedule.
 
@@ -156,7 +156,7 @@ the read path wherever it can be, behind a board people want to use.
 | 2.6 | The board, redesigned | ✅ #146 |
 | 2.7 | GC and pins on every store | ✅ #145 |
 | 2.8 | Reads leave odu | ✅ #148 |
-| 2.9 | Uploads go straight to the store | ✅ #PR |
+| 2.9 | Uploads go straight to the store | ✅ #154 |
 | 2.10 | The admin CLI is retired | ✅ #144 |
 
 What each step delivers:
