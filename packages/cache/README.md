@@ -13,7 +13,7 @@ Part of the odu repo — `"@odu/cache": "workspace:*"`.
 | --- | --- | --- |
 | `./surface` | the CONTRACT: a bucket's shape, the verbs that administer it, the tagged refusal, `useBlock`, and the expose map both the terminal and an agent read | ✅ |
 | `./server` | implements it and exports `cacheRow` — the plugin the daemon mounts, which mounts ITSELF on the runs' bundle and closes its own database | ❌ |
-| `./cli` | `odu cache …`, the argv face: `use`, `login`, `push`; the administering verbs are the board and `odu surface cache <verb>` (`bucket_create`, `bucket_list`, `token_mint`, `pin_create`, `gc_run`, `stats_read`, …) | ❌ |
+| `./cli` | `odu cache …`, the argv face: `use`, `login`, `push`; the administering verbs are the board and `odu surface cache <verb>` (`bucket_create`, `bucket_list`, `bucket_delete`, `token_mint`, `pin_create`, `gc_run`, `stats_read`, …) | ❌ |
 | `./face` | the board's Cache view | ✅ (draws) |
 
 That is the whole package: the engine, the protocol route and the mount path are
@@ -134,6 +134,18 @@ on the wire and `cache_bucket_create` to an agent.
   a typo in a workflow's `pin:` must not drop `release-1.0`. Write tokens of
   one bucket are peers in this, as they already are in pushing to it.
   DELETING a pin stays the admin surface's either way.
+- **A bucket can be deleted, objects first.** `bucket.delete` (cache surface
+  **4.3**; `cache_bucket_delete` to an agent) lists the bucket's whole prefix
+  in its store and deletes every key
+  under it — NARs, the narinfos beside them, `nix-cache-info`, an orphan, a
+  temp a dead put left — and answers that count and those bytes as `objects`
+  and `bytes`: store objects removed, not paths. Only then do the rows go: the
+  bucket, its paths, its pins (a pin guards nothing in a bucket that will not
+  exist) and the tokens whose bucket glob is exactly this name, a wider glob
+  being somebody else's. It refuses a bucket with a domain bound — clearing it
+  is `bucket.domain` with no domain, and a record left pointing at nothing is
+  worse than a refusal — and one with a migration in flight. What left is
+  announced for purging like a collection's evictions.
 
 ## Reads leave odu
 

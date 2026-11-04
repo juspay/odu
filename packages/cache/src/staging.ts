@@ -81,7 +81,10 @@ export type NarinfoOutcome =
   | { ok: true; status: 200; storePath: string }
   | {
       ok: false;
-      status: 400;
+      /** 400 for a proof this push could not make; 404 for a bucket that
+       *  stopped existing while the push was being verified — the answer
+       *  `admit` gives every request that arrives one moment later. */
+      status: 400 | 404;
       message: string;
       /** What the refusal knew, for the server's own log. */
       detail?: {
@@ -997,7 +1000,18 @@ export function createStaging(deps: StagingDeps): Staging {
       // the snapshot's store would put it in the one the move is emptying,
       // and the move's delete pass would take it. The lock makes this read
       // and the write that follows one moment.
-      const current = bucketNow(bucket.name) ?? bucket;
+      //
+      // AND THE BUCKET CAN BE GONE. `bucket.delete` purges the prefix and
+      // drops the rows under this same lock, so a push already past `admit`
+      // can arrive here with nothing to be recorded against. Writing against
+      // the snapshot would put an object and a row under a name no listing
+      // reaches — never collected, never swept, and served again under a new
+      // key if the name is re-created. 404 is what `admit` would have
+      // answered a moment later.
+      const current = bucketNow(bucket.name);
+      if (current === null) {
+        return { ok: false, status: 404, message: `no bucket "${bucket.name}"` };
+      }
       const file = await keep(current);
       if ("ok" in file) return file;
       await record(current, info, file, selfHash);

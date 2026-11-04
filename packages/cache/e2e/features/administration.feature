@@ -133,6 +133,24 @@ Feature: An admin administers the cache from the board
     And the pin list says nothing is pinned
     And there should be no page errors
 
+  # THE ONE CONTROL WITH NO UNDO, so the button is dead until the bucket's own
+  # name has been typed — the gate is the whole point, and it is graded BEFORE
+  # the name is there. What the delete really took is read off the
+  # SUBSTITUTER: the path this scenario pushed answered a moment ago, and the
+  # same address is a 404 once the bucket is gone.
+  Scenario: A bucket is deleted from its page, and stops serving what it held
+    Given a bucket created from the board
+    And I mint a "write" token
+    When a path is pushed with that token from the CLI
+    Then the bucket serves that path's narinfo to the token
+    And the delete button is disabled until the name is typed
+    When I type the bucket's name to confirm
+    And I press "Delete bucket"
+    Then the page returns to the cache list
+    And that bucket is no longer listed
+    And the bucket's narinfo answers 404
+    And there should be no page errors
+
   # "WHAT AM I ABOUT TO LOSE" is asked BEFORE the button, so the dry run is
   # graded naming the path the collection then takes — and not naming the one
   # the pin holds. ZERO DAYS is the bucket saying "keep only what a reference

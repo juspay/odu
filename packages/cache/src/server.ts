@@ -161,7 +161,7 @@ export interface CacheServer {
     /** A store the bucket is no longer on, whose domain served these objects
      *  a moment ago; for a re-push, the one it still lives on. */
     store: string;
-    reason: "migrate" | "repush";
+    reason: "migrate" | "repush" | "delete";
     removals: readonly GcRemoval[];
     /** The bucket's own `nix-cache-info`, which no removal names. */
     cacheInfo?: boolean;
@@ -441,8 +441,8 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       rows.set(row.name, row);
       publisher.buckets.upsert(row.name, row);
     }
-    // A bucket that went away — `odu cache` has no delete yet, but a row left
-    // behind by one would be a row nobody can open.
+    // A bucket that went away — `bucket.delete`, or a row this publisher has
+    // outlived. Either way a row left behind is a row nobody can open.
     for (const name of [...published.keys()]) {
       if (next.has(name)) continue;
       published.delete(name);
@@ -542,12 +542,18 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
    * A finished MOVE: the objects are identical in the new store, but the old
    * store's domain is about to answer 404 for every one of them. A RE-PUSH:
    * the text object was rewritten, and what it replaced is cacheable for a
-   * day while odu's own render is already correct.
+   * day while odu's own render is already correct. A DELETED BUCKET: every
+   * address it served is gone, and the `store` it names is the one it lived
+   * in, read before its row went.
    */
   const announceMoved: CacheServer["announceMoved"] = (input) => {
     if (!opts.purge.listening()) return;
     announceUrls(
-      input.reason === "migrate" ? "cache.bucket.migrate.purge" : "cache.narinfo.purge",
+      input.reason === "migrate"
+        ? "cache.bucket.migrate.purge"
+        : input.reason === "delete"
+          ? "cache.bucket.delete.purge"
+          : "cache.narinfo.purge",
       input.bucket,
       urlsFor({
         bucket: input.bucket,
@@ -741,6 +747,13 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 store: input.store,
               }),
             (facts) => rowOf(facts),
+          ),
+        delete: ({ input }) =>
+          admin(
+            input,
+            (authority) =>
+              cache.admin.bucketDelete({ authority, bucket: input.bucket }),
+            (gone) => gone,
           ),
       },
       token: {

@@ -348,6 +348,31 @@ const MigrateInputSchema = Schema.Struct({
   store: Schema.String,
 });
 
+/**
+ * TAKE A BUCKET AWAY — its objects, its rows, its tokens and its pins.
+ *
+ * One verb for the whole thing, because half a deleted bucket is the worst of
+ * the three states: a name whose key is gone and whose objects are not, or
+ * rows pointing at a store prefix nothing serves. Refused for a bucket with a
+ * DOMAIN bound to it (the operator takes the name away first, so no DNS
+ * record is left pointing at a bucket that is not there) and for one with a
+ * move in flight.
+ */
+const DeleteInputSchema = Schema.Struct({
+  rootToken: Schema.String,
+  bucket: Schema.String,
+});
+const DeleteOutputSchema = Schema.Struct({
+  name: Schema.String,
+  /** STORE OBJECTS removed, not paths: every NAR, the narinfo beside each one,
+   *  the bucket's own `nix-cache-info`, anything orphaned under its prefix and
+   *  any temp a dead put left. A bucket's `objects` fact counts PATHS; this
+   *  counts what the store gave up. */
+  objects: Schema.Int,
+  /** What those objects weighed, as the store listed them. */
+  bytes: Schema.Int,
+});
+
 const PinInputSchema = Schema.Struct({
   rootToken: Schema.String,
   bucket: Schema.String,
@@ -494,6 +519,17 @@ export const DEFAULT_RETENTION_DAYS = 90;
  */
 export const DEFAULT_NAR_PART_BYTES = 64 * 1024 * 1024;
 export const MAX_NAR_PART_BYTES = 96 * 1024 * 1024;
+
+/**
+ * WHICH CONTRACT ADDED THE UPLOAD NEGOTIATION — the one number a push client
+ * names when an origin answers 404 to `…/nar/<file>/upload`.
+ *
+ * A FIXED FACT, not {@link CACHE_CONTRACT_VERSION}: the row's version moves
+ * every time the surface grows, and interpolating it told an operator their
+ * cache "predates 4.3, which added the upload negotiation" the moment a
+ * different verb landed. The sentence is about 4.2 forever.
+ */
+export const UPLOAD_NEGOTIATION_SINCE = "4.2";
 
 /**
  * In DIRECT mode (PLAN 2.9) nothing proxies the bytes, so the number above
@@ -727,6 +763,7 @@ export const oduCacheSurface = defineSurface({
       paths: { input: PathsInputSchema, output: PathsOutputSchema, error: REFUSES },
       retention: { input: RetentionInputSchema, output: CacheBucketSchema, error: REFUSES },
       migrate: { input: MigrateInputSchema, output: CacheBucketSchema, error: REFUSES },
+      delete: { input: DeleteInputSchema, output: DeleteOutputSchema, error: REFUSES },
     },
     token: {
       mint: { input: TokenMintInputSchema, output: TokenMintOutputSchema, error: REFUSES },
@@ -766,9 +803,10 @@ export type OduCacheSurface = typeof oduCacheSurface;
  * `<namespace>_<verb>`, with the sibling key in front when the row is composed —
  * so the cache answers `cache_bucket_create`, `cache_bucket_list`,
  * `cache_bucket_describe`, `cache_bucket_paths`, `cache_bucket_retention`,
- * `cache_token_mint`, `cache_token_list`, `cache_token_revoke`,
- * `cache_pin_create`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan`,
- * `cache_gc_run` and `cache_stats_read`.
+ * `cache_bucket_delete`, `cache_token_mint`, `cache_token_list`,
+ * `cache_token_revoke`, `cache_pin_create`, `cache_pin_list`,
+ * `cache_pin_delete`, `cache_gc_plan`, `cache_gc_run` and
+ * `cache_stats_read`.
  *
  * `buckets` is a RESOURCE because the board subscribes to it; `paths` is not,
  * because its input is an address (a bucket name and a page cursor) and a stream
@@ -788,6 +826,9 @@ export const ODU_CACHE_EXPOSE = {
   "bucket.paths": { tool: { mutates: false } },
   "bucket.retention": { tool: { mutates: true } },
   "bucket.migrate": { tool: { mutates: true } },
+  // THE ONE VERB THAT TAKES A BUCKET AWAY: mutating, and an agent must be
+  // asked before it runs one — there is no undo for a deleted key.
+  "bucket.delete": { tool: { mutates: true } },
   "token.mint": { tool: { mutates: true } },
   "token.list": { tool: { mutates: false } },
   "token.revoke": { tool: { mutates: true } },
@@ -846,6 +887,12 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "A PRIVATE bucket may not live on a store with a `publicUrl`: the bound",
   "domain serves every prefix in it, so `cache_bucket_create` and",
   "`cache_bucket_migrate` refuse that combination with `bad_input`.",
+  "`cache_bucket_delete` takes a whole bucket away — its objects, its paths,",
+  "its tokens and its pins — and answers how many store objects and bytes it",
+  "removed. There is no undo and no trash: ask it only when somebody asked",
+  "for it by name. A bucket with a DOMAIN bound to it is refused until the",
+  "domain is cleared (no DNS record left pointing at nothing), as is one with",
+  "a migration in flight.",
 ].join("\n");
 
 // ── the row ─────────────────────────────────────────────────────────────────
@@ -901,8 +948,13 @@ export const CACHE_KEY = "cache";
  * that hang off the upload it answers), which is why the number moves at all:
  * a client that speaks 4.2 expects to be able to negotiate, and one that does
  * not keeps the staged routes, which are unchanged.
+ *
+ * 4.3: A BUCKET CAN BE TAKEN AWAY. Additive: the verb
+ * `bucket.delete`, which purges the bucket's objects from its store and then
+ * drops its rows, its tokens and its pins. Nothing a 4.2 reader already reads
+ * changed, and a reader that does not know the verb simply never calls it.
  */
-export const CACHE_CONTRACT_VERSION = "4.2";
+export const CACHE_CONTRACT_VERSION = "4.3";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

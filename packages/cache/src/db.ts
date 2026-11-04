@@ -187,6 +187,14 @@ export interface CacheRepo {
    *  the header (lowercase, no port); the domain is stored that way. */
   bucketByDomain(domain: string): BucketRow | null;
   buckets(): BucketRow[];
+  /**
+   * EVERYTHING THAT IS THIS BUCKET'S: the row, its objects, its pins, a
+   * migration record, and the tokens minted FOR IT — a token whose glob is
+   * exactly this name can address nothing else, so leaving it would be a
+   * credential with no bucket. A WIDER glob (`team-*`) is left alone: it
+   * names the buckets beside this one too, and deleting one of them is not
+   * a decision about them.
+   */
   deleteBucket(name: string): void;
   /** THE MOVE RUNNING ON A BUCKET, or null. One per bucket: a second
    *  `bucket.migrate` while one is running is refused, not queued. */
@@ -649,6 +657,7 @@ export function openCacheRepo(path: string): CacheRepo {
       db.run("DELETE FROM object WHERE bucket = ?", [name]);
       db.run("DELETE FROM pin WHERE bucket = ?", [name]);
       db.run("DELETE FROM bucket_migration WHERE bucket = ?", [name]);
+      db.run("DELETE FROM token WHERE bucket_glob = ?", [name]);
     },
 
     migration: (bucket) => {

@@ -35,6 +35,7 @@ import type { GcRemoval } from "./gc";
 import { narFileName } from "./narinfo";
 import type { ObjectStore } from "@odu/objects";
 import type { Slots } from "./slots";
+import { purgeKeys } from "./purge";
 import {
   cacheInfoKey,
   CACHE_INFO_CONTENT_TYPE,
@@ -255,10 +256,18 @@ export async function runMigration(row: MigrationRow, deps: MigrationDeps): Prom
       // these are bytes nobody reads — and the addresses they were served at
       // are what the purge below invalidates.
       const removals = removalsOf(repo, state.bucket);
-      for (const entry of migrationKeys(repo, state.bucket)) {
-        if (deps.stopping()) return;
-        await deps.slots.withSlot(() => from.delete(entry.key)).catch(() => {});
-      }
+      await purgeKeys({
+        objects: from,
+        keys: migrationKeys(repo, state.bucket).map((entry) => entry.key),
+        slots: deps.slots,
+        stop: deps.stopping,
+        // A KEY THAT WOULD NOT GO IS NOT THIS MOVE'S PROBLEM: the flip has
+        // happened, the bucket is served from the new store, and what is
+        // left behind in the old one is a leftover for a later sweep. A move
+        // that stalled here would hold a row in `deleting` forever.
+        failed: () => {},
+      });
+      if (deps.stopping()) return;
       deps.purged?.({
         bucket: state.bucket,
         store: state.fromStore,

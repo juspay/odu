@@ -27,6 +27,9 @@ const LEDGER: ContractLedger = {
   // 4.2 — PLAN 2.9: `writesTo` on a bucket row, the one fact the push
   // negotiation answers from. Additive.
   "4.2": "0d639bc2b90f11e8",
+  // 4.3 — `bucket.delete`: a bucket, its objects, its tokens and its pins
+  // taken away in one verb. Additive.
+  "4.3": "95162ed3ed6003ad",
 };
 
 describe("the cache row's contract", () => {

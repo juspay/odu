@@ -49,7 +49,7 @@ import {
   type UploadMode,
   type UploadPlan,
 } from "./paths";
-import { CACHE_CONTRACT_VERSION, DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES } from "./surface";
+import { DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES, UPLOAD_NEGOTIATION_SINCE } from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
 /** The environment slice this client reads. Passed in rather than reached for:
@@ -775,7 +775,7 @@ async function beginUpload(
     return {
       error:
         `${base} does not take uploads this way: it predates cache surface ` +
-        `${CACHE_CONTRACT_VERSION}, which added the upload negotiation — upgrade the cache`,
+        `${UPLOAD_NEGOTIATION_SINCE}, which added the upload negotiation — upgrade the cache`,
       retry: false,
     };
   }

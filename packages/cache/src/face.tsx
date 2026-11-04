@@ -1095,6 +1095,16 @@ function BucketPage(
                     name={name}
                     now={props.now}
                   />
+                  {/* LAST, and the only control on this page that cannot be
+                      undone: it is drawn under the stats a person reads
+                      before deciding, and it asks for the name back. */}
+                  <BucketDelete
+                    client={props.client}
+                    call={props.call}
+                    rootToken={props.rootToken}
+                    name={name}
+                    onDeleted={() => props.onOpen(null)}
+                  />
                 </div>
               )}
             </Show>
@@ -2097,6 +2107,77 @@ function BucketStats(props: AdminProps & { name: string; now: number }): JSX.Ele
             A path is wanted by a push or by a <code>missing</code> query that
             names it — never by a read, which is a substitution leaving odu.
           </p>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+/**
+ * TAKE THIS BUCKET AWAY — `bucket.delete`, and the one control here with no
+ * undo behind it.
+ *
+ * So it is GATED ON THE NAME: the button does nothing until the operator has
+ * typed the bucket's own name back, exactly, which is the convention a person
+ * already knows from deleting a repository. A confirmation dialog would be
+ * one keystroke on a control that destroys every object in a bucket; retyping
+ * the name is the one gesture that cannot be made by muscle memory, and it
+ * also names WHICH bucket, which is the mistake this guards against — the
+ * operator with two tabs open.
+ *
+ * On success the page LEAVES: the bucket it was drawing does not exist, and
+ * every read on it is about to refuse. The list it returns to has already
+ * dropped the row, because the row's own collection published its removal.
+ */
+function BucketDelete(
+  props: AdminProps & { name: string; onDeleted: () => void },
+): JSX.Element {
+  const [typed, setTyped] = createSignal("");
+  const action = createControl(props.call);
+  const confirmed = createMemo(() => typed() === props.name);
+  // LEAVE ON THE ANSWER, not on the call: `Control.run`'s own `after` fires on
+  // a refusal too, and a page that navigated away from a bound-domain refusal
+  // would hide the sentence that says what to do about it. `done()` is the OK
+  // arm alone.
+  createEffect(
+    on(action.done, (message) => {
+      if (message !== null) props.onDeleted();
+    }, { defer: true }),
+  );
+  const remove = (): void => {
+    if (!confirmed()) return;
+    action.run(
+      props.client.procedures.bucket.delete({
+        rootToken: props.rootToken(),
+        bucket: props.name,
+      }),
+      (gone) => `Deleted ${gone.name}: ${gone.objects} objects, ${bytes(gone.bytes)}.`,
+    );
+  };
+  return (
+    <Panel
+      title="Delete this bucket"
+      note="Removes every object, path, token and pin in it. There is no undo. A bucket with a domain keeps its name until you clear it above."
+      label="delete"
+    >
+      <div class="panel-body">
+        <div class="stack">
+          <Field id="delete-confirm" label={`type ${props.name} to confirm`}>
+            <TextInput
+              id="delete-confirm"
+              value={typed()}
+              placeholder={props.name}
+              onValue={setTyped}
+            />
+          </Field>
+          <Button
+            class="btn-danger"
+            disabled={action.busy() || !confirmed()}
+            onClick={remove}
+          >
+            {action.busy() ? "deleting…" : "Delete bucket"}
+          </Button>
+          <Answer control={action} />
         </div>
       </div>
     </Panel>
