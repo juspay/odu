@@ -86,18 +86,27 @@ const kept = (outcome: PutOutcome): ObjectFacts => {
  *  declines the capability — which is all-or-nothing (see `objectStore.ts`),
  *  so one check answers for the group. */
 type DirectStore = ObjectStore &
-  Required<Pick<ObjectStore, "partSize" | "presignPut" | "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy">>;
+  Required<Pick<ObjectStore, "partSize" | "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy">>;
 
 function directly(store: ObjectStore): DirectStore | null {
   const offered =
     store.partSize !== undefined &&
-    store.presignPut !== undefined &&
     store.createUpload !== undefined &&
     store.presignPart !== undefined &&
     store.completeUpload !== undefined &&
     store.abortUpload !== undefined &&
     store.copy !== undefined;
   return offered ? (store as DirectStore) : null;
+}
+
+/** A TEMP OBJECT THE WAY A DIRECT UPLOAD MAKES ONE: one upload, one part,
+ *  completed. There is no presigned `PUT` to make one with — that is the
+ *  point of the shape (see `objectStore.ts`) — so the cases that need bytes
+ *  under a temp key put them there the way a writer would. */
+async function uploadedTemp(direct: DirectStore, key: string, payload: Uint8Array): Promise<void> {
+  const uploadId = await direct.createUpload(key);
+  const parts = await uploadParts(direct, key, uploadId, [payload]);
+  expect(await direct.completeUpload(key, uploadId, parts)).toBe("stored");
 }
 
 /** Send `chunks` as the parts of `uploadId`, each through a URL of its own,
@@ -485,7 +494,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       const { store, dispose } = await make();
       const offered = {
         partSize: store.partSize !== undefined,
-        presignPut: store.presignPut !== undefined,
         createUpload: store.createUpload !== undefined,
         presignPart: store.presignPart !== undefined,
         completeUpload: store.completeUpload !== undefined,
@@ -500,7 +508,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       const whole = store.presignGet !== undefined;
       expect(offered).toEqual({
         partSize: whole,
-        presignPut: whole,
         createUpload: whole,
         presignPart: whole,
         completeUpload: whole,
@@ -510,22 +517,29 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
-    it("takes a whole object through a URL a writer PUTs to itself", async () => {
+    it("signs no URL that can write a finished object", async () => {
       const { store, dispose } = await make();
       const direct = directly(store);
       if (direct === null) {
         await dispose();
         return;
       }
-      const payload = bytes("a NAR the writer sent itself");
-      // A PLAIN `fetch`: no Authorization, no client of this store's — the
-      // URL carries every bit of authority the write needs.
-      const sent = await fetch(direct.presignPut("main/nar/sent.nar.zst", 600), {
-        method: "PUT",
-        body: payload as Uint8Array<ArrayBuffer>,
-      });
-      expect({ ok: sent.ok, status: sent.status }).toEqual({ ok: true, status: 200 });
-      expect(Array.from((await read(store, "main/nar/sent.nar.zst")) as Uint8Array)).toEqual(Array.from(payload));
+      // THE WHOLE PROOF A CALLER GETS. The only URLs this store signs for a
+      // key are parts of ONE upload, and the completion ends that upload — so
+      // whoever proved the finished object cannot have it changed underneath
+      // them. There is no `presignPut` to leave a second way in.
+      const key = `main/nar/${TEMP}write-once`;
+      const uploadId = await direct.createUpload(key);
+      const payload = bytes("the bytes somebody will prove");
+      const url = direct.presignPart(key, uploadId, 0, 600);
+      const parts = await uploadParts(direct, key, uploadId, [payload]);
+      expect(await direct.completeUpload(key, uploadId, parts)).toBe("stored");
+
+      // THE SAME PART URL, AFTERWARDS: the upload it names is gone, and the
+      // object does not move.
+      const again = await fetch(url, { method: "PUT", body: bytes("other bytes") as Uint8Array<ArrayBuffer> });
+      expect(again.ok).toBe(false);
+      expect(Array.from((await read(store, key)) as Uint8Array)).toEqual(Array.from(payload));
       await dispose();
     });
 
@@ -646,7 +660,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       // them to the copy that makes them an object.
       const source = `main/nar/${TEMP}copied`;
       const payload = patterned(5_000, 16);
-      await fetch(direct.presignPut(source, 600), { method: "PUT", body: payload as Uint8Array<ArrayBuffer> });
+      await uploadedTemp(direct, source, payload);
       const facts = factsOf(payload);
       const destination = "main/nar/copied.nar.zst";
       expect(await direct.copy(source, destination, { facts, ifAbsent: true })).toBe("stored");
@@ -655,10 +669,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       // ONTO A KEY THAT IS TAKEN: the copy is refused and the object there
       // is the one that was there.
       const other = patterned(5_000, 17);
-      await fetch(direct.presignPut(`main/nar/${TEMP}other`, 600), {
-        method: "PUT",
-        body: other as Uint8Array<ArrayBuffer>,
-      });
+      await uploadedTemp(direct, `main/nar/${TEMP}other`, other);
       expect(await direct.copy(`main/nar/${TEMP}other`, destination, { facts: factsOf(other), ifAbsent: true })).toBe(
         "exists",
       );
@@ -675,22 +686,24 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         return;
       }
       // WHAT A PROVER DOES: read the object, learn which version it read,
-      // then copy THAT. A source anybody else can still write — a direct
-      // upload's temp key, which the client holds a presigned PUT for — is
-      // otherwise a different object by the time the copy reads it, once per
-      // part, and the destination would carry facts of bytes it does not hold.
+      // then copy THAT. This is the SECOND line of defence — the first is
+      // that a finished key has no writer at all — and how far it reaches is
+      // the service's: AWS and versitygw hold `UploadPartCopy` to
+      // `x-amz-copy-source-if-match`, R2 does not implement it there. So a
+      // caller may use it, and may not rest on it.
       const source = `main/nar/${TEMP}versioned`;
       const proved = patterned(5_000, 18);
-      await fetch(direct.presignPut(source, 600), { method: "PUT", body: proved as Uint8Array<ArrayBuffer> });
+      await uploadedTemp(direct, source, proved);
       const opened = await store.get(source);
       const version = opened?.etag;
       expect(version).toBeTruthy();
       await opened?.stream.cancel();
 
-      // The client puts other bytes there, as it still may.
+      // Something writes the key again — which odu's own shape prevents, and
+      // which this case stages deliberately to see what the copy does.
       const swapped = patterned(5_000, 19);
       await store.delete(source);
-      await fetch(direct.presignPut(source, 600), { method: "PUT", body: swapped as Uint8Array<ArrayBuffer> });
+      await uploadedTemp(direct, source, swapped);
 
       const destination = "main/nar/versioned.nar.zst";
       expect(
@@ -726,10 +739,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         return;
       }
       const temp = `main/nar/${TEMP}unproved`;
-      await fetch(direct.presignPut(temp, 600), {
-        method: "PUT",
-        body: bytes("bytes nobody proved") as Uint8Array<ArrayBuffer>,
-      });
+      await uploadedTemp(direct, temp, bytes("bytes nobody proved"));
       // NOT AN OBJECT: a temp name is never listed, whoever wrote it.
       expect(await store.list("main")).toEqual([]);
       expect(await store.head(temp)).toBe(19);

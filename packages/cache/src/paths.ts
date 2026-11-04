@@ -51,8 +51,17 @@ export type UploadPlan =
       /** What every part but the last must be. The client slices to it, so
        *  the store is never handed a part it would refuse for being short. */
       partSize: number;
-      /** A single-object PUT, for a NAR that fits in one part. */
-      put: string;
+      /**
+       * WHERE PART 0 GOES. Every byte of a direct upload is a PART — there is
+       * no plain PUT, because a plain PUT leaves the key writable for as long
+       * as its URL lives and odu has to PROVE that key afterwards. Part URLs
+       * stop writing when the upload is completed.
+       *
+       * The first one rides on the plan so the common case — a NAR that fits
+       * in one part — costs the same three requests a single PUT would have:
+       * begin, the part, the completion. The rest are asked for one at a time.
+       */
+      part: string;
     };
 
 /**

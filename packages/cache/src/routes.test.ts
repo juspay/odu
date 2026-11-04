@@ -1691,36 +1691,42 @@ describe("a large NAR stays off the heap", () => {
  * the store, never by anything the client said.
  */
 describe("a direct upload", () => {
-  /** Begin, send the bytes where the plan says, and join. Answers the plan
-   *  and the completion, so a case can assert on either. */
+  /** Begin, send the bytes to the part URL the plan carries, and join.
+   *  Answers the plan and the completion, so a case can assert on either. */
   async function direct(
     h: Harness,
     file: string,
     bytes: Uint8Array,
-  ): Promise<{ plan: { mode: string; upload?: string; partSize?: number; put?: string }; complete: Response }> {
+  ): Promise<{
+    plan: { mode: string; upload?: string; partSize?: number; part?: string };
+    complete: Response;
+  }> {
     const begun = await h.fetch(`/main/nar/${file}/upload`, {
       ...bearer(h.tokens.write),
       method: "POST",
       body: JSON.stringify({ partSize: 1 }),
     });
     expect(begun.status).toBe(200);
-    const plan = (await begun.json()) as { mode: string; upload?: string; put?: string };
+    const plan = (await begun.json()) as { mode: string; upload?: string; part?: string };
     if (plan.mode !== "direct") throw new Error(`the bucket answered ${plan.mode}`);
-    const put = await fetch(plan.put as string, { method: "PUT", body: body(bytes) });
+    const put = await fetch(plan.part as string, { method: "PUT", body: body(bytes) });
     expect(put.status).toBe(200);
     const complete = await h.fetch(`/main/nar/${file}/upload/${plan.upload}/complete`, {
       ...bearer(h.tokens.write),
       method: "POST",
-      body: JSON.stringify({ parts: [] }),
+      body: JSON.stringify({ parts: [{ index: 0, etag: put.headers.get("etag") }] }),
     });
     return { plan, complete };
   }
 
   /**
-   * A STORE THAT LETS A CLIENT RACE THE PROOF: it rewrites the temp object
-   * the moment odu asks to copy it, which is exactly what a client holding
-   * the ten-minute presigned PUT can do between the readback and the copy.
-   * `rewrote` is the bytes it slipped in.
+   * A STORE WHOSE TEMP OBJECT CHANGES UNDER THE COPY, however it got there:
+   * it rewrites the source the moment odu asks to copy it. Odu's own shape
+   * makes this unreachable for a client — the only URLs it signs for the key
+   * are parts of an upload the completion closes — so this stages the hazard
+   * the shape removes, and holds the SECOND line of defence to its promise
+   * where the store honours it (AWS, versitygw; R2 does not implement the
+   * source condition on `UploadPartCopy`).
    */
   function racingS3(rewrite: Uint8Array): { where: Where; raced: () => number } {
     let raced = 0;
@@ -1758,14 +1764,21 @@ describe("a direct upload", () => {
       method: "POST",
       body: "",
     });
-    const plan = (await begun.json()) as { mode: string; partSize: number; put: string };
+    const plan = (await begun.json()) as Record<string, unknown>;
     expect(plan.mode).toBe("direct");
     // THE PART SIZE IS THE STORE'S FLOOR, never the 1 byte a client may ask
     // for: S3 refuses a short part in the middle of an upload.
-    expect(plan.partSize).toBeGreaterThanOrEqual(5 * 1024 * 1024);
-    // A URL THAT CARRIES ITS OWN AUTHORITY, at the store and not at odu.
-    expect(new URL(plan.put).searchParams.get("X-Amz-Signature")).not.toBeNull();
-    expect(new URL(plan.put).pathname).toContain("/nar/.tmp-");
+    expect(plan.partSize as number).toBeGreaterThanOrEqual(5 * 1024 * 1024);
+    // A URL THAT CARRIES ITS OWN AUTHORITY, at the store and not at odu —
+    // and it is a PART of one upload, not a plain PUT. That is the whole of
+    // why the object odu proves later cannot be rewritten: completing the
+    // upload ends every URL odu ever signed for the key.
+    const part = new URL(plan.part as string);
+    expect(part.searchParams.get("X-Amz-Signature")).not.toBeNull();
+    expect(part.searchParams.get("partNumber")).toBe("1");
+    expect(part.searchParams.get("uploadId")).not.toBeNull();
+    expect(part.pathname).toContain("/nar/.tmp-");
+    expect(Object.keys(plan).sort()).toEqual(["mode", "part", "partSize", "upload"]);
     await onS3.dispose();
   });
 
@@ -1792,13 +1805,13 @@ describe("a direct upload", () => {
     const file = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const { complete } = await direct(h, file, payload.bytes);
     expect(complete.status).toBe(200);
-    expect(await complete.json()).toEqual({ parts: 0, bytes: payload.bytes.length });
+    expect(await complete.json()).toEqual({ parts: 1, bytes: payload.bytes.length });
     // THIS NAR's line — the harness seeded a staged one before it, which is
     // the same event for the other mode.
     expect(
       events.find((line) => line.event === "cache.nar.uploaded" && line.fields.file === file)
         ?.fields,
-    ).toMatchObject({ bucket: "main", file, mode: "direct", parts: 0, bytes: payload.bytes.length });
+    ).toMatchObject({ bucket: "main", file, mode: "direct", parts: 1, bytes: payload.bytes.length });
 
     // NOTHING IS RECORDED YET: bytes with no proof are not a path.
     expect(h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(GLIBC))).toBeNull();
@@ -1872,12 +1885,42 @@ describe("a direct upload", () => {
     await h.dispose();
   });
 
-  it("refuses bytes rewritten between the verify and the copy, and keeps none of them", async () => {
-    // THE ONE INVARIANT 2.9 EXISTS FOR. The client holds a presigned PUT for
-    // the temp key for ten minutes, and the copy reads that key once per
-    // part — so without a precondition odu would verify `G`, copy `E`, and
-    // sign `G`'s hash over `E`'s bytes. The copy carries the ETag the verify
-    // read; a source that moved is a refusal.
+  it("hands the client no URL that can rewrite the object it will prove", async () => {
+    // THE FIX FOR THE ONE INVARIANT 2.9 EXISTS FOR, and it is structural
+    // rather than conditional: the plan's only write URL is PART 0 of one
+    // multipart upload, and completing that upload ends it. A precondition
+    // on the copy cannot be the guarantee, because R2 does not implement
+    // `x-amz-copy-source-if-match` on `UploadPartCopy`.
+    const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
+    const payload = nar("bytes the client cannot take back");
+    const file = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
+    const { plan, complete } = await direct(h, file, payload.bytes);
+    expect(complete.status).toBe(200);
+
+    // THE CLIENT STILL HOLDS PART 0'S URL. It no longer writes anything: the
+    // upload it names was consumed by the completion.
+    const again = await fetch(plan.part as string, {
+      method: "PUT",
+      body: body(new TextEncoder().encode("bytes nobody proved")),
+    });
+    expect(again.ok).toBe(false);
+    // AND THE PATH STILL LANDS, over the bytes odu read back.
+    expect((await upload(h.fetch, h.tokens.write, GLIBC, payload, { skipNar: true })).status).toBe(200);
+    const read = await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read));
+    const bytes =
+      read.status === 307
+        ? new Uint8Array(await (await fetch(read.headers.get("location") as string)).arrayBuffer())
+        : new Uint8Array(await read.arrayBuffer());
+    expect(new TextDecoder().decode(bytes)).toBe("bytes the client cannot take back");
+    await h.dispose();
+  });
+
+  it("refuses bytes that changed between the verify and the copy, and keeps none of them", async () => {
+    // THE SECOND LINE OF DEFENCE, held to its promise. No client can reach
+    // the source any more (the case above), so this stages the hazard at the
+    // store and asserts what the copy does WHERE the service honours the
+    // source precondition — versitygw here, AWS too, and NOT R2, which is
+    // exactly why the guarantee rests on the shape rather than on this.
     const events: { event: string; fields: Record<string, unknown> }[] = [];
     const honest = nar("the bytes odu verified");
     const swapped = new TextEncoder().encode("the bytes a racing client slipped in");

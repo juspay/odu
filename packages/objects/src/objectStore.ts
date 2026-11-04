@@ -41,9 +41,9 @@
  * S3.
  *
  * **Writes can leave odu too.** A store that serves its own objects also TAKES
- * its own objects: `presignPut`, `createUpload`, `presignPart`,
- * `completeUpload`, `abortUpload` and `copy` let a writer that odu has
- * authorised send the bytes to the store directly, and let odu then prove them
+ * its own objects: `createUpload`, `presignPart`, `completeUpload`,
+ * `abortUpload` and `copy` let a writer that odu has authorised send the
+ * bytes to the store directly, and let odu then prove them
  * and `copy` them into place. Optional, like `presignGet` and for the same
  * reason: a store whose objects are local files has nobody to presign for.
  *
@@ -143,10 +143,14 @@ export interface CopyOptions extends PutOptions {
   readonly ifAbsent?: boolean;
   /**
    * COPY THESE BYTES OR NONE: the source's {@link StoredObject.etag} as the
-   * caller read it. The copy is then bound to the version the caller PROVED,
-   * and a source rewritten in between answers `source_changed` instead of
-   * moving bytes nobody vouched for. A copy reads its source once per part,
-   * so without this the window is the whole copy.
+   * caller read it, sent as `x-amz-copy-source-if-match`. A source rewritten
+   * since answers `source_changed`, and nothing is written.
+   *
+   * HOW FAR IT REACHES IS THE SERVICE'S: AWS and versitygw honour it on
+   * `UploadPartCopy`; R2 lists it as NOT IMPLEMENTED there (it implements it
+   * on `CopyObject`, which this store does not use). It is a second line of
+   * defence and never a caller's only one — a caller whose source another
+   * writer can reach must make it unreachable instead.
    */
   readonly sourceIfMatch?: string;
 }
@@ -207,15 +211,19 @@ export interface ObjectStore {
   // uploaded straight to the store is not trusted, so the bytes land under a
   // temp key, and whoever proves them `copy`s them into place with the facts
   // IT measured. That is the whole of why these are separate from `put`.
+  //
+  // AND NOTHING HERE PRESIGNS A PLAIN PUT. A multipart upload is the only way
+  // in: its parts are writable only until the upload is completed, and after
+  // that NO url this store ever signed can write the key — which is what lets
+  // a caller prove an object and then act on the proof. A presigned
+  // `PutObject` would leave the key writable for as long as the URL lived,
+  // and no source precondition closes that everywhere (R2 does not implement
+  // `x-amz-copy-source-if-match` on `UploadPartCopy`).
 
   /** The length every part but the last must have. S3 refuses a short part in
    *  the middle of an upload, so the client is told this number rather than
    *  guessing one the store will reject. */
   readonly partSize?: number;
-  /** A URL that WRITES the object at `key` for the next `expiresSeconds`,
-   *  carrying its own authority. One request, one object: what a NAR that
-   *  fits in a single part is uploaded with. */
-  presignPut?(key: string, expiresSeconds: number): URL;
   /** Open a multipart upload at `key`; answers the id its parts and its
    *  completion carry. The object appears only on {@link completeUpload}. */
   createUpload?(key: string): Promise<string>;

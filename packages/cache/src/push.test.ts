@@ -193,7 +193,8 @@ function startServer(): Server {
           mode: "direct",
           upload,
           partSize: state.directPartSize,
-          put: `${state.origin}/store/${upload}-whole`,
+          // PART 0, never a plain PUT — the shape the server really answers.
+          part: `${state.origin}/store/${upload}-part-0`,
         });
       }
       if (request.method === "GET" && url.pathname.includes("/upload/")) {
@@ -620,11 +621,16 @@ describe("pushing a closure", () => {
         partSize: 64,
       });
       expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "direct" });
-      // ONE OBJECT, at the URL the plan named — and no multipart upload was
-      // opened for it, so the join names no parts.
-      expect([...server.stored.keys()]).toEqual(["u1-whole"]);
-      expect(server.stored.get("u1-whole")).toBe("a NAR that fits in one part");
-      expect(server.joined).toEqual([{ upload: "u1", parts: [] }]);
+      // ONE PART, at the URL the plan carried — no extra round trip to sign
+      // it, and still a part, so the key stops being writable the moment the
+      // completion lands.
+      expect([...server.stored.keys()]).toEqual(["u1-part-0"]);
+      expect(server.stored.get("u1-part-0")).toBe("a NAR that fits in one part");
+      expect(server.joined).toEqual([
+        { upload: "u1", parts: [{ index: 0, etag: '"etag-u1-part-0"' }] },
+      ]);
+      // AND NOBODY ASKED ODU TO SIGN ANYTHING: part 0 came with the plan.
+      expect(server.seen.filter((seen) => seen.path.includes("/parts/"))).toEqual([]);
       // NOT ONE NAR BYTE CROSSED ODU: every body it saw is a narinfo or a
       // small JSON document.
       const toOdu = server.seen.filter(

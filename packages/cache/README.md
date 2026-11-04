@@ -194,18 +194,20 @@ A push's bytes crossed this process on their way to the store, and on an S3
 store they no longer do (PLAN 2.9, cache surface **4.2**).
 
 - **The store decides, and the client is told.** `POST …/nar/<file>/upload`
-  answers `{mode:"direct", upload, partSize, put}` or `{mode:"staged"}`, from
+  answers `{mode:"direct", upload, partSize, part}` or `{mode:"staged"}`, from
   `Staging.uploadMode(bucket)` — which asks the bucket's `ObjectStore` whether
-  it offers the direct-upload capability (`createUpload` and its five
+  it offers the direct-upload capability (`createUpload` and its four
   siblings; all-or-nothing, like `presignGet` for reads). No route ever peeks
   at a store, and the same answer is the row's `writesTo`.
-- **One temp key per upload.** The client writes `<bucket>/nar/.tmp-<uuid>`:
-  one presigned PUT when the NAR fits in one part, else a presigned part at a
-  time (`GET …/upload/<id>/parts/<i>`), each ETag kept and handed back to
-  `POST …/upload/<id>/complete`, which joins them and HEADs the object — so a
-  200 there means odu saw the bytes land. `partSize` is the largest of S3's
-  5 MiB floor, the store's own part size and the client's `--part-size`,
-  which in this mode is a floor rather than a proxy's ceiling.
+- **One temp key per upload, and one way into it.** The client writes
+  `<bucket>/nar/.tmp-<uuid>` as the PARTS of a single multipart upload odu
+  opened at `begin` — part 0's URL rides on the plan, so a one-part NAR costs
+  no extra round trip, and the rest come from `GET …/upload/<id>/parts/<i>`.
+  Each ETag is handed back to `POST …/upload/<id>/complete`, which joins them
+  and HEADs the object: a 200 there means odu saw the bytes land. `partSize`
+  is the largest of S3's 5 MiB floor, the store's own part size and the
+  client's `--part-size`, which in this mode is a floor rather than a proxy's
+  ceiling.
 - **The narinfo is still the proof.** `proveDirect` streams the temp object
   back out of the store, runs the SAME `verifyNar` a staged file gets
   (`verifyNarStream`, never spooled to disk), and only then — under the write
@@ -213,15 +215,21 @@ store they no longer do (PLAN 2.9, cache surface **4.2**).
   and deletes the temp. A refusal deletes the temp too and records nothing,
   and logs `cache.nar.verify_failed {reason}` with a token for a reason. Odu
   signs no hash a client claimed; the ETags it was handed decide nothing.
-- **And the proof BINDS the copy.** The client holds a presigned PUT for the
-  temp key for ten minutes, and a copy reads its source once per part — so
-  the readback's ETag (`StoredObject.etag`) rides back into `copy` as
-  `sourceIfMatch`, and `@odu/objects` puts it on every `UploadPartCopy` and on
-  every read window after the first. A key rewritten between the verify and
-  the copy answers `source_changed`: a 400, a
-  `cache.nar.verify_failed {reason:"source_changed"}`, and nothing kept.
-  Without it a client could have odu verify one NAR and sign its hash over
-  another's bytes — permanently, `nar/<file>` being put-if-absent.
+- **And the proof is binding because the key has no writer.** Completing the
+  upload ends every URL odu signed for that key — they were parts of it — so
+  from the completion onwards nothing a client holds can change the object
+  odu is about to read, prove and copy. That is the guarantee, and it holds
+  on every S3 service, because it asks for no conditional feature at all.
+  There is deliberately no presigned plain `PUT`: that would be one request
+  fewer and a key writable for ten minutes.
+  - The readback's ETag still rides into `copy` as `sourceIfMatch` (and onto
+    every read window after the first), so a source that moved answers
+    `source_changed`: a 400, a
+    `cache.nar.verify_failed {reason:"source_changed"}`, nothing kept. It is a
+    SECOND line — **R2 does not implement `x-amz-copy-source-if-match` on
+    `UploadPartCopy`** — and it fails closed: a store that answers a read with
+    no version at all refuses the push (`reason:"unversioned_source"`) rather
+    than copying on trust.
 - **The upload record is this daemon's, and in memory.** A handle from before
   a restart is a `404`, which the client answers by beginning the path again
   — as it does for any 4xx at the store, an expired presign included. One

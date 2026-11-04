@@ -792,9 +792,9 @@ async function beginUpload(
   return plan;
 }
 
-/** One part, or one whole NAR, PUT to the STORE. No odu header rides along:
- *  the URL carries its own authority, and an `Authorization` beside a
- *  presigned signature is what an S3 service refuses. */
+/** One PART, PUT to the STORE. No odu header rides along: the URL carries
+ *  its own authority, and an `Authorization` beside a presigned signature is
+ *  what an S3 service refuses. */
 async function putToStore(
   url: string,
   body: Uint8Array,
@@ -820,11 +820,17 @@ async function putToStore(
 /**
  * THE NAR, STRAIGHT INTO THE STORE (PLAN 2.9).
  *
- * One part is one presigned PUT and nothing else; more than one is a
- * multipart upload whose parts odu signs one at a time. EVERY failure here
- * re-begins the path rather than retrying in place: a presign is minted for
- * ten minutes, so the 4xx a slow part earns is an expiry, and a fresh upload
- * id costs one `begin` against an upload whose state nobody can inspect.
+ * EVERY BYTE IS A PART, a one-part NAR included, and the plan carries part
+ * 0's URL so that common case still costs three requests. Parts are what the
+ * store lets odu take back: completing the upload kills their URLs, and odu
+ * signs nothing else for the key, so the object it proves afterwards is one
+ * nobody can rewrite. A plain presigned PUT would be one request fewer and a
+ * key writable for ten minutes.
+ *
+ * EVERY failure here re-begins the path rather than retrying in place: a
+ * presign is minted for ten minutes, so the 4xx a slow part earns is an
+ * expiry, and a fresh upload id costs one `begin` against an upload whose
+ * state nobody can inspect.
  */
 async function uploadDirect(
   base: string,
@@ -836,20 +842,16 @@ async function uploadDirect(
   narName: string,
 ): Promise<NarUpload> {
   const parts = narParts(platform.dump(entry.storePath), plan.partSize);
-  const first = await parts.next();
-  const second = await parts.next();
   const done: { index: number; etag: string }[] = [];
+  const first = await parts.next();
+  let current = first.done ? new Uint8Array(0) : first.value;
+  let ahead: IteratorResult<Uint8Array> = await parts.next();
 
-  if (second.done) {
-    // THE WHOLE NAR IN ONE OBJECT, which most paths are: no multipart upload
-    // is opened at all, and the store sees one request.
-    const sent = await putToStore(plan.put, first.done ? new Uint8Array(0) : first.value);
-    if (!sent.ok) return { ok: false, message: sent.message, retry: true };
-  } else {
-    let index = 0;
-    let current = first.value as Uint8Array;
-    let ahead: IteratorResult<Uint8Array> = second;
-    for (;;) {
+  for (let index = 0; ; index += 1) {
+    // PART 0'S URL CAME WITH THE PLAN; the rest are asked for one at a time,
+    // which costs a round trip only on a NAR that is already several parts.
+    let url = plan.part;
+    if (index > 0) {
       const signed = await fetch(`${base}/nar/${narName}/upload/${plan.upload}/parts/${index}`, {
         headers,
       }).catch(asError);
@@ -862,32 +864,31 @@ async function uploadDirect(
         return {
           ok: false,
           message: `signing part ${index + 1} answered ${signed.status}: ${(await signed.text()).trim()}`,
-          retry: worthRetrying(signed.status) || signed.status === 404,
+          retry: true,
         };
       }
-      const { url } = (await signed.json()) as { url: string };
-      const sent = await putToStore(url, current);
-      if (!sent.ok) {
-        await parts.return(undefined as never);
-        return { ok: false, message: sent.message, retry: true };
-      }
-      if (sent.etag === null) {
-        await parts.return(undefined as never);
-        return {
-          ok: false,
-          message: `the store took part ${index + 1} without an ETag, which the join needs`,
-          retry: false,
-        };
-      }
-      done.push({ index, etag: sent.etag });
-      // PROGRESS for a large path: one line per part, so a slow upload reads
-      // as work rather than as the old silence.
-      say(`⏳ ${entry.storePath} part ${index + 1} → store`);
-      index += 1;
-      if (ahead.done) break;
-      current = ahead.value;
-      ahead = await parts.next();
+      ({ url } = (await signed.json()) as { url: string });
     }
+    const sent = await putToStore(url, current);
+    if (!sent.ok) {
+      await parts.return(undefined as never);
+      return { ok: false, message: sent.message, retry: true };
+    }
+    if (sent.etag === null) {
+      await parts.return(undefined as never);
+      return {
+        ok: false,
+        message: `the store took part ${index + 1} without an ETag, which the join needs`,
+        retry: false,
+      };
+    }
+    done.push({ index, etag: sent.etag });
+    // PROGRESS for a large path: one line per part, so a slow upload reads
+    // as work rather than as the old silence.
+    if (index > 0) say(`⏳ ${entry.storePath} part ${index + 1} → store`);
+    if (ahead.done) break;
+    current = ahead.value;
+    ahead = await parts.next();
   }
 
   const joined = await fetch(`${base}/nar/${narName}/upload/${plan.upload}/complete`, {

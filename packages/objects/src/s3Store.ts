@@ -194,16 +194,25 @@ async function untilDecided<T>(attempt: () => Promise<T | "conflict">): Promise<
  *
  * A DIRECT UPLOAD IS DECIDED BY THE SAME HEADER, on the same two calls, and
  * promises exactly as much. `completeUpload(..., { ifAbsent: true })` and
- * `copy(..., { ifAbsent: true })` both finish a multipart upload, so where a
- * service honours the precondition on a completion (AWS, versitygw) the first
- * writer wins across processes and the rest are `exists`; where it documents
- * none (R2) the answer is `stored` for whoever finishes last, and only
- * `oneWriter` keeps this process's own writers apart. Neither call measures
- * anything: a direct upload's bytes never passed through odu, so the facts
- * recorded at the destination are the CALLER'S (`CopyOptions.facts`), and an
- * object made by `completeUpload` alone carries no facts at all — `facts()`
- * refuses it as an {@link UnrecordedObject} until something copies it into
- * place with them.
+ * `copy(..., { ifAbsent: true })` both finish a multipart upload, and R2
+ * HONOURS the precondition there — `412 PreconditionFailed`, measured against
+ * bucket `kolu` on 2026-11-03, though Cloudflare documents it only on
+ * `PutObject` — as AWS and versitygw do. First-kept-wins therefore holds
+ * across processes on all three, at any object size.
+ *
+ * WHAT R2 DOES NOT IMPLEMENT is the SOURCE condition on a copy's parts:
+ * `x-amz-copy-source-if-match` is listed as not implemented on
+ * `UploadPartCopy` (it is implemented on `CopyObject`, which this store does
+ * not use). So `CopyOptions.sourceIfMatch` binds a copy on AWS and versitygw
+ * and is IGNORED on R2, and a caller whose source some other writer can
+ * reach must not rest on it — see `@odu/cache`'s direct upload, which hands
+ * out no URL that can write the key it proves.
+ *
+ * Neither call measures anything: a direct upload's bytes never passed
+ * through odu, so the facts recorded at the destination are the CALLER'S
+ * (`CopyOptions.facts`), and an object made by `completeUpload` alone carries
+ * no facts at all — `facts()` refuses it as an {@link UnrecordedObject} until
+ * something copies it into place with them.
  */
 export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   const { target } = options;
@@ -778,13 +787,15 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     // ── THE DIRECT UPLOAD ────────────────────────────────────────────────
     //
     // WHAT THE WRITER DOES ITSELF, with URLs that carry their own authority:
-    // sends the bytes. What this store still does: open and finish the upload,
+    // sends the parts. What this store still does: open and finish the upload,
     // and copy the finished bytes into place once somebody has proved them.
     // Nothing here measures anything — the facts come with the `copy`.
+    //
+    // A MULTIPART UPLOAD IS THE ONLY WAY IN. Its part URLs stop writing when
+    // the upload is completed, so the finished key has no writer this store
+    // ever signed for — which is what makes a proof of it worth anything.
 
     partSize,
-
-    presignPut: (key, expiresSeconds) => presign(target, "PUT", safeKey(key), expiresSeconds),
 
     // NO METADATA: these bytes are a temp object whose facts nobody has proved
     // yet, and an upload's metadata is fixed here, before the first byte.

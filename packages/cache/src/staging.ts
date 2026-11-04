@@ -390,13 +390,9 @@ export function createStaging(deps: StagingDeps): Staging {
    *  every caller holds. */
   type DirectStore = ObjectStore &
     Required<
-      Pick<
-        ObjectStore,
-        "presignPut" | "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy"
-      >
+      Pick<ObjectStore, "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy">
     >;
   const directStore = (store: ObjectStore): DirectStore | null =>
-    store.presignPut !== undefined &&
     store.createUpload !== undefined &&
     store.presignPart !== undefined &&
     store.completeUpload !== undefined &&
@@ -409,16 +405,22 @@ export function createStaging(deps: StagingDeps): Staging {
     readonly id: string;
     readonly bucket: string;
     readonly file: string;
-    /** The temp key the client writes. Unique per upload, so two pushers of
-     *  one path never write each other's bytes and no completion needs a
-     *  precondition. */
+    /**
+     * THE TEMP KEY THE CLIENT WRITES — and the one odu proves afterwards.
+     *
+     * Unique per upload, so two pushers of one path never write each other's
+     * bytes. And writable ONLY as parts of {@link DirectUpload.upload}: odu
+     * presigns nothing else for it, so completing that upload leaves a key no
+     * URL odu ever signed can touch. That is what makes the readback a proof
+     * of the bytes the copy will move, rather than of a key somebody may
+     * still rewrite.
+     */
     readonly key: string;
     readonly store: DirectStore;
+    /** The store's multipart upload, opened when this record was made. */
+    readonly upload: string;
     readonly partSize: number;
     readonly began: number;
-    /** The store's multipart upload, opened on the first part asked for and
-     *  memoised; null while the NAR may still be one object. */
-    upload: Promise<string> | null;
   }
 
   /** Uploads in flight, by their handle. */
@@ -440,19 +442,6 @@ export function createStaging(deps: StagingDeps): Staging {
       : null;
   }
 
-  /** The store's multipart upload for this record, opened once. A failure is
-   *  not memoised: the next part asks again rather than inheriting a rejected
-   *  promise forever. */
-  function openUpload(direct: DirectUpload): Promise<string> {
-    if (direct.upload === null) {
-      direct.upload = direct.store.createUpload(direct.key);
-      direct.upload.catch(() => {
-        direct.upload = null;
-      });
-    }
-    return direct.upload;
-  }
-
   /** Let an upload go: its record, its claim on the name, and the bytes it
    *  left in the store. Called when a narinfo has had its answer out of it,
    *  and when the sweep finds one nobody finished. */
@@ -461,10 +450,7 @@ export function createStaging(deps: StagingDeps): Staging {
     if (landed.get(directKey(direct.bucket, direct.file))?.id === direct.id) {
       landed.delete(directKey(direct.bucket, direct.file));
     }
-    const opened = await direct.upload?.catch(() => null);
-    if (opened !== null && opened !== undefined) {
-      await direct.store.abortUpload(direct.key, opened).catch(() => {});
-    }
+    await direct.store.abortUpload(direct.key, direct.upload).catch(() => {});
     await direct.store.delete(direct.key).catch(() => {});
   }
 
@@ -854,12 +840,19 @@ export function createStaging(deps: StagingDeps): Staging {
    * conditional, and an `exists` answers with the object that was already
    * there.
    *
-   * `version` IS WHAT MAKES THE PROOF BINDING. The temp key is one the client
-   * holds a ten-minute presigned PUT for, and a copy reads its source once
-   * per part — so without a precondition a client could let odu verify `G`
-   * and copy `E`, and odu would sign `G`'s hash over `E`'s bytes. The copy
-   * carries the ETag the verify read; a source that moved is refused here and
-   * nothing is recorded.
+   * WHAT BINDS THE PROOF TO THE COPY, in two layers.
+   *
+   * The FIRST is structural and holds on every service: odu presigns nothing
+   * for the temp key but PARTS of one multipart upload, and completing that
+   * upload kills them, so from the completion onwards no URL anybody holds
+   * can write the key this proof read. That is the guarantee.
+   *
+   * The SECOND is `version`, the ETag the readback was answered from, sent as
+   * `sourceIfMatch`. AWS and versitygw hold the copy to it; R2 does not
+   * implement the source condition on `UploadPartCopy`, so it is defence and
+   * not the guarantee. It still FAILS CLOSED: a store that answers a read
+   * with no version at all is one this proof cannot be checked against, and
+   * the push is refused rather than copied on trust.
    */
   async function keepCopied(
     bucket: BucketRow,
@@ -888,6 +881,26 @@ export function createStaging(deps: StagingDeps): Staging {
           "its bytes went to the old one; push it again",
       };
     }
+    // NO VERSION, NO COPY. A store that answered the readback without naming
+    // which object it answered from cannot be held to it, and this is a proof
+    // the whole private-bucket story rests on — so the push is refused rather
+    // than the precondition quietly dropped.
+    if (version === undefined) {
+      log?.("cache.nar.verify_failed", {
+        bucket: bucket.name,
+        file: basename(info.url),
+        mode: "direct",
+        path: info.storePath,
+        reason: "unversioned_source",
+      });
+      return {
+        ok: false,
+        status: 400,
+        message:
+          `${info.url} was read from a store that named no version for it — ` +
+          "odu will not copy a proof it cannot bind",
+      };
+    }
     const refused: Refusal = {
       ok: false,
       status: 400,
@@ -900,7 +913,7 @@ export function createStaging(deps: StagingDeps): Staging {
         ifAbsent: true,
         contentType: NAR_CONTENT_TYPE,
         cacheControl: NAR_CACHE_CONTROL,
-        ...(version === undefined ? {} : { sourceIfMatch: version }),
+        sourceIfMatch: version,
       });
       if (decided === "stored") return file;
       if (decided === "exists") {
@@ -1022,22 +1035,26 @@ export function createStaging(deps: StagingDeps): Staging {
       // no proxy body limit to stay under, and a part too SMALL is the only
       // one a store refuses.
       const partSize = Math.max(MIN_DIRECT_PART_BYTES, store.partSize ?? 0, floor ?? 0);
+      const key = `${bucket.name}/nar/${TEMP}${randomUUID()}`;
       const direct: DirectUpload = {
         id: randomUUID(),
         bucket: bucket.name,
         file,
-        key: `${bucket.name}/nar/${TEMP}${randomUUID()}`,
+        key,
         store,
+        upload: await store.createUpload(key),
         partSize,
         began: now(),
-        upload: null,
       };
       directs.set(direct.id, direct);
       return {
         mode: "direct",
         upload: direct.id,
         partSize,
-        put: store.presignPut(direct.key, PRESIGN_SECONDS).href,
+        // PART 0 RIDES ALONG, so a NAR that fits in one part costs the three
+        // requests a plain PUT would have — and is still a PART, which is
+        // what keeps the key unwritable once the upload is completed.
+        part: store.presignPart(key, direct.upload, 0, PRESIGN_SECONDS).href,
       };
     },
 
@@ -1049,10 +1066,9 @@ export function createStaging(deps: StagingDeps): Staging {
       if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_PARTS) {
         return { ok: false, status: 400, message: `"${index}" is not a part index` };
       }
-      const uploadId = await openUpload(direct);
       return {
         ok: true,
-        url: direct.store.presignPart(direct.key, uploadId, index, PRESIGN_SECONDS).href,
+        url: direct.store.presignPart(direct.key, direct.upload, index, PRESIGN_SECONDS).href,
       };
     },
 
@@ -1061,38 +1077,31 @@ export function createStaging(deps: StagingDeps): Staging {
       if (direct === null) {
         return { ok: false, status: 404, message: `no upload ${upload} for nar/${file}` };
       }
-      if (parts.length > MAX_PARTS) {
-        return { ok: false, status: 400, message: `${parts.length} is more parts than one NAR may have` };
+      // A JOIN THAT DID NOT HAPPEN ENDS THE UPLOAD. The record, the temp
+      // object and the open multipart upload go now rather than an hour from
+      // now, so the client's next `begin` — which is what it answers a
+      // refusal with — is not racing an abandoned upload on a key of its own.
+      const failed = async (message: string): Promise<DirectComplete> => {
+        await dropUpload(direct);
+        return { ok: false, status: 400, message };
+      };
+      if (parts.length < 1 || parts.length > MAX_PARTS) {
+        return await failed(`${parts.length} is not a part count for one NAR`);
       }
-      // NO PARTS IS THE SINGLE-OBJECT PUT: there is no multipart upload to
-      // join, and the HEAD below is the whole of what completion means.
-      if (parts.length > 0) {
-        // A JOIN THAT DID NOT HAPPEN ENDS THE UPLOAD. The record, the temp
-        // object and the open multipart upload go now rather than an hour
-        // from now, so the client's next `begin` — which is what it answers a
-        // refusal with — is not racing an abandoned upload on a key of its
-        // own.
-        const failed = async (message: string): Promise<DirectComplete> => {
-          await dropUpload(direct);
-          return { ok: false, status: 400, message };
-        };
-        try {
-          // The temp key is this upload's alone, so nothing can be racing for
-          // it and the completion needs no precondition.
-          const decided = await direct.store.completeUpload(
-            direct.key,
-            await openUpload(direct),
-            parts,
-          );
-          if (decided !== "stored") {
-            return await failed(`the store did not join the parts (${decided})`);
-          }
-        } catch (err) {
-          return await failed(String((err as Error).message ?? err));
+      try {
+        // The temp key is this upload's alone, so nothing can be racing for
+        // it and the completion needs no precondition.
+        const decided = await direct.store.completeUpload(direct.key, direct.upload, parts);
+        if (decided !== "stored") {
+          return await failed(`the store did not join the parts (${decided})`);
         }
+      } catch (err) {
+        return await failed(String((err as Error).message ?? err));
       }
       // WHAT ODU ITSELF SAW. A completion that answers 200 means the object
-      // is in the store and this long — not that a client said so.
+      // is in the store and this long — not that a client said so. From here
+      // the key has NO WRITER: the part URLs die with the upload they named,
+      // and odu signed nothing else for it.
       const bytes = await direct.store.head(direct.key).catch(() => null);
       if (bytes === null) {
         await dropUpload(direct);

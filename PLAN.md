@@ -525,11 +525,12 @@ Commits and PR bodies use the earlier names.
 
 [^uploads]: How 2.9 works. The client asks `POST …/nar/<file>/upload` first;
     the answer is the bucket's STORE's, not a flag: `{mode:"direct", upload,
-    partSize, put}` for an S3 store, `{mode:"staged"}` for disk, and the row
-    carries the same fact as `writesTo` (cache surface 4.2). The client PUTs
-    the NAR to `<bucket>/nar/.tmp-<uuid>` — one presigned object when it fits
-    in one part, else a presigned part at a time, each ETag kept — and
-    `POST …/upload/<id>/complete` joins them and confirms the object. The
+    partSize, part}` for an S3 store, `{mode:"staged"}` for disk, and the row
+    carries the same fact as `writesTo` (cache surface 4.2). The client sends
+    the NAR to `<bucket>/nar/.tmp-<uuid>` as the PARTS of one multipart
+    upload — part 0 at the URL the plan carried, the rest one presigned part
+    at a time, each ETag kept — and `POST …/upload/<id>/complete` joins them
+    and confirms the object. The
     narinfo PUT is where it is decided: odu streams the temp object back,
     verifies NarHash, size and `CA:` WITHOUT spooling it to disk, copies it
     into `nar/<file>` with `If-None-Match: *`, deletes the temp and records
@@ -547,14 +548,30 @@ Commits and PR bodies use the earlier names.
       Odu's `copy` is `UploadPartCopy` + a conditional completion, so
       put-if-absent holds across daemons for a copy of any size. R2 also
       completes a multipart upload whose only part is well under 5 MiB.
-    - **The verify binds the copy.** The client holds a ten-minute presigned
-      PUT for the temp key, and a copy reads its source once per part — so the
-      readback's ETag rides back as `x-amz-copy-source-if-match` on every
-      `UploadPartCopy`, and a windowed read carries `If-Match` on the first
-      window's ETag. A source rewritten in between is `source_changed`: a 400,
-      a `cache.nar.verify_failed {reason:"source_changed"}`, and nothing kept.
-      Without it a client could have odu verify one NAR and sign its hash over
-      another's bytes, permanently, since `nar/<file>` is put-if-absent.
+    - **THE PROOF IS BINDING BECAUSE THE KEY HAS NO WRITER.** Odu presigns
+      nothing for the temp key but PARTS of one multipart upload (part 0
+      rides on the plan, so a one-part NAR costs no extra round trip), and
+      completing that upload ends them — so from the completion onwards
+      nothing a client holds can change the object odu then reads, proves and
+      copies. It asks for no conditional feature, so it holds on every S3
+      service. A presigned plain `PUT` would have been one request fewer and
+      a key writable for ten minutes; it was removed from `ObjectStore` for
+      that reason.
+      - The readback's ETag still rides into the copy as
+        `x-amz-copy-source-if-match`, and a windowed read carries `If-Match`
+        on the first window's ETag; a source that moved is `source_changed`,
+        a 400 and nothing kept. That is a SECOND line only: **R2 lists
+        `x-amz-copy-source-if-match` as not implemented on `UploadPartCopy`**
+        (it implements it on `CopyObject`, which odu does not use), so the
+        guarantee could not rest there. It fails closed — a read that names
+        no version refuses the push.
+      - NOT RE-MEASURED ON R2, and it needs no new measurement: it uses the
+        two calls already measured there (a part `PUT`, and a conditional
+        `CompleteMultipartUpload`). The short-lived `kolu` credentials were
+        deleted with the probe's scratch directory, so a fresh probe wants
+        fresh keys; what it would add is confirmation that a part URL stops
+        writing after its upload completes, which is S3's own semantics and
+        not a conditional feature.
     - A part is 5 MiB at least (S3's floor), the store's own part size, or the
       client's `--part-size` — the largest of the three. In direct mode that
       flag is a FLOOR; staged, it stays the ceiling a proxy imposes.
