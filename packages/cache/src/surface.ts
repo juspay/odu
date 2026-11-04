@@ -482,12 +482,22 @@ const StatsOutputSchema = Schema.Struct({
 });
 export type CacheStats = typeof StatsOutputSchema.Type;
 
-/** One page of a bucket's paths, newest first.
+/**
+ * ONE PAGE OF A BUCKET'S PATHS — as paths, as PACKAGES, or as one package's
+ * versions.
  *
- *  The cursor is the LAST row of the page you were given, opaque to the caller
- *  and stable against a push landing between two pages: it names a position in
- *  `(created, storePath)` order rather than an offset, so a new path at the top
- *  shifts nothing you are about to read. */
+ * The cursor is the LAST row of the page you were given, opaque to the caller
+ * and stable against a push landing between two pages: it names a POSITION in
+ * the order you asked for rather than an offset, so a new path at the top
+ * shifts nothing you are about to read.
+ *
+ * GROUPING AND ORDERING ARE THE ROW'S, not a reader's. A client that grouped
+ * a page it had already been given would state the page's totals — "6
+ * versions, 1.3 GiB" over whatever happened to be in the first hundred — and
+ * say the number changed when somebody pressed "show more". The counts, the
+ * sums and the order are therefore computed over the WHOLE bucket, in SQL,
+ * and paged like anything else.
+ */
 const PathsInputSchema = Schema.Struct({
   bucket: Schema.String.check(Schema.isMinLength(1)),
   /** A substring the store path must contain — the board's filter box, and the
@@ -495,9 +505,43 @@ const PathsInputSchema = Schema.Struct({
   filter: Schema.optionalKey(Schema.String),
   /** Absent means the first page. */
   after: Schema.optionalKey(Schema.String),
+  /** `name` answers `groups` — one row per package, over the whole bucket.
+   *  Absent answers `paths`. */
+  group: Schema.optionalKey(Schema.Literals(["name"])),
+  /** One package's versions, as paths. Exclusive with `group`: a group of one
+   *  name opened is this call. */
+  name: Schema.optionalKey(Schema.String),
+  /** What the page is ordered by — of the group's aggregate when grouped.
+   *  Absent is `pushed`. */
+  sort: Schema.optionalKey(Schema.Literals(["name", "size", "pushed", "reads"])),
+  /** Absent is TRUE for every order but `name`: biggest, newest and most read
+   *  first, and A before Z. */
+  descending: Schema.optionalKey(Schema.Boolean),
 });
+
+/** One PACKAGE in a bucket: every version of a store path's name, summed. */
+export const CachePathGroupSchema = Schema.Struct({
+  /** The store path's name — everything after the hash. */
+  name: Schema.String,
+  /** How many versions of it the bucket holds. */
+  versions: Schema.Int,
+  /** Summed over them: what this package costs the bucket, and how often
+   *  anything of it has been fetched. */
+  bytes: Schema.Int,
+  hits: Schema.Int,
+  /** The NEWEST version's push, and the latest want across all of them — a
+   *  version nobody wants must not make the package look idle. */
+  pushed: Schema.Number,
+  wanted: Schema.Number,
+  /** The newest version's store path: the hash a reader compares by. */
+  storePath: Schema.String,
+});
+export type CachePathGroup = typeof CachePathGroupSchema.Type;
+
 const PathsOutputSchema = Schema.Struct({
   paths: Schema.Array(CachePathSchema),
+  /** Present, and the whole answer, when `group` was asked for. */
+  groups: Schema.optionalKey(Schema.Array(CachePathGroupSchema)),
   /** Absent when this is the last page. */
   next: Schema.optionalKey(Schema.String),
 });
@@ -994,7 +1038,7 @@ export const CACHE_KEY = "cache";
  * own rows are untouched, and `gc.run` does not take the field, which is why
  * the two verbs stopped sharing an input schema.
  */
-export const CACHE_CONTRACT_VERSION = "4.4";
+export const CACHE_CONTRACT_VERSION = "4.5";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

@@ -17,9 +17,13 @@ import { join } from "node:path";
 import {
   type BucketRow,
   CACHE_SCHEMA_VERSION,
+  type CacheRepo,
+  cursorFor,
   MIGRATIONS,
+  type ObjectGroupRow,
   type ObjectRow,
   openCacheRepo,
+  type PathSort,
   type TokenRow,
 } from "./db";
 
@@ -251,6 +255,133 @@ describe("counting", () => {
       hits: object.hits * 2,
       lastWanted: NOW + 5,
     });
+  });
+});
+
+/**
+ * THE GROUPING IS THE DATABASE'S, and that is the whole point of it: a view
+ * holding one page cannot count a bucket, and a view that tried would state
+ * its page's totals as the bucket's and change them at "show more". So the
+ * counts, the sums, the order and the paging are asserted here, where they
+ * are computed.
+ */
+describe("a bucket's paths, by package", () => {
+  const build = (name: string, hash: string, over: Partial<ObjectRow>): ObjectRow => ({
+    ...object,
+    storePath: `/nix/store/${hash}-${name}`,
+    hash,
+    ...over,
+  });
+  /** Three builds of one package and one of another, so a group's totals are
+   *  neither the page's nor any one row's. */
+  const seed = (repo: CacheRepo): void => {
+    repo.putObject(
+      build("widget-1.0", "a".repeat(32), { narSize: 100, hits: 1, created: NOW, lastWanted: NOW }),
+    );
+    repo.putObject(
+      build("widget-1.0", "b".repeat(32), {
+        narSize: 200,
+        hits: 2,
+        created: NOW + 10,
+        lastWanted: NOW + 50,
+      }),
+    );
+    repo.putObject(
+      build("widget-1.0", "c".repeat(32), {
+        narSize: 300,
+        hits: 4,
+        created: NOW + 20,
+        lastWanted: NOW + 5,
+      }),
+    );
+    repo.putObject(
+      build("zlib-1.3", "d".repeat(32), {
+        narSize: 900,
+        hits: 9,
+        created: NOW + 15,
+        lastWanted: NOW + 15,
+      }),
+    );
+  };
+  const page = { limit: 10, after: null, filter: null, sort: "pushed" as const, descending: true };
+
+  it("counts and sums every version, and names the newest one's path", () => {
+    const repo = openCacheRepo(":memory:");
+    seed(repo);
+    const { rows, more } = repo.objectGroupsPage("main", page);
+    expect(more).toBe(false);
+    expect(rows).toEqual([
+      {
+        name: "widget-1.0",
+        versions: 3,
+        bytes: 600,
+        hits: 7,
+        // The newest PUSH, and the latest want across all three — a version
+        // nobody wants must not make the package look idle.
+        pushed: NOW + 20,
+        wanted: NOW + 50,
+        storePath: `/nix/store/${"c".repeat(32)}-widget-1.0`,
+      },
+      {
+        name: "zlib-1.3",
+        versions: 1,
+        bytes: 900,
+        hits: 9,
+        pushed: NOW + 15,
+        wanted: NOW + 15,
+        storePath: `/nix/store/${"d".repeat(32)}-zlib-1.3`,
+      },
+    ]);
+  });
+
+  it("orders by the aggregate, not by any one version", () => {
+    const repo = openCacheRepo(":memory:");
+    seed(repo);
+    const names = (sort: PathSort, descending: boolean): string[] =>
+      repo.objectGroupsPage("main", { ...page, sort, descending }).rows.map((row) => row.name);
+    // zlib's single NAR (900) is the biggest; the PACKAGE widget holds 600
+    // against it, so by size zlib leads — and by reads it does too.
+    expect(names("size", true)).toEqual(["zlib-1.3", "widget-1.0"]);
+    expect(names("size", false)).toEqual(["widget-1.0", "zlib-1.3"]);
+    expect(names("reads", true)).toEqual(["zlib-1.3", "widget-1.0"]);
+    expect(names("name", false)).toEqual(["widget-1.0", "zlib-1.3"]);
+  });
+
+  it("pages by the keyset of the order it was read in", () => {
+    const repo = openCacheRepo(":memory:");
+    seed(repo);
+    const first = repo.objectGroupsPage("main", { ...page, sort: "size", limit: 1 });
+    expect(first.more).toBe(true);
+    expect(first.rows.map((row) => row.name)).toEqual(["zlib-1.3"]);
+    const after = cursorFor(first.rows[0] as ObjectGroupRow, "size");
+    const second = repo.objectGroupsPage("main", { ...page, sort: "size", limit: 1, after });
+    expect(second.rows.map((row) => row.name)).toEqual(["widget-1.0"]);
+    expect(second.more).toBe(false);
+  });
+
+  it("narrows to one package's versions, and to a filter", () => {
+    const repo = openCacheRepo(":memory:");
+    seed(repo);
+    const versions = repo.objectsPage("main", { ...page, name: "widget-1.0" });
+    expect(versions.rows.map((row) => row.narSize)).toEqual([300, 200, 100]);
+    // The filter is the same substring the board's box sends, and it narrows
+    // the GROUPING too — the totals are of what matched.
+    expect(
+      repo.objectGroupsPage("main", { ...page, filter: "zlib" }).rows.map((row) => row.name),
+    ).toEqual(["zlib-1.3"]);
+  });
+
+  it("orders paths themselves by the same columns", () => {
+    const repo = openCacheRepo(":memory:");
+    seed(repo);
+    expect(
+      repo.objectsPage("main", { ...page, sort: "size" }).rows.map((row) => row.narSize),
+    ).toEqual([900, 300, 200, 100]);
+    expect(
+      repo
+        .objectsPage("main", { ...page, sort: "reads", descending: false })
+        .rows.map((row) => row.hits),
+    ).toEqual([1, 2, 4, 9]);
   });
 });
 

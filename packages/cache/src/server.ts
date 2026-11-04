@@ -722,9 +722,16 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 bucket: input.bucket,
                 filter: input.filter ?? null,
                 after: input.after ?? null,
+                group: input.group ?? null,
+                name: input.name ?? null,
+                sort: input.sort ?? null,
+                descending: input.descending ?? null,
               }),
             (page) => ({
               paths: page.paths.map((path) => ({ ...path })),
+              ...(page.groups === null
+                ? {}
+                : { groups: page.groups.map((group) => ({ ...group })) }),
               ...(page.next === null ? {} : { next: page.next }),
             }),
           ),

@@ -90,6 +90,7 @@ import {
   type CacheGcPlan,
   type CacheMigration,
   type CachePath,
+  type CachePaths,
   type CachePin,
   type CacheToken,
   flakeBlock,
@@ -621,81 +622,55 @@ export type PathColumn = "name" | "size" | "pushed" | "reads";
  *
  * GROUPED is the default because a bucket is mostly one package over and
  * over: a screen of `odu-base-0.1.0` six times, `odu-runner` five times and
- * `odu-web-ui` three times says nothing about what is in the bucket. A group
- * carries the aggregate a reader decides by (how much of my disk is this
- * package, when did it last move) and holds its versions for whoever asks.
+ * `odu-web-ui` three times says nothing about what is in the bucket.
  *
- * UNGROUPED is the same shape with one version each, so the table draws one
- * kind of row either way.
+ * BOTH KINDS ARE COUNTED BY THE ROW. A group's `versions`, `bytes` and `hits`
+ * are the bucket's, counted in SQL over everything that matched the filter —
+ * never over the page on screen, which would state one number and then change
+ * it at **Show 100 more**. An ungrouped path is the same shape with one
+ * version, so the table draws one kind of row either way.
  */
 export interface PathRow {
   /** The package name, which is also the key its disclosure is held by. */
   readonly name: string;
   /** The NEWEST version's store path: what the hash cell shows and copies. */
   readonly storePath: string;
-  readonly hash: string;
-  /** Newest first. One entry when the table is not grouped. */
-  readonly versions: readonly CachePath[];
-  /** Summed over the versions — what this package costs the bucket. */
+  /** How many versions the BUCKET holds — 1 for an ungrouped path. */
+  readonly versions: number;
   readonly bytes: number;
   readonly hits: number;
-  /** The newest version's push, and the latest want across all of them. */
   readonly pushed: number;
   readonly wanted: number;
 }
 
 /**
- * THE TABLE, FROM THE PAGE THE ROW ANSWERED — a view, never a second read.
+ * THE TABLE, FROM THE PAGE THE ROW ANSWERED — a view, and only a view.
  *
- * Grouping and ordering are decisions about what is already on screen, so
- * they are a pure function of the page plus the two switches above it. A
- * server-side sort would make every click a round trip and disagree with the
- * filter's own paging.
+ * Grouping, aggregation and order are the row's (`bucket.paths` takes
+ * `group`, `sort` and `descending`), so this is the one mapping left: two
+ * answer shapes into the one row the table draws.
  */
-export function pathRows(
-  paths: readonly CachePath[],
-  view: { readonly grouped: boolean; readonly column: PathColumn; readonly descending: boolean },
-): readonly PathRow[] {
-  const held = new Map<string, CachePath[]>();
-  for (const path of paths) {
-    // UNGROUPED GROUPS BY THE WHOLE PATH, which is unique — one version per
-    // row, and one shape for the renderer.
-    const key = view.grouped ? storePathParts(path.storePath).name : path.storePath;
-    const seen = held.get(key);
-    if (seen === undefined) held.set(key, [path]);
-    else seen.push(path);
+export function pathRows(page: CachePaths): readonly PathRow[] {
+  if (page.groups !== undefined) {
+    return page.groups.map((group) => ({
+      name: group.name,
+      storePath: group.storePath,
+      versions: group.versions,
+      bytes: group.bytes,
+      hits: group.hits,
+      pushed: group.pushed,
+      wanted: group.wanted,
+    }));
   }
-  const rows = [...held].map(([key, versions]): PathRow => {
-    const ordered = [...versions].sort((a, b) => b.created - a.created);
-    const newest = ordered[0] as CachePath;
-    return {
-      name: view.grouped ? key : storePathParts(newest.storePath).name,
-      storePath: newest.storePath,
-      hash: storePathParts(newest.storePath).hash,
-      versions: ordered,
-      bytes: ordered.reduce((sum, one) => sum + one.narSize, 0),
-      hits: ordered.reduce((sum, one) => sum + one.hits, 0),
-      pushed: newest.created,
-      wanted: ordered.reduce((latest, one) => Math.max(latest, one.lastWanted), 0),
-    };
-  });
-  // THE NAME BREAKS EVERY TIE, and always the same way round: two packages of
-  // one size must not swap places when the list is redrawn, nor when the
-  // reader reverses a column that cannot tell them apart. So the DIRECTION is
-  // applied to the column alone, and the name settles what is left.
-  const column = (a: PathRow, b: PathRow): number =>
-    view.column === "name"
-      ? a.name.localeCompare(b.name)
-      : view.column === "size"
-        ? a.bytes - b.bytes
-        : view.column === "reads"
-          ? a.hits - b.hits
-          : a.pushed - b.pushed;
-  return rows.sort((a, b) => {
-    const decided = column(a, b);
-    if (decided !== 0) return view.descending ? -decided : decided;
-    return a.name.localeCompare(b.name);
-  });
+  return page.paths.map((path) => ({
+    name: storePathParts(path.storePath).name,
+    storePath: path.storePath,
+    versions: 1,
+    bytes: path.narSize,
+    hits: path.hits,
+    pushed: path.created,
+    wanted: path.lastWanted,
+  }));
 }
 
 /** THE HEADER ROW, once: what each column is called, whether its figures are
@@ -799,9 +774,35 @@ function BucketPage(
     ),
   );
 
+  /**
+   * HOW THE TABLE IS ASKED FOR — two switches and a column, every one of them
+   * a QUESTION FOR THE ROW rather than a decision about the page on screen.
+   *
+   * GROUPED BY DEFAULT: a bucket is mostly one package over and over, and the
+   * question a reader arrives with ("what is in here, and what is it costing
+   * me") is answered by the package, not by its eleventh build. PUSHED-NEWEST
+   * by default, because the newest push is what somebody just did.
+   */
+  const [grouped, setGrouped] = createSignal(true);
+  const [column, setColumn] = createSignal<PathColumn>("pushed");
+  const [descending, setDescending] = createSignal(true);
+  /** A click on the column already sorted REVERSES it; a click on another
+   *  takes that column's own natural direction — biggest, newest, most read,
+   *  and A before Z. */
+  const sortBy = (which: PathColumn): void => {
+    if (column() === which) setDescending(!descending());
+    else {
+      setColumn(which);
+      setDescending(which !== "name");
+    }
+  };
+  /** What `aria-sort` says of a header. */
+  const sortOf = (which: PathColumn): "ascending" | "descending" | "none" =>
+    column() !== which ? "none" : descending() ? "descending" : "ascending";
+
   /** A "more" page, appended to the first. Cleared whenever the QUERY changes,
-   *  because a cursor belongs to the filter that minted it. */
-  const [appended, setAppended] = createSignal<CachePath[]>([]);
+   *  because a cursor belongs to the question that minted it. */
+  const [appended, setAppended] = createSignal<readonly PathRow[]>([]);
   const [extra, setExtra] = createSignal<string | null>(null);
   const [failure, setFailure] = createSignal<string | null>(null);
   const [loadingMore, setLoadingMore] = createSignal(false);
@@ -826,14 +827,31 @@ function BucketPage(
     supersede();
   });
 
+  /** WHAT THE ROW IS ASKED, in one place: the filter, the grouping and the
+   *  order, as `bucket.paths` takes them. A page of "more" asks exactly the
+   *  same question with a cursor on it. */
+  const query = (): {
+    filter?: string;
+    group?: "name";
+    sort: PathColumn;
+    descending: boolean;
+  } => ({
+    ...(filter() === "" ? {} : { filter: filter() }),
+    ...(grouped() ? { group: "name" as const } : {}),
+    sort: column(),
+    descending: descending(),
+  });
+
   /**
-   * THE FIRST PAGE, AS A RESOURCE KEYED ON `[name, filter]`.
+   * THE FIRST PAGE, AS A RESOURCE KEYED ON EVERY PART OF THE QUESTION.
    *
    * `createResource` is what makes the filter safe: a keystroke supersedes the
    * read before it, and a superseded answer is DISCARDED rather than painted
    * over a newer one — which is what a bare promise chain did, in whatever order
    * the answers happened to arrive. Its `onCleanup` is the resource's own, so a
-   * page that navigates away mid-read leaves nothing running.
+   * page that navigates away mid-read leaves nothing running. A sort click and
+   * the grouping switch are in the key for the same reason they are the row's
+   * to answer: both change which rows the first page holds.
    *
    * THE ANSWER IS A VALUE, REFUSALS INCLUDED. A resource whose fetch REJECTS
    * holds the error in `error`, and `read()` rethrows it at whoever touches the
@@ -845,22 +863,20 @@ function BucketPage(
    * it comes back as the value like every other answer.
    */
   const [first, { refetch }] = createResource(
-    () => [props.name, filter()] as const,
-    async ([name, needle]): Promise<FirstPage> => {
+    () => [props.name, filter(), grouped(), column(), descending()] as const,
+    async ([name]): Promise<FirstPage> => {
+      const asked = query();
       setAppended([]);
       setExtra(null);
       setFailure(null);
       setLoadingMore(false);
-      // A NEW QUERY RETIRES EVERY PAGE READ AGAINST THE OLD ONE.
+      // A NEW QUESTION RETIRES EVERY PAGE READ AGAINST THE OLD ONE.
       supersede();
       try {
         return {
           ok: true,
           page: await props.call(
-            props.client.procedures.bucket.paths({
-              bucket: name,
-              ...(needle === "" ? {} : { filter: needle }),
-            }),
+            props.client.procedures.bucket.paths({ bucket: name, ...asked }),
           ),
         };
       } catch (err) {
@@ -870,24 +886,18 @@ function BucketPage(
   );
 
   /** A later page. Not a resource: it is a click, and it appends to what the
-   *  resource already answered for the SAME query — which is exactly why it
+   *  resource already answered for the SAME question — which is exactly why it
    *  carries the generation it was asked under. */
   const more = (after: string): void => {
     const asked = current();
     setLoadingMore(true);
     void props
-      .call(
-        props.client.procedures.bucket.paths({
-          bucket: props.name,
-          ...(filter() === "" ? {} : { filter: filter() }),
-          after,
-        }),
-      )
+      .call(props.client.procedures.bucket.paths({ bucket: props.name, ...query(), after }))
       .then(
         (answer) => {
-          if (asked !== current()) return; // the query moved on
+          if (asked !== current()) return; // the question moved on
           setLoadingMore(false);
-          setAppended([...appended(), ...answer.paths]);
+          setAppended([...appended(), ...pathRows(answer)]);
           setExtra(answer.next ?? null);
         },
         (err: unknown) => {
@@ -903,13 +913,13 @@ function BucketPage(
     return answer === undefined || answer.ok ? null : answer.message;
   });
 
-  const stable = keepIdentity<CachePath & { readonly name: string }>();
-  const paths = createMemo<Array<CachePath & { readonly name: string }>>(() => {
+  /** THE ROWS ON SCREEN, their identity KEPT across a page append: a second
+   *  page must not dispose and rebuild the hundred rows above it. */
+  const stable = keepIdentity<PathRow>();
+  const rows = createMemo<readonly PathRow[]>(() => {
     const answer = first();
     if (answer === undefined || !answer.ok) return [];
-    return [...answer.page.paths, ...appended()].map((path) =>
-      stable({ ...path, name: path.storePath }),
-    );
+    return [...pathRows(answer.page), ...appended()].map(stable);
   });
   const next = createMemo<string | null>(() => {
     const answer = first();
@@ -918,44 +928,60 @@ function BucketPage(
   });
 
   /**
-   * HOW THE TABLE IS DRAWN — two switches and a column, all of them about
-   * the page already on screen.
+   * WHICH PACKAGES ARE OPEN, by NAME, and what each holds.
    *
-   * GROUPED BY DEFAULT: a bucket is mostly one package over and over, and the
-   * question a reader arrives with ("what is in here, and what is it costing
-   * me") is answered by the package, not by its eleventh build. PUSHED-NEWEST
-   * by default, because the newest push is what somebody just did.
+   * A group's versions are a READ of their own (`bucket.paths {name}`), not a
+   * slice of the page: the page holds one row per package, and the versions
+   * under it may not be in it at all. The answer is kept by name, so closing
+   * and reopening costs nothing and a re-sort leaves it standing.
    */
-  const [grouped, setGrouped] = createSignal(true);
-  const [column, setColumn] = createSignal<PathColumn>("pushed");
-  const [descending, setDescending] = createSignal(true);
-  /** A click on the column already sorted REVERSES it; a click on another
-   *  takes that column's own natural direction — biggest, newest, most read,
-   *  and A before Z. */
-  const sortBy = (which: PathColumn): void => {
-    if (column() === which) setDescending(!descending());
-    else {
-      setColumn(which);
-      setDescending(which !== "name");
-    }
-  };
-  /** What `aria-sort` says of a header. */
-  const sortOf = (which: PathColumn): "ascending" | "descending" | "none" =>
-    column() !== which ? "none" : descending() ? "descending" : "ascending";
-  /** WHICH PACKAGES ARE OPEN, by NAME — the rows are minted afresh by every
-   *  memo pass, so the disclosure cannot live on them, exactly as a pin's
-   *  does not live on its row. */
   const [opened, setOpened] = createSignal<ReadonlySet<string>>(new Set());
-  const toggleOpen = (name: string): void => {
-    setOpened((held) => {
-      const next = new Set(held);
-      if (!next.delete(name)) next.add(name);
-      return next;
-    });
-  };
-  const rows = createMemo<readonly PathRow[]>(() =>
-    pathRows(paths(), { grouped: grouped(), column: column(), descending: descending() }),
+  const [versions, setVersions] = createSignal<ReadonlyMap<string, readonly CachePath[]>>(
+    new Map(),
   );
+  const [reading, setReading] = createSignal<ReadonlySet<string>>(new Set());
+  const withOut = (held: ReadonlySet<string>, name: string): Set<string> => {
+    const next = new Set(held);
+    next.delete(name);
+    return next;
+  };
+  const toggleOpen = (name: string): void => {
+    const open = !opened().has(name);
+    setOpened((held) => (open ? new Set(held).add(name) : withOut(held, name)));
+    if (!open || versions().has(name) || reading().has(name)) return;
+    const asked = current();
+    setReading((held) => new Set(held).add(name));
+    void props
+      .call(
+        props.client.procedures.bucket.paths({
+          bucket: props.name,
+          name,
+          sort: "pushed",
+          descending: true,
+        }),
+      )
+      .then(
+        (answer) => {
+          if (asked !== current()) return;
+          setReading((held) => withOut(held, name));
+          setVersions((held) => new Map(held).set(name, answer.paths));
+        },
+        (err: unknown) => {
+          if (asked !== current()) return;
+          setReading((held) => withOut(held, name));
+          setFailure(refusalText(err));
+        },
+      );
+  };
+  // A NEW QUESTION IS A NEW SET OF PACKAGES: the names a filter leaves may not
+  // be the names that were open, and a version list read under the old filter
+  // is still this package's whole list, so only what is OPEN is forgotten.
+  createEffect(
+    on(() => [props.name, filter()] as const, () => setOpened(new Set<string>()), {
+      defer: true,
+    }),
+  );
+  createEffect(on(() => props.name, () => setVersions(new Map()), { defer: true }));
 
   /** THE TOKEN JUST MINTED HERE, held by the page so the push block can show
    *  it in its one showing. It belongs to ONE bucket: opening another clears
@@ -1216,14 +1242,20 @@ function BucketPage(
                       />
                       {/* ONE ROW PER PACKAGE, or one per path. The switch is
                           beside the filter because they are the same kind of
-                          decision: which of what is here do I want to see. */}
+                          decision: which of what is here do I want to see.
+
+                          ONE NAME, WHATEVER IT IS SET TO: `aria-pressed`
+                          carries the state precisely because the name does
+                          not — a control that renamed itself as it flipped
+                          would announce a different control from the one
+                          that was pressed. */}
                       <button
                         type="button"
                         class="text-action"
                         aria-pressed={grouped()}
                         onClick={() => setGrouped(!grouped())}
                       >
-                        {grouped() ? "grouped by name" : "every version"}
+                        group by name
                       </button>
                       {/* THE LIST IS A SNAPSHOT, and this page's only stale
                           copy: the facts line above follows the bucket's row
@@ -1254,7 +1286,7 @@ function BucketPage(
                     )}
                   </Show>
                   <Show
-                    when={paths().length > 0}
+                    when={rows().length > 0}
                     fallback={
                       <Show when={refusal() === null && failure() === null}>
                         <p class="panel-body hint">
@@ -1319,7 +1351,7 @@ function BucketPage(
                                       a disclosure over a single row would be a
                                       control that answers its own question. */}
                                   <Show
-                                    when={row.versions.length > 1}
+                                    when={row.versions > 1}
                                     fallback={<span class="name">{row.name}</span>}
                                   >
                                     <button
@@ -1329,9 +1361,7 @@ function BucketPage(
                                       onClick={() => toggleOpen(row.name)}
                                     >
                                       <span class="name">{row.name}</span>
-                                      <span class="versions">
-                                        {row.versions.length} versions
-                                      </span>
+                                      <span class="versions">{row.versions} versions</span>
                                     </button>
                                   </Show>
                                 </td>
@@ -1341,26 +1371,41 @@ function BucketPage(
                                 <td class="numeric">{row.hits}</td>
                                 <td class="numeric">{ago(row.wanted, pathsClock())}</td>
                               </tr>
-                              <Show when={row.versions.length > 1 && opened().has(row.name)}>
-                                <For each={row.versions}>
-                                  {(version) => (
-                                    <tr class="version-row">
-                                      <td class="path-name" />
-                                      <HashCell storePath={version.storePath} />
-                                      <td class="numeric">{bytes(version.narSize)}</td>
-                                      <td class="numeric">
-                                        {ago(version.created, pathsClock())}
-                                      </td>
-                                      <td class="numeric">{version.hits}</td>
-                                      {/* WANTED, not read: retention counts
-                                          from here, and the reads beside it
-                                          never move it. */}
-                                      <td class="numeric">
-                                        {ago(version.lastWanted, pathsClock())}
-                                      </td>
-                                    </tr>
+                              <Show when={opened().has(row.name)}>
+                                <Show when={versions().get(row.name)}>
+                                  {(held) => (
+                                    <For each={held()}>
+                                      {(version) => (
+                                        <tr class="version-row">
+                                          <td class="path-name" />
+                                          <HashCell storePath={version.storePath} />
+                                          <td class="numeric">{bytes(version.narSize)}</td>
+                                          <td class="numeric">
+                                            {ago(version.created, pathsClock())}
+                                          </td>
+                                          <td class="numeric">{version.hits}</td>
+                                          {/* WANTED, not read: retention counts
+                                              from here, and the reads beside it
+                                              never move it. */}
+                                          <td class="numeric">
+                                            {ago(version.lastWanted, pathsClock())}
+                                          </td>
+                                        </tr>
+                                      )}
+                                    </For>
                                   )}
-                                </For>
+                                </Show>
+                                {/* THE VERSIONS ARE A READ, so an open package
+                                    says it is reading rather than drawing an
+                                    empty gap. */}
+                                <Show when={versions().get(row.name) === undefined}>
+                                  <tr class="version-row">
+                                    <td class="path-name" />
+                                    <td class="hint" colSpan={5}>
+                                      reading…
+                                    </td>
+                                  </tr>
+                                </Show>
                               </Show>
                             </>
                           )}
@@ -2531,7 +2576,7 @@ function BucketGc(
                 ? "counting…"
                 : asking().kind === "own"
                   ? "Dry run"
-                  : `Dry run at ${retention().trim()} days`}
+                  : `Dry run at ${retention().trim()} day${retention().trim() === "1" ? "" : "s"}`}
             </Button>
             {/* THE DRY RUN'S OWN NUMBER, beside the button it belongs to and
                 nowhere near "Set retention" above: this one asks, that one

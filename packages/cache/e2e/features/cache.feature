@@ -65,7 +65,7 @@ Feature: The cache is a row of the board
     And the paths table holds 1 rows
     When I expand that package
     Then the paths table holds 3 version rows
-    When I press "grouped by name"
+    When I press "group by name"
     Then the paths table holds 3 rows
     And there should be no page errors
 

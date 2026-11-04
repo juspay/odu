@@ -199,6 +199,33 @@ export interface PinRow {
   createdBy: PinAuthor;
 }
 
+/** What a page of paths may be ordered by: a store path's NAME, the bytes
+ *  its NAR weighs, when it was pushed, or how often it has been read. */
+export type PathSort = "name" | "size" | "pushed" | "reads";
+
+/** What every page read takes: how many, from where, narrowed by what, and
+ *  in which order. */
+export interface PathPage {
+  limit: number;
+  after: string | null;
+  filter: string | null;
+  sort: PathSort;
+  descending: boolean;
+}
+
+/** ONE PACKAGE: every version of one store-path name in a bucket, summed. */
+export interface ObjectGroupRow {
+  name: string;
+  versions: number;
+  bytes: number;
+  hits: number;
+  /** The newest version's push, the latest want across all of them, and the
+   *  newest version's own path. */
+  pushed: number;
+  wanted: number;
+  storePath: string;
+}
+
 export interface CacheRepo {
   putBucket(row: BucketRow): void;
   bucket(name: string): BucketRow | null;
@@ -270,18 +297,35 @@ export interface CacheRepo {
   bucketStats(): Map<string, BucketTotals>;
 
   /**
-   * ONE PAGE of a bucket's paths, newest first — the keyset page behind
-   * `cache.paths`.
+   * ONE PAGE of a bucket's paths, in the order asked for — the keyset page
+   * behind `cache.paths`.
    *
-   * `after` is a cursor this function minted (`cursorOf`), so a page is a
-   * POSITION in `(created, store_path)` order rather than an offset: a push
-   * landing between two pages shifts nothing the reader is about to read, which
-   * an `OFFSET` would.
+   * `after` is a cursor this function minted ({@link cursorFor}), so a page is
+   * a POSITION in `(<the ordered column>, store_path)` order rather than an
+   * offset: a push landing between two pages shifts nothing the reader is
+   * about to read, which an `OFFSET` would.
+   *
+   * `name` narrows to one package — every version of one store-path name,
+   * which is what opening a group on the board asks for.
    */
-  objectsPage(
+  objectsPage(bucket: string, page: PathPage & { name?: string | null }): {
+    rows: ObjectRow[];
+    more: boolean;
+  };
+
+  /**
+   * THE SAME PAGE, AS PACKAGES — one row per store-path name, counted and
+   * summed over the WHOLE bucket by SQL.
+   *
+   * A client cannot do this: it holds one page, so its totals would be the
+   * page's and would change under the reader at "show more". The aggregate is
+   * therefore the row's, and it pages by the same keyset rule — on the
+   * aggregate being ordered by, with the name settling every tie.
+   */
+  objectGroupsPage(
     bucket: string,
-    page: { limit: number; after: string | null; filter: string | null },
-  ): { rows: ObjectRow[]; more: boolean };
+    page: PathPage,
+  ): { rows: ObjectGroupRow[]; more: boolean };
   /** The same, over every bucket, plus reads and the newest renewal. */
   objectTotals(): {
     objects: number;
@@ -494,24 +538,73 @@ const list = (row: Row, column: string): string[] => {
 };
 
 /**
- * A PAGE CURSOR — `<created>|<storePath>`, the last row of the page just given.
+ * A PAGE CURSOR — `<the ordered value>|<the key>`, the last row of the page
+ * just given: `<created>|<storePath>` for the default order, `<bytes>|<name>`
+ * for packages by size, and so on.
  *
  * Opaque to a caller on purpose: it names a POSITION in the page order, and a
  * caller that could read it would be a caller tempted to mint one. A malformed
  * cursor is `null` — the first page — rather than an error, because the only
  * thing a stale cursor can mean is "start again".
  */
-export const cursorOf = (key: string): { created: number; storePath: string } | null => {
+export const cursorOf = (key: string): { value: string; key: string } | null => {
   const at = key.indexOf("|");
   if (at <= 0) return null;
-  const created = Number(key.slice(0, at));
-  if (!Number.isFinite(created)) return null;
-  return { created, storePath: key.slice(at + 1) };
+  return { value: key.slice(0, at), key: key.slice(at + 1) };
 };
 
-/** The cursor for a page's last row. */
-export const cursorFor = (row: { created: number; storePath: string }): string =>
-  `${row.created}|${row.storePath}`;
+/** The cursor for a page's last row, in the order it was read in. */
+export const cursorFor = (row: ObjectRow | ObjectGroupRow, sort: PathSort): string => {
+  if ("versions" in row) {
+    const value =
+      sort === "name" ? row.name : sort === "size" ? row.bytes : sort === "reads" ? row.hits : row.pushed;
+    return `${value}|${row.name}`;
+  }
+  const value =
+    sort === "name"
+      ? nameOfStorePath(row.storePath)
+      : sort === "size"
+        ? row.narSize
+        : sort === "reads"
+          ? row.hits
+          : row.created;
+  return `${value}|${row.storePath}`;
+};
+
+/**
+ * A STORE PATH'S NAME, as SQL takes it: everything after the first `-`.
+ *
+ * `/nix/store/<32 base-32 characters>-<name>` — the hash holds no hyphen and
+ * neither does the store directory, so the first one ends it. This spelling
+ * and the SQL below are the SAME rule, written twice because one of them has
+ * to run inside a `GROUP BY`; {@link PATH_NAME_SQL} is the other half and the
+ * pair is pinned by `db.test.ts`.
+ */
+export const nameOfStorePath = (storePath: string): string => {
+  const dash = storePath.indexOf("-");
+  return dash === -1 ? storePath : storePath.slice(dash + 1);
+};
+
+/** @see nameOfStorePath */
+const PATH_NAME_SQL = "substr(store_path, instr(store_path, '-') + 1)";
+
+/**
+ * WHAT EACH ORDER IS, IN SQL — the expression a row is ordered by, the one a
+ * GROUP is ordered by, and whether the cursor's value is a number.
+ *
+ * `size` is `nar_size` rather than the stored `file_size`, because the number
+ * the board prints beside a path is its NAR's, and an order that disagreed
+ * with the column it is drawn under is worse than no order at all.
+ */
+const PATH_ORDER: Record<
+  PathSort,
+  { readonly row: string; readonly group: string; readonly numeric: boolean }
+> = {
+  name: { row: PATH_NAME_SQL, group: "name", numeric: false },
+  size: { row: "nar_size", group: "bytes", numeric: true },
+  pushed: { row: "created", group: "pushed", numeric: true },
+  reads: { row: "hits", group: "hits", numeric: true },
+};
 
 const bucketOf = (row: Row): BucketRow => ({
   name: text(row, "name"),
@@ -859,7 +952,7 @@ export function openCacheRepo(path: string): CacheRepo {
     },
 
     objectsPage(bucket, page) {
-      const after = page.after === null ? null : cursorOf(page.after);
+      const order = PATH_ORDER[page.sort];
       const where = ["bucket = ?"];
       const params: unknown[] = [bucket];
       if (page.filter !== null && page.filter !== "") {
@@ -868,19 +961,90 @@ export function openCacheRepo(path: string): CacheRepo {
         where.push("instr(store_path, ?) > 0");
         params.push(page.filter);
       }
+      if (page.name !== undefined && page.name !== null) {
+        where.push(`${PATH_NAME_SQL} = ?`);
+        params.push(page.name);
+      }
+      const after = page.after === null ? null : cursorOf(page.after);
       if (after !== null) {
-        where.push("(created < ? OR (created = ? AND store_path < ?))");
-        params.push(after.created, after.created, after.storePath);
+        // THE KEYSET, in the order being read: the ordered column decides, and
+        // the store path settles a tie so no row is read twice or skipped.
+        const compare = page.descending ? "<" : ">";
+        where.push(
+          `(${order.row} ${compare} ? OR (${order.row} = ? AND store_path ${compare} ?))`,
+        );
+        const value = order.numeric ? Number(after.value) : after.value;
+        params.push(value, value, after.key);
       }
       params.push(page.limit + 1);
+      const way = page.descending ? "DESC" : "ASC";
       const rows = db
         .query(
           `SELECT * FROM object WHERE ${where.join(" AND ")} ` +
-            "ORDER BY created DESC, store_path DESC LIMIT ?",
+            `ORDER BY ${order.row} ${way}, store_path ${way} LIMIT ?`,
         )
         .all(...(params as never[])) as Row[];
       const more = rows.length > page.limit;
       return { rows: (more ? rows.slice(0, page.limit) : rows).map(objectOf), more };
+    },
+
+    objectGroupsPage(bucket, page) {
+      const order = PATH_ORDER[page.sort];
+      const where = ["bucket = ?"];
+      const params: unknown[] = [bucket];
+      if (page.filter !== null && page.filter !== "") {
+        where.push("instr(store_path, ?) > 0");
+        params.push(page.filter);
+      }
+      // THE KEYSET IS ON THE AGGREGATE, so it is a HAVING: the count, the sums
+      // and the two clocks exist only after the grouping, and a WHERE could
+      // not see them.
+      const having: string[] = [];
+      const after = page.after === null ? null : cursorOf(page.after);
+      if (after !== null) {
+        const compare = page.descending ? "<" : ">";
+        having.push(
+          `(${order.group} ${compare} ? OR (${order.group} = ? AND name ${compare} ?))`,
+        );
+        const value = order.numeric ? Number(after.value) : after.value;
+        params.push(value, value, after.key);
+      }
+      params.push(page.limit + 1);
+      const way = page.descending ? "DESC" : "ASC";
+      const rows = db
+        .query(
+          `SELECT ${PATH_NAME_SQL} AS name, COUNT(*) AS versions, ` +
+            "COALESCE(SUM(nar_size), 0) AS bytes, COALESCE(SUM(hits), 0) AS hits, " +
+            "MAX(created) AS pushed, MAX(last_wanted) AS wanted, " +
+            // THE NEWEST VERSION'S OWN PATH, by a subquery rather than a bare
+            // column: SQLite hands a bare column the max row's value only when
+            // there is exactly ONE min/max in the select, and there are two.
+            // The name is spelled out on both sides rather than taken from
+            // the alias — a result alias is not in scope inside a subquery —
+            // and the outer side is a bare column every row of the group
+            // answers the same way.
+            "(SELECT inner.store_path FROM object AS inner WHERE inner.bucket = object.bucket " +
+            `AND ${PATH_NAME_SQL.replaceAll("store_path", "inner.store_path")} = ` +
+            `${PATH_NAME_SQL.replaceAll("store_path", "object.store_path")} ` +
+            "ORDER BY inner.created DESC, inner.store_path DESC LIMIT 1) AS store_path " +
+            `FROM object WHERE ${where.join(" AND ")} GROUP BY name ` +
+            (having.length === 0 ? "" : `HAVING ${having.join(" AND ")} `) +
+            `ORDER BY ${order.group} ${way}, name ${way} LIMIT ?`,
+        )
+        .all(...(params as never[])) as Row[];
+      const more = rows.length > page.limit;
+      return {
+        rows: (more ? rows.slice(0, page.limit) : rows).map((row) => ({
+          name: text(row, "name"),
+          versions: integer(row, "versions"),
+          bytes: integer(row, "bytes"),
+          hits: integer(row, "hits"),
+          pushed: integer(row, "pushed"),
+          wanted: integer(row, "wanted"),
+          storePath: text(row, "store_path"),
+        })),
+        more,
+      };
     },
     objectTotals() {
       const row = db

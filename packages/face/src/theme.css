@@ -983,6 +983,15 @@
   .link:hover:not(:disabled) { color: var(--cyan); }
   .text-action:disabled { color: var(--muted); cursor: default; }
 
+  /* A TEXT ACTION THAT IS A SWITCH — "group by name". `aria-pressed` is the
+     state (the label stays put, so a reader is not handed a different
+     control each press), and this is that state for the eye. */
+  .text-action[aria-pressed="true"] {
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: inset 0 -2px 0 var(--select);
+  }
+
   /* ── the confirmation ─────────────────────────────────────────────────────
    *
    * A native `<dialog>`, so Esc closes it, the backdrop is the browser's,
@@ -1050,10 +1059,6 @@
     font: 0.78rem var(--mono);
     scrollbar-width: thin;
   }
-
-  /* The dim half of a store path — the hash nobody reads — so the NAME is what
-     the eye lands on. */
-  .path-hash { color: var(--quiet); }
 
   /* A LINE OF SMALL FACTS under a name — when a path was pushed and how often
      it was read, how long a session has left, which bucket a route carries.
@@ -1137,10 +1142,14 @@
      doing" — which rows exist, what each is saying, who you are — and the
      counts on it are the reason a person leaves a page. A bucket page is
      hundreds of paths long, so a rail that scrolled away took the way out
-     with it. Wide screens only: below that the rail is a band across the
-     top (see `.app`), and a band pinned over a phone screen is a band
-     eating a phone screen. */
-  @media (min-width: 52rem) {
+     with it.
+
+     55rem, NOT 52: the rail asks for 15rem and the screen for 40rem, so
+     `.app`'s wrap happens at their sum — below it the rail is a full-width
+     band, and a sticky full-height band is one that paints over the screen
+     it is meant to sit beside. The breakpoint is the WRAP, not the narrow
+     reflow below it. */
+  @media (min-width: 55rem) {
     .sidebar {
       position: sticky;
       top: 0;

@@ -31,6 +31,7 @@ import type {
   PinAuthor,
   Scope,
   TokenRow,
+  PathSort,
 } from "./db";
 import { cursorFor, openCacheRepo } from "./db";
 import {
@@ -373,18 +374,33 @@ export interface CacheAdmin {
   }): Promise<CacheOutcome<GcPreview>>;
   stats(input: { authority: Authority }): Promise<CacheOutcome<CacheStats>>;
   /**
-   * ONE PAGE of a bucket's stored paths, newest first.
+   * ONE PAGE of a bucket's stored paths — as paths, as PACKAGES (`group`), or
+   * as one package's versions (`name`), in the order asked for.
    *
    * No root token: the same reasoning as `describe`. A bucket's PATH LIST is
    * what the substituter already serves one narinfo at a time to anyone who can
    * read the bucket, so a listing that demanded the operator's secret would be
    * a credential on a question the protocol answers for free.
+   *
+   * THE GROUPING AND THE ORDER ARE THIS ROW'S. A caller holding one page
+   * cannot count a bucket, and a caller that tried would state its page's
+   * totals as the bucket's.
    */
   paths(input: {
     bucket: string;
     filter: string | null;
     after: string | null;
-  }): Promise<CacheOutcome<{ paths: readonly PathPageRow[]; next: string | null }>>;
+    group?: "name" | null;
+    name?: string | null;
+    sort?: PathSort | null;
+    descending?: boolean | null;
+  }): Promise<
+    CacheOutcome<{
+      paths: readonly PathPageRow[];
+      groups: readonly PathGroupPageRow[] | null;
+      next: string | null;
+    }>
+  >;
 }
 
 /** WHAT A DELETED BUCKET'S STORE GAVE UP: the keys removed under its prefix
@@ -404,6 +420,19 @@ export interface PathPageRow {
   hits: number;
   /** When a push or a `missing` query last said somebody wants it. */
   lastWanted: number;
+}
+
+/** One PACKAGE, as a grouped `paths` lists it: every version of one store
+ *  path's name, counted and summed by the database. */
+export interface PathGroupPageRow {
+  name: string;
+  versions: number;
+  bytes: number;
+  hits: number;
+  pushed: number;
+  wanted: number;
+  /** The newest version's path — the hash a reader compares by. */
+  storePath: string;
 }
 
 /** The verdict on a presented credential. `status` is what the route answers
@@ -1693,23 +1722,42 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      const page = repo.objectsPage(bucket.name, {
+      // THE ORDER'S OWN DIRECTION when the caller says nothing: biggest,
+      // newest and most read first, and A before Z.
+      const sort = input.sort ?? "pushed";
+      const page = {
         limit: PATH_PAGE_SIZE,
         after: input.after,
         filter: input.filter,
-      });
-      const last = page.rows.at(-1);
+        sort,
+        descending: input.descending ?? sort !== "name",
+      };
+      if (input.group === "name") {
+        const grouped = repo.objectGroupsPage(bucket.name, page);
+        const last = grouped.rows.at(-1);
+        return {
+          ok: true,
+          value: {
+            paths: [],
+            groups: grouped.rows,
+            next: grouped.more && last !== undefined ? cursorFor(last, sort) : null,
+          },
+        };
+      }
+      const listed = repo.objectsPage(bucket.name, { ...page, name: input.name ?? null });
+      const last = listed.rows.at(-1);
       return {
         ok: true,
         value: {
-          paths: page.rows.map((row) => ({
+          paths: listed.rows.map((row) => ({
             storePath: row.storePath,
             narSize: row.narSize,
             created: row.created,
             hits: row.hits,
             lastWanted: row.lastWanted,
           })),
-          next: page.more && last !== undefined ? cursorFor(last) : null,
+          groups: null,
+          next: listed.more && last !== undefined ? cursorFor(last, sort) : null,
         },
       };
     },

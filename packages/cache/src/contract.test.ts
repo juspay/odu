@@ -33,6 +33,11 @@ const LEDGER: ContractLedger = {
   // 4.4 — PLAN 2.7's open item: `gc.plan` takes a `retentionDays` to plan
   // with, which `gc.run` deliberately does not. Additive.
   "4.4": "7922ebb8aef0d7da",
+  // 4.5 — `bucket.paths` takes `group`, `name`, `sort` and `descending`, and
+  // answers `groups` beside `paths`: a bucket grouped by package and ordered
+  // BY THE ROW, counted over the whole of it rather than over whichever page
+  // a reader happens to hold. Additive.
+  "4.5": "37e28294bbd765b7",
 };
 
 describe("the cache row's contract", () => {
