@@ -730,12 +730,10 @@ Then("the page has the four blocks a person pastes", async function (this: OduWo
       `the page has no ${title} block`,
     );
   }
-  // ONE BLOCK AT A TIME, so one button for it — beside the two facts that
-  // have their own.
   assert.strictEqual(
     await this.page.locator("button[data-copy]").count(),
-    3,
-    "the page does not offer a copy button for the substituter, the key and the block",
+    5,
+    "the page does not offer a copy button per block (four use blocks and the push)",
   );
 });
 
@@ -949,6 +947,9 @@ When("twelve paths are pushed with that token from the CLI", function (this: Odu
 When("I open the pins", async function (this: OduWorld) {
   await this.page.getByRole("tab", { name: "Pins", exact: true }).click();
   await this.page.locator('section[aria-label="pins"]').waitFor({ timeout: 30_000 });
+  // The tab is the list AND the form that adds to it; a scenario that says it
+  // opened the pins has both in front of it.
+  await openPinForm(this);
 });
 
 When("I open the paths", async function (this: OduWorld) {
@@ -956,9 +957,20 @@ When("I open the paths", async function (this: OduWorld) {
   await this.page.locator(".cache-paths").waitFor({ timeout: 30_000 });
 });
 
+/** The pin form is folded away until somebody wants it: the list is what the
+ *  tab is for, and making one pin is a choice. */
+async function openPinForm(world: OduWorld): Promise<void> {
+  const summary = world.page
+    .locator('section[aria-label="pins"] button.disclosure-summary')
+    .first();
+  await summary.waitFor({ timeout: 30_000 });
+  if ((await summary.getAttribute("aria-expanded")) !== "true") await summary.click();
+}
+
 async function pinPaths(world: OduWorld, name: string, paths: readonly string[]): Promise<void> {
+  await openPinForm(world);
   await world.page.getByLabel("pin name", { exact: true }).fill(name);
-  await world.page.getByLabel("store paths to pin", { exact: true }).fill(paths.join("\n"));
+  await world.page.getByLabel("store paths", { exact: true }).fill(paths.join("\n"));
   await world.page.getByRole("button", { name: "Pin closure", exact: true }).click();
 }
 

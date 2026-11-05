@@ -356,12 +356,6 @@ function CreateBucket(
       <div class="panel-body">
         <Disclosure summary="New bucket" open={open()} onToggle={() => setOpen((was) => !was)}>
           <Fields>
-            <Show when={props.local}>
-              <RootTokenField
-                typedToken={props.typedToken}
-                onTypedToken={props.onTypedToken}
-              />
-            </Show>
             <Field id="new-bucket-name" label="name">
               <TextInput
                 id="new-bucket-name"
@@ -464,7 +458,25 @@ function BucketList(
   });
   return (
     <section class="screen cache" aria-label="buckets">
-      <PageHead title="Cache" />
+      <PageHead
+        title="Cache"
+        actions={
+          /* THE CREDENTIAL IS THE SCREEN'S, not the create form's. A daemon
+             with no door administers by the operator's root token, and on
+             this screen that token authorises more than a new bucket — it is
+             what the bucket a reader opens next will administer with. Folded
+             inside `New bucket` it was a secret you had to open a form to
+             type. */
+          <Show when={props.local && props.canAdminister}>
+            <div class="page-actions">
+              <RootTokenField
+                typedToken={props.typedToken}
+                onTypedToken={props.onTypedToken}
+              />
+            </div>
+          </Show>
+        }
+      />
 
       <Show
         when={rows().length > 0}
