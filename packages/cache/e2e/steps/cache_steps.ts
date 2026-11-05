@@ -415,7 +415,7 @@ Then("no path is listed", async function (this: OduWorld) {
  *  the question is whether the page asked the row again, not which path
  *  survived. */
 Then("one path is listed", async function (this: OduWorld) {
-  const rows = this.page.locator("table.paths-table tbody tr.path-row");
+  const rows = this.page.locator("table.paths-table tbody tr.table-row");
   await this.waitUntil(
     async () => (await rows.count()) === 1,
     "the path table to hold exactly one row",
@@ -424,7 +424,7 @@ Then("one path is listed", async function (this: OduWorld) {
 
 /** THE GROUPED ROWS — one per package, whatever each holds. */
 Then("the paths table holds {int} rows", async function (this: OduWorld, count: number) {
-  const rows = this.page.locator("table.paths-table tbody tr.path-row");
+  const rows = this.page.locator("table.paths-table tbody tr.table-row");
   await this.waitUntil(
     async () => (await rows.count()) === count,
     `the paths table to hold ${count} rows`,
@@ -436,7 +436,7 @@ Then("the paths table holds {int} rows", async function (this: OduWorld, count: 
 Then(
   "the paths table holds {int} version rows",
   async function (this: OduWorld, count: number) {
-    const rows = this.page.locator("table.paths-table tbody tr.version-row");
+    const rows = this.page.locator("table.paths-table tbody tr.table-sub-row");
     await this.waitUntil(
       async () => (await rows.count()) === count,
       `the paths table to hold ${count} version rows`,
@@ -453,7 +453,7 @@ Then("that package is one row saying {string}", async function (this: OduWorld, 
 When("I expand that package", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no package was arranged");
-  await pathRow(this, name).locator("button.disclose").click();
+  await pathRow(this, name).locator("button.disclosure-summary").click();
 });
 
 /** THE ORDER IS CHOSEN IN THE HEADER, so this presses the header — the same
@@ -482,7 +482,7 @@ Then("the {string} path is first", async function (this: OduWorld, which: string
   const names = this.cachePathNames ?? [];
   const wanted = which === "large" ? names[0] : names[1];
   assert.ok(wanted !== undefined, "no large and small path were arranged");
-  const first = this.page.locator("table.paths-table tbody tr.path-row").first();
+  const first = this.page.locator("table.paths-table tbody tr.table-row").first();
   await this.saysThat(first, "the table's first row", wanted);
 });
 
@@ -962,15 +962,13 @@ function pinRow(world: OduWorld, name: string): Locator {
   return world.page.locator("ul.pins li", { hasText: name }).first();
 }
 
-/** Open what a pin holds, once: `<details>` TOGGLES, so a second click on a
- *  summary that is already open is a step that closes the thing it is about
- *  to read. */
+/** Open what a pin holds, once. */
 async function openRoots(world: OduWorld, name: string): Promise<void> {
-  const details = pinRow(world, name).locator("details").first();
-  await details.waitFor({ timeout: 30_000 });
-  if ((await details.getAttribute("open")) === null) {
-    await details.locator("summary").click();
-  }
+  const summary = pinRow(world, name).locator("button.disclosure-summary").first();
+  await summary.waitFor({ timeout: 30_000 });
+  // The open bit is the LIST's now, not the platform's, and it is announced
+  // on the control: a second click would close what this is about to read.
+  if ((await summary.getAttribute("aria-expanded")) !== "true") await summary.click();
 }
 
 When("I expand what the pin {string} holds", async function (this: OduWorld, name: string) {

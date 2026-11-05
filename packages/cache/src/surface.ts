@@ -587,10 +587,11 @@ export type CachePaths = typeof PathsOutputSchema.Type;
 
 // ── what both faces print ───────────────────────────────────────────────────
 
-/** How many paths one `cache.paths` page carries: what the board's list renders
- *  without a scroll, and what a person reading a bucket wants before deciding to
- *  filter. Here because the VERB's page and the VIEW's page are one number. */
-export const PATH_PAGE_SIZE = 100;
+/** How many rows one `cache.paths` page carries — packages, paths, or one
+ *  package's versions. Twenty: what a bucket page shows without becoming a
+ *  wall, and what a reader scans before deciding to filter instead. Here
+ *  because the VERB's page and the VIEW's page are one number. */
+export const PATH_PAGE_SIZE = 20;
 
 /**
  * HOW LONG A BUCKET KEEPS WHAT NOBODY WANTS, when its creator says nothing.

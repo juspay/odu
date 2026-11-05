@@ -65,8 +65,13 @@ import {
   PageHead,
   Panel,
   Pill,
+  Disclosure,
+  Facts,
+  Fields,
   Receipt,
   SearchInput,
+  Table,
+  type TableColumn,
   Stat,
   Tag,
   TextInput,
@@ -255,7 +260,7 @@ function RootTokenField(props: TokenField): JSX.Element {
     <Field
       id="cache-root-token"
       label="root token"
-      hint="What this daemon's administration checks — the same secret odu cache reads from $ODU_ROOT_TOKEN. It is held for this page only."
+      hint="$ODU_ROOT_TOKEN; held for this page"
     >
       <input
         id="cache-root-token"
@@ -270,20 +275,22 @@ function RootTokenField(props: TokenField): JSX.Element {
   );
 }
 
-/** WHY THE UPSTREAM SWITCH EXISTS, in the docs' one line: a store that did not
- *  build the paths never holds nixpkgs, so a bucket that skips upstream paths
- *  makes every push wait at 202 for referrers that will never arrive. */
-export const UPSTREAM_HINT =
-  "Skip paths cache.nixos.org already signed. Turn off for a server whose " +
-  "store is not the machine that built the paths, or every push waits at 202 " +
-  "(the CLI's --no-upstream).";
+/** THE SWITCH'S OWN WORDS, six of them: the why is a paragraph and a
+ *  paragraph belongs in `cache.md`, which the panel links to. */
+export const UPSTREAM_HINT = "skips what cache.nixos.org already signed";
 
-/** The cache screen's one sentence: what a bucket IS, before any of them are
- *  read. The stores are named because where the objects live is the one
- *  creation fact that cannot be changed afterwards. */
-const CACHE_SUB =
-  "Nix binary caches, one per bucket. Each keeps its objects on this server's " +
-  "disk or in an S3 store.";
+/** The cache screen's sub-line: facts, not a sentence. */
+const CACHE_SUB = "one substituter per bucket · local disk or S3";
+
+/** WHERE THE EXPLANATION LIVES. A control is its label; the paragraph that
+ *  used to sit under it is in the docs, and this is the one link to it. */
+function DocsLink(): JSX.Element {
+  return (
+    <a class="link" href="https://odu.kolu.dev/docs/cache/" target="_blank" rel="noreferrer">
+      docs
+    </a>
+  );
+}
 
 /**
  * CREATE A BUCKET.
@@ -675,22 +682,6 @@ export function pathRows(page: CachePaths): readonly PathRow[] {
   }));
 }
 
-/** THE HEADER ROW, once: what each column is called, whether its figures are
- *  compared down the column (so right-aligned), and what clicking it sorts
- *  by — `null` for the two that cannot be ordered meaningfully. */
-const PATH_COLUMNS: ReadonlyArray<{
-  readonly label: string;
-  readonly column: PathColumn | null;
-  readonly numeric: boolean;
-}> = [
-  { label: "name", column: "name", numeric: false },
-  { label: "hash", column: null, numeric: false },
-  { label: "size", column: "size", numeric: true },
-  { label: "pushed", column: "pushed", numeric: true },
-  { label: "reads", column: "reads", numeric: true },
-  { label: "wanted", column: null, numeric: true },
-];
-
 /**
  * THE HASH, AND THE WHOLE PATH BEHIND IT.
  *
@@ -711,18 +702,18 @@ function HashCell(props: { storePath: string }): JSX.Element {
       reset = setTimeout(() => setSaid(null), 1400);
     });
   };
+  // A CELL'S CONTENTS, not a cell: the table draws the `<td>`, and a second
+  // one nested inside it is a row the browser lays out twice.
   return (
-    <td class="path-hash">
-      <button
-        type="button"
-        class="hash"
-        title={props.storePath}
-        aria-label={`copy ${props.storePath}`}
-        onClick={press}
-      >
-        {said() ?? storePathParts(props.storePath).hash.slice(0, HASH_SHOWN)}
-      </button>
-    </td>
+    <button
+      type="button"
+      class="hash"
+      title={props.storePath}
+      aria-label={`copy ${props.storePath}`}
+      onClick={press}
+    >
+      {said() ?? storePathParts(props.storePath).hash.slice(0, HASH_SHOWN)}
+    </button>
   );
 }
 
@@ -798,9 +789,7 @@ function BucketPage(
       setDescending(which !== "name");
     }
   };
-  /** What `aria-sort` says of a header. */
-  const sortOf = (which: PathColumn): "ascending" | "descending" | "none" =>
-    column() !== which ? "none" : descending() ? "descending" : "ascending";
+
 
   /** A "more" page, appended to the first. Cleared whenever the QUERY changes,
    *  because a cursor belongs to the question that minted it. */
@@ -986,6 +975,95 @@ function BucketPage(
         },
       );
   };
+
+  /**
+   * THE TABLE, AS DATA — six columns, their widths, and what each cell is.
+   *
+   * Every width but the name's is fixed, so the name takes what is left and
+   * nothing in a cell can widen the page; the `Table` primitive owns the
+   * alignment, the clipping and the `aria-sort`.
+   */
+  const columns: ReadonlyArray<TableColumn<PathRow>> = [
+    {
+      key: "name",
+      label: "name",
+      sortable: true,
+      cell: (row) =>
+        row.versions > 1 ? (
+          <button
+            type="button"
+            class="disclosure-summary"
+            aria-expanded={opened().has(row.name)}
+            onClick={() => toggleOpen(row.name)}
+          >
+            <span class="name">{row.name}</span>
+            <span class="versions">{row.versions}</span>
+          </button>
+        ) : (
+          <span class="name">{row.name}</span>
+        ),
+    },
+    {
+      key: "hash",
+      label: "hash",
+      width: "6rem",
+      cell: (row) => <HashCell storePath={row.storePath} />,
+    },
+    {
+      key: "size",
+      label: "size",
+      align: "right",
+      width: "5rem",
+      sortable: true,
+      cell: (row) => bytes(row.bytes),
+    },
+    {
+      key: "pushed",
+      label: "pushed",
+      align: "right",
+      width: "5.5rem",
+      sortable: true,
+      cell: (row) => ago(row.pushed, pathsClock()),
+    },
+    {
+      key: "reads",
+      label: "reads",
+      align: "right",
+      width: "4rem",
+      sortable: true,
+      cell: (row) => row.hits,
+    },
+    {
+      key: "wanted",
+      label: "wanted",
+      align: "right",
+      width: "5.5rem",
+      cell: (row) => ago(row.wanted, pathsClock()),
+    },
+  ];
+  /** An open package's versions, as rows of the same shape — one table
+   *  grammar, not a second one for what hangs under a row. */
+  const versionsOf = (row: PathRow): readonly PathRow[] => {
+    const state = openState(row.name);
+    if (state === undefined || state.kind !== "held") return [];
+    return state.versions.map((version) => ({
+      name: row.name,
+      storePath: version.storePath,
+      versions: 1,
+      bytes: version.narSize,
+      hits: version.hits,
+      pushed: version.created,
+      wanted: version.lastWanted,
+    }));
+  };
+  /** What an open package's read has come to, when it is not rows. */
+  const noteUnder = (row: PathRow): JSX.Element | null => {
+    const state = openState(row.name);
+    if (state === undefined) return null;
+    if (state.kind === "reading") return "reading…";
+    if (state.kind === "failed") return <span class="fault">{state.message}</span>;
+    return state.more ? `the newest ${state.versions.length} of ${row.versions}` : null;
+  };
   // A NEW QUESTION IS A NEW SET OF PACKAGES, and a new answer under each: the
   // filter decides which versions count, so a list read under the old one is
   // not this one's.
@@ -1126,8 +1204,7 @@ function BucketPage(
                   for whichever file it is going into. */}
               <Panel
                 title="Use it"
-                note="Two facts make a Nix client trust this bucket."
-                label="use it"
+                          label="use it"
               >
                 <KeyValue label="Substituter" value={row().url}>
                   <CopyButton text={row().url} />
@@ -1316,151 +1393,16 @@ function BucketPage(
                       </Show>
                     }
                   >
-                    {/* A TABLE, because six facts about a hundred paths is a
-                        table: every column lines up, the numbers are right
-                        aligned where they are compared, and the header is
-                        where the ordering is chosen. */}
-                    <table class="paths-table">
-                      <thead>
-                        <tr>
-                          <For each={PATH_COLUMNS}>
-                            {(head) => (
-                              <th
-                                scope="col"
-                                class={head.numeric ? "numeric" : undefined}
-                                aria-sort={head.column === null ? undefined : sortOf(head.column)}
-                              >
-                                <Show when={head.column} fallback={head.label}>
-                                  {(which) => (
-                                    <button
-                                      type="button"
-                                      class="sort"
-                                      onClick={() => sortBy(which())}
-                                    >
-                                      {head.label}
-                                      {/* THE ARROW IS DECORATION: `aria-sort`
-                                          on the cell is what a screen reader
-                                          hears, and a glyph inside the
-                                          button's NAME would rename the
-                                          control every time it was pressed. */}
-                                      <span class="arrow" aria-hidden="true">
-                                        {sortOf(which()) === "ascending"
-                                          ? "↑"
-                                          : sortOf(which()) === "descending"
-                                            ? "↓"
-                                            : ""}
-                                      </span>
-                                    </button>
-                                  )}
-                                </Show>
-                              </th>
-                            )}
-                          </For>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <For each={rows()}>
-                          {(row) => (
-                            <>
-                              <tr class="path-row">
-                                <td class="path-name">
-                                  {/* A PACKAGE WITH ONE VERSION IS A PATH, and
-                                      a disclosure over a single row would be a
-                                      control that answers its own question. */}
-                                  <Show
-                                    when={row.versions > 1}
-                                    fallback={<span class="name">{row.name}</span>}
-                                  >
-                                    <button
-                                      type="button"
-                                      class="disclose"
-                                      aria-expanded={opened().has(row.name)}
-                                      onClick={() => toggleOpen(row.name)}
-                                    >
-                                      <span class="name">{row.name}</span>
-                                      <span class="versions">{row.versions} versions</span>
-                                    </button>
-                                  </Show>
-                                </td>
-                                <HashCell storePath={row.storePath} />
-                                <td class="numeric">{bytes(row.bytes)}</td>
-                                <td class="numeric">{ago(row.pushed, pathsClock())}</td>
-                                <td class="numeric">{row.hits}</td>
-                                <td class="numeric">{ago(row.wanted, pathsClock())}</td>
-                              </tr>
-                              {/* THE VERSIONS ARE A READ, so an open package
-                                  draws what that read has come to — in
-                                  flight, answered, or refused — rather than
-                                  an empty gap or a permanent "reading…". */}
-                              <Show when={openState(row.name)}>
-                                {(state) => (
-                                  <Switch>
-                                    <Match when={state().kind === "reading"}>
-                                      <tr class="version-row">
-                                        <td class="path-name" />
-                                        <td class="hint" colSpan={5}>
-                                          reading…
-                                        </td>
-                                      </tr>
-                                    </Match>
-                                    <Match when={asFailed(state())}>
-                                      {(failed) => (
-                                        <tr class="version-row">
-                                          <td class="path-name" />
-                                          <td class="fault" colSpan={5}>
-                                            {failed().message}
-                                          </td>
-                                        </tr>
-                                      )}
-                                    </Match>
-                                    <Match when={asHeld(state())}>
-                                      {(answer) => (
-                                        <>
-                                          <For each={answer().versions}>
-                                            {(version) => (
-                                              <tr class="version-row">
-                                                <td class="path-name" />
-                                                <HashCell storePath={version.storePath} />
-                                                <td class="numeric">{bytes(version.narSize)}</td>
-                                                <td class="numeric">
-                                                  {ago(version.created, pathsClock())}
-                                                </td>
-                                                <td class="numeric">{version.hits}</td>
-                                                {/* WANTED, not read: retention
-                                                    counts from here, and the
-                                                    reads beside it never move
-                                                    it. */}
-                                                <td class="numeric">
-                                                  {ago(version.lastWanted, pathsClock())}
-                                                </td>
-                                              </tr>
-                                            )}
-                                          </For>
-                                          {/* A PAGE OF VERSIONS IS A PAGE: a
-                                              package with more of them than
-                                              one read carries says so rather
-                                              than contradicting its own
-                                              count. */}
-                                          <Show when={answer().more}>
-                                            <tr class="version-row">
-                                              <td class="path-name" />
-                                              <td class="hint" colSpan={5}>
-                                                the newest {answer().versions.length} of{" "}
-                                                {row.versions} — filter to narrow it
-                                              </td>
-                                            </tr>
-                                          </Show>
-                                        </>
-                                      )}
-                                    </Match>
-                                  </Switch>
-                                )}
-                              </Show>
-                            </>
-                          )}
-                        </For>
-                      </tbody>
-                    </table>
+                    <Table
+                      class="paths-table"
+                      label="paths"
+                      columns={columns}
+                      rows={rows()}
+                      sorted={{ key: column(), descending: descending() }}
+                      onSort={(key) => sortBy(key as PathColumn)}
+                      under={(row) => versionsOf(row)}
+                      note={(row) => noteUnder(row)}
+                    />
                   </Show>
                   <Show when={next()}>
                     {(after) => (
@@ -1722,12 +1664,6 @@ function BucketDomain(
     <Panel title="A name of its own" label="domain">
       <div class="panel-body">
         <div class="stack">
-          <p class="hint">
-            A DNS name for this bucket, with no scheme and no port. When it is set,
-            the substituter URL, the netrc block and the push block use it. The
-            NixOS module needs a virtual host for the same name; a bucket on the
-            public pod gets one through a tunnel row.
-          </p>
           <Field id="bucket-domain" label="domain">
             <TextInput
               id="bucket-domain"
@@ -1802,8 +1738,8 @@ function BucketRetention(
   return (
     <Panel
       title="Retention"
-      note="Days a path survives from the last time anything WANTED it — a push, or a `missing` query that named it. Reads do not count: they are leaving odu, so the busiest paths would be the first to look idle."
       label="retention"
+      actions={<DocsLink />}
     >
       <div class="panel-body">
         <div class="stack">
@@ -1909,8 +1845,8 @@ function BucketMigrate(
   return (
     <Panel
       title="Move to another store"
-      note="Copies every object to another declared store. The bucket keeps serving from the old store until the copy is done."
       label="migrate"
+      actions={<DocsLink />}
     >
       <div class="panel-body">
         <div class="stack">
@@ -1920,10 +1856,7 @@ function BucketMigrate(
               <Show
                 when={elsewhere().length > 0}
                 fallback={
-                  <p class="hint">
-                    This daemon declares only one store, so there is nowhere to move
-                    this bucket.
-                  </p>
+                  <p class="hint">one store declared</p>
                 }
               >
                 <fieldset class="toggles">
@@ -2054,10 +1987,7 @@ function BucketTokens(props: TokenProps): JSX.Element {
           <Show when={minted()}>
             {(held) => (
               <>
-                <p class="hint">
-                  <strong>Copy this token now.</strong> It is shown once; only a hash is
-                  kept.
-                </p>
+                <p class="hint">shown once</p>
                 <pre class="use-block minted-token">{held().token}</pre>
               </>
             )}
@@ -2292,6 +2222,16 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
    * list forgets exactly when the `<details>` it rode on does.
    */
   const [expanded, setExpanded] = createSignal<ReadonlySet<string>>(new Set());
+  /** Which pins have their roots open — the DISCLOSURE's state, held here for
+   *  the same reason "show all" is: a republish re-mints every row. */
+  const [showing, setShowing] = createSignal<ReadonlySet<string>>(new Set());
+  const toggleRoots = (key: string): void => {
+    setShowing((all) => {
+      const next = new Set(all);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+  };
   const closureKey = (pin: CachePin): string => `${pin.name}@${pin.created}`;
   const showAll = (key: string): void => {
     setExpanded((held) => new Set(held).add(key));
@@ -2336,49 +2276,46 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
     <Panel
       class="cache-pins"
       title="Pins"
-      note="A pin holds its roots, and whatever they reference inside this bucket, against every collection — however long nobody wants them — until it is removed here."
       label="pins"
       actions={
-        /* The other snapshot on this page: this list is read once per bucket
-           and after this page's own create or unpin, so a pin a CI push
-           re-pointed since then is still drawn as it was. */
-        <button
-          type="button"
-          class="text-action"
-          disabled={pins.loading()}
-          onClick={pins.refetch}
-        >
-          {pins.loading() ? "reading…" : "refresh pins"}
-        </button>
+        <>
+          <button
+            type="button"
+            class="text-action"
+            disabled={pins.loading()}
+            onClick={pins.refetch}
+          >
+            {pins.loading() ? "reading…" : "refresh pins"}
+          </button>
+          <DocsLink />
+        </>
       }
     >
       <div class="panel-body">
         <div class="stack">
-          <Field id="pin-name" label="pin name">
-            <TextInput
-              id="pin-name"
-              value={pin()}
-              placeholder="release-1.2"
-              onValue={setPin}
-            />
-          </Field>
-          <Field
-            id="pin-paths"
-            label="store paths to pin"
-            hint="One or more, space or newline separated."
-          >
-            <textarea
-              id="pin-paths"
-              class="input"
-              rows={3}
-              placeholder="/nix/store/…"
-              value={paths()}
-              onInput={(event) => setPaths(event.currentTarget.value)}
-            />
-          </Field>
-          <Button class="btn-primary" disabled={action.busy()} onClick={create}>
-            {action.busy() ? "pinning…" : "Pin closure"}
-          </Button>
+          <Fields>
+            <Field id="pin-name" label="pin name">
+              <TextInput
+                id="pin-name"
+                value={pin()}
+                placeholder="release-1.2"
+                onValue={setPin}
+              />
+            </Field>
+            <Field id="pin-paths" label="store paths" hint="space or newline separated">
+              <textarea
+                id="pin-paths"
+                class="input"
+                rows={3}
+                placeholder="/nix/store/…"
+                value={paths()}
+                onInput={(event) => setPaths(event.currentTarget.value)}
+              />
+            </Field>
+            <Button class="btn-primary" disabled={action.busy()} onClick={create}>
+              {action.busy() ? "pinning…" : "Pin closure"}
+            </Button>
+          </Fields>
           <Answer control={action} />
           <Show when={pins.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
           <Show
@@ -2407,6 +2344,8 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
                           now={props.now}
                           busy={action.busy()}
                           all={expanded().has(closureKey(held))}
+                          open={showing().has(closureKey(held))}
+                          onOpen={() => toggleRoots(closureKey(held))}
                           onShowAll={() => showAll(closureKey(held))}
                           onUnpin={unpin}
                         />
@@ -2453,6 +2392,8 @@ function PinnedRow(props: {
   now: number;
   busy: boolean;
   all: boolean;
+  open: boolean;
+  onOpen: () => void;
   onShowAll: () => void;
   onUnpin: (name: string) => void;
 }): JSX.Element {
@@ -2470,36 +2411,29 @@ function PinnedRow(props: {
           <code>{parsed().ref}</code>
           <Show when={parsed().system}>{(system) => <Tag>{system()}</Tag>}</Show>
         </span>
-        <span class="fact-line">
-          <span>
-            {props.pin.rootPaths.length} path
-            {props.pin.rootPaths.length === 1 ? "" : "s"} in its closure
-          </span>
-          <span>pinned {ago(props.pin.created, props.now)}</span>
-          {/* WHO MADE IT decides who may re-point it — and an admin who
-              re-points a pushed pin TAKES IT OVER: the next push naming it is
-              refused and that workflow step goes red, loudly. */}
-          <span>
-            {props.pin.createdBy === "write"
-              ? "made by a push, which may re-point it"
-              : "made by an administrator: a push can no longer move it"}
-          </span>
-        </span>
+        <Facts
+          items={[
+            { label: "paths", value: props.pin.rootPaths.length },
+            { label: "pinned", value: ago(props.pin.created, props.now) },
+            // WHO MADE IT decides who may re-point it — and an admin who
+            // re-points a pushed pin takes it over: the next push naming it
+            // is refused and that workflow step goes red.
+            { label: "by", value: props.pin.createdBy === "write" ? "a push" : "an admin" },
+          ]}
+        />
         {/* WHAT IT HOLDS, when somebody asks: the roots are the whole answer
             to "may this one go?", and the count above is the whole answer to
-            "how much". A native `<details>` because the four behaviours a
-            disclosure needs are the four the platform implements. */}
-        <details class="pin-roots-box">
-          <summary>what it holds</summary>
+            "how much". */}
+        <Disclosure summary="what it holds" open={props.open} onToggle={props.onOpen}>
           <span class="pin-roots">
             <For each={shown()}>{(root) => <code class="path">{root}</code>}</For>
+            <Show when={rest() > 0}>
+              <button type="button" class="text-action" onClick={props.onShowAll}>
+                show all {props.pin.rootPaths.length}
+              </button>
+            </Show>
           </span>
-          <Show when={rest() > 0}>
-            <button type="button" class="text-action" onClick={props.onShowAll}>
-              show all {props.pin.rootPaths.length}
-            </button>
-          </Show>
-        </details>
+        </Disclosure>
       </span>
       <button
         type="button"
@@ -2607,8 +2541,8 @@ function BucketGc(
   return (
     <Panel
       title="Garbage collection"
-      note="Evicts what retention expired AND nothing retained references AND no pin holds."
       label="garbage collection"
+      actions={<DocsLink />}
     >
       <div class="panel-body">
         <div class="stack">
@@ -2676,8 +2610,7 @@ function BucketGc(
                   </ol>
                   <Show when={would().evicted > would().paths.length}>
                     <p class="hint">
-                      The {would().paths.length} oldest wants are listed; the count
-                      and the total above are the whole of it.
+                      {would().paths.length} oldest wants listed
                     </p>
                   </Show>
                 </Show>
@@ -2734,8 +2667,8 @@ function BucketDelete(
   return (
     <Panel
       title="Delete this bucket"
-      note="Removes every object, path, token and pin in it. There is no undo. A bucket with a domain keeps its name until you clear it above."
       label="delete"
+      actions={<DocsLink />}
     >
       <div class="panel-body">
         <div class="stack">

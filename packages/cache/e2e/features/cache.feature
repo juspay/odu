@@ -83,14 +83,14 @@ Feature: The cache is a row of the board
     And the "size" column says it is sorted "ascending"
     And there should be no page errors
 
-  # A PAGE IS A HUNDRED PATHS and the rest are a button — the paging the row
+  # A PAGE IS TWENTY ROWS and the rest are a button — the paging the row
   # answers with, read through the table rather than around it.
-  Scenario: A bucket with more than one page offers the next hundred
-    Given a bucket with 101 paths pushed from the CLI
+  Scenario: A bucket with more than one page offers the next twenty
+    Given a bucket with 25 paths pushed from the CLI
     When I open that bucket
-    Then the paths table holds 100 rows
-    When I press "Show 100 more"
-    Then the paths table holds 101 rows
+    Then the paths table holds 20 rows
+    When I press "Show 20 more"
+    Then the paths table holds 25 rows
     And there should be no page errors
 
   # THE SUBSTITUTER URL IN A BROWSER. It used to render the board's Runs view —
