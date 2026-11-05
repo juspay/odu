@@ -83,6 +83,8 @@ import {
   on,
   onCleanup,
   Show,
+  Switch,
+  Match,
   type JSX,
 } from "solid-js";
 import {
@@ -103,7 +105,9 @@ import {
   DEFAULT_RETENTION_DAYS,
   LOCAL_STORE,
   actionsPushBlock,
+  type PathSort,
   pushBlock,
+  storePathParts,
   useCommand,
   type CacheScope,
 } from "./surface";
@@ -406,13 +410,14 @@ function CreateBucket(
  * the SAME object: the cache publishes a bundle's counters every second, and a
  * keyboard user should not pay for it.
  */
-function keepIdentity<T extends { readonly name: string }>(): (row: T) => T {
+function keepIdentity<T>(keyOf: (row: T) => string): (row: T) => T {
   const held = new Map<string, { readonly row: T; readonly encoded: string }>();
   return (row) => {
+    const key = keyOf(row);
     const encoded = JSON.stringify(row);
-    const seen = held.get(row.name);
+    const seen = held.get(key);
     if (seen !== undefined && seen.encoded === encoded) return seen.row;
-    held.set(row.name, { row, encoded });
+    held.set(key, { row, encoded });
     return row;
   };
 }
@@ -442,7 +447,7 @@ function BucketList(
     },
 ): JSX.Element {
   const held = props.client.collections.buckets.use();
-  const stable = keepIdentity<CacheBucket>();
+  const stable = keepIdentity<CacheBucket>((row) => row.name);
   const rows = createMemo<CacheBucket[]>(() => {
     const out: CacheBucket[] = [];
     for (const key of held.keys()) {
@@ -538,9 +543,26 @@ function BucketList(
 type FirstPage =
   | {
       readonly ok: true;
-      readonly page: { readonly paths: readonly CachePath[]; readonly next?: string };
+      readonly rows: readonly PathRow[];
+      readonly next: string | null;
     }
   | { readonly ok: false; readonly message: string };
+
+/** WHAT AN OPEN PACKAGE'S READ HAS COME TO: it is out, it answered, or it was
+ *  refused — one fact in one place, so the row can draw all three. `more`
+ *  says the bucket holds versions past this page, which a reader of a
+ *  hundred-build package has to be told rather than left to assume. */
+type Versions =
+  | { readonly kind: "reading" }
+  | { readonly kind: "held"; readonly versions: readonly CachePath[]; readonly more: boolean }
+  | { readonly kind: "failed"; readonly message: string };
+
+/** The two arms a row draws from: TypeScript narrows through a `Show`'s
+ *  accessor only when the condition is the value itself. */
+const asHeld = (state: Versions): Extract<Versions, { kind: "held" }> | undefined =>
+  state.kind === "held" ? state : undefined;
+const asFailed = (state: Versions): Extract<Versions, { kind: "failed" }> | undefined =>
+  state.kind === "failed" ? state : undefined;
 
 /** How long the filter waits for the typing to stop before it asks. Short
  *  enough that a pause reads as an answer, long enough that a word typed at
@@ -586,36 +608,16 @@ function snippetFor(
   }
 }
 
-/**
- * A STORE PATH'S TWO HALVES, as a table draws them: the hash a person
- * compares two builds by, and the name they are looking for.
- *
- * `/nix/store/<32 chars>-<name>` — and a path that is not that shape keeps
- * all of itself under `name`, because inventing a hash for it would be a
- * guess printed in a monospace column.
- */
-export function storePathParts(storePath: string): {
-  readonly hash: string;
-  readonly name: string;
-} {
-  const slash = storePath.lastIndexOf("/");
-  const dash = storePath.indexOf("-", slash + 1);
-  // A STORE PATH HAS A DIRECTORY AND A DASH. Without both, the string is
-  // something else — a filter's leftovers, a row from another cache — and
-  // the first hyphen in it is not a hash boundary.
-  if (slash === -1 || dash === -1) return { hash: "", name: storePath };
-  return { hash: storePath.slice(slash + 1, dash), name: storePath.slice(dash + 1) };
-}
-
 /** How much of a hash a column shows. Eight base-32 characters is 40 bits —
  *  enough that two builds of one package never collide on this page, and
  *  short enough that the names beside them line up. */
 export const HASH_SHOWN = 8;
 
-/** What the table can be ordered by. The hash is not among them: it is a
- *  random string, so sorting by it is sorting by nothing, and `wanted` moves
- *  under the reader as pushes renew it. */
-export type PathColumn = "name" | "size" | "pushed" | "reads";
+/** What the table can be ordered by — the CONTRACT's word, because the order
+ *  is the row's to apply. The hash is not among them: it is a random string,
+ *  so sorting by it is sorting by nothing, and `wanted` moves under the
+ *  reader as pushes renew it. */
+export type PathColumn = PathSort;
 
 /**
  * ONE LINE OF THE PATHS TABLE — a package, or a single path.
@@ -863,9 +865,10 @@ function BucketPage(
    * it comes back as the value like every other answer.
    */
   const [first, { refetch }] = createResource(
-    () => [props.name, filter(), grouped(), column(), descending()] as const,
-    async ([name]): Promise<FirstPage> => {
-      const asked = query();
+    // THE QUESTION IS THE KEY, and the same object is the payload: two
+    // spellings of one thing would be two things to keep in agreement.
+    () => ({ bucket: props.name, ...query() }),
+    async (asked): Promise<FirstPage> => {
       setAppended([]);
       setExtra(null);
       setFailure(null);
@@ -873,12 +876,8 @@ function BucketPage(
       // A NEW QUESTION RETIRES EVERY PAGE READ AGAINST THE OLD ONE.
       supersede();
       try {
-        return {
-          ok: true,
-          page: await props.call(
-            props.client.procedures.bucket.paths({ bucket: name, ...asked }),
-          ),
-        };
+        const page = await props.call(props.client.procedures.bucket.paths(asked));
+        return { ok: true, rows: pathRows(page), next: page.next ?? null };
       } catch (err) {
         return { ok: false, message: refusalText(err) };
       }
@@ -914,48 +913,64 @@ function BucketPage(
   });
 
   /** THE ROWS ON SCREEN, their identity KEPT across a page append: a second
-   *  page must not dispose and rebuild the hundred rows above it. */
-  const stable = keepIdentity<PathRow>();
+   *  page must not dispose and rebuild the hundred rows above it.
+   *
+   *  BY THE STORE PATH, which is unique in both answers — a package's row
+   *  carries its newest version's. A row's NAME is not: ungrouped, three
+   *  builds of `widget-1.0` are three rows with one name, and keying on it
+   *  would collide them into one slot and rebuild all three every pass. */
+  const stable = keepIdentity<PathRow>((row) => row.storePath);
   const rows = createMemo<readonly PathRow[]>(() => {
     const answer = first();
     if (answer === undefined || !answer.ok) return [];
-    return [...pathRows(answer.page), ...appended()].map(stable);
+    return [...answer.rows, ...appended()].map(stable);
   });
   const next = createMemo<string | null>(() => {
     const answer = first();
     if (extra() !== null) return extra();
-    return answer !== undefined && answer.ok ? (answer.page.next ?? null) : null;
+    return answer !== undefined && answer.ok ? answer.next : null;
   });
 
   /**
-   * WHICH PACKAGES ARE OPEN, by NAME, and what each holds.
+   * WHICH PACKAGES ARE OPEN, and what each one's read answered.
    *
    * A group's versions are a READ of their own (`bucket.paths {name}`), not a
    * slice of the page: the page holds one row per package, and the versions
-   * under it may not be in it at all. The answer is kept by name, so closing
-   * and reopening costs nothing and a re-sort leaves it standing.
+   * under it may not be in it at all. It carries the FILTER too — the count
+   * on the row is of what matched, so the list under it must be the same
+   * question or the two disagree in front of the reader.
+   *
+   * ONE MAP, THREE STATES. A read that is out, an answer, and a refusal are
+   * one fact about one package; held as a set plus a map there was no place
+   * for the refusal at all, and a refused read left the row saying "reading…"
+   * for as long as it stayed open.
    */
   const [opened, setOpened] = createSignal<ReadonlySet<string>>(new Set());
-  const [versions, setVersions] = createSignal<ReadonlyMap<string, readonly CachePath[]>>(
-    new Map(),
-  );
-  const [reading, setReading] = createSignal<ReadonlySet<string>>(new Set());
-  const withOut = (held: ReadonlySet<string>, name: string): Set<string> => {
-    const next = new Set(held);
-    next.delete(name);
-    return next;
+  const [versions, setVersions] = createSignal<ReadonlyMap<string, Versions>>(new Map());
+  const held = (name: string, state: Versions): void => {
+    setVersions((all) => new Map(all).set(name, state));
   };
+  /** What an OPEN package's read has come to — a closed one draws nothing,
+   *  and its answer is kept for the next time it is opened. */
+  const openState = (name: string): Versions | undefined =>
+    opened().has(name) ? versions().get(name) : undefined;
   const toggleOpen = (name: string): void => {
     const open = !opened().has(name);
-    setOpened((held) => (open ? new Set(held).add(name) : withOut(held, name)));
-    if (!open || versions().has(name) || reading().has(name)) return;
+    setOpened((all) => {
+      const next = new Set(all);
+      if (open) next.add(name);
+      else next.delete(name);
+      return next;
+    });
+    if (!open || versions().has(name)) return;
     const asked = current();
-    setReading((held) => new Set(held).add(name));
+    held(name, { kind: "reading" });
     void props
       .call(
         props.client.procedures.bucket.paths({
           bucket: props.name,
           name,
+          ...(filter() === "" ? {} : { filter: filter() }),
           sort: "pushed",
           descending: true,
         }),
@@ -963,25 +978,27 @@ function BucketPage(
       .then(
         (answer) => {
           if (asked !== current()) return;
-          setReading((held) => withOut(held, name));
-          setVersions((held) => new Map(held).set(name, answer.paths));
+          held(name, { kind: "held", versions: answer.paths, more: answer.next !== undefined });
         },
         (err: unknown) => {
           if (asked !== current()) return;
-          setReading((held) => withOut(held, name));
-          setFailure(refusalText(err));
+          held(name, { kind: "failed", message: refusalText(err) });
         },
       );
   };
-  // A NEW QUESTION IS A NEW SET OF PACKAGES: the names a filter leaves may not
-  // be the names that were open, and a version list read under the old filter
-  // is still this package's whole list, so only what is OPEN is forgotten.
+  // A NEW QUESTION IS A NEW SET OF PACKAGES, and a new answer under each: the
+  // filter decides which versions count, so a list read under the old one is
+  // not this one's.
   createEffect(
-    on(() => [props.name, filter()] as const, () => setOpened(new Set<string>()), {
-      defer: true,
-    }),
+    on(
+      () => [props.name, filter()] as const,
+      () => {
+        setOpened(new Set<string>());
+        setVersions(new Map());
+      },
+      { defer: true },
+    ),
   );
-  createEffect(on(() => props.name, () => setVersions(new Map()), { defer: true }));
 
   /** THE TOKEN JUST MINTED HERE, held by the page so the push block can show
    *  it in its one showing. It belongs to ONE bucket: opening another clears
@@ -1371,41 +1388,73 @@ function BucketPage(
                                 <td class="numeric">{row.hits}</td>
                                 <td class="numeric">{ago(row.wanted, pathsClock())}</td>
                               </tr>
-                              <Show when={opened().has(row.name)}>
-                                <Show when={versions().get(row.name)}>
-                                  {(held) => (
-                                    <For each={held()}>
-                                      {(version) => (
+                              {/* THE VERSIONS ARE A READ, so an open package
+                                  draws what that read has come to — in
+                                  flight, answered, or refused — rather than
+                                  an empty gap or a permanent "reading…". */}
+                              <Show when={openState(row.name)}>
+                                {(state) => (
+                                  <Switch>
+                                    <Match when={state().kind === "reading"}>
+                                      <tr class="version-row">
+                                        <td class="path-name" />
+                                        <td class="hint" colSpan={5}>
+                                          reading…
+                                        </td>
+                                      </tr>
+                                    </Match>
+                                    <Match when={asFailed(state())}>
+                                      {(failed) => (
                                         <tr class="version-row">
                                           <td class="path-name" />
-                                          <HashCell storePath={version.storePath} />
-                                          <td class="numeric">{bytes(version.narSize)}</td>
-                                          <td class="numeric">
-                                            {ago(version.created, pathsClock())}
-                                          </td>
-                                          <td class="numeric">{version.hits}</td>
-                                          {/* WANTED, not read: retention counts
-                                              from here, and the reads beside it
-                                              never move it. */}
-                                          <td class="numeric">
-                                            {ago(version.lastWanted, pathsClock())}
+                                          <td class="fault" colSpan={5}>
+                                            {failed().message}
                                           </td>
                                         </tr>
                                       )}
-                                    </For>
-                                  )}
-                                </Show>
-                                {/* THE VERSIONS ARE A READ, so an open package
-                                    says it is reading rather than drawing an
-                                    empty gap. */}
-                                <Show when={versions().get(row.name) === undefined}>
-                                  <tr class="version-row">
-                                    <td class="path-name" />
-                                    <td class="hint" colSpan={5}>
-                                      reading…
-                                    </td>
-                                  </tr>
-                                </Show>
+                                    </Match>
+                                    <Match when={asHeld(state())}>
+                                      {(answer) => (
+                                        <>
+                                          <For each={answer().versions}>
+                                            {(version) => (
+                                              <tr class="version-row">
+                                                <td class="path-name" />
+                                                <HashCell storePath={version.storePath} />
+                                                <td class="numeric">{bytes(version.narSize)}</td>
+                                                <td class="numeric">
+                                                  {ago(version.created, pathsClock())}
+                                                </td>
+                                                <td class="numeric">{version.hits}</td>
+                                                {/* WANTED, not read: retention
+                                                    counts from here, and the
+                                                    reads beside it never move
+                                                    it. */}
+                                                <td class="numeric">
+                                                  {ago(version.lastWanted, pathsClock())}
+                                                </td>
+                                              </tr>
+                                            )}
+                                          </For>
+                                          {/* A PAGE OF VERSIONS IS A PAGE: a
+                                              package with more of them than
+                                              one read carries says so rather
+                                              than contradicting its own
+                                              count. */}
+                                          <Show when={answer().more}>
+                                            <tr class="version-row">
+                                              <td class="path-name" />
+                                              <td class="hint" colSpan={5}>
+                                                the newest {answer().versions.length} of{" "}
+                                                {row.versions} — filter to narrow it
+                                              </td>
+                                            </tr>
+                                          </Show>
+                                        </>
+                                      )}
+                                    </Match>
+                                  </Switch>
+                                )}
                               </Show>
                             </>
                           )}
@@ -2223,7 +2272,7 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
    * is a pure function of it, derived where it is drawn. The `<details>` open
    * state is the DOM's own and rides on this identity.
    */
-  const stableRow = keepIdentity<CachePin>();
+  const stableRow = keepIdentity<CachePin>((pin) => pin.name);
   const grouped = createMemo<ReadonlyMap<string, ReadonlyArray<CachePin>>>(
     () =>
       new Map(

@@ -483,6 +483,38 @@ const StatsOutputSchema = Schema.Struct({
 export type CacheStats = typeof StatsOutputSchema.Type;
 
 /**
+ * A STORE PATH'S TWO HALVES: the hash a person compares two builds by, and
+ * the name they are looking for.
+ *
+ * `/nix/store/<32 base-32 characters>-<name>` — and a path that is not that
+ * shape keeps all of itself under `name`, because inventing a hash for it
+ * would be a guess printed in a monospace column.
+ *
+ * HERE, not in the view and not in the database: the name is what a bucket's
+ * paths are GROUPED by, so the rule belongs beside the contract that carries
+ * it. The row applies it when a path is stored; the board applies it to
+ * label a row and to split the hash off.
+ */
+export function storePathParts(storePath: string): {
+  readonly hash: string;
+  readonly name: string;
+} {
+  const slash = storePath.lastIndexOf("/");
+  const dash = storePath.indexOf("-", slash + 1);
+  // A STORE PATH HAS A DIRECTORY AND A DASH. Without both, the string is
+  // something else — a filter's leftovers, a row from another cache — and
+  // the first hyphen in it is not a hash boundary.
+  if (slash === -1 || dash === -1) return { hash: "", name: storePath };
+  return { hash: storePath.slice(slash + 1, dash), name: storePath.slice(dash + 1) };
+}
+
+/** WHAT A PAGE OF PATHS MAY BE ORDERED BY — the wire's word, and the one the
+ *  storage maps to a column and the board draws a header for. Declared here
+ *  because it is a CONTRACT: the ledger watches this list. */
+export const PathSortSchema = Schema.Literals(["name", "size", "pushed", "reads"]);
+export type PathSort = typeof PathSortSchema.Type;
+
+/**
  * ONE PAGE OF A BUCKET'S PATHS — as paths, as PACKAGES, or as one package's
  * versions.
  *
@@ -512,10 +544,16 @@ const PathsInputSchema = Schema.Struct({
    *  name opened is this call. */
   name: Schema.optionalKey(Schema.String),
   /** What the page is ordered by — of the group's aggregate when grouped.
-   *  Absent is `pushed`. */
-  sort: Schema.optionalKey(Schema.Literals(["name", "size", "pushed", "reads"])),
-  /** Absent is TRUE for every order but `name`: biggest, newest and most read
-   *  first, and A before Z. */
+   *  Absent is `pushed`, which with the default direction is exactly the
+   *  order every release before 4.5 answered in.
+   *
+   *  `reads` is the one order whose column MOVES while a reader pages: a
+   *  narinfo served between two pages changes a row's `hits`, so a keyset
+   *  page on it may repeat or skip a row. The other three are immutable
+   *  facts about a path. */
+  sort: Schema.optionalKey(PathSortSchema),
+  /** Absent is TRUE — biggest, newest, most read, Z before A. The board
+   *  sends what its header says; it does not rely on a default. */
   descending: Schema.optionalKey(Schema.Boolean),
 });
 

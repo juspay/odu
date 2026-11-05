@@ -303,7 +303,10 @@ describe("the paths table draws what the row answered", () => {
   });
 
   it("splits a store path into the hash a person compares and the name they read", async () => {
-    const { storePathParts } = await import("./face");
+    // THE RULE IS THE CONTRACT'S: the row groups a bucket by this name when
+    // it stores a path, and the board labels a row and splits the hash off
+    // with the same function.
+    const { storePathParts } = await import("./surface");
     expect(storePathParts("/nix/store/abcd1234abcd1234abcd1234abcd1234-hello-2.12")).toEqual({
       hash: "abcd1234abcd1234abcd1234abcd1234",
       name: "hello-2.12",

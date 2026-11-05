@@ -33,7 +33,7 @@ import type {
   TokenRow,
   PathSort,
 } from "./db";
-import { cursorFor, openCacheRepo } from "./db";
+import { openCacheRepo } from "./db";
 import {
   closureOf,
   type GcBucketPlan,
@@ -1722,30 +1722,33 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      // THE ORDER'S OWN DIRECTION when the caller says nothing: biggest,
-      // newest and most read first, and A before Z.
-      const sort = input.sort ?? "pushed";
+      // THE TWO NARROWINGS ARE EXCLUSIVE and the schema cannot say so, so the
+      // row does: a call that asks for the packages AND for one package's
+      // versions means one of them, and guessing which is a wrong answer with
+      // no complaint attached to it.
+      if (input.group === "name" && input.name !== undefined && input.name !== null) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message:
+            "group and name are exclusive: ask for the packages, or for one package's versions",
+        };
+      }
       const page = {
         limit: PATH_PAGE_SIZE,
         after: input.after,
         filter: input.filter,
-        sort,
-        descending: input.descending ?? sort !== "name",
+        sort: input.sort ?? "pushed",
+        // BIGGEST, NEWEST, MOST READ, Z BEFORE A — one rule for every order
+        // rather than a taste per column. The board sends what its header
+        // says, so nothing drawn there depends on this default.
+        descending: input.descending ?? true,
       };
       if (input.group === "name") {
         const grouped = repo.objectGroupsPage(bucket.name, page);
-        const last = grouped.rows.at(-1);
-        return {
-          ok: true,
-          value: {
-            paths: [],
-            groups: grouped.rows,
-            next: grouped.more && last !== undefined ? cursorFor(last, sort) : null,
-          },
-        };
+        return { ok: true, value: { paths: [], groups: grouped.rows, next: grouped.next } };
       }
       const listed = repo.objectsPage(bucket.name, { ...page, name: input.name ?? null });
-      const last = listed.rows.at(-1);
       return {
         ok: true,
         value: {
@@ -1757,7 +1760,7 @@ export function createCache(options: CacheOptions): Cache {
             lastWanted: row.lastWanted,
           })),
           groups: null,
-          next: listed.more && last !== undefined ? cursorFor(last, sort) : null,
+          next: listed.next,
         },
       };
     },

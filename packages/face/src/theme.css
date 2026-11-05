@@ -1146,14 +1146,18 @@
 
      55rem, NOT 52: the rail asks for 15rem and the screen for 40rem, so
      `.app`'s wrap happens at their sum — below it the rail is a full-width
-     band, and a sticky full-height band is one that paints over the screen
-     it is meant to sit beside. The breakpoint is the WRAP, not the narrow
-     reflow below it. */
+     band. The breakpoint is the WRAP, not the narrow reflow below it.
+
+     And `max-height`, not `height`: a media query is measured against the
+     viewport INCLUDING a classic scrollbar while flexbox wraps on the
+     content box, so for a scrollbar's width the rail can be a band and still
+     match this query. A band told to be its own height is harmless there; a
+     band told to fill the viewport paints over the screen beside it. */
   @media (min-width: 55rem) {
     .sidebar {
       position: sticky;
       top: 0;
-      height: 100dvh;
+      max-height: 100dvh;
       overflow: auto;
       scrollbar-width: thin;
     }

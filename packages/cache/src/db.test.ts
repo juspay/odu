@@ -18,9 +18,7 @@ import {
   type BucketRow,
   CACHE_SCHEMA_VERSION,
   type CacheRepo,
-  cursorFor,
   MIGRATIONS,
-  type ObjectGroupRow,
   type ObjectRow,
   openCacheRepo,
   type PathSort,
@@ -308,8 +306,8 @@ describe("a bucket's paths, by package", () => {
   it("counts and sums every version, and names the newest one's path", () => {
     const repo = openCacheRepo(":memory:");
     seed(repo);
-    const { rows, more } = repo.objectGroupsPage("main", page);
-    expect(more).toBe(false);
+    const { rows, next } = repo.objectGroupsPage("main", page);
+    expect(next).toBeNull();
     expect(rows).toEqual([
       {
         name: "widget-1.0",
@@ -347,16 +345,22 @@ describe("a bucket's paths, by package", () => {
     expect(names("name", false)).toEqual(["widget-1.0", "zlib-1.3"]);
   });
 
-  it("pages by the keyset of the order it was read in", () => {
+  it("pages by the cursor it minted, and starts again on one from another order", () => {
     const repo = openCacheRepo(":memory:");
     seed(repo);
     const first = repo.objectGroupsPage("main", { ...page, sort: "size", limit: 1 });
-    expect(first.more).toBe(true);
     expect(first.rows.map((row) => row.name)).toEqual(["zlib-1.3"]);
-    const after = cursorFor(first.rows[0] as ObjectGroupRow, "size");
+    expect(first.next).not.toBeNull();
+    const after = first.next;
     const second = repo.objectGroupsPage("main", { ...page, sort: "size", limit: 1, after });
     expect(second.rows.map((row) => row.name)).toEqual(["widget-1.0"]);
-    expect(second.more).toBe(false);
+    expect(second.next).toBeNull();
+    // A CURSOR NAMES ITS OWN ORDER. Replayed against another one it is no
+    // cursor at all — the FIRST page, not an empty one: read as a number, a
+    // name binds as NULL and every keyset test would fail silently.
+    const elsewhere = repo.objectGroupsPage("main", { ...page, sort: "pushed", limit: 1, after });
+    expect(elsewhere.rows).toHaveLength(1);
+    expect(elsewhere.next).not.toBeNull();
   });
 
   it("narrows to one package's versions, and to a filter", () => {
