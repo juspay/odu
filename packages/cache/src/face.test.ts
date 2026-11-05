@@ -87,28 +87,18 @@ describe("the empty state names what this person can do", () => {
  *
  * CI never types a pin name: the push action derives
  * `<owner>/<repo>@<ref>/<system>`, so a busy bucket's list is forty of them
- * and the only way to scan it is grouped. The parse is the whole of that
- * grouping, and it is pure, so it is pinned here rather than in a browser.
+ * and the table draws the ref and the system as the separate things they
+ * are. The parse is pure, so it is pinned here rather than in a browser.
  *
  * The cases that matter are the ones a regex gets wrong: a ref with a slash
  * in it (`release/2.0`), which is legal and common, and a name that is NOT a
  * derived one at all — inventing a repository for `release-1.2` would be a
  * guess printed as a fact.
  */
-describe("pins are grouped by the repository their name derives from", () => {
-  const pin = (name: string) => ({
-    bucket: "kolu",
-    name,
-    rootPaths: ["/nix/store/aaa-x"],
-    created: 0,
-    createdBy: "write" as const,
-  });
-
+describe("a pin's name is split into the facts it carries", () => {
   it("splits a derived name into repository, ref and system", async () => {
-    const { pinGroups } = await import("./face");
-    const [group] = pinGroups([pin("juspay/odu@master/x86_64-linux")]);
-    expect(group?.repo).toBe("juspay/odu");
-    expect(group?.pins[0]?.parsed).toEqual({
+    const { pinName } = await import("./face");
+    expect(pinName("juspay/odu@master/x86_64-linux")).toEqual({
       repo: "juspay/odu",
       ref: "master",
       system: "x86_64-linux",
@@ -116,28 +106,15 @@ describe("pins are grouped by the repository their name derives from", () => {
   });
 
   it("keeps a slash inside the ref, where it belongs", async () => {
-    const { pinGroups } = await import("./face");
-    const [group] = pinGroups([pin("juspay/odu@release/2.0/aarch64-darwin")]);
-    expect(group?.pins[0]?.parsed.ref).toBe("release/2.0");
-    expect(group?.pins[0]?.parsed.system).toBe("aarch64-darwin");
+    const { pinName } = await import("./face");
+    const parsed = pinName("juspay/odu@release/2.0/aarch64-darwin");
+    expect(parsed.ref).toBe("release/2.0");
+    expect(parsed.system).toBe("aarch64-darwin");
   });
 
-  it("gathers one repository's refs under one heading, newest first", async () => {
-    const { pinGroups } = await import("./face");
-    const groups = pinGroups([
-      pin("juspay/odu@master/x86_64-linux"),
-      pin("juspay/kolu@main/x86_64-linux"),
-      pin("juspay/odu@topic/x86_64-linux"),
-    ]);
-    expect(groups.map((one) => one.repo)).toEqual(["juspay/odu", "juspay/kolu"]);
-    expect(groups[0]?.pins.map((one) => one.parsed.ref)).toEqual(["master", "topic"]);
-  });
-
-  it("invents no repository for a pin somebody named by hand, and lists it last", async () => {
-    const { pinGroups } = await import("./face");
-    const groups = pinGroups([pin("release-1.2"), pin("juspay/odu@master/x86_64-linux")]);
-    expect(groups.map((one) => one.repo)).toEqual(["juspay/odu", "Pinned by hand"]);
-    expect(groups[1]?.pins[0]?.parsed).toEqual({ repo: null, ref: "release-1.2", system: null });
+  it("invents no repository for a pin somebody named by hand", async () => {
+    const { pinName } = await import("./face");
+    expect(pinName("release-1.2")).toEqual({ repo: null, ref: "release-1.2", system: null });
   });
 });
 
@@ -153,29 +130,24 @@ describe("pins are grouped by the repository their name derives from", () => {
  */
 describe("a pin name is parsed in one pass", () => {
   it("answers a pathological name promptly, and reads it as nobody's repository", async () => {
-    const { pinGroups } = await import("./face");
+    const { pinName } = await import("./face");
     const hostile = `a/b@${"!/".repeat(10_000)}`;
     const started = performance.now();
-    const groups = pinGroups([
-      { bucket: "kolu", name: hostile, rootPaths: [], created: 0, createdBy: "admin" as const },
-    ]);
+    const parsed = pinName(hostile);
     const took = performance.now() - started;
     // A trailing `/` means no system, so the whole string is the name.
-    expect(groups[0]?.repo).toBe("Pinned by hand");
-    expect(groups[0]?.pins[0]?.parsed).toEqual({ repo: null, ref: hostile, system: null });
+    expect(parsed).toEqual({ repo: null, ref: hostile, system: null });
     expect(took, `the parse took ${took}ms on a 20k-character name`).toBeLessThan(100);
   });
 
   it("still finds the system when a hostile ref ends in one", async () => {
-    const { pinGroups } = await import("./face");
+    const { pinName } = await import("./face");
     const name = `a/b@${"!/".repeat(10_000)}x86_64-linux`;
     const started = performance.now();
-    const groups = pinGroups([
-      { bucket: "kolu", name, rootPaths: [], created: 0, createdBy: "admin" as const },
-    ]);
+    const parsed = pinName(name);
     const took = performance.now() - started;
-    expect(groups[0]?.repo).toBe("a/b");
-    expect(groups[0]?.pins[0]?.parsed.system).toBe("x86_64-linux");
+    expect(parsed.repo).toBe("a/b");
+    expect(parsed.system).toBe("x86_64-linux");
     expect(took, `the parse took ${took}ms on a 20k-character name`).toBeLessThan(100);
   });
 });

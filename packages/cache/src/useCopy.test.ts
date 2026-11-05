@@ -103,7 +103,7 @@ describe("the copy a bucket page and the docs share", () => {
     // the same cache, and only one of them is what `odu cache use` printed.
     expect(block).toContain("odu cache push --cache https://odu.example.com/cache/main <paths>");
     expect(block).not.toContain("--origin");
-    expect(block).toContain("nix-cache-info");
+    expect(block).not.toContain("/cache/main/");
   });
 
   it("names the credential each block needs", () => {

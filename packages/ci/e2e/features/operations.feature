@@ -39,8 +39,9 @@ Feature: The board does everything odu does for runs
     And there should be no page errors
 
   Scenario: The machines page reads the last probe, and probes on request
-    # Opening the page dials nothing — it reads the probe the service kept.
-    # The button is what dials, and the page redraws from the kept answer.
+    # Opening the page draws the probe the service kept, and asks for one only
+    # when nothing has probed yet — the service has no verb that lists the
+    # configured machines without dialling them. The button refreshes it.
     Given I open the machines page
     When I press "Probe machines"
     Then the machines page lists this machine's platform

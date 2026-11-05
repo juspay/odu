@@ -139,10 +139,10 @@ function searched(row: RunRow, needle: string): boolean {
  *
  * What it does NOT carry is the nodes of a superseded run: a checkout frame
  * holds its recent runs as rows and its latest run's work. So a History row
- * for an older run has no strip, and that is drawn as an EMPTY pipeline cell
- * rather than as a guess. The alternative was one `streams.nodes`
- * subscription per listed run, which for a checkout with forty of them is
- * forty sockets for a column nobody opened the page to read.
+ * for an older run has no per-node strip, and draws the WHOLE-RUN cell
+ * instead — see the pipeline column in {@link Row}. The alternative was one
+ * `streams.nodes` subscription per listed run, which for a checkout with
+ * forty of them is forty sockets for a column nobody opened the page to read.
  */
 function nodesByRun(checkouts: CheckoutFrame[]): Map<string, readonly RunNode[]> {
   const out = new Map<string, readonly RunNode[]>();
@@ -206,16 +206,36 @@ function Row(props: {
       </span>
       {/* THE PIPELINE — what this run is actually doing, as cells. `For` over
           the lanes because a lane is identified by its platform name, so a
-          frame that re-sends everything leaves the strips alone. */}
+          frame that re-sends everything leaves the strips alone.
+
+          EVERY ROW DRAWS SOMETHING HERE. A superseded run's nodes are not on
+          the board (see {@link nodesByRun}), and a blank column down the
+          History list read as a run that did no work rather than as a board
+          that did not fetch it. What it gets instead is ONE cell for the whole
+          run, in the run's own verdict hue and labelled as the whole run — the
+          same vocabulary, at the only resolution this row actually holds, so
+          nothing here claims to know a node it does not. */}
       <span class="row-lanes">
-        <For each={lanes()}>
-          {(lane) => (
-            <LaneStrip
-              label={lanes().length > 1 ? platformShort(lane.platform) : undefined}
-              cells={laneCells(lane.nodes)}
-            />
-          )}
-        </For>
+        <Show
+          when={props.nodes.length > 0}
+          fallback={
+            <span class="row-summary">
+              <LaneStrip
+                label="run"
+                cells={[{ label: `whole run, ${status().label}`, hue: status().hue }]}
+              />
+            </span>
+          }
+        >
+          <For each={lanes()}>
+            {(lane) => (
+              <LaneStrip
+                label={lanes().length > 1 ? platformShort(lane.platform) : undefined}
+                cells={laneCells(lane.nodes)}
+              />
+            )}
+          </For>
+        </Show>
         {/* WHAT A GREEN HERE COVERS, under the work it covers — the two read
             together, and a scope that said "whole pipeline" beside a strip of
             two cells would be the one line on this row worth checking. It

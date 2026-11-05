@@ -38,11 +38,11 @@ Then("the pipeline preview names {string}", async function (this: OduWorld, reci
 
 Then("the machines page lists this machine's platform", async function (this: OduWorld) {
   // The harness's hosts file pins this platform to a localhost lane, so its
-  // card is the answer the kept probe draws.
+  // row is the answer the kept probe draws.
   //
-  // `.venues` and not `ul.venues`: the machines are drawn as a GRID OF CARDS
-  // now, and `.venues li` in the design system dresses a hairline list row —
-  // the other presentation. The hook rides the container either way, which is
+  // `.venues` and not `ul.venues`: the machines are drawn as a TABLE now, and
+  // `.venues li` in the design system dresses a hairline list row — another
+  // presentation entirely. The hook rides the container either way, which is
   // what this step is addressing.
   await this.saysThat(this.page.locator(".venues"), "the venue list", currentNixSystem());
 });

@@ -45,7 +45,13 @@ import { requestId } from "./format";
 // re-exported furniture was a door the fence would eventually have to close.
 import { Create, type CreateState, type PreviewState, type StartForm } from "./create";
 import { Machines, Maintain } from "./ops";
-import { type ControlState, Detail, LOG_PAGE_BYTES, LogPanel } from "./detail";
+import {
+  type ControlState,
+  Detail,
+  LOG_PAGE_BYTES,
+  LogPanel,
+  openingNode,
+} from "./detail";
 import type { CheckoutFrame, LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
 
 type ServiceSpec = (typeof oduServiceSurface)["spec"];
@@ -246,9 +252,32 @@ export function CiFace(props: CiFaceProps): JSX.Element {
   // Derived from the ROUTE, not held beside it. One source of truth means Back
   // moves through logs as well as runs, and a pasted address opens on the same
   // failure the sender was looking at.
+  //
+  // AND A RUN THAT NAMES NO NODE OPENS ON ONE. `#/run/<id>` — what the board,
+  // the create form and a pasted link all produce — used to land on a blank
+  // console beside a list with the failure already drawn red in it. The
+  // fallback is `openingNode`'s choice, turned into a key here because this is
+  // where the run's nodes are; it is not written INTO the address, so the
+  // address a person copied is still the address they get back and Back still
+  // walks out of the run rather than out of a node it never chose.
+  //
+  // It is a DERIVATION and not a one-shot choice: while the address names no
+  // node the pane follows the evidence, so a failure that lands in a live run
+  // somebody is watching brings its own log with it. One click pins it — that
+  // is what writing the address does, and from then on nothing moves the pane
+  // but the reader.
   const logKey = createMemo<string | null>(() => {
     const at = route();
-    return at.at === "run" ? at.log : null;
+    if (at.at !== "run") return null;
+    if (at.log !== null) return at.log;
+    const opening = openingNode(frame()?.nodes ?? []);
+    return opening === null
+      ? null
+      : formatLogKey({
+          runId: at.runId,
+          node: opening.id,
+          attempt: opening.attempt,
+        });
   });
   /** THE ADDRESS, taken apart ONCE. The node and the attempt are two halves of
    *  one key, and they used to be two memos each parsing the same string and

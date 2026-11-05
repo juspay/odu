@@ -734,7 +734,7 @@
   }
 
   .kv + .kv { border-top: 1px solid var(--line); }
-  .kv-key { color: var(--muted); font-size: 0.8rem; }
+
 
   .kv-value {
     min-width: 0;
@@ -813,10 +813,19 @@
 
   .field { display: grid; gap: 0.35rem; min-width: 0; }
 
+  /* ONE RULE FOR EVERY LABEL. A field's label, a fieldset's legend and the
+     key beside a value all name the thing next to them, and three typefaces
+     for one job is what a reader reads as three kinds of thing. (A table's
+     header keeps its own: it labels a COLUMN, which is read down rather than
+     across.) */
   .field label,
-  .field-label {
+  .field-label,
+  .toggles legend,
+  .kv-key {
     font: 500 0.78rem var(--mono);
     color: var(--muted);
+    letter-spacing: normal;
+    text-transform: none;
   }
 
   .hint {
@@ -882,13 +891,7 @@
     background: var(--panel);
   }
 
-  .toggles legend {
-    padding: 0 0.35rem;
-    color: var(--quiet);
-    font: 500 0.72rem var(--mono);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
+  .toggles legend { padding: 0 0.35rem; }
 
   .toggle {
     display: flex;

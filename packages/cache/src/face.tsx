@@ -66,7 +66,6 @@ import {
   Panel,
   Pill,
   Disclosure,
-  Facts,
   Fields,
   Receipt,
   SearchInput,
@@ -191,6 +190,11 @@ interface AdminProps {
   /** `""` for a signed-in person — the row ignores it, their role is the
    *  authority — and what the local owner typed otherwise. */
   rootToken: () => string;
+  /** WHETHER THERE IS A CREDENTIAL TO ASK WITH. A daemon with no door draws
+   *  its administration before the owner has typed the root token, and a read
+   *  fired then comes back refused — so the page opened with a red box
+   *  reporting a token nobody had entered yet. False until there is one. */
+  armed: () => boolean;
 }
 
 /** The two halves of the local owner's secret, threaded to wherever the field
@@ -215,6 +219,7 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
       return props.call;
     },
     rootToken: () => (props.local ? rootToken() : ""),
+    armed: () => !props.local || rootToken() !== "",
     typedToken: rootToken,
     onTypedToken: setRootToken,
   };
@@ -260,7 +265,6 @@ function RootTokenField(props: TokenField): JSX.Element {
     <Field
       id="cache-root-token"
       label="root token"
-      hint="$ODU_ROOT_TOKEN; held for this page"
     >
       <input
         id="cache-root-token"
@@ -274,13 +278,6 @@ function RootTokenField(props: TokenField): JSX.Element {
     </Field>
   );
 }
-
-/** THE SWITCH'S OWN WORDS, six of them: the why is a paragraph and a
- *  paragraph belongs in `cache.md`, which the panel links to. */
-export const UPSTREAM_HINT = "skips what cache.nixos.org already signed";
-
-/** The cache screen's sub-line: facts, not a sentence. */
-const CACHE_SUB = "one substituter per bucket · local disk or S3";
 
 /** WHERE THE EXPLANATION LIVES. A control is its label; the paragraph that
  *  used to sit under it is in the docs, and this is the one link to it. */
@@ -349,60 +346,61 @@ function CreateBucket(
       },
     );
   };
+  // THE FORM IS A CHOICE, NOT THE SCREEN. A list of buckets is what this page
+  // is; a form for a new one is something a person does occasionally, and
+  // four always-open controls (a secret, a name, a store, a switch) above the
+  // list made the occasional thing the first thing.
+  const [open, setOpen] = createSignal(false);
   return (
-    <Panel title="New bucket" class="panel-dashed" label="new bucket">
+    <Panel class="panel-dashed" label="new bucket">
       <div class="panel-body">
-        <div class="form">
-          <Show when={props.local}>
-            <RootTokenField
-              typedToken={props.typedToken}
-              onTypedToken={props.onTypedToken}
-            />
-          </Show>
-          <Field id="new-bucket-name" label="Name">
-            <TextInput
-              id="new-bucket-name"
-              value={name()}
-              placeholder="new bucket name"
-              onValue={setName}
-            />
-          </Field>
-          <Show when={offered().length > 1}>
-            <fieldset class="toggles">
-              <legend>Where its objects live</legend>
-              <div class="form-pair">
-                <For each={offered()}>
-                  {(one) => (
-                    <Choice
-                      name="bucket-store"
-                      value={one.name}
-                      checked={chosen() === one.name}
-                      label={one.name}
-                      note={
-                        (one.kind === "local" ? "This server's disk." : "An S3 store.") +
-                        (one.default ? " The default." : "")
-                      }
-                      onPick={(picked) =>
-                        setStore(picked === fallback() ? null : picked)
-                      }
-                    />
-                  )}
-                </For>
-              </div>
-            </fieldset>
-          </Show>
-          <fieldset class="toggles">
-            <legend>Upstream</legend>
+        <Disclosure summary="New bucket" open={open()} onToggle={() => setOpen((was) => !was)}>
+          <Fields>
+            <Show when={props.local}>
+              <RootTokenField
+                typedToken={props.typedToken}
+                onTypedToken={props.onTypedToken}
+              />
+            </Show>
+            <Field id="new-bucket-name" label="name">
+              <TextInput
+                id="new-bucket-name"
+                value={name()}
+                placeholder="new bucket name"
+                onValue={setName}
+              />
+            </Field>
+            <Show when={offered().length > 1}>
+              <fieldset class="toggles">
+                <legend>where its objects live</legend>
+                <div class="form-pair">
+                  <For each={offered()}>
+                    {(one) => (
+                      <Choice
+                        name="bucket-store"
+                        value={one.name}
+                        checked={chosen() === one.name}
+                        label={one.name}
+                        note={
+                          (one.kind === "local" ? "this server's disk" : "an S3 store") +
+                          (one.default ? ", the default" : "")
+                        }
+                        onPick={(picked) => setStore(picked === fallback() ? null : picked)}
+                      />
+                    )}
+                  </For>
+                </div>
+              </fieldset>
+            </Show>
             <Toggle id="new-bucket-upstream" checked={upstream()} onChecked={setUpstream}>
               Skip upstream paths
             </Toggle>
-            <p class="hint">{UPSTREAM_HINT}</p>
-          </fieldset>
-          <Button class="btn-primary" disabled={control.busy()} onClick={create}>
-            {control.busy() ? "creating…" : "Create bucket"}
-          </Button>
-          <Answer control={control} />
-        </div>
+            <Button class="btn-primary" disabled={control.busy()} onClick={create}>
+              {control.busy() ? "creating…" : "Create bucket"}
+            </Button>
+          </Fields>
+        </Disclosure>
+        <Answer control={control} />
       </div>
     </Panel>
   );
@@ -466,7 +464,7 @@ function BucketList(
   });
   return (
     <section class="screen cache" aria-label="buckets">
-      <PageHead title="Cache" sub={CACHE_SUB} />
+      <PageHead title="Cache" />
 
       <Show
         when={rows().length > 0}
@@ -534,6 +532,7 @@ function BucketList(
           client={props.client}
           call={props.call}
           rootToken={props.rootToken}
+          armed={props.armed}
           typedToken={props.typedToken}
           onTypedToken={props.onTypedToken}
           local={props.local}
@@ -577,21 +576,45 @@ const asFailed = (state: Versions): Extract<Versions, { kind: "failed" }> | unde
 const FILTER_DEBOUNCE_MS = 200;
 
 /**
- * WHERE A PERSON PUTS THE TWO FACTS ABOVE — four destinations, one block.
+ * WHERE A PERSON PUTS THE TWO FACTS ABOVE — six destinations, one block.
  *
- * The substituter URL and the public key are the whole of it; what changes is
- * the file they are going into. Four stacked blocks made a reader scroll past
- * three they did not want, so this is a tablist over ONE snippet — and it is
- * the same contract functions `odu cache use` and the docs print, so the page,
- * the terminal and the documentation cannot say three different things.
+ * The substituter URL and the public key are the whole of reading it, and a
+ * write token is the whole of writing to it; what changes is the file they
+ * are going into. Six stacked panels made a reader scroll past five they did
+ * not want — and put them above the paths, which is what the bucket is for —
+ * so this is a tablist over ONE block, at the bottom of the page.
+ *
+ * The strings are the contract functions `odu cache use` and the docs print,
+ * so the page, the terminal and the documentation cannot say three different
+ * things.
  *
  * NETRC RIDES `nix.conf` rather than taking a tab of its own: `netrc-file` IS
  * a nix.conf setting, and the credential half is of no use without the pair
  * above it. A reader who needs it (a private bucket) finds it where they are
- * already pasting; a reader who does not reads two extra commented lines.
+ * already pasting.
  */
-const SNIPPET_TABS = ["nix.conf", "NixOS", "flake.nix", "odu CLI"] as const;
-type SnippetTab = (typeof SNIPPET_TABS)[number];
+const SETUP_TABS = [
+  "nix.conf",
+  "NixOS",
+  "flake.nix",
+  "odu CLI",
+  "push",
+  "GitHub Actions",
+] as const;
+type SetupTab = (typeof SETUP_TABS)[number];
+
+/** What the chosen block IS, as the class the acceptance suite addresses it
+ *  by: a client's lines, a push, or a workflow step. */
+function blockClassOf(where: SetupTab): string {
+  switch (where) {
+    case "push":
+      return "push-block";
+    case "GitHub Actions":
+      return "actions-push-block";
+    default:
+      return "consume-block";
+  }
+}
 
 /** The main column's two lists: what the bucket serves, and what is held in
  *  it against collection. Administration only — a reader who cannot list pins
@@ -600,7 +623,7 @@ const BUCKET_TABS = ["Paths", "Pins"] as const;
 type BucketTab = (typeof BUCKET_TABS)[number];
 
 function snippetFor(
-  where: SnippetTab,
+  where: Exclude<SetupTab, "push" | "GitHub Actions">,
   input: { readonly url: string; readonly publicKey: string; readonly bucket: string },
 ): string {
   switch (where) {
@@ -736,7 +759,7 @@ function BucketPage(
 
   /** Which file the snippet is being pasted into. A page's state and nothing
    *  else: every tab is the same two facts. */
-  const [tab, setTab] = createSignal<SnippetTab>("nix.conf");
+  const [tab, setTab] = createSignal<SetupTab>("nix.conf");
 
   /** What the person typed, and what the query is allowed to see. Two signals:
    *  the box must track every keystroke, and the request must not. */
@@ -997,7 +1020,9 @@ function BucketPage(
             onClick={() => toggleOpen(row.name)}
           >
             <span class="name">{row.name}</span>
-            <span class="versions">{row.versions}</span>
+            {/* A BARE NUMBER BESIDE A NAME IS A RIDDLE: what it counts is
+                said, in the muted shade a qualifier gets. */}
+            <span class="versions">· {row.versions} versions</span>
           </button>
         ) : (
           <span class="name">{row.name}</span>
@@ -1112,14 +1137,25 @@ function BucketPage(
   const pathsClock = clockWhile("Paths");
   const pinsClock = clockWhile("Pins");
 
-  /** The push block, computed once: the button copies the string the block
-   *  shows, and two calls could not be anything else. */
-  const pushText = createMemo<string>(() => {
+  /** WHAT THE CHOSEN TAB SHOWS, computed once: the block and the button beside
+   *  it copy one string, and two calls could not be anything else. */
+  const setupText = createMemo<string>(() => {
     const row = bucket();
     if (row === undefined) return "";
-    return pushBlock({
+    const where = tab();
+    if (where === "push") {
+      return pushBlock({
+        url: row.url,
+        token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
+      });
+    }
+    if (where === "GitHub Actions") {
+      return actionsPushBlock({ url: row.url, ref: pushActionRef() });
+    }
+    return snippetFor(where, {
       url: row.url,
-      token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
+      publicKey: row.publicKey,
+      bucket: props.name,
     });
   });
 
@@ -1199,86 +1235,6 @@ function BucketPage(
         {(row) => (
           <div class="split">
             <div class="split-main">
-              {/* HOW TO USE THIS BUCKET: the two facts a client trusts it by,
-                  each with the button that takes it, and the same pair spelled
-                  for whichever file it is going into. */}
-              <Panel
-                title="Use it"
-                          label="use it"
-              >
-                <KeyValue label="Substituter" value={row().url}>
-                  <CopyButton text={row().url} />
-                </KeyValue>
-                <KeyValue label="Public key" value={row().publicKey}>
-                  <CopyButton text={row().publicKey} />
-                </KeyValue>
-                <div class="tabs" role="tablist" aria-label="where to put it">
-                  <For each={SNIPPET_TABS}>
-                    {(where) => (
-                      <button
-                        type="button"
-                        role="tab"
-                        class="tab"
-                        aria-selected={tab() === where}
-                        onClick={() => setTab(where)}
-                      >
-                        {where}
-                      </button>
-                    )}
-                  </For>
-                </div>
-                {/* ONE BLOCK, RE-RENDERED. `consume-block` is the class the
-                    acceptance suite reads the substituter and netrc lines out
-                    of, and it stays one element whichever tab is chosen. */}
-                <pre class="use-block consume-block" role="tabpanel" aria-label={tab()}>
-                  {snippetFor(tab(), {
-                    url: row().url,
-                    publicKey: row().publicKey,
-                    bucket: props.name,
-                  })}
-                </pre>
-              </Panel>
-
-              <Panel
-                title="Push to it"
-                note={
-                  minted()?.scope === "write"
-                    ? "With the write token you just minted — paste it into your build's secrets now; it is not shown again."
-                    : props.canAdminister
-                      ? "Mint a write token beside this page, and this block fills it in while it can be shown."
-                      : "With a write token an admin of this server mints for you."
-                }
-                label="push to it"
-                actions={<CopyButton text={pushText()} />}
-              >
-                <pre class="use-block push-block">{pushText()}</pre>
-              </Panel>
-
-              <Panel
-                title="Push from GitHub Actions"
-                note={
-                  pushActionRef() === ACTION_REF_PLACEHOLDER
-                    ? "The action odu ships: it builds its own odu from the revision you pin it to, pushes this bucket, and fails if a path it pushed does not answer here. Pin a revision — that commit is the pusher. Nix must already be on the runner."
-                    : `The action odu ships: it builds its own odu from the revision you pin it to, pushes this bucket, and fails if a path it pushed does not answer here. This block pins ${pushActionRef()} — the commit this server was built from, so the pusher matches the cache you are looking at. Nix must already be on the runner.`
-                }
-                label="push from github actions"
-                actions={
-                  <CopyButton
-                    text={actionsPushBlock({
-                      url: row().url,
-                      ref: pushActionRef(),
-                    })}
-                  />
-                }
-              >
-                <pre class="use-block actions-push-block">
-                  {actionsPushBlock({
-                    url: row().url,
-                    ref: pushActionRef(),
-                  })}
-                </pre>
-              </Panel>
-
               {/* WHAT IS IN THIS BUCKET — the paths it serves, and (for an
                   administrator) the pins holding some of them against every
                   collection. One column, two tabs: a pin is about the paths
@@ -1418,7 +1374,6 @@ function BucketPage(
                   </Show>
                 </Panel>
               </div>
-
               {/* KEYED ON THE NAME AND NOTHING ELSE: a half-typed pin belongs
                   to the bucket it was typed on, and to no particular tab. */}
               <Show when={props.canAdminister ? props.name : null} keyed>
@@ -1434,12 +1389,55 @@ function BucketPage(
                       client={props.client}
                       call={props.call}
                       rootToken={props.rootToken}
+                      armed={props.armed}
                       name={name}
                       now={pinsClock()}
                     />
                   </div>
                 )}
               </Show>
+
+              {/* HOW TO USE THIS BUCKET — LAST, because a reader opens a
+                  bucket to see what is in it and sets a client up once. One
+                  panel over one tablist: the two facts a client trusts the
+                  bucket by, and then whichever file they are going into.
+
+                  The block's CLASS follows the tab, because each of them is a
+                  different thing to paste and the acceptance suite addresses
+                  them by what they are: `consume-block` is what a client
+                  reads with, `push-block` what a build pushes with,
+                  `actions-push-block` the workflow step. */}
+              <Panel
+                class="cache-setup"
+                title="Set up"
+                label="set up"
+                actions={<CopyButton text={setupText()} />}
+              >
+                <KeyValue label="substituter" value={row().url}>
+                  <CopyButton text={row().url} />
+                </KeyValue>
+                <KeyValue label="public key" value={row().publicKey}>
+                  <CopyButton text={row().publicKey} />
+                </KeyValue>
+                <div class="tabs" role="tablist" aria-label="where to put it">
+                  <For each={SETUP_TABS}>
+                    {(where) => (
+                      <button
+                        type="button"
+                        role="tab"
+                        class="tab"
+                        aria-selected={tab() === where}
+                        onClick={() => setTab(where)}
+                      >
+                        {where}
+                      </button>
+                    )}
+                  </For>
+                </div>
+                <pre class={`use-block ${blockClassOf(tab())}`} role="tabpanel" aria-label={tab()}>
+                  {setupText()}
+                </pre>
+              </Panel>
             </div>
 
             {/* THE BUCKET'S SETTINGS — what this bucket IS, rather than what is
@@ -1450,7 +1448,19 @@ function BucketPage(
               {(name) => (
                 <div class="split-side">
                   <Show when={props.local}>
-                    <Panel title="Root token">
+                    {/* ONE WORD FOR THE STATE, where a sentence about
+                        `$ODU_ROOT_TOKEN` used to be: a box with something in
+                        it is the credential every control beside it asks
+                        with, and a wrong one is reported by the control that
+                        was refused rather than guessed at here. */}
+                    <Panel
+                      title="Root token"
+                      actions={
+                        <Show when={props.armed()}>
+                          <Tag>administering</Tag>
+                        </Show>
+                      }
+                    >
                       <div class="panel-body">
                         <RootTokenField
                           typedToken={props.typedToken}
@@ -1463,6 +1473,7 @@ function BucketPage(
                     client={props.client}
                     call={props.call}
                     rootToken={props.rootToken}
+                    armed={props.armed}
                     minted={minted()}
                     onMinted={setMinted}
                     name={name}
@@ -1472,6 +1483,7 @@ function BucketPage(
                     client={props.client}
                     call={props.call}
                     rootToken={props.rootToken}
+                    armed={props.armed}
                     name={name}
                     retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
                   />
@@ -1479,6 +1491,7 @@ function BucketPage(
                     client={props.client}
                     call={props.call}
                     rootToken={props.rootToken}
+                    armed={props.armed}
                     name={name}
                     domain={bucket()?.domain ?? null}
                     tunnelRow={props.tunnelRow}
@@ -1487,6 +1500,7 @@ function BucketPage(
                     client={props.client}
                     call={props.call}
                     rootToken={props.rootToken}
+                    armed={props.armed}
                     name={name}
                     store={bucket()?.store ?? LOCAL_STORE}
                     migration={bucket()?.migration ?? null}
@@ -1495,6 +1509,7 @@ function BucketPage(
                     client={props.client}
                     call={props.call}
                     rootToken={props.rootToken}
+                    armed={props.armed}
                     name={name}
                     now={props.now}
                     retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
@@ -1510,6 +1525,7 @@ function BucketPage(
                       client={props.client}
                       call={props.call}
                       rootToken={props.rootToken}
+                      armed={props.armed}
                       name={name}
                       onDeleted={() => props.onOpen(null)}
                     />
@@ -1566,13 +1582,14 @@ interface Read<T> {
  */
 function reading<T>(
   key: () => string | null,
-  rootToken: () => string,
+  gate: { readonly rootToken: () => string; readonly armed: () => boolean },
   ask: (bucket: string) => Promise<T>,
 ): Read<T> {
   const [answer, { refetch }] = createResource(
     () => {
       const named = key();
-      return named === null ? null : ([named, rootToken()] as const);
+      if (named === null || !gate.armed()) return null;
+      return [named, gate.rootToken()] as const;
     },
     async ([bucket]): Promise<Reading<T>> => {
       try {
@@ -1661,7 +1678,7 @@ function BucketDomain(
     );
   };
   return (
-    <Panel title="A name of its own" label="domain">
+    <Panel title="Domain" label="domain">
       <div class="panel-body">
         <div class="stack">
           <Field id="bucket-domain" label="domain">
@@ -1842,54 +1859,50 @@ function BucketMigrate(
         `Moving ${row.name} to ${row.migration?.to ?? to}. It keeps serving from ${row.store} until every object is copied.`,
     );
   };
+  // NOTHING TO DECIDE, NOTHING TO DRAW: a daemon that declares one store has
+  // nowhere to move a bucket to, and a panel whose whole content is a note
+  // saying so is a line of the settings column spent on a non-choice. It
+  // reappears by itself on a daemon that declares a second store — and a move
+  // already running is always drawn, whatever the stores say now.
   return (
-    <Panel
-      title="Move to another store"
-      label="migrate"
-      actions={<DocsLink />}
-    >
-      <div class="panel-body">
-        <div class="stack">
-          <Show
-            when={props.migration}
-            fallback={
-              <Show
-                when={elsewhere().length > 0}
-                fallback={
-                  <p class="hint">one store declared</p>
-                }
-              >
-                <fieldset class="toggles">
-                  <legend>Where to move it</legend>
-                  <div class="form-pair">
-                    <For each={elsewhere()}>
-                      {(one) => (
-                        <Choice
-                          name="migrate-store"
-                          value={one.name}
-                          checked={target() === one.name}
-                          label={one.name}
-                          note={
-                            one.kind === "local" ? "This server's disk." : "An S3 store."
-                          }
-                          onPick={(name) => setPicked(name)}
-                        />
-                      )}
-                    </For>
-                  </div>
-                </fieldset>
-                <Button class="btn-primary" disabled={action.busy()} onClick={start}>
-                  {action.busy() ? "starting…" : "Start move"}
-                </Button>
-              </Show>
-            }
-          >
-            {(moving) => <p class="hint migration-progress">{migrationText(moving())}</p>}
-          </Show>
-          <Answer control={action} />
+    <Show when={props.migration !== null || elsewhere().length > 0}>
+      <Panel title="Move to another store" label="migrate" actions={<DocsLink />}>
+        <div class="panel-body">
+          <div class="stack">
+            <Show
+              when={props.migration}
+              fallback={
+                <>
+                  <fieldset class="toggles">
+                    <legend>where to move it</legend>
+                    <div class="form-pair">
+                      <For each={elsewhere()}>
+                        {(one) => (
+                          <Choice
+                            name="migrate-store"
+                            value={one.name}
+                            checked={target() === one.name}
+                            label={one.name}
+                            note={one.kind === "local" ? "this server's disk" : "an S3 store"}
+                            onPick={(name) => setPicked(name)}
+                          />
+                        )}
+                      </For>
+                    </div>
+                  </fieldset>
+                  <Button class="btn-primary" disabled={action.busy()} onClick={start}>
+                    {action.busy() ? "starting…" : "Start move"}
+                  </Button>
+                </>
+              }
+            >
+              {(moving) => <p class="hint migration-progress">{migrationText(moving())}</p>}
+            </Show>
+            <Answer control={action} />
+          </div>
         </div>
-      </div>
-    </Panel>
+      </Panel>
+    </Show>
   );
 }
 
@@ -1907,7 +1920,7 @@ function BucketTokens(props: TokenProps): JSX.Element {
 
   const tokens = reading(
     () => props.name,
-    props.rootToken,
+    props,
     async (bucket) =>
       (await props.call(props.client.procedures.token.list({ rootToken: props.rootToken(), bucket })))
         .tokens,
@@ -2100,7 +2113,7 @@ export interface PinName {
  * inventing a repository for `release-1.2` would be a guess printed as a
  * fact.
  */
-function pinName(name: string): PinName {
+export function pinName(name: string): PinName {
   const whole: PinName = { repo: null, ref: name, system: null };
   const at = name.indexOf("@");
   if (at <= 0) return whole;
@@ -2127,40 +2140,6 @@ function hasSpace(text: string): boolean {
   return false;
 }
 
-/** The pins of one repository, in the order the row answered. */
-export interface PinGroup {
-  /** The heading: a repository, or the word for everything hand-made. */
-  readonly repo: string;
-  readonly pins: ReadonlyArray<{ readonly pin: CachePin; readonly parsed: PinName }>;
-}
-
-/**
- * GROUPED, in first-seen order — never sorted.
- *
- * The row answers pins newest first, and that order is information: the pin a
- * person just made, or the branch CI last pushed, is the one they came to
- * look at. Sorting by name would bury it under whatever is alphabetically
- * first. Hand-made pins come last under one heading, because they are the
- * exception and a reader scanning repositories should not have to step over
- * them.
- */
-export function pinGroups(pins: ReadonlyArray<CachePin>): ReadonlyArray<PinGroup> {
-  const byRepo = new Map<string, { pin: CachePin; parsed: PinName }[]>();
-  const loose: { pin: CachePin; parsed: PinName }[] = [];
-  for (const pin of pins) {
-    const parsed = pinName(pin.name);
-    if (parsed.repo === null) {
-      loose.push({ pin, parsed });
-      continue;
-    }
-    const held = byRepo.get(parsed.repo);
-    if (held === undefined) byRepo.set(parsed.repo, [{ pin, parsed }]);
-    else held.push({ pin, parsed });
-  }
-  const groups = [...byRepo].map(([repo, held]) => ({ repo, pins: held }));
-  return loose.length === 0 ? groups : [...groups, { repo: "Pinned by hand", pins: loose }];
-}
-
 /**
  * `pin.create`, `pin.list` and `pin.delete` for this bucket.
  *
@@ -2175,7 +2154,7 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
 
   const pins = reading(
     () => props.name,
-    props.rootToken,
+    props,
     async (bucket) =>
       (await props.call(props.client.procedures.pin.list({ rootToken: props.rootToken(), bucket })))
         .pins,
@@ -2183,43 +2162,16 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
   const listed = (): readonly CachePin[] => pins.value() ?? [];
 
   /**
-   * ROWS THAT SURVIVE A REPUBLISH, and the expansion that rides on them.
+   * WHICH CLOSURES A READER ASKED TO SEE — by name AND the moment it was
+   * pinned, because re-pointing a pin keeps the name and replaces the closure
+   * (`db.ts`'s upsert writes `root_paths` and `created` together). Keyed by
+   * name alone, a CI push re-pointing `…@master/x86_64-linux` would draw all
+   * 1 789 roots of a closure nobody asked about.
    *
-   * `pinGroups` mints fresh objects every call, so a refetch — a pin created,
-   * one removed — would hand `<For>` all-new identities and dispose every
-   * row: an audit of a 1 789-root pin collapsing because somebody unpinned
-   * something else. Two things keep it open.
-   *
-   * THE HEADING IS THE KEY, not the group. `<For>` keys a string by VALUE, so
-   * a repository whose name is still in the list is still the same item
-   * however its pins moved — where a group OBJECT holding its pins changed
-   * identity whenever any pin under it did, taking the whole repository's
-   * rows with it. The pins hang off a `Map` read by that heading.
-   *
-   * AND EACH ROW KEEPS ITS OWN IDENTITY while its facts hold, so removing one
-   * pin disposes that row and no other. A row IS the pin — `CachePin` already
-   * carries the `name` {@link keepIdentity} compares by, and the split name
-   * is a pure function of it, derived where it is drawn. The `<details>` open
-   * state is the DOM's own and rides on this identity.
-   */
-  const stableRow = keepIdentity<CachePin>((pin) => pin.name);
-  const grouped = createMemo<ReadonlyMap<string, ReadonlyArray<CachePin>>>(
-    () =>
-      new Map(
-        pinGroups(listed()).map((group) => [
-          group.repo,
-          group.pins.map((held) => stableRow(held.pin)),
-        ]),
-      ),
-  );
-  const headings = createMemo<readonly string[]>(() => [...grouped().keys()]);
-  /**
-   * WHICH CLOSURES A READER ASKED TO SEE WHOLE — by name AND the moment it
-   * was pinned, because re-pointing a pin keeps the name and replaces the
-   * closure (`db.ts`'s upsert writes `root_paths` and `created` together).
-   * Keyed by name alone, a CI push re-pointing `…@master/x86_64-linux` would
-   * draw all 1 789 roots of a closure nobody asked about; keyed by both, the
-   * list forgets exactly when the `<details>` it rode on does.
+   * The state is the LIST's and not a row's: `pin.list` is asked again after
+   * every create and unpin, and rows rebuilt from that answer would take
+   * their open bit with them — an audit of a 1 789-root pin collapsing
+   * because somebody removed an unrelated one.
    */
   const [expanded, setExpanded] = createSignal<ReadonlySet<string>>(new Set());
   /** Which pins have their roots open — the DISCLOSURE's state, held here for
@@ -2272,6 +2224,113 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
     );
   };
 
+  /** Whether the form is open. A form nobody is filling in is three controls
+   *  between a reader and the list they came for. */
+  const [forming, setForming] = createSignal(false);
+
+  /**
+   * THE TABLE, AS DATA — a pin is a line like everything else on this board.
+   *
+   * The name takes what is left; every other width is fixed, so a pin named
+   * by a CI push cannot widen the page. What it HOLDS is the note under the
+   * row, because roots are store paths and a column of them is the wall this
+   * page stopped drawing.
+   */
+  const columns: ReadonlyArray<TableColumn<CachePin>> = [
+    {
+      key: "name",
+      label: "name",
+      cell: (held) => (
+        <button
+          type="button"
+          class="disclosure-summary"
+          aria-expanded={showing().has(closureKey(held))}
+          onClick={() => toggleRoots(closureKey(held))}
+        >
+          {/* THE REPOSITORY IS PART OF THE NAME, muted: two branches called
+              `master` in one bucket are two different repositories, and a
+              column that drops the owner says they are the same pin. */}
+          <span class="name">
+            <Show when={pinName(held.name).repo}>
+              {(repo) => <span class="muted">{repo()}@</span>}
+            </Show>
+            {pinName(held.name).ref}
+          </span>
+        </button>
+      ),
+    },
+    {
+      key: "system",
+      label: "system",
+      width: "8rem",
+      cell: (held) => {
+        const system = pinName(held.name).system;
+        return system === null ? <span class="muted">—</span> : <code>{system}</code>;
+      },
+    },
+    {
+      key: "paths",
+      label: "paths",
+      align: "right",
+      width: "4rem",
+      cell: (held) => held.rootPaths.length,
+    },
+    {
+      key: "pinned",
+      label: "pinned",
+      align: "right",
+      width: "5.5rem",
+      cell: (held) => ago(held.created, props.now),
+    },
+    {
+      // WHO MADE IT decides who may re-point it — and an administrator who
+      // re-points a pushed pin TAKES IT OVER: the next push naming it is
+      // refused and that workflow step goes red, loudly.
+      key: "by",
+      label: "by",
+      align: "right",
+      width: "5.5rem",
+      cell: (held) => (held.createdBy === "write" ? "a push" : "an admin"),
+    },
+    {
+      key: "unpin",
+      label: "",
+      align: "right",
+      width: "4rem",
+      cell: (held) => (
+        <button
+          type="button"
+          class="text-action"
+          aria-label={`unpin ${held.name}`}
+          disabled={action.busy()}
+          onClick={() => unpin(held.name)}
+        >
+          unpin
+        </button>
+      ),
+    },
+  ];
+
+  /** WHAT A PIN HOLDS, when somebody asks: the roots are the whole answer to
+   *  "may this one go?", and the count in the row is the whole answer to "how
+   *  much". `data-pin` rides the box because the acceptance suite counts one
+   *  pin's roots and a note row is a SIBLING of the row it belongs to. */
+  const rootsUnder = (held: CachePin): JSX.Element | null => {
+    if (!showing().has(closureKey(held))) return null;
+    const all = expanded().has(closureKey(held));
+    const shown = all ? held.rootPaths : held.rootPaths.slice(0, PIN_ROOTS_SHOWN);
+    return (
+      <span class="pin-roots" data-pin={held.name}>
+        <For each={shown}>{(root) => <code class="path">{root}</code>}</For>
+        <Show when={shown.length < held.rootPaths.length}>
+          <button type="button" class="text-action" onClick={() => showAll(closureKey(held))}>
+            show all {held.rootPaths.length}
+          </button>
+        </Show>
+      </span>
+    );
+  };
+
   return (
     <Panel
       class="cache-pins"
@@ -2293,29 +2352,30 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
     >
       <div class="panel-body">
         <div class="stack">
-          <Fields>
-            <Field id="pin-name" label="pin name">
-              <TextInput
-                id="pin-name"
-                value={pin()}
-                placeholder="release-1.2"
-                onValue={setPin}
-              />
-            </Field>
-            <Field id="pin-paths" label="store paths" hint="space or newline separated">
-              <textarea
-                id="pin-paths"
-                class="input"
-                rows={3}
-                placeholder="/nix/store/…"
-                value={paths()}
-                onInput={(event) => setPaths(event.currentTarget.value)}
-              />
-            </Field>
-            <Button class="btn-primary" disabled={action.busy()} onClick={create}>
-              {action.busy() ? "pinning…" : "Pin closure"}
-            </Button>
-          </Fields>
+          <Disclosure
+            summary="Pin a closure"
+            open={forming()}
+            onToggle={() => setForming((open) => !open)}
+          >
+            <Fields>
+              <Field id="pin-name" label="pin name">
+                <TextInput id="pin-name" value={pin()} placeholder="release-1.2" onValue={setPin} />
+              </Field>
+              <Field id="pin-paths" label="store paths" hint="space or newline separated">
+                <textarea
+                  id="pin-paths"
+                  class="input"
+                  rows={3}
+                  placeholder="/nix/store/…"
+                  value={paths()}
+                  onInput={(event) => setPaths(event.currentTarget.value)}
+                />
+              </Field>
+              <Button class="btn-primary" disabled={action.busy()} onClick={create}>
+                {action.busy() ? "pinning…" : "Pin closure"}
+              </Button>
+            </Fields>
+          </Disclosure>
           <Answer control={action} />
           <Show when={pins.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
           <Show
@@ -2328,33 +2388,13 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
               </Show>
             }
           >
-            {/* ONE LIST, GROUPED — `ul.pins` stays the list the acceptance
-                suite reads a pin out of, and the repository headings are
-                items in it rather than a second list per repo: a pin is a
-                pin whichever heading it sits under. */}
-            <ul class="pins facts">
-              <For each={headings()}>
-                {(repo) => (
-                  <>
-                    <li class="pin-group">{repo}</li>
-                    <For each={grouped().get(repo) ?? []}>
-                      {(held) => (
-                        <PinnedRow
-                          pin={held}
-                          now={props.now}
-                          busy={action.busy()}
-                          all={expanded().has(closureKey(held))}
-                          open={showing().has(closureKey(held))}
-                          onOpen={() => toggleRoots(closureKey(held))}
-                          onShowAll={() => showAll(closureKey(held))}
-                          onUnpin={unpin}
-                        />
-                      )}
-                    </For>
-                  </>
-                )}
-              </For>
-            </ul>
+            <Table
+              class="pins-table"
+              label="pins"
+              columns={columns}
+              rows={listed()}
+              note={rootsUnder}
+            />
           </Show>
         </div>
       </div>
@@ -2374,79 +2414,6 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
  */
 const PIN_ROOTS_SHOWN = 10;
 
-/**
- * ONE PIN, ONE ROW — the three facts about it, and its roots behind a
- * disclosure.
- *
- * `PinnedRow`, not `PinRow`: `db.ts` already calls a pin's DATABASE row that,
- * and two things one name inside one package is a reading mistake waiting to
- * happen.
- *
- * WHETHER IT IS EXPANDED IS THE LIST'S, not this row's: `pin.list` is asked
- * again after every create and unpin, and a row rebuilt by that answer would
- * take its own state with it — an audit of a 1 789-root pin collapsing
- * because somebody removed an unrelated one.
- */
-function PinnedRow(props: {
-  pin: CachePin;
-  now: number;
-  busy: boolean;
-  all: boolean;
-  open: boolean;
-  onOpen: () => void;
-  onShowAll: () => void;
-  onUnpin: (name: string) => void;
-}): JSX.Element {
-  /** The name, split into the three facts it carries — a pure function of the
-   *  pin, derived where it is drawn rather than carried beside it. */
-  const parsed = createMemo<PinName>(() => pinName(props.pin.name));
-  const shown = createMemo<readonly string[]>(() =>
-    props.all ? props.pin.rootPaths : props.pin.rootPaths.slice(0, PIN_ROOTS_SHOWN),
-  );
-  const rest = (): number => props.pin.rootPaths.length - shown().length;
-  return (
-    <li>
-      <span class="pin">
-        <span class="pin-head">
-          <code>{parsed().ref}</code>
-          <Show when={parsed().system}>{(system) => <Tag>{system()}</Tag>}</Show>
-        </span>
-        <Facts
-          items={[
-            { label: "paths", value: props.pin.rootPaths.length },
-            { label: "pinned", value: ago(props.pin.created, props.now) },
-            // WHO MADE IT decides who may re-point it — and an admin who
-            // re-points a pushed pin takes it over: the next push naming it
-            // is refused and that workflow step goes red.
-            { label: "by", value: props.pin.createdBy === "write" ? "a push" : "an admin" },
-          ]}
-        />
-        {/* WHAT IT HOLDS, when somebody asks: the roots are the whole answer
-            to "may this one go?", and the count above is the whole answer to
-            "how much". */}
-        <Disclosure summary="what it holds" open={props.open} onToggle={props.onOpen}>
-          <span class="pin-roots">
-            <For each={shown()}>{(root) => <code class="path">{root}</code>}</For>
-            <Show when={rest() > 0}>
-              <button type="button" class="text-action" onClick={props.onShowAll}>
-                show all {props.pin.rootPaths.length}
-              </button>
-            </Show>
-          </span>
-        </Disclosure>
-      </span>
-      <button
-        type="button"
-        class="text-action"
-        aria-label={`unpin ${props.pin.name}`}
-        disabled={props.busy}
-        onClick={() => props.onUnpin(props.pin.name)}
-      >
-        unpin
-      </button>
-    </li>
-  );
-}
 
 /**
  * `gc.plan` AND `gc.run`, for this bucket — the dry run beside the collection.
@@ -2494,7 +2461,7 @@ function BucketGc(
   const [answeredWith, setAnsweredWith] = createSignal<number | null>(null);
   const plan = reading(
     () => (asked() ? props.name : null),
-    props.rootToken,
+    props,
     async (bucket) => {
       const days = asking();
       const override = days.kind === "days" ? days.days : null;

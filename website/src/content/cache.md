@@ -54,9 +54,7 @@ extra_nix_config: |
 A **private** bucket's page also carries the netrc block, because reading it needs a credential:
 
 ```sh
-# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
-# and it does NOT expand ~ there: give it an absolute path.
-# (replace <home> below with yours — a page cannot know it)
+# netrc — an absolute path, no ~
 netrc-file = <home>/.netrc
 machine 127.0.0.1:18440 password <your-read-token>
 ```
@@ -107,12 +105,10 @@ It reads the token from stdin (or `--token <token>`), and writes one entry per o
 2. `$ODU_CACHE_TOKEN`
 3. the credentials entry for the bucket's origin
 
-The bucket argument is a name resolved against the logged-in origin, or a full `https://<host>/cache/<bucket>` URL — the substituter URL `odu cache use` prints. CI exports the secret and never logs in — this is the block a bucket's page shows under **Push to it**, with the token filled in the moment you mint one there:
+The bucket argument is a name resolved against the logged-in origin, or a full `https://<host>/cache/<bucket>` URL — the substituter URL `odu cache use` prints. CI exports the secret and never logs in — this is the block a bucket's page shows under **Set up → push**, with the token filled in the moment you mint one there:
 
 ```sh
-# push — a write token, exported where the build runs (a build secret)
-# --cache is the substituter URL you already read from: this cache's
-# nix-cache-info names the origin a push goes to and the bucket it lands in.
+# push — a write token, where the build runs
 export ODU_CACHE_TOKEN=<your-write-token>
 odu cache push --cache https://odu.example.com/cache/main <paths>
 ```
@@ -194,21 +190,17 @@ One step, in any repository. The action odu ships pushes with **its own `odu`** 
 Then it proves the push. For every path the bucket serves, `check.sh` asks `<substituter>/<hash>.narinfo` — the address a Nix client asks, which is the store's public URL or the bucket's own domain when it has one — reads the narinfo's `URL:` and `FileSize:`, and requires the NAR to answer `200` with a matching `Content-Length`, following a redirect to the store as a client would. Plain HTTP throughout, so no local narinfo cache can answer for the bucket, and an object truncated by a proxy's body cap is caught rather than counted as landed.
 
 ```yaml
-# .github/workflows — with Nix installed in an earlier step
+# .github/workflows — Nix installed in an earlier step
 - uses: juspay/odu/.github/actions/push@<odu-revision>
   with:
     cache: https://odu.example.com/cache/main
     token: ${{ secrets.ODU_CACHE_TOKEN }}
-    # No `paths`: every package, dev shell and check of this flake, for the
-    # runner's system. Name `paths` to push only what you name. `pin` holds
-    # what this push landed, under a name derived from the repository, the
-    # ref and the system.
     pin: ${{ github.ref_name == github.event.repository.default_branch }}
 ```
 
 **`cache:` is the one fact — the substituter URL**, the same line your `nix.conf` already has. The push origin and the bucket name are read off `<cache>/nix-cache-info`, which states them ([The cache describes itself](#the-cache-describes-itself)). They cannot be derived any more: a bucket whose reads are served from a store answers `GET` at an address that takes no push at all. A cache that states neither refuses the step, naming the URL it asked.
 
-**With no `paths`, the whole flake goes** — every `packages.<system>`, `devShells.<system>` and `checks.<system>` output for the runner's system, enumerated by Nix rather than listed by hand, so a flake that gains an output gains it here on the next push. Name `paths` to push exactly what you name instead: store paths, `result` links, or flake installables, space- or newline-separated, installables built first. A bucket page prints this block filled in with its own substituter URL under **Push from GitHub Actions**.
+**With no `paths`, the whole flake goes** — every `packages.<system>`, `devShells.<system>` and `checks.<system>` output for the runner's system, enumerated by Nix rather than listed by hand, so a flake that gains an output gains it here on the next push. Name `paths` to push exactly what you name instead: store paths, `result` links, or flake installables, space- or newline-separated, installables built first. A bucket page prints this block filled in with its own substituter URL under **Set up → GitHub Actions**.
 
 **`pin:` is a boolean, and the line above is the policy.** The action holds none of its own: it pins whatever this push landed, whenever the workflow says true. The pin's NAME is derived — `<owner>/<repo>@<ref>/<system>`, e.g. `juspay/kolu@master/x86_64-linux` — because several repositories share one bucket and a matrix pushes a Linux closure and a macOS closure on the same commit; under one name the second job to finish would re-point the pin and hand the first job's closure to the next collection. Anything falsy, the default, pins nothing. Free-text pin names stay in the API, for the board and an administrator.
 
@@ -288,7 +280,7 @@ A bucket keeps what nobody wants for **90 days** unless it says otherwise. `cach
 
 **Collection also happens on its own, once a day,** over every bucket, so a cache nobody administers still stops growing; `cache gc_run` and **Run GC** are that same collection asked for sooner. An object is evicted only when retention has expired, nothing retained in the bucket references it, and no pin holds it. A collection of *every* bucket also sweeps **orphans** — object keys the store held that no row ever named, a put whose record never landed — and reports them beside what it evicted. It collects with nothing but the store's own `list` and `delete`, so a bucket on R2 collects exactly as one on local disk. Whatever was deleted is announced as URLs: a bucket behind a Cloudflare tunnel has them purged at the edge, and with no CDN in front nothing is purged because nothing was cached.
 
-On the board, a bucket page is two columns. The main one is what is IN the bucket: **Use it**, **Push to it**, **Push from GitHub Actions**, and a **Paths | Pins** tablist — the paths it serves as a sortable table grouped by name, or the pins holding closures against collection (pin a closure, read what each pin holds as one row with its roots folded behind *what it holds*, delete one). Both lists are read when the page opens, so each carries a **refresh paths** / **refresh pins** beside it; the facts line under the bucket's name needs none, because the row republishes whenever a push, a pin or a collection moves it. The side column is what the bucket IS: **Tokens**, **Retention**, **A name of its own** (its domain), **Move to another store**, **Garbage collection** — **Run GC**, and a **Dry run** with its own **retention** field — and, behind a **Danger zone** rule, **Delete this bucket**. Deleting a pin needs an administrator; a *write* token may create or re-point one it made, which is how a CI push keeps a master pin current (see [Protocol](#protocol)).
+On the board, a bucket page is two columns. The main one opens on a **Paths | Pins** tablist — the paths it serves as a sortable table grouped by name, or the pins holding closures against collection as a table of their own (name, system, paths, when, who made it; pressing a pin's name opens its roots under the row, ten of them until you ask for the rest). Under them is **Set up**: the substituter URL, the public key, and one block over a tablist — `nix.conf`, `NixOS`, `flake.nix`, `odu CLI`, `push`, `GitHub Actions`. Both lists are read when the page opens, so each carries a **refresh paths** / **refresh pins** beside it; the facts line under the bucket's name needs none, because the row republishes whenever a push, a pin or a collection moves it. The side column is what the bucket IS: **Root token** (on a daemon with no door), **Tokens**, **Retention**, **Domain**, **Move to another store** (drawn only when this daemon declares a store to move to), **Garbage collection**, and a **Danger zone** with **Delete this bucket** in it.
 
 ### Delete a bucket
 
@@ -542,7 +534,7 @@ Odu then:
 
 A name is **wiring** while that happens, **live** once `https://<name>/nix-cache-info` answers, or **failed** with Cloudflare's reason (a token without the DNS permission; a zone the token cannot see). The bucket page's route strip and the board's **Tunnel** page show it, and `odu surface cloudflare status_read --json` asks from a terminal. The tunnel page also shows the connector: running, connected, stopped, or failed with the last words `cloudflared` said.
 
-Once live, the bucket's **Use it** block and `odu cache use kolu` print the new URL; the old `/cache/kolu` URL keeps working. Pushes are unchanged: `odu cache push kolu` finds the bucket by name.
+Once live, the bucket's **Set up** block and `odu cache use kolu` print the new URL; the old `/cache/kolu` URL keeps working. Pushes are unchanged: `odu cache push kolu` finds the bucket by name.
 
 **A store's public URL wins over a bucket's domain**, for a public bucket on a store that declares one: the advertised read URL is `<publicUrl>/<bucket>` ([A public URL for a store](#a-public-url-for-a-store)), because that is the address that answers when odu does not. The bucket's own name keeps working for writes and for the `missing` query, which are odu's either way.
 

@@ -524,9 +524,20 @@ Then("the cache says {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.page.locator(".cache"), "the cache view", text);
 });
 
+/** The create form is folded away until somebody wants it: a list of buckets
+ *  is what the screen is, and the form for a new one is a choice. */
+async function openCreateForm(world: OduWorld): Promise<void> {
+  const summary = world.page
+    .locator('section[aria-label="new bucket"] button.disclosure-summary')
+    .first();
+  await summary.waitFor({ timeout: 30_000 });
+  if ((await summary.getAttribute("aria-expanded")) !== "true") await summary.click();
+}
+
 When("I name a new bucket", async function (this: OduWorld) {
   const name = unique("board");
   this.cacheBucket = name;
+  await openCreateForm(this);
   await this.page.getByPlaceholder("new bucket name").fill(name);
 });
 
@@ -557,6 +568,7 @@ Given("a bucket created from the board", async function (this: OduWorld) {
   await typeRootTokenIfAsked(this.page);
   const name = unique("board");
   this.cacheBucket = name;
+  await openCreateForm(this);
   await this.page.getByPlaceholder("new bucket name").fill(name);
   await this.page.getByRole("button", { name: "Create bucket", exact: true }).click();
   await this.page.getByRole("heading", { name, exact: true }).waitFor({ timeout: 30_000 });
@@ -603,6 +615,17 @@ Then("the page's substituter URL is {string}", async function (this: OduWorld, h
   );
 });
 
+/** WHICH BLOCK THE SET-UP PANEL IS SHOWING. The six things a person pastes
+ *  are one block behind a tablist now — the panel used to be three stacked
+ *  panels above the paths — so a step that reads the push block chooses it
+ *  first. `nix.conf` is the tab the panel opens on, so a reader of
+ *  `pre.consume-block` needs nothing. */
+async function openSetupTab(world: OduWorld, name: string): Promise<void> {
+  const tab = world.page.getByRole("tab", { name, exact: true });
+  await tab.waitFor({ timeout: 30_000 });
+  if ((await tab.getAttribute("aria-selected")) !== "true") await tab.click();
+}
+
 Then("the page's netrc block names {string}", async function (this: OduWorld, host: string) {
   const text = await this.page.locator("pre.consume-block").innerText();
   assert.ok(
@@ -621,6 +644,7 @@ Then("the push block names the same cache the nix.conf block does", async functi
   const conf = await this.page.locator("pre.consume-block").innerText();
   const url = /extra-substituters = (\S+)/.exec(conf)?.[1];
   assert.ok(url !== undefined, `the nix.conf block names no substituter: ${conf}`);
+  await openSetupTab(this, "push");
   await this.saysThat(
     this.page.locator("pre.push-block"),
     "the push block",
@@ -706,10 +730,12 @@ Then("the page has the four blocks a person pastes", async function (this: OduWo
       `the page has no ${title} block`,
     );
   }
+  // ONE BLOCK AT A TIME, so one button for it — beside the two facts that
+  // have their own.
   assert.strictEqual(
     await this.page.locator("button[data-copy]").count(),
-    5,
-    "the page does not offer a copy button per block (four use blocks and the push)",
+    3,
+    "the page does not offer a copy button for the substituter, the key and the block",
   );
 });
 
@@ -957,9 +983,15 @@ When("I pin every pushed path as {string}", async function (this: OduWorld, name
   await pinPaths(this, name, paths);
 });
 
-/** One pin's row in the list. */
+/** One pin's row in the table. */
 function pinRow(world: OduWorld, name: string): Locator {
-  return world.page.locator("ul.pins li", { hasText: name }).first();
+  return world.page.locator("table.pins-table tr.table-row", { hasText: name }).first();
+}
+
+/** What that pin holds, which is a row of its OWN under it: a note row is a
+ *  sibling of the row it belongs to, so it carries the pin's name. */
+function pinRoots(world: OduWorld, name: string): Locator {
+  return world.page.locator(`table.pins-table [data-pin="${name}"]`);
 }
 
 /** Open what a pin holds, once. */
@@ -984,7 +1016,7 @@ Then(
   async function (this: OduWorld, name: string) {
     const path = this.cachePath;
     assert.ok(path !== undefined, "no path was pushed");
-    await this.saysThat(pinRow(this, name), `the pin ${name}`, path);
+    await this.saysThat(pinRoots(this, name), `the pin ${name}`, path);
   },
 );
 
@@ -994,7 +1026,7 @@ Then(
 Then(
   "the pin {string} renders {int} store paths",
   async function (this: OduWorld, name: string, count: number) {
-    const roots = pinRow(this, name).locator("code.path");
+    const roots = pinRoots(this, name).locator("code.path");
     await this.waitUntil(
       async () => (await roots.count()) === count,
       `the pin ${name} to render ${count} store paths`,
@@ -1005,17 +1037,19 @@ Then(
 /** …and they are not merely off the bottom of a long list: they are not drawn
  *  at all until the disclosure is open. */
 Then("the pin {string} keeps its roots folded away", async function (this: OduWorld, name: string) {
-  const first = pinRow(this, name).locator("code.path").first();
-  await first.waitFor({ state: "attached", timeout: 30_000 });
+  // NOT DRAWN AT ALL, not merely hidden: the disclosure's box is mounted when
+  // it is open, which is the whole reason a pin of a 1 789-path closure is one
+  // row until somebody asks.
+  await pinRow(this, name).waitFor({ timeout: 30_000 });
   assert.strictEqual(
-    await first.isVisible(),
-    false,
+    await pinRoots(this, name).locator("code.path").count(),
+    0,
     `the pin ${name} drew its roots before anybody asked for them`,
   );
 });
 
 Then("the pin {string} shows its roots", async function (this: OduWorld, name: string) {
-  await pinRow(this, name)
+  await pinRoots(this, name)
     .locator("code.path")
     .first()
     .waitFor({ state: "visible", timeout: 30_000 });
@@ -1162,6 +1196,7 @@ Then("the push block names the minted token", async function (this: OduWorld) {
   assert.ok(token !== undefined, "no token was minted");
   // The once-shown moment is when a person pastes it into a CI secret, so the
   // push block carries it while the page can still show it.
+  await openSetupTab(this, "push");
   await this.saysThat(this.page.locator("pre.push-block"), "the push block", token);
 });
 

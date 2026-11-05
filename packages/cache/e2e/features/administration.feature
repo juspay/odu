@@ -149,7 +149,6 @@ Feature: An admin administers the cache from the board
     And I pin every pushed path as "release"
     Then the cache says "Pinned release"
     And the cache says "12 paths in its closure"
-    And the pin "release" renders 10 store paths
     And the pin "release" keeps its roots folded away
     When I expand what the pin "release" holds
     Then the pin "release" shows its roots

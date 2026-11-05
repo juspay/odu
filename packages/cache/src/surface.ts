@@ -717,11 +717,8 @@ export function netrcBlock(input: {
       return input.url;
     }
   })();
-  return `# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
-# and it does NOT expand ~ there: give it an absolute path.${
-    input.home === null
-      ? "\n# (replace <home> below with yours — a page cannot know it)\nnetrc-file = <home>/.netrc"
-      : `\nnetrc-file = ${input.home}/.netrc`
+  return `# netrc — an absolute path, no ~${
+    input.home === null ? "\nnetrc-file = <home>/.netrc" : `\nnetrc-file = ${input.home}/.netrc`
   }
 machine ${authority} password ${READ_TOKEN_PLACEHOLDER}`;
 }
@@ -771,9 +768,7 @@ export function pushBlock(input: {
   readonly url: string;
   readonly token: string | null;
 }): string {
-  return `# push — a write token, exported where the build runs (a build secret)
-# --cache is the substituter URL you already read from: this cache's
-# nix-cache-info names the origin a push goes to and the bucket it lands in.
+  return `# push — a write token, where the build runs
 export ODU_CACHE_TOKEN=${input.token ?? WRITE_TOKEN_PLACEHOLDER}
 odu cache push --cache ${input.url.replace(/\/$/, "")} <paths>
 `;
@@ -810,15 +805,11 @@ export function actionsPushBlock(input: {
    *  when its build baked none. */
   readonly ref: string;
 }): string {
-  return `# .github/workflows — with Nix installed in an earlier step
+  return `# .github/workflows — Nix installed in an earlier step
 - uses: juspay/odu/.github/actions/push@${input.ref}
   with:
     cache: ${input.url.replace(/\/$/, "")}
     token: \${{ secrets.ODU_CACHE_TOKEN }}
-    # No \`paths\`: every package, dev shell and check of this flake, for the
-    # runner's system. Name \`paths\` to push only what you name. \`pin\` holds
-    # what this push landed, under a name derived from the repository, the
-    # ref and the system.
     pin: \${{ github.ref_name == github.event.repository.default_branch }}
 `;
 }
