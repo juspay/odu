@@ -153,17 +153,23 @@
      * both themes. On the near-black canvas the two halves are usually the
      * same value; on the near-white one they part company, because a hue that
      * is fine as a bar under a heading is not fine as `exit 3`.
+     *
+     * AND THE INK IS MEASURED ON THE TINT, not on the canvas. A pill sets its
+     * own background — the same hue at 13% — so `✔ passed` is read against a
+     * surface slightly closer to its own colour than the page is, and the
+     * light theme's inks cleared 4.5:1 on white while measuring 3.7 there.
+     * These values clear it where the type actually sits.
      */
     --green: light-dark(#0ca678, #2fbf7f);
-    --green-ink: light-dark(#077a58, #3ddc97);
+    --green-ink: light-dark(#056146, #3ddc97);
     --amber: light-dark(#b47500, #f2c14e);
-    --amber-ink: light-dark(#8f5d00, #f2c14e);
+    --amber-ink: light-dark(#7a4f00, #f2c14e);
     --red: light-dark(#e5484d, #ff6b5e);
-    --red-ink: light-dark(#c42a30, #ff8a7f);
+    --red-ink: light-dark(#ab1f26, #ff8a7f);
     --violet: light-dark(#7c5cff, #a98bff);
-    --violet-ink: light-dark(#6b45e8, #c2abff);
+    --violet-ink: light-dark(#5a34d6, #c2abff);
     --cyan: light-dark(#0e9ab0, #3fd0de);
-    --cyan-ink: light-dark(#0a7385, #3fd0de);
+    --cyan-ink: light-dark(#086070, #3fd0de);
 
     /* SELECTION — which filter, which attempt, which node's log is open, and
        where the keyboard is. Its own token rather than a reach for cyan at

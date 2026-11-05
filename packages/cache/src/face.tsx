@@ -554,13 +554,24 @@ type FirstPage =
     }
   | { readonly ok: false; readonly message: string };
 
-/** WHAT AN OPEN PACKAGE'S READ HAS COME TO: it is out, it answered, or it was
- *  refused — one fact in one place, so the row can draw all three. `more`
- *  says the bucket holds versions past this page, which a reader of a
- *  hundred-build package has to be told rather than left to assume. */
+/**
+ * WHAT AN OPEN PACKAGE'S READ HAS COME TO: it is out, it answered, or it was
+ * refused — one fact in one place, so the row can draw all three.
+ *
+ * A held answer carries its own CURSOR, because a package with a hundred
+ * builds is paged exactly like the bucket is: the versions on screen are a
+ * page, `next` is where the following one starts, and `reading` is a second
+ * page already asked for. A boolean `more` could only say that there WAS
+ * another page — which is a sentence to print rather than an action to take.
+ */
 type Versions =
   | { readonly kind: "reading" }
-  | { readonly kind: "held"; readonly versions: readonly CachePath[]; readonly more: boolean }
+  | {
+      readonly kind: "held";
+      readonly versions: readonly CachePath[];
+      readonly next: string | null;
+      readonly reading: boolean;
+    }
   | { readonly kind: "failed"; readonly message: string };
 
 /** The two arms a row draws from: TypeScript narrows through a `Show`'s
@@ -966,6 +977,51 @@ function BucketPage(
    *  and its answer is kept for the next time it is opened. */
   const openState = (name: string): Versions | undefined =>
     opened().has(name) ? versions().get(name) : undefined;
+  /**
+   * ONE PACKAGE'S PAGE — the first, or the next one after a cursor.
+   *
+   * The same read either way, because "open this package" and "show five
+   * more of it" are the same question with a different starting point. A
+   * page that arrives after the QUESTION changed (a new filter, another
+   * bucket) is dropped: `current()` is what was asked.
+   */
+  const readVersions = (name: string, after: string | null): void => {
+    const asked = current();
+    const standing = versions().get(name);
+    held(
+      name,
+      after === null || standing?.kind !== "held"
+        ? { kind: "reading" }
+        : { ...standing, reading: true },
+    );
+    void props
+      .call(
+        props.client.procedures.bucket.paths({
+          bucket: props.name,
+          name,
+          ...(filter() === "" ? {} : { filter: filter() }),
+          ...(after === null ? {} : { after }),
+          sort: "pushed",
+          descending: true,
+        }),
+      )
+      .then(
+        (answer) => {
+          if (asked !== current()) return;
+          const before = after === null ? [] : (asHeld(versions().get(name) ?? { kind: "reading" })?.versions ?? []);
+          held(name, {
+            kind: "held",
+            versions: [...before, ...answer.paths],
+            next: answer.next ?? null,
+            reading: false,
+          });
+        },
+        (err: unknown) => {
+          if (asked !== current()) return;
+          held(name, { kind: "failed", message: refusalText(err) });
+        },
+      );
+  };
   const toggleOpen = (name: string): void => {
     const open = !opened().has(name);
     setOpened((all) => {
@@ -975,28 +1031,7 @@ function BucketPage(
       return next;
     });
     if (!open || versions().has(name)) return;
-    const asked = current();
-    held(name, { kind: "reading" });
-    void props
-      .call(
-        props.client.procedures.bucket.paths({
-          bucket: props.name,
-          name,
-          ...(filter() === "" ? {} : { filter: filter() }),
-          sort: "pushed",
-          descending: true,
-        }),
-      )
-      .then(
-        (answer) => {
-          if (asked !== current()) return;
-          held(name, { kind: "held", versions: answer.paths, more: answer.next !== undefined });
-        },
-        (err: unknown) => {
-          if (asked !== current()) return;
-          held(name, { kind: "failed", message: refusalText(err) });
-        },
-      );
+    readVersions(name, null);
   };
 
   /**
@@ -1066,13 +1101,21 @@ function BucketPage(
       cell: (row) => ago(row.wanted, pathsClock()),
     },
   ];
-  /** An open package's versions, as rows of the same shape — one table
-   *  grammar, not a second one for what hangs under a row. */
+  /**
+   * AN OPEN PACKAGE'S VERSIONS, as rows of the same shape — one table
+   * grammar, not a second one for what hangs under a row.
+   *
+   * THE NAME IS EMPTY, and that is the point: every one of them is a build
+   * of the package named in the row above, so twenty repetitions of
+   * `nodejs-22.11.0` down the column say nothing and make the hash — the one
+   * thing that differs — the second thing a reader's eye reaches. The
+   * indent under the group is what says whose they are.
+   */
   const versionsOf = (row: PathRow): readonly PathRow[] => {
     const state = openState(row.name);
     if (state === undefined || state.kind !== "held") return [];
     return state.versions.map((version) => ({
-      name: row.name,
+      name: "",
       storePath: version.storePath,
       versions: 1,
       bytes: version.narSize,
@@ -1081,13 +1124,28 @@ function BucketPage(
       wanted: version.lastWanted,
     }));
   };
-  /** What an open package's read has come to, when it is not rows. */
+  /** What an open package's read has come to, when it is not rows: a read
+   *  that is out, a refusal, or THE NEXT PAGE — which is a control, because
+   *  a count of what is missing is only useful if it can be asked for. */
   const noteUnder = (row: PathRow): JSX.Element | null => {
     const state = openState(row.name);
     if (state === undefined) return null;
     if (state.kind === "reading") return "reading…";
     if (state.kind === "failed") return <span class="fault">{state.message}</span>;
-    return state.more ? `the newest ${state.versions.length} of ${row.versions}` : null;
+    if (state.next === null) return null;
+    const rest = row.versions - state.versions.length;
+    return (
+      <button
+        type="button"
+        class="text-action"
+        disabled={state.reading}
+        onClick={() => readVersions(row.name, state.next)}
+      >
+        {state.reading
+          ? "reading…"
+          : `show ${rest > PATH_PAGE_SIZE || rest <= 0 ? PATH_PAGE_SIZE : rest} more`}
+      </button>
+    );
   };
   // A NEW QUESTION IS A NEW SET OF PACKAGES, and a new answer under each: the
   // filter decides which versions count, so a list read under the old one is
@@ -1469,67 +1527,76 @@ function BucketPage(
                       </div>
                     </Panel>
                   </Show>
-                  <BucketTokens
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    armed={props.armed}
-                    minted={minted()}
-                    onMinted={setMinted}
-                    name={name}
-                    now={props.now}
-                  />
-                  <BucketRetention
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    armed={props.armed}
-                    name={name}
-                    retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
-                  />
-                  <BucketDomain
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    armed={props.armed}
-                    name={name}
-                    domain={bucket()?.domain ?? null}
-                    tunnelRow={props.tunnelRow}
-                  />
-                  <BucketMigrate
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    armed={props.armed}
-                    name={name}
-                    store={bucket()?.store ?? LOCAL_STORE}
-                    migration={bucket()?.migration ?? null}
-                  />
-                  <BucketGc
-                    client={props.client}
-                    call={props.call}
-                    rootToken={props.rootToken}
-                    armed={props.armed}
-                    name={name}
-                    now={props.now}
-                    retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
-                  />
-                  {/* LAST, BEHIND A RULE OF ITS OWN: every control above
-                      changes what this bucket does and can be changed back.
-                      This one ends it, so it is not a seventh panel in the
-                      stack — a reader scrolling the settings meets a heading
-                      that says what the rest of the column is. */}
-                  <div class="danger-zone">
-                    <h2 class="danger-zone-head">Danger zone</h2>
-                    <BucketDelete
+                  {/* A CONTROL THAT CANNOT FIRE IS NOT A CONTROL. Until the
+                      root token is held, every panel below would draw its
+                      fields, its lists and its buttons and refuse every one
+                      of them — six panels of furniture over a box somebody
+                      has not filled in yet. So the column IS the box until
+                      there is a credential in it, and the rest appear the
+                      moment there is one. */}
+                  <Show when={props.armed()}>
+                    <BucketTokens
+                      client={props.client}
+                      call={props.call}
+                      rootToken={props.rootToken}
+                      armed={props.armed}
+                      minted={minted()}
+                      onMinted={setMinted}
+                      name={name}
+                      now={props.now}
+                    />
+                    <BucketRetention
                       client={props.client}
                       call={props.call}
                       rootToken={props.rootToken}
                       armed={props.armed}
                       name={name}
-                      onDeleted={() => props.onOpen(null)}
+                      retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
                     />
-                  </div>
+                    <BucketDomain
+                      client={props.client}
+                      call={props.call}
+                      rootToken={props.rootToken}
+                      armed={props.armed}
+                      name={name}
+                      domain={bucket()?.domain ?? null}
+                      tunnelRow={props.tunnelRow}
+                    />
+                    <BucketMigrate
+                      client={props.client}
+                      call={props.call}
+                      rootToken={props.rootToken}
+                      armed={props.armed}
+                      name={name}
+                      store={bucket()?.store ?? LOCAL_STORE}
+                      migration={bucket()?.migration ?? null}
+                    />
+                    <BucketGc
+                      client={props.client}
+                      call={props.call}
+                      rootToken={props.rootToken}
+                      armed={props.armed}
+                      name={name}
+                      now={props.now}
+                      retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
+                    />
+                    {/* LAST, BEHIND A RULE OF ITS OWN: every control above
+                        changes what this bucket does and can be changed back.
+                        This one ends it, so it is not a seventh panel in the
+                        stack — a reader scrolling the settings meets a heading
+                        that says what the rest of the column is. */}
+                    <div class="danger-zone">
+                      <h2 class="danger-zone-head">Danger zone</h2>
+                      <BucketDelete
+                        client={props.client}
+                        call={props.call}
+                        rootToken={props.rootToken}
+                        armed={props.armed}
+                        name={name}
+                        onDeleted={() => props.onOpen(null)}
+                      />
+                    </div>
+                  </Show>
                 </div>
               )}
             </Show>
@@ -2382,8 +2449,16 @@ function BucketPins(props: AdminProps & { name: string; now: number }): JSX.Elem
             when={listed().length > 0}
             fallback={
               <Show when={pins.fault() === null}>
+                {/* AN EMPTY LIST IS A CLAIM, and a page that never asked
+                    cannot make it: without a root token `pin.list` is not
+                    called at all, so "nothing is pinned" would be a lie told
+                    to whoever has not typed the secret yet. */}
                 <p class="hint">
-                  {pins.loading() ? "reading…" : "Nothing is pinned in this bucket."}
+                  {!props.armed()
+                    ? "root token needed"
+                    : pins.loading()
+                      ? "reading…"
+                      : "Nothing is pinned in this bucket."}
                 </p>
               </Show>
             }
