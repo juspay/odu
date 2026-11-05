@@ -193,9 +193,9 @@
   .node-exit,
   .node-pushed { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
   .node-exit { color: var(--red-ink); }
-  /* WHAT A NODE WARMED (PLAN 4.1) — the one cell on this row that is good
-   * news, so it reads as a fact rather than as muted trim. */
-  .node-pushed { color: var(--green-ink); }
+  /* `.node-pushed` stays `--muted` with the rest of the trim: colour carries
+   * STATUS on this board and nothing else, and a green cell on a node that
+   * failed on its push would read as a second verdict. */
   .node-controls { display: flex; gap: 0.3rem; flex: none; }
 
   /* ── the lane timeline ────────────────────────────────────────────────────

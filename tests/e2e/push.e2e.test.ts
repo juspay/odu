@@ -19,7 +19,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { formatLogKey } from "@odu/service-client/logKey";
@@ -39,8 +39,9 @@ const FOREIGN_ROOT = "e2e-run-push-foreign-root";
 let odu: string;
 /** The daemon whose runs push: it serves `warm`, and a fixture reads from it. */
 let home: WebWorld;
-/** A second daemon serving `theirs`, so "served elsewhere" is a real origin
- *  rather than a string this suite made up. */
+/** A second daemon serving `theirs`, so "a cache this odu does not serve" is a
+ *  real odu bucket at a real foreign origin rather than a string this suite
+ *  made up — the exact shape the resolution must refuse. */
 let foreign: WebWorld;
 const dirs: string[] = [];
 
@@ -181,6 +182,53 @@ build:
   return dir;
 }
 
+/**
+ * The same fixture, but with the build recipe in a MODULE — `mod ci 'ci/mod.just'`
+ * — which is where a `result` link stops being in the workspace root.
+ *
+ * `just` chdirs into the module's directory for a module recipe, so the glob
+ * that finds what to push has to follow it. This is not an exotic layout: it
+ * is the one `[metadata("ci")]` and odu's own `ci/mod.just` encourage, and
+ * getting it wrong pushes NOTHING while every surface stays green — the one
+ * silent failure mode in the design.
+ */
+function moduleFixture(substituter: string, publicKey: string): string {
+  const dir = fixture(substituter, publicKey);
+  mkdirSync(join(dir, "ci"), { recursive: true });
+  writeFileSync(
+    join(dir, "ci", "mod.just"),
+    `[metadata("ci")]
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash=$(readlink -f "$(command -v bash)")
+    export ODU_E2E_BASH=\${bash%/bin/bash}
+    nix build --impure --file ../build.nix --out-link result
+    readlink -f result
+`,
+  );
+  writeFileSync(
+    join(dir, "justfile"),
+    `mod ci 'ci/mod.just'
+`,
+  );
+  const git = (...args: string[]): void => {
+    execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
+  };
+  git("add", "-A");
+  git(
+    "-c",
+    "user.email=e2e@odu.test",
+    "-c",
+    "user.name=odu e2e",
+    "commit",
+    "-q",
+    "-m",
+    "module",
+  );
+  return dir;
+}
+
 /** The hash part a narinfo is named for. */
 const hashOf = (storePath: string): string =>
   storePath.slice(storePath.lastIndexOf("/") + 1).slice(0, 32);
@@ -194,6 +242,22 @@ interface ReadRun {
   };
   passed: boolean;
   settled: boolean;
+}
+
+/** A bucket's tokens, which is where a run's grant is visible and where its
+ *  revocation is PROVED rather than assumed from a fixture's recording. */
+function tokensIn(
+  world: WebWorld,
+  rootToken: string,
+  name: string,
+): { id: string; label?: string | null; expires: number | null; revoked: boolean }[] {
+  const listed = surface(world, ["cache", "token_list"], {
+    rootToken,
+    bucket: name,
+  }) as {
+    tokens: { id: string; label?: string | null; expires: number | null; revoked: boolean }[];
+  };
+  return listed.tokens;
 }
 
 beforeAll(async () => {
@@ -263,6 +327,49 @@ describe("a run whose repository reads from this daemon's cache", () => {
     const narinfo = await fetch(`${warm.url}/${hashOf(storePath)}.narinfo`);
     expect(narinfo.status).toBe(200);
     expect(await narinfo.text()).toContain(`StorePath: ${storePath}`);
+
+    // THE GRANT'S WHOLE LIFE, read off the CACHE rather than off a fixture's
+    // recording — the only place that says what a real daemon did.
+    const tokens = tokensIn(home, ROOT, "warm").filter(
+      (token) => token.label === `run ${runId}`,
+    );
+    expect(tokens).toHaveLength(1);
+    const granted = tokens[0] as { expires: number | null; revoked: boolean };
+    // REVOKED, because the run settled and nothing is serving it any more.
+    expect(granted.revoked).toBe(true);
+    // AND IT WOULD HAVE EXPIRED ANYWAY. The backstop is 24 hours from the
+    // mint, which is a WALL-CLOCK instant and not a day boundary — the
+    // `expiresDays: 1` the cache's own CLI takes rounds to one, and the run
+    // that finishes at 23:59 would get a token good for a minute.
+    const ahead = (granted.expires ?? 0) - Date.now();
+    expect(ahead).toBeGreaterThan(23 * 60 * 60 * 1_000);
+    expect(ahead).toBeLessThanOrEqual(24 * 60 * 60 * 1_000);
+
+    // AND NO PLAINTEXT CREDENTIAL IS ANYWHERE A READER LOOKS. The token file
+    // itself is gone — the coordinator unlinks it as it reads it — so what is
+    // searched for is the SHAPE every minted token has (`odu_` and 43
+    // base64url characters), across every surface this run produced. A
+    // credential in a log the catalog keeps is a credential in the context of
+    // every agent that ever reads the run.
+    const stateDir = home.env.ODU_STATE_DIR as string;
+    const leftOver = readdirSync(stateDir, { recursive: true, encoding: "utf-8" }).filter(
+      (entry) => entry.endsWith("push.token"),
+    );
+    expect(leftOver).toEqual([]);
+    const plaintext = /odu_[A-Za-z0-9_-]{43}/;
+    const node = `ci::build@${currentNixSystem()}`;
+    const surfaces = [
+      ran.stdout,
+      ran.stderr,
+      run(home, ["ci", "logs", formatLogKey({ runId, node, attempt: 1 })]).stdout,
+      run(home, [
+        "ci",
+        "logs",
+        formatLogKey({ runId, node: `_ci-setup@${currentNixSystem()}`, attempt: 1 }),
+      ]).stdout,
+      JSON.stringify(read),
+    ];
+    for (const text of surfaces) expect(text).not.toMatch(plaintext);
   }, 1_800_000);
 });
 
@@ -280,10 +387,14 @@ describe("a run whose repository reads from somebody else's odu cache", () => {
     const runId = listed.rows[0]?.runId as string;
     const read = surface(home, ["run_read"], { runId }) as ReadRun;
     expect(read.passed).toBe(true);
-    // THE INTERIM WRITE GRANT IS "this odu serves that bucket", and this one
-    // does not — so the run is told, once, rather than failing.
+    // THE WRITE GRANT IS "this daemon advertises that URL", and this one does
+    // not — the URL belongs to the OTHER daemon — so the run is told, once,
+    // rather than failing. It is told in one sentence naming what it read,
+    // because a substituter this daemon does not serve is indistinguishable
+    // here from `cache.nixos.org`.
     expect(read.push?.target).toBeNull();
-    expect(read.push?.note).toContain("served elsewhere");
+    expect(read.push?.note).toContain("is a cache this odu serves");
+    expect(read.push?.note).toContain(theirs.url);
 
     // SAID IN THE SETUP LOG, which is the node every face opens first. The
     // key is minted by the surface's own encoder rather than spelled here:
@@ -299,11 +410,31 @@ describe("a run whose repository reads from somebody else's odu cache", () => {
       }),
     ]);
     expect(setup.stdout).toContain("not pushing");
-    expect(setup.stdout).toContain("served elsewhere");
+    expect(setup.stdout).toContain("is a cache this odu serves");
 
     // AND NOTHING WENT THERE. The other daemon's bucket has no paths at all,
     // which is the assertion that a skip is a skip rather than a silent push
     // somewhere else.
     expect(objectsIn(foreign, FOREIGN_ROOT, "theirs")).toBe(0);
+  }, 1_800_000);
+});
+
+describe("a run whose build recipe lives in a just MODULE", () => {
+  it("pushes the link the recipe left in the module's own directory", async () => {
+    // The whole point: `just` ran the recipe in `ci/`, so `./result` is
+    // `ci/result` and a glob of the workspace root alone finds nothing —
+    // silently, since a run with no `result*` anywhere is a legitimate run.
+    const warm = bucket(home, ROOT, "warm-module");
+    const dir = moduleFixture(warm.url, warm.publicKey);
+
+    const ran = run(home, ["ci", "run", "--no-strict"], { cwd: dir });
+    expect({ status: ran.status, stderr: ran.stderr }).toMatchObject({ status: 0 });
+
+    const paths = surface(home, ["cache", "bucket_paths"], {
+      bucket: "warm-module",
+      limit: 10,
+    }) as { paths: { storePath: string }[] };
+    expect(paths.paths.map((one) => one.storePath)).toHaveLength(1);
+    expect(paths.paths[0]?.storePath).toContain("-odu-run-push-e2e");
   }, 1_800_000);
 });

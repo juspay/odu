@@ -344,13 +344,13 @@ export function purgeBroker(): CachePurge {
  * needing the root token; this is not one of them.
  */
 export interface CacheGrants {
-  /** The origin this cache states as `Odu-Origin` in every bucket's
-   *  `nix-cache-info` — the address a push is aimed at. `null` when no cache is
-   *  registered. */
+  /** Is a cache registered at all, and at which origin? `null` when none is —
+   *  the early exit that keeps a daemon serving no cache from evaluating every
+   *  repository's flake for a grant that can never happen. */
   origin(): string | null;
-  /** Does this daemon serve that bucket, and what key does it publish? `null`
-   *  when it does not (or when no cache is registered at all). */
-  bucket(name: string): { name: string; publicKey: string } | null;
+  /** The bucket this daemon serves AT THAT SUBSTITUTER URL, or `null`. See
+   *  {@link GrantedBucket} for why the URL and never a probe. */
+  bucketAt(substituter: string): GrantedBucket | null;
   /**
    * A WRITE TOKEN FOR ONE RUN AND ONE BUCKET. `expiresAt` is wall-clock
    * milliseconds — a run is shorter than the day the administrative mint
@@ -373,11 +373,34 @@ export interface CacheGrants {
   register(grantor: CacheGrantor): () => void;
 }
 
-/** What the cache row registers — the three questions, less the broker's own
+/**
+ * ONE BUCKET THIS DAEMON SERVES, as a URL in somebody's `nix.conf` names it.
+ *
+ * **The answer is decided by the URL, never by a response body.** The first
+ * shape of this asked each substituter for its `nix-cache-info` and believed
+ * the `Odu-Origin` / `Odu-Bucket` lines it found there — which made the grant
+ * a function of a server the REPOSITORY chose, so one line of `flake.nix`
+ * pointing at an attacker's host could claim to be any bucket here and collect
+ * a write token for it. The daemon already knows every URL it advertises for
+ * every bucket it serves; matching against that set is the whole test. It
+ * cannot be lied to, it works for a PRIVATE bucket (no anonymous read is
+ * involved), and it dials nothing at all.
+ */
+export interface GrantedBucket {
+  readonly name: string;
+  /** The key a consumer needs in `trusted-public-keys` to USE what is pushed. */
+  readonly publicKey: string;
+  /** `Odu-Origin`: where a push to this bucket is aimed. */
+  readonly origin: string;
+  /** The advertised substituter URL that matched. */
+  readonly substituter: string;
+}
+
+/** What the cache row registers — the four questions, less the broker's own
  *  absent-answerer defaults. */
 export interface CacheGrantor {
   origin(): string;
-  bucket(name: string): { name: string; publicKey: string } | null;
+  bucketAt(substituter: string): GrantedBucket | null;
   mint(request: {
     bucket: string;
     label: string;
@@ -405,7 +428,7 @@ export function grantsBroker(): CacheGrants {
   let installed: { readonly grantor: CacheGrantor } | null = null;
   return {
     origin: () => installed?.grantor.origin() ?? null,
-    bucket: (name) => installed?.grantor.bucket(name) ?? null,
+    bucketAt: (substituter) => installed?.grantor.bucketAt(substituter) ?? null,
     mint: (request) => installed?.grantor.mint(request) ?? null,
     revoke: (id) => installed?.grantor.revoke(id),
     register(grantor) {

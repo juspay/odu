@@ -22,9 +22,9 @@ import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 const LEDGER: ContractLedger = {
   "2.4": "83be116bdd6efc03",
   // 2.5 — PLAN 4.1: `push` on a run row and on a wait/read answer (where this
-  // run pushes, and what it warmed), and `pushed` on a node. Three optional
-  // output fields; additive.
-  "2.5": "bd88b851f1482113",
+  // run pushes, and what it warmed), and `pushed` on a node — its paths, its
+  // bytes and the push's own time. Optional output fields; additive.
+  "2.5": "26f781a758503b2f",
 };
 
 describe("the ci row's contract", () => {

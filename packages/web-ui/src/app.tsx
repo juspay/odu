@@ -616,6 +616,10 @@ export function App(props: {
                   now={now()}
                   call={(effect) => Effect.runPromise(effect)}
                   onRoute={(next) => go(next)}
+                  // THE ONE SPELLER OF A CROSS-ROW ADDRESS. The run page
+                  // links the bucket it pushes to (PLAN 4.1) through this
+                  // rather than writing `#/cache/<name>` in a face.
+                  bucketHref={(bucket) => hashOf({ at: "cache", bucket })}
                   ambient={held()}
                   canRun={holdsFloor("member")}
                   canAdminister={holdsFloor("admin")}

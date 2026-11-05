@@ -460,6 +460,7 @@ async function start(
       ? null
       : {
           substituter: target.substituter,
+          origin: target.origin,
           bucket: target.bucket,
           tokenId: grant.tokenId,
           token: grant.token,
@@ -507,9 +508,13 @@ async function start(
     pushNote,
   });
   if (!launched.ok) {
-    // THE TOKEN GOES BACK. Nothing ever reached a lane, so a credential left
-    // live for a day would be a grant with no run behind it.
-    if (push !== null) deps.push.revoke(push.tokenId);
+    // THE TOKEN GOES BACK, and the FILE goes with it. Nothing ever reached a
+    // lane, so a credential left live for a day would be a grant with no run
+    // behind it — and its plaintext would sit in the catalog until retention.
+    if (push !== null) {
+      deps.push.revoke(push.tokenId);
+      deps.push.dropToken(runId, catalog);
+    }
     return refuseAndRecord(
       deps,
       input.requestId,

@@ -443,6 +443,11 @@ export const RunEventSchema = Schema.Union([
     bucket: Schema.String,
     paths: Schema.Int,
     bytes: Schema.Int,
+    /** HOW LONG THE PUSH TOOK, on its own. A node's `durationMs` is the
+     *  RECIPE's time and stays that: a run whose timings silently absorbed
+     *  upload seconds would change what every existing timing surface means.
+     *  `optionalKey`, so a line written before this field still decodes. */
+    durationMs: Schema.optionalKey(Schema.Int),
   }),
   /** The run reached a terminal outcome. Sequence-wise the last line any
    *  writer appends. */

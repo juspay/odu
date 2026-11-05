@@ -27,9 +27,10 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   credentialsPath as sharedCredentialsPath,
@@ -168,6 +169,10 @@ export interface DescribedCache {
   bucket: string;
 }
 
+/** How much of a `nix-cache-info` is worth reading. The real file is five
+ *  short lines; the bound exists because the URL can come from a repository. */
+const CACHE_INFO_MAX_BYTES = 8 * 1024;
+
 export async function describeCache(
   substituter: string,
   send: typeof fetch = fetch,
@@ -202,7 +207,10 @@ export async function describeCache(
           "may read this bucket";
     throw new Error(`${url} answered ${response.status} ${why}`);
   }
-  const text = await response.text();
+  // BOUNDED. A `nix-cache-info` is five short lines; a server that streams a
+  // gigabyte in its place is not one, and only the first two fields are read
+  // in any case.
+  const text = (await response.text()).slice(0, CACHE_INFO_MAX_BYTES);
   const origin = infoField(text, ODU_ORIGIN_FIELD);
   const bucket = infoField(text, ODU_BUCKET_FIELD);
   if (origin === null || bucket === null) {
@@ -296,11 +304,16 @@ export type FlakeNixConfigOutcome =
    *  nothing was pushed rather than merely that nothing was. */
   | { ok: false; reason: string };
 
-/** How a `nix eval` is run. Injected so the resolver's arms — no flake, an
- *  eval error, a `nixConfig` of the wrong shape — are stated without a Nix. */
+/** How a `nix eval` is run. ASYNC, because this is reached from `run.start`
+ *  on a daemon that is one event loop: a synchronous evaluation of somebody
+ *  else's `flake.nix` froze the board, every projection and another run's
+ *  in-flight upload for as long as `nix` took, and `nixConfig = let f = x: f
+ *  x; in f 1` is how long that is. Injected so the resolver's arms — no
+ *  flake, an eval error, a `nixConfig` of the wrong shape — are stated
+ *  without a Nix. */
 export type NixEval = (
   dir: string,
-) => { ok: true; json: string } | { ok: false; stderr: string };
+) => Promise<{ ok: true; json: string } | { ok: false; stderr: string }>;
 
 /** One multi-valued `nixConfig` setting as a list of words, from either
  *  spelling. Anything else (a number, a bool, a nested attrset) contributes
@@ -327,39 +340,196 @@ function unioned(config: Record<string, unknown>, plain: string): string[] {
   return out;
 }
 
-/** `nix eval --json -f flake.nix nixConfig`, with no input fetched. */
-export const nixEvalFlakeConfig: NixEval = (dir) => {
-  const result = spawnSync(
-    "nix",
-    ["eval", "--json", "-f", "flake.nix", "nixConfig"],
-    { cwd: dir, encoding: "utf-8", timeout: FLAKE_EVAL_TIMEOUT_MS },
-  );
-  if (result.status === 0) return { ok: true, json: result.stdout };
-  const said = (result.stderr ?? "").trim().split("\n").filter((line) => line.trim() !== "");
-  return {
-    ok: false,
-    // THE LAST LINE, which is where `nix eval` puts the fault; the ones above
-    // it are the trace. One line, because this reaches a run's setup log and a
-    // forty-line Nix trace there is noise standing in front of the answer.
-    stderr: said[said.length - 1]?.trim() ?? (result.error?.message ?? "nix eval failed"),
-  };
-};
-
 /** How long a `nixConfig` evaluation may take. It fetches nothing and parses
- *  one file, so this is a backstop against a hung `nix`, not a budget. */
-const FLAKE_EVAL_TIMEOUT_MS = 30_000;
+ *  one file, so this is a backstop against a hostile or hung `nix`, not a
+ *  budget — and it is enforced by killing the process GROUP, because `nix`
+ *  forks. */
+export const FLAKE_EVAL_TIMEOUT_MS = 20_000;
 
-/** What a checkout's `flake.nix` declares about the caches it reads from. */
-export function readFlakeNixConfig(
+/** How much of a `nix eval` answer is worth reading. A `nixConfig` is a few
+ *  hundred bytes; anything past this is a repository trying to make a parser
+ *  the expensive part of a run. */
+const FLAKE_EVAL_MAX_STDOUT = 64 * 1024;
+
+/** How much of `nix`'s complaint survives into the run's record. The reason
+ *  becomes an argv (`--push-note`), a durable manifest field and a line in a
+ *  log, and a repository controls every byte of it. */
+export const FLAKE_EVAL_MAX_STDERR = 512;
+
+/**
+ * `nixConfig`, EVALUATED UNDER RESTRAINT.
+ *
+ * `flake.nix` is the least trusted input odu has: on `odu ci run` over a
+ * contributor's branch it is attacker-controlled, and this is the one place a
+ * repository's own expressions execute ON THE SERVICE. Four things bound it,
+ * and each closes a specific hole rather than being belt and braces:
+ *
+ *   - **an explicit, minimal environment.** The daemon's own environment is
+ *     where `$ODU_ROOT_TOKEN` lives, and `builtins.getEnv` would have read it
+ *     into a published skip reason. Nothing of this process's environment is
+ *     inherited; `HOME` and `TMPDIR` are a scratch directory, `NIX_PATH` is
+ *     empty, and the only variables forwarded are the ones that LOCATE a Nix
+ *     store.
+ *   - **`restrict-eval`**, with the checkout as the single search path. This
+ *     is what stops `builtins.readFile /etc/shadow`, `builtins.fetchurl` and
+ *     every other reach outside the repository — and, as a side effect Nix
+ *     documents, makes `getEnv` answer `""` whatever the environment holds.
+ *   - **`allow-import-from-derivation false`**, so an evaluation cannot
+ *     become a BUILD on the service host.
+ *   - **a process-group kill on the deadline**, because `nix` forks and
+ *     killing the direct child alone leaves the evaluation running.
+ *
+ * `pure-eval` is explicitly OFF: it is incompatible with reading a file by
+ * path at all, which is the whole operation. `restrict-eval` is what carries
+ * the containment, and `--extra-experimental-features nix-command` is passed
+ * because the synthetic `HOME` means a single-user install's own `nix.conf`
+ * is not read.
+ */
+export function nixEvalFlakeConfig(parentEnv: NodeJS.ProcessEnv): NixEval {
+  return async (dir) => {
+    const scratch = mkdtempSync(join(tmpdir(), "odu-nixconfig-"));
+    try {
+      return await runNixEval(dir, scratch, parentEnv);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  };
+}
+
+async function runNixEval(
   dir: string,
-  evaluate: NixEval = nixEvalFlakeConfig,
-): FlakeNixConfigOutcome {
+  scratch: string,
+  parentEnv: NodeJS.ProcessEnv,
+): Promise<{ ok: true; json: string } | { ok: false; stderr: string }> {
+  const child = spawn(
+    "nix",
+    [
+      "eval",
+      "--json",
+      "--extra-experimental-features",
+      "nix-command",
+      "--option",
+      "restrict-eval",
+      "true",
+      "--option",
+      "pure-eval",
+      "false",
+      "--option",
+      "allow-import-from-derivation",
+      "false",
+      "-I",
+      `src=${dir}`,
+      "--expr",
+      "(import <src/flake.nix>).nixConfig",
+    ],
+    {
+      cwd: scratch,
+      // DETACHED so the deadline can take the whole group: `nix` forks, and a
+      // kill aimed at the direct child leaves the evaluation burning a core.
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: minimalNixEnv(scratch, parentEnv),
+    },
+  );
+  const { promise, resolve } = Promise.withResolvers<
+    { ok: true; json: string } | { ok: false; stderr: string }
+  >();
+  let out = "";
+  let err = "";
+  let timedOut = false;
+  child.stdout?.setEncoding("utf-8");
+  child.stderr?.setEncoding("utf-8");
+  child.stdout?.on("data", (chunk: string) => {
+    if (out.length < FLAKE_EVAL_MAX_STDOUT) out += chunk;
+  });
+  child.stderr?.on("data", (chunk: string) => {
+    // Twice the published bound, so the LAST line is still whole when the
+    // trace above it is long.
+    if (err.length < FLAKE_EVAL_MAX_STDERR * 2) err += chunk;
+  });
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    killGroup(child.pid);
+  }, FLAKE_EVAL_TIMEOUT_MS);
+  deadline.unref?.();
+  const finish = (outcome: { ok: true; json: string } | { ok: false; stderr: string }): void => {
+    clearTimeout(deadline);
+    resolve(outcome);
+  };
+  child.on("error", (error) =>
+    finish({ ok: false, stderr: error instanceof Error ? error.message : String(error) }),
+  );
+  child.on("close", (code) => {
+    if (timedOut) {
+      finish({ ok: false, stderr: `nix eval did not finish within ${FLAKE_EVAL_TIMEOUT_MS}ms` });
+      return;
+    }
+    if (code === 0) {
+      finish({ ok: true, json: out });
+      return;
+    }
+    finish({ ok: false, stderr: lastLine(err) });
+  });
+  return promise;
+}
+
+/** The whole environment a `nixConfig` evaluation gets, out of the one the
+ *  composition root handed in. Nothing else of the daemon's: see
+ *  {@link nixEvalFlakeConfig}. The three `NIX_*` names forwarded LOCATE a
+ *  store (a daemon socket, a chroot store) and carry no credential. */
+function minimalNixEnv(scratch: string, parentEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    PATH: parentEnv.PATH ?? "/usr/bin:/bin",
+    HOME: scratch,
+    TMPDIR: scratch,
+    NIX_PATH: "",
+  };
+  for (const key of ["NIX_REMOTE", "NIX_STORE_DIR", "NIX_STATE_DIR"]) {
+    const value = parentEnv[key];
+    if (value !== undefined && value !== "") env[key] = value;
+  }
+  return env;
+}
+
+/** Kill a detached child's whole process group, best effort. */
+function killGroup(pid: number | undefined): void {
+  if (pid === undefined) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // Already gone, or never a group leader. Either way there is nothing to
+    // stop and nothing a caller could do about it.
+  }
+}
+
+/** THE LAST LINE of a `nix` complaint, which is where the fault is; the ones
+ *  above it are the trace. Truncated, because every byte of it is the
+ *  repository's and it becomes an argv and a durable field. */
+export function lastLine(text: string): string {
+  const lines = text.trim().split("\n").filter((line) => line.trim() !== "");
+  const said = lines[lines.length - 1]?.trim() ?? "nix eval failed";
+  return said.length <= FLAKE_EVAL_MAX_STDERR
+    ? said
+    : `${said.slice(0, FLAKE_EVAL_MAX_STDERR)}… (truncated)`;
+}
+
+/** What a checkout's `flake.nix` declares about the caches it reads from.
+ *  The evaluation is an ARGUMENT: which `nix` runs, and in what environment
+ *  it runs, is the composition root's fact — see {@link nixEvalFlakeConfig}. */
+export async function readFlakeNixConfig(
+  dir: string,
+  evaluate: NixEval,
+): Promise<FlakeNixConfigOutcome> {
   if (!existsSync(join(dir, "flake.nix"))) {
     return { ok: false, reason: "no flake.nix" };
   }
-  const evaluated = evaluate(dir);
+  const evaluated = await evaluate(dir);
   if (!evaluated.ok) {
-    return { ok: false, reason: `flake.nix nixConfig could not be read — ${evaluated.stderr}` };
+    // "COULD NOT READ", not "your flake is wrong". A hung `nix`, a store that
+    // is not there and an actual syntax error all land here, and only the
+    // repository's own `nix` line can tell them apart — so the sentence says
+    // what odu knows and quotes what nix said.
+    return { ok: false, reason: `could not read nixConfig: ${evaluated.stderr}` };
   }
   let parsed: unknown;
   try {
@@ -386,10 +556,14 @@ export interface OduSubstituter extends DescribedCache {
   substituter: string;
 }
 
-/** How long one `nix-cache-info` probe may take. Bounded because this runs on
- *  the path of `run.start`, which a caller is waiting on, and a substituter
- *  that is down must cost a timeout rather than the run. */
+/** How long one `nix-cache-info` probe may take. Bounded because a
+ *  substituter that accepts a connection and never answers must cost a
+ *  timeout rather than the command. */
 export const CACHE_PROBE_TIMEOUT_MS = 5_000;
+
+/** How many substituters are worth asking about. A repository that names more
+ *  than this is not describing its cache. */
+export const CACHE_PROBE_MAX = 8;
 
 /**
  * WHICH OF THESE SUBSTITUTERS ARE ODU CACHES — asked of each one, in parallel,
@@ -397,15 +571,27 @@ export const CACHE_PROBE_TIMEOUT_MS = 5_000;
  *
  * A substituter that does not answer, or answers without `Odu-Origin` and
  * `Odu-Bucket`, is IGNORED rather than refused: `cache.nixos.org` is in a great
- * many `nixConfig`s and is nobody's push target. The refusals this resolution
- * can produce are about odu caches, which is what {@link describeCache} already
- * says and the reason this reuses it rather than parsing the file again.
+ * many `nixConfig`s and is nobody's push target.
+ *
+ * **The URL list comes from a repository, so the dial is bounded on every
+ * axis.** `http`/`https` only — Bun's `fetch` serves `file:` URLs, and a
+ * repository naming one would be reading the pusher's disk. Redirects are not
+ * followed, because a 302 is a second URL nobody vetted. The list is capped
+ * and so is the body: a `nix-cache-info` is under a kilobyte.
+ *
+ * This no longer runs on the SERVICE. A run's push target is decided from the
+ * URL against what the daemon advertises (`CacheGrants.bucketAt`), which can
+ * be neither lied to nor pointed at a machine of the attacker's choosing;
+ * this is the CLIENT's discovery, where the person at the terminal is the one
+ * whose machine dials.
  */
 export async function oduCachesOf(
   substituters: readonly string[],
   options: {
     send?: typeof fetch;
-    /** The credential a PRIVATE bucket's `nix-cache-info` needs. */
+    /** The credential a PRIVATE bucket's `nix-cache-info` needs. Omitted for
+     *  an INFERRED substituter: the repository chose that URL, so a token the
+     *  operator holds must not be sent to it. */
     token?: string | null;
     timeoutMs?: number;
   } = {},
@@ -416,9 +602,16 @@ export async function oduCachesOf(
   // cannot have and `describeCache` never calls. The cast names that gap
   // rather than widening the parameter every other caller depends on.
   const bounded = ((input: string, init?: RequestInit) =>
-    send(input, { ...(init ?? {}), signal: AbortSignal.timeout(timeoutMs) })) as typeof fetch;
+    send(input, {
+      ...(init ?? {}),
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    })) as typeof fetch;
+  const dialable = substituters
+    .filter((substituter) => /^https?:\/\//i.test(substituter.trim()))
+    .slice(0, CACHE_PROBE_MAX);
   const described = await Promise.all(
-    substituters.map(async (substituter) => {
+    dialable.map(async (substituter) => {
       try {
         const facts = await describeCache(substituter, bounded, options.token ?? null);
         return { substituter, ...facts };

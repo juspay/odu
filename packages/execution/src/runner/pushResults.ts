@@ -37,23 +37,25 @@
 
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import {
-  describeCache,
-  type DescribedCache,
-  pushToCache,
-  type PushSummary,
-} from "@odu/cache/push";
+import { pushToCache, type PushSummary } from "@odu/cache/push";
 
 /** What a node's environment has to carry for this lane to push at all. */
 export interface PushConfig {
-  /** The URL the repository substitutes from. */
-  readonly substituter: string;
-  /** The run's write token, scoped to one bucket and expiring with the run. */
+  /** `Odu-Origin`: where the push goes. RESOLVED BY THE DAEMON from the
+   *  bucket it serves — this lane asks no server what a URL is, because a
+   *  server the repository named is exactly the thing that must not decide
+   *  where a write token is sent. */
+  readonly origin: string;
+  /** The bucket at that origin. */
+  readonly bucket: string;
+  /** The run's write token, scoped to that one bucket and expiring with the
+   *  run. */
   readonly token: string;
 }
 
-/** The two variables a coordinator puts on a task so this module can act. */
-export const PUSH_SUBSTITUTER_ENV = "ODU_CACHE_SUBSTITUTER";
+/** The three variables a coordinator puts on a task so this module can act. */
+export const PUSH_ORIGIN_ENV = "ODU_CACHE_ORIGIN";
+export const PUSH_BUCKET_ENV = "ODU_CACHE_BUCKET";
 export const PUSH_TOKEN_ENV = "ODU_CACHE_TOKEN";
 
 /** The push configuration a task's environment states, or `null` when it
@@ -61,20 +63,25 @@ export const PUSH_TOKEN_ENV = "ODU_CACHE_TOKEN";
 export function pushConfigOf(
   env: Readonly<Record<string, string>> | undefined,
 ): PushConfig | null {
-  const substituter = env?.[PUSH_SUBSTITUTER_ENV];
+  const origin = env?.[PUSH_ORIGIN_ENV];
+  const bucket = env?.[PUSH_BUCKET_ENV];
   const token = env?.[PUSH_TOKEN_ENV];
-  if (substituter === undefined || substituter === "") return null;
+  if (origin === undefined || origin === "") return null;
+  if (bucket === undefined || bucket === "") return null;
   if (token === undefined || token === "") return null;
-  return { substituter, token };
+  return { origin, bucket, token };
 }
 
-/** What one node's push came to. `null` from {@link pushNodeResults} means
+/** What one node's push came to. `null` from {@link LanePusher.push} means
  *  there was nothing new to push, which is not the same as pushing zero. */
 export interface PushedFact {
   /** Store paths the bucket serves as a result of this node. */
   paths: number;
   /** NAR bytes this node's uploads stored. */
   bytes: number;
+  /** How long the push took. SEPARATE from the node's own duration, which
+   *  stays the recipe's time. */
+  durationMs: number;
 }
 
 /**
@@ -127,22 +134,27 @@ function nixStoreDir(): string {
 }
 
 /**
- * ONE RUNNER'S PUSHING — what it has already sent, and the bucket it learnt
- * once.
+ * ONE RUNNER'S PUSHING — what it has already sent.
  *
- * Held per runner process rather than per node, because both facts are about
- * the LANE: a store path pushed by node A is on the bucket for node B too, and
- * the `nix-cache-info` that says which bucket a substituter is does not change
- * between nodes.
+ * Held per runner process rather than per node, because that is a fact about
+ * the LANE: a store path pushed by node A is on the bucket for node B too.
+ *
+ * There is no discovery here any more. The first shape asked the substituter
+ * for its `nix-cache-info` — sending the run's write token to a URL the
+ * REPOSITORY named, and then pushing to whatever origin that body claimed —
+ * and memoised the promise, so one transient blip reddened every later node on
+ * the lane for good. The daemon resolved the origin and the bucket before the
+ * lane existed; this uses them, and dials nothing it was not told to.
  */
 export interface LanePusher {
   /**
    * Push whatever `result*` links this node left that have not been pushed
-   * yet. `null` when there was nothing new; throws when the push failed, which
-   * is what makes the node red.
+   * yet, looking in the directory the recipe actually RAN in. `null` when
+   * there was nothing new; throws when the push failed, which is what makes
+   * the node red.
    */
   push(
-    workspace: string,
+    workdir: string,
     config: PushConfig,
     say: (line: string) => void,
   ): Promise<PushedFact | null>;
@@ -150,37 +162,31 @@ export interface LanePusher {
 
 export function createLanePusher(
   deps: {
-    describe?: typeof describeCache;
     push?: typeof pushToCache;
     /** Where this machine's Nix store is — a seam, so a suite can state a
      *  workspace with links into a store it made. */
     storeDir?: string;
+    now?: () => number;
   } = {},
 ): LanePusher {
-  const describe = deps.describe ?? describeCache;
   const send = deps.push ?? pushToCache;
+  const now = deps.now ?? Date.now;
   /** Store paths this lane has already put on the bucket. */
   const sent = new Set<string>();
-  /** What the substituter said about itself, asked once. */
-  let described: Promise<DescribedCache> | null = null;
 
   return {
-    async push(workspace, config, say) {
-      const found = resultPathsIn(workspace, deps.storeDir);
+    async push(workdir, config, say) {
+      const found = resultPathsIn(workdir, deps.storeDir);
       const fresh = found.filter((path) => !sent.has(path));
       if (fresh.length === 0) return null;
-      // ASKED ONCE PER LANE, and asked at all for the reason `odu cache push
-      // --cache` asks: the push origin cannot be derived from the substituter,
-      // because a substituter may be a store's own domain that takes no push.
-      described ??= describe(config.substituter, fetch, config.token);
-      const facts = await described;
+      const startedAt = now();
       say(
         `[odu] pushing ${fresh.length} result path${fresh.length === 1 ? "" : "s"} ` +
-          `to ${config.substituter} (bucket ${facts.bucket})`,
+          `to bucket ${config.bucket} at ${config.origin}`,
       );
       const summary: PushSummary = await send({
-        bucket: facts.bucket,
-        origin: facts.origin,
+        bucket: config.bucket,
+        origin: config.origin,
         paths: fresh,
         // THE TOKEN, AND ONLY THE TOKEN. The push client reads an environment
         // slice rather than `process.env`, so the lane hands it exactly the one
@@ -195,11 +201,15 @@ export function createLanePusher(
       if (summary.failed > 0) {
         throw new Error(
           `odu: ${summary.failed} path${summary.failed === 1 ? "" : "s"} could not be ` +
-            `pushed to ${facts.bucket} — ` +
+            `pushed to ${config.bucket} — ` +
             summary.failures.map((failure) => `${failure.path}: ${failure.message}`).join("; "),
         );
       }
-      return { paths: summary.served.length, bytes: summary.bytes };
+      return {
+        paths: summary.served.length,
+        bytes: summary.bytes,
+        durationMs: now() - startedAt,
+      };
     },
   };
 }

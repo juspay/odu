@@ -174,8 +174,11 @@ export const NodeStateSchema = Schema.Struct({
     Schema.Struct({
       /** Store paths the bucket serves as a result of this node. */
       paths: Schema.Int,
-      /** Bytes this node's uploads sent. */
+      /** NAR bytes this node's uploads sent. */
       bytes: Schema.Int,
+      /** How long the push took, SEPARATE from the node's own `durationMs`,
+       *  which stays the recipe's time. */
+      durationMs: Schema.Int,
     }),
   ),
 });

@@ -36,7 +36,7 @@ import { spawnSync } from "node:child_process";
 import { dialRun } from "@odu/run-client/dial";
 import { errorMessage, firstFrame, runUnary } from "@odu/execution/common/effectEdge";
 import { ghForge } from "@odu/execution/common/forge";
-import { packagedLauncher } from "@odu/execution/coordinator/launcher";
+import { dropPushToken, packagedLauncher } from "@odu/execution/coordinator/launcher";
 import {
   isSameRun,
   retryRun as retryRecordedRun,
@@ -46,7 +46,8 @@ import { type CatalogOptions, listRuns } from "@odu/run-history/store";
 import { readPipeline } from "./pipelinePort";
 import { holdVenue, probeVenues, releaseVenue } from "./venuePort";
 import { protectBranch } from "./protectPort";
-import { oduCachesOf, readFlakeNixConfig } from "@odu/cache/push";
+import type { FlakeNixConfigOutcome } from "@odu/cache/push";
+import { nixEvalFlakeConfig, readFlakeNixConfig } from "@odu/cache/push";
 import type { CacheGrants } from "@odu/cordis/services";
 import { RUN_TOKEN_LIFETIME_MS } from "@odu/service/start";
 import type {
@@ -117,20 +118,32 @@ export function probeCheckout(
  * WHERE A CHECKOUT'S RUN PUSHES — the resolution PLAN 4.1 turns on, and the
  * one port that reads a repository's Nix configuration.
  *
- * Three steps, and each narrows the previous one:
+ * Two steps, and the second is the whole security argument:
  *
  *   1. **The repository's own declaration.** `flake.nix`'s `nixConfig`, which
  *      a consumer already keeps because it is how it READS from the cache.
  *      Nothing else is asked of the repo — no recipe step, no token, no key.
- *   2. **Which of those substituters are odu caches.** Each one's
- *      `nix-cache-info`, which an odu cache answers with `Odu-Origin` and
- *      `Odu-Bucket`. A substituter that says neither is somebody else's cache
- *      (`cache.nixos.org` is in a great many flakes) and is ignored in silence.
- *   3. **Which of THOSE this daemon may write to.** The interim write grant,
- *      until orgs land in PLAN 3.1, is *this odu serves that bucket*:
- *      `Odu-Origin` is this daemon's own origin AND the bucket exists here.
- *      Another odu's cache is skipped with a sentence naming it, because
- *      "I cannot write there" is a different fact from "you named nothing".
+ *      Evaluated under restraint, in a scratch environment with
+ *      `restrict-eval`: see `@odu/cache/push`'s `nixEvalFlakeConfig`.
+ *   2. **Which of those substituter URLs THIS DAEMON SERVES.** Asked of the
+ *      cache row through `bucketAt`, which matches the URL against the set
+ *      this daemon advertises and dials nothing.
+ *
+ * **Nothing a repository says about a cache is believed.** The first shape of
+ * this asked each substituter for its `nix-cache-info` and took the grant out
+ * of the `Odu-Origin` / `Odu-Bucket` lines in the body — so a flake naming an
+ * attacker's host, answering with any bucket name served here, collected a
+ * write token for that bucket and then had it posted to the attacker's own
+ * server as a Bearer header. A URL match cannot be forged, costs no request,
+ * and resolves a PRIVATE bucket (whose `nix-cache-info` is a 404 to an
+ * anonymous reader) exactly as well as a public one.
+ *
+ * **The interim bound, until orgs land in PLAN 3.1, is the OPERATOR's.** Any
+ * checkout this daemon runs can push to any bucket this daemon serves, because
+ * there is no row yet that says which repository owns which bucket. That is
+ * the reason `run.start` only ever reaches here for a checkout the operator
+ * already handed it, and it is stated in `PLAN.md`'s `[^runpush]`, the docs
+ * and the skill rather than left to be discovered.
  *
  * Two grantable caches REFUSE the run, with both URLs. A repository builds for
  * one cache; choosing between two would be this port inventing a policy, and
@@ -140,54 +153,61 @@ export function resolvePush(
   checkout: string,
   grants: CacheGrants,
 ): Promise<PushResolution> {
-  return resolvePushWith(checkout, grants, readFlakeNixConfig, oduCachesOf);
+  // THE DAEMON'S OWN ENVIRONMENT, handed in rather than reached for: the
+  // evaluator takes a parent environment and forwards only the names that
+  // LOCATE a Nix store, which is what keeps `$ODU_ROOT_TOKEN` out of reach of
+  // a `builtins.getEnv` in somebody's `flake.nix`.
+  return resolvePushWith(checkout, grants, (dir) =>
+    readFlakeNixConfig(dir, nixEvalFlakeConfig(process.env)),
+  );
 }
 
-/** The resolution, with its two readings of the world injected — the seam the
- *  suite states a flake and a set of substituters through. */
+/** The resolution, with its one reading of the world injected — the seam a
+ *  suite states a flake through. */
 export async function resolvePushWith(
   checkout: string,
   grants: CacheGrants,
-  readConfig: typeof readFlakeNixConfig,
-  describeAll: typeof oduCachesOf,
+  readConfig: (checkout: string) => Promise<FlakeNixConfigOutcome>,
 ): Promise<PushResolution> {
-  const config = readConfig(checkout);
+  // BEFORE THE FLAKE IS READ AT ALL. A daemon serving no cache can grant
+  // nothing, and evaluating every repository's Nix to find that out would be
+  // a cost — and an exposure — paid for an answer that is already known.
+  if (grants.origin() === null) {
+    return { kind: "skipped", reason: "this daemon serves no cache" };
+  }
+  const config = await readConfig(checkout);
   if (!config.ok) return { kind: "skipped", reason: config.reason };
   if (config.config.substituters.length === 0) {
     return { kind: "skipped", reason: "flake.nix nixConfig names no substituters" };
   }
-  const odu = await describeAll(config.config.substituters);
-  if (odu.length === 0) {
-    return {
-      kind: "skipped",
-      reason: "no substituter in flake.nix nixConfig is an odu cache",
-    };
-  }
-  const ours = grants.origin();
   const grantable: PushTarget[] = [];
-  const elsewhere: string[] = [];
-  for (const cache of odu) {
-    const bucket = cache.origin === ours ? grants.bucket(cache.bucket) : null;
-    if (bucket === null) {
-      elsewhere.push(`reads ${cache.substituter}, served elsewhere`);
-      continue;
-    }
+  for (const substituter of config.config.substituters) {
+    const bucket = grants.bucketAt(substituter);
+    if (bucket === null) continue;
     grantable.push({
-      substituter: cache.substituter,
-      origin: cache.origin,
+      substituter: bucket.substituter,
+      origin: bucket.origin,
       bucket: bucket.name,
       // A REPOSITORY THAT CANNOT VERIFY WHAT IT READS is still worth pushing
       // for — the bytes are correct and the next machine may trust the key —
       // so this is a warning and never a refusal.
       keyWarning: config.config.trustedPublicKeys.includes(bucket.publicKey)
         ? null
-        : `${cache.substituter} is pushed to, but its key is missing from ` +
+        : `${bucket.substituter} is pushed to, but its key is missing from ` +
           `trusted-public-keys — add "${bucket.publicKey}" to flake.nix ` +
           "nixConfig or nothing will substitute from it",
     });
   }
   if (grantable.length === 0) {
-    return { kind: "skipped", reason: elsewhere.join("; ") };
+    // ONE SENTENCE, and it says what odu knows: a substituter this daemon
+    // does not serve is indistinguishable here from `cache.nixos.org`, and
+    // guessing which it was would be the body-trusting resolution again.
+    return {
+      kind: "skipped",
+      reason:
+        "no substituter in flake.nix nixConfig is a cache this odu serves " +
+        `(${config.config.substituters.join(", ")})`,
+    };
   }
   if (grantable.length > 1) {
     return {
@@ -234,6 +254,7 @@ export function webPorts(grants: CacheGrants): WebPorts {
       return minted === null ? null : { tokenId: minted.id, token: minted.token };
     },
     revoke: (tokenId) => grants.revoke(tokenId),
+    dropToken: (runId, catalog) => dropPushToken(runId, catalog ?? {}),
   };
   /**
    * The launcher a REPLAY goes through — the same one, with the push target
@@ -262,19 +283,30 @@ export function webPorts(grants: CacheGrants): WebPorts {
       runId: request.runId,
       expiresAt: Date.now() + RUN_TOKEN_LIFETIME_MS,
     });
-    return launcher({
+    const launched = await launcher({
       ...request,
       push:
         granted === null
           ? null
           : {
               substituter: resolved.target.substituter,
+              origin: resolved.target.origin,
               bucket: resolved.target.bucket,
               tokenId: granted.tokenId,
               token: granted.token,
             },
       pushNote: resolved.target.keyWarning,
     });
+    // THE TOKEN GOES BACK when nothing was started, exactly as `run.start`
+    // does on its own failed launch: a credential with no run behind it is
+    // one that only its expiry would ever take away — and the FILE the
+    // launcher wrote for a coordinator that never read it goes with it,
+    // rather than sitting in the catalog as plaintext until retention.
+    if (!launched.ok && granted !== null) {
+      push.revoke(granted.tokenId);
+      push.dropToken(request.runId, request.catalog);
+    }
+    return launched;
   };
   const ports: ServicePorts = {
     // The engine's `LaunchRequest` still spells the caller's inventory as the

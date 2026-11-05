@@ -80,13 +80,21 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 keeps in order to READ from a bucket — is the whole declaration, and
 `odu ci run` pushes every recipe's `result*` closure there. No step in any
 recipe, no token in the repository, no second place a bucket name can go
-stale. The run's write token is minted for that run, scoped to that one
-bucket, and revoked when the run settles; a push that fails makes the node
-RED, because green means warmed. A repository that reads from an odu cache
-this daemon does not serve is told once, in `_ci-setup`, and runs exactly as
-before; one that names two is refused at start, because a repository builds
-for one cache. The run's page names the bucket and each node says what it
-warmed.
+stale. The target is decided from the URL against what this daemon
+advertises, never from anything a server says about itself, so a flake cannot
+point a run's credential somewhere else. The run's write token is minted for
+that run, scoped to that one bucket, expires in 24 hours and is revoked as
+soon as nothing is serving the run; a push that fails makes the node RED,
+because green means warmed. A repository that names a substituter THIS daemon
+does not serve is told once, in `_ci-setup`, and runs exactly as before; one
+that names two it DOES serve is refused at start, because a repository builds
+for one cache — a replay runs without pushing instead of refusing. The run's
+page names the bucket and each node says what it warmed.
+
+**The interim bound is the operator's.** Until orgs land (3.1) there is no row
+saying which repository owns which bucket, so any checkout this daemon runs
+may push to any bucket it serves — which is why `run.start` only ever reaches
+a checkout the operator handed it.
 
 | What | How | On the board |
 | --- | --- | --- |
@@ -95,7 +103,7 @@ warmed.
 | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | `odu cache use <bucket>` | a bucket's page |
 | Scoped, expiring, revocable tokens; the plaintext is shown once | `odu surface cache token_mint\|token_list\|token_revoke` | a bucket's **Tokens** |
 | Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — |
-| Upload only the paths the bucket is missing; long NARs are chunked. `--cache <substituter>` reads the push origin and the bucket off the cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…`, `odu cache push --cache <substituter> <path>…`, `odu cache push <path>…` | — |
+| Upload only the paths the bucket is missing; long NARs are chunked. `--cache <substituter>` reads the push origin and the bucket off the cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig` and probed ANONYMOUSLY — a repository names that URL, so no token is ever sent to it, and a private bucket needs `--cache`. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…`, `odu cache push --cache <substituter> <path>…`, `odu cache push <path>…` | — |
 | Give a bucket a DNS name of its own through a Cloudflare tunnel | `odu surface cache bucket_domain` | bucket → **Domain** |
 | How long a path outlives the last time anything wanted it, in days | `odu surface cache bucket_retention` | a bucket's **Retention** |
 | Move a bucket's objects to another declared store, serving from the old one until the copy is done | `odu surface cache bucket_migrate` | a bucket's **Move to another store** |

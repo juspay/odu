@@ -48,6 +48,9 @@ import type { Caller } from "./caller";
  *  `@odu/execution/coordinator/launcher`. */
 export interface LaunchPush {
   readonly substituter: string;
+  /** `Odu-Origin`: where the push is aimed. RESOLVED by the daemon from its
+   *  own bucket, never read back off a server the repository named. */
+  readonly origin: string;
   readonly bucket: string;
   /** How the token is revoked at finalize. Recorded on the manifest; the
    *  token itself never is. */
@@ -158,8 +161,9 @@ export interface PushGrant {
 }
 
 export interface PushPort {
-  /** What `flake.nix` says, and which of it this daemon can grant. Async and
-   *  network-bound, which is why it is not part of {@link CheckoutProbe}. */
+  /** What `flake.nix` says, and which of it this daemon can grant. Async
+   *  because it evaluates somebody else's Nix, which is why it is not part of
+   *  {@link CheckoutProbe}. */
   resolve: (checkout: string) => Promise<PushResolution>;
   /** Mint the run's write token for a resolved bucket. `null` when the bucket
    *  has gone between resolution and launch. */
@@ -170,6 +174,11 @@ export interface PushPort {
   }) => PushGrant | null;
   /** Let a run's token go. Idempotent. */
   revoke: (tokenId: string) => void;
+  /** Remove the token FILE a launch left for a coordinator that never
+   *  started. Beside the revoke rather than folded into it: one is the
+   *  credential, the other is a byte on disk, and only this layer knows the
+   *  launch failed. */
+  dropToken: (runId: string, catalog?: CatalogOptions) => void;
 }
 
 // ── retrying a recorded run ─────────────────────────────────────────────────

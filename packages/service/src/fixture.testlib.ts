@@ -348,6 +348,8 @@ export interface RecordingPorts extends ServicePorts {
   pushResolves: string[];
   pushGrants: { bucket: string; runId: string; expiresAt: number }[];
   pushRevokes: string[];
+  /** Every run whose token FILE this service asked to be removed. */
+  pushDrops: string[];
 }
 
 type VenueProbeRequest = Parameters<ServicePorts["probeVenues"]>[0];
@@ -388,6 +390,7 @@ export function recordingPorts(opts: {
   const pushResolves: string[] = [];
   const pushGrants: { bucket: string; runId: string; expiresAt: number }[] = [];
   const pushRevokes: string[] = [];
+  const pushDrops: string[] = [];
   return {
     launches,
     retries,
@@ -399,6 +402,7 @@ export function recordingPorts(opts: {
     pushResolves,
     pushGrants,
     pushRevokes,
+    pushDrops,
     push: {
       resolve: async (checkout) => {
         pushResolves.push(checkout);
@@ -418,6 +422,9 @@ export function recordingPorts(opts: {
       },
       revoke: (tokenId) => {
         pushRevokes.push(tokenId);
+      },
+      dropToken: (runId) => {
+        pushDrops.push(runId);
       },
     },
     launch: async (request) => {

@@ -693,12 +693,21 @@ declares.
 
 - **A RUN PUSHES WHAT IT BUILDS** (`ci` 2.5, PLAN 4.1): every recipe's
   `result*` closure goes to the odu cache the repository's `flake.nix`
-  `nixConfig` already reads from, when the serving daemon has it. No recipe
-  step, no token in the tree, no request field, no flag. The run's write token
-  is minted for that run, scoped to that one bucket and revoked at finalize
-  (it reads `run <id>` in the bucket page's Tokens list, cache 4.6); a push
-  that fails reddens its node. `run_read` answers `push`, and a node answers
-  `pushed`.
+  `nixConfig` already reads from, when THIS daemon is the one serving it. The
+  target is decided from the URL against what the daemon advertises — the
+  bucket's path under its public origin, or a domain bound to that bucket —
+  and never from anything a server says about itself, so a flake cannot aim a
+  run's credential at a host somebody else runs. No recipe step, no token in
+  the tree, no request field, no flag. The run's write token is minted for
+  that run, scoped to that one bucket, expires in 24 hours as a backstop and
+  is revoked as soon as nothing is serving the run — a `--linger` coordinator
+  keeps it, because a rerun still pushes (it reads `run <id>` in the bucket
+  page's Tokens list, cache 4.6); the recipe's own environment never has it; a
+  push that fails reddens its node. A repository naming TWO caches this daemon
+  serves is refused at start, except on a replay, which runs without pushing.
+  `run_read` answers `push`, and a node answers `pushed`. The interim bound is
+  the operator's: with no org row saying which repository owns which bucket,
+  any checkout this daemon runs may push to any bucket it serves.
 - **The daemon can be scraped** (`metrics` 1.0, PLAN 6.2): `GET /metrics` is a
   Prometheus exposition of the cache row's hit rates and storage, the runs'
   durations and lane use. It needs the root token or a `metrics` token
@@ -745,7 +754,10 @@ declares.
   does not answer — is refused with a sentence naming the URL. With NEITHER a
   `--cache` nor a bucket, `odu cache push <path>…` reads the substituter out of
   `./flake.nix`'s `nixConfig` and pushes to the one odu cache named there; two
-  is a refusal listing both.
+  is a refusal listing both. That inference probes ANONYMOUSLY — the URL came
+  out of a repository, so no saved credential is sent to it — which means a
+  PRIVATE bucket cannot be inferred and must be named with `--cache` or
+  `<bucket> --origin`.
 - `odu cache push --pin NAME` re-points a pin at the closure the push landed
   (nothing is pinned if a path was refused). The push action takes `pin: true`
   instead of a name and derives `<owner>/<repo>@<ref>/<system>`; when to pin is

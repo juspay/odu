@@ -33,7 +33,8 @@ import { createLaneRunner } from "./runner";
 import type { LanePusher, PushConfig, PushedFact } from "./pushResults";
 
 const PUSH_ENV = {
-  ODU_CACHE_SUBSTITUTER: "https://cache.example/main",
+  ODU_CACHE_ORIGIN: "https://odu.example.org",
+  ODU_CACHE_BUCKET: "main",
   ODU_CACHE_TOKEN: "odu_run_token",
 };
 
@@ -140,7 +141,7 @@ function stubPusher(
   const calls: PushConfig[] = [];
   return {
     calls,
-    push: async (_workspace, config, say) => {
+    push: async (_workdir, config, say) => {
       calls.push(config);
       say("[odu] 3 paths in the closure: 1 to push");
       return answer(config);
@@ -150,7 +151,11 @@ function stubPusher(
 
 describe("a lane node that pushes what it built", () => {
   it("carries the counts on the node, and the client's lines in its log", async () => {
-    const pusher = stubPusher(async () => ({ paths: 4, bytes: 2_097_152 }));
+    const pusher = stubPusher(async () => ({
+      paths: 4,
+      bytes: 2_097_152,
+      durationMs: 1_500,
+    }));
     const l = await lane(pusher);
     await l.configure([
       { id: "build", command: "echo built", needs: [], env: PUSH_ENV },
@@ -160,9 +165,20 @@ describe("a lane node that pushes what it built", () => {
     // THE CONFIGURATION CAME OFF THE TASK'S ENVIRONMENT — the seam a
     // coordinator fills, and the only place a lane learns a token.
     expect(pusher.calls).toEqual([
-      { substituter: PUSH_ENV.ODU_CACHE_SUBSTITUTER, token: PUSH_ENV.ODU_CACHE_TOKEN },
+      {
+        origin: PUSH_ENV.ODU_CACHE_ORIGIN,
+        bucket: PUSH_ENV.ODU_CACHE_BUCKET,
+        token: PUSH_ENV.ODU_CACHE_TOKEN,
+      },
     ]);
-    expect(last(l).nodes.build?.pushed).toEqual({ paths: 4, bytes: 2_097_152 });
+    expect(last(l).nodes.build?.pushed).toEqual({
+      paths: 4,
+      bytes: 2_097_152,
+      durationMs: 1_500,
+    });
+    // THE RECIPE'S OWN TIME, not the recipe's plus the push's: every existing
+    // timing surface reads `durationMs` as how long the work took.
+    expect(last(l).nodes.build?.durationMs).toBeLessThan(1_500);
     expect(await l.logOf("build")).toContain("3 paths in the closure");
   });
 
@@ -185,7 +201,7 @@ describe("a lane node that pushes what it built", () => {
   });
 
   it("does not push a recipe that FAILED", async () => {
-    const pusher = stubPusher(async () => ({ paths: 1, bytes: 1 }));
+    const pusher = stubPusher(async () => ({ paths: 1, bytes: 1, durationMs: 1 }));
     const l = await lane(pusher);
     await l.configure([
       { id: "build", command: "exit 3", needs: [], env: PUSH_ENV },
@@ -198,11 +214,43 @@ describe("a lane node that pushes what it built", () => {
   });
 
   it("never reaches the pusher for a lane with no push configuration", async () => {
-    const pusher = stubPusher(async () => ({ paths: 1, bytes: 1 }));
+    const pusher = stubPusher(async () => ({ paths: 1, bytes: 1, durationMs: 1 }));
     const l = await lane(pusher);
     await l.configure([{ id: "build", command: "echo built", needs: [] }]);
     await until(() => last(l).nodes.build?.status === "ok");
     expect(pusher.calls).toEqual([]);
     expect(last(l).nodes.build?.pushed).toBeUndefined();
+  });
+
+  it("delivers a task's environment to the recipe — and NOT the run's token", async () => {
+    // TWO FACTS, ONE CASE, because they are the same `spawn`.
+    //
+    // The DELIVERY was uncovered: this change deleted the only exercised path
+    // (`shards.ts` used to prepend `ODU_SHARD_INDEX=… ` to the displayed
+    // command), so dropping the env spread in `spawnNode` would have left
+    // every suite green while `ODU_SHARD_INDEX` vanished from every recipe.
+    //
+    // The ABSENCE is the security half: the runner IS the node's process, so
+    // the pusher can hold the token without the repo's own shell inheriting
+    // it — and a recipe that prints its environment must not write a live
+    // credential into a log the catalog keeps.
+    const pusher = stubPusher(async () => null);
+    const l = await lane(pusher);
+    await l.configure([
+      {
+        id: "build",
+        command: "echo index=$ODU_SHARD_INDEX token=[${ODU_CACHE_TOKEN:-absent}]",
+        needs: [],
+        env: { ...PUSH_ENV, ODU_SHARD_INDEX: "2" },
+      },
+    ]);
+    await until(() => last(l).nodes.build?.status === "ok");
+    const log = await l.logOf("build");
+    expect(log).toContain("index=2");
+    expect(log).toContain("token=[absent]");
+    expect(log).not.toContain(PUSH_ENV.ODU_CACHE_TOKEN);
+    // And the PUSHER still got it: keeping it from the child is not keeping
+    // it from the lane.
+    expect(pusher.calls[0]?.token).toBe(PUSH_ENV.ODU_CACHE_TOKEN);
   });
 });

@@ -95,6 +95,9 @@ describe("a start that resolves a cache", () => {
     const launched = ports.launches[0];
     expect(launched?.push).toEqual({
       substituter: "https://cache.kolu.dev/kolu-r2",
+      // THE RESOLVED ORIGIN travels with the launch: the lane pushes THERE
+      // and asks no server what the substituter is.
+      origin: "https://odu.kolu.dev",
       bucket: "kolu-r2",
       tokenId: "tok-1",
       token: "odu_stub_1",
@@ -176,20 +179,6 @@ describe("a start that resolves a cache", () => {
 });
 
 describe("the request digest", () => {
-  it("does not know where a run pushes", () => {
-    // The digest is what the CALLER sent. Where a checkout pushes is read out
-    // of its `flake.nix` and off a substituter, so putting it in here would
-    // make the digest a function of the world again — the exact fault
-    // `expectedSha` replaced a HEAD read to avoid.
-    const scope = { selectors: [], platforms: [], noDeps: false };
-    expect(digestOfRequest(input(), scope)).toBe(
-      digestOfRequest(input(), scope),
-    );
-    // And the proof that matters is behavioural: a repeated request id with a
-    // DIFFERENT world re-resolves rather than conflicting.
-    expect(digestOfRequest(input(), scope)).not.toContain("kolu-r2");
-  });
-
   it("re-resolves on a repeat, and replays the receipt", async () => {
     const w = open();
     let answer: PushResolution = TARGET;

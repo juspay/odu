@@ -730,25 +730,37 @@ export function createOduService(opts: ServiceOptions): OduService {
    */
   const revokedPushTokens = new Set<string>();
   /**
-   * A RUN THAT WILL NOT MOVE AGAIN GIVES ITS WRITE TOKEN BACK.
+   * A RUN NOBODY IS SERVING ANY MORE GIVES ITS WRITE TOKEN BACK.
    *
    * Driven off the PROJECTION rather than off the coordinator, and that is the
    * design: the coordinator writes `finalized` and then dies, and it holds no
    * authority over a cache in any case. The service minted the token, the
-   * service can see the run reach a terminal state — `owner_lost` included,
-   * where nobody wrote `finalized` at all — and the service revokes it.
+   * service can see the run stop — `owner_lost` included, where nobody wrote
+   * `finalized` at all — and the service revokes it.
+   *
+   * **Settled is not the test; still being SERVED is.** `--linger` exists so a
+   * node can be rerun after the run drains, and a lingering coordinator is a
+   * settled row with a live endpoint. Revoking at first settle met that rerun
+   * with a dead credential and reddened the node for a reason that had nothing
+   * to do with the recipe — on the retry path linger was added for. A run that
+   * has released its endpoint (`releaseOwnership` nulls it) or lost its owner
+   * is one nothing can push from again.
    *
    * Crash-safe for free: the first refresh after a restart upserts every run
    * in the catalog, so a token whose daemon died mid-run is revoked the moment
    * its successor projects that run. A daemon that never comes back is covered
    * by the token's own expiry.
    */
-  const revokeSettledPushTokens = (rows: readonly RunRow[]): void => {
+  const revokeFinishedPushTokens = (rows: readonly RunRow[]): void => {
     for (const row of rows) {
-      const tokenId = row.push?.target?.tokenId;
-      if (tokenId === undefined) continue;
       if (row.state === "provisioning" || row.state === "running") continue;
-      if (revokedPushTokens.has(tokenId)) continue;
+      // STILL SERVING: a lingering coordinator, whose reruns still push.
+      if (row.endpoint !== null && row.state === "settled") continue;
+      // The id is deliberately NOT on the wire row — a revocation handle is
+      // not something every browser that can list runs needs — so it is read
+      // from the projection that holds the manifest.
+      const tokenId = registry.pushTokenOf(row.runId);
+      if (tokenId === null || revokedPushTokens.has(tokenId)) continue;
       revokedPushTokens.add(tokenId);
       opts.ports.push.revoke(tokenId);
     }
@@ -757,7 +769,7 @@ export function createOduService(opts: ServiceOptions): OduService {
   /** Re-project the catalog and publish what moved. */
   const refresh = (): void => {
     const delta = registry.refresh(now());
-    revokeSettledPushTokens(delta.upserted);
+    revokeFinishedPushTokens(delta.upserted);
     for (const row of delta.upserted) runtime.ctx.collections.runs.upsert(row.runId, row);
     for (const runId of delta.removed) runtime.ctx.collections.runs.remove(runId);
     for (const key of watched) {

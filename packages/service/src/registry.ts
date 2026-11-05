@@ -151,6 +151,10 @@ interface Entry {
    *  readings of one journal, and a caller that got them from two reads could
    *  hold a lane that has landed beside a node that has not started. */
   env: RunEnv;
+  /** THE RUN'S PUSH TOKEN ID (PLAN 4.1), off the manifest and deliberately
+   *  NOT on the row: a revocation handle is this process's business, not every
+   *  browser's. Read through {@link RunRegistry.pushTokenOf}. */
+  pushTokenId: string | null;
 }
 
 /**
@@ -188,7 +192,7 @@ function nodesOf(
   runId: string,
   roster: readonly string[],
   latest: ReadonlyMap<string, AttemptState>,
-  pushed: ReadonlyMap<string, { paths: number; bytes: number }>,
+  pushed: ReadonlyMap<string, { paths: number; bytes: number; durationMs: number }>,
 ): RunNode[] {
   // The ROSTER's order, because that is the schedule a dashboard paints. A node
   // the fold saw but the roster does not list is appended: a run whose roster
@@ -235,7 +239,13 @@ function nodesOf(
       // only — the bucket is the RUN's, and it is on the row.
       ...(warmed === undefined
         ? {}
-        : { pushed: { paths: warmed.paths, bytes: warmed.bytes } }),
+        : {
+            pushed: {
+              paths: warmed.paths,
+              bytes: warmed.bytes,
+              durationMs: warmed.durationMs,
+            },
+          }),
     });
   }
   return out;
@@ -406,10 +416,25 @@ function project(
     // cursor: that one advances only through events actually delivered, and
     // this read delivered none.
     cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
-    // WHERE THIS RUN PUSHES (PLAN 4.1), copied off the manifest. A record
-    // written before the field simply has no key, which is what lets a board
-    // show nothing rather than claim the run pushed nowhere.
-    ...(manifest.push === undefined ? {} : { push: manifest.push }),
+    // WHERE THIS RUN PUSHES (PLAN 4.1), copied off the manifest MINUS the
+    // token id: the service revokes by that, and a board row is read by every
+    // client that can list runs. A record written before the field simply has
+    // no key, which is what lets a board show nothing rather than claim the
+    // run pushed nowhere.
+    ...(manifest.push === undefined
+      ? {}
+      : {
+          push: {
+            target:
+              manifest.push.target === null
+                ? null
+                : {
+                    substituter: manifest.push.target.substituter,
+                    bucket: manifest.push.target.bucket,
+                  },
+            note: manifest.push.note,
+          },
+        }),
   };
   return {
     fingerprint: stamp,
@@ -420,6 +445,7 @@ function project(
     // The ROW just built, so the elapsed time on this frame and the one every
     // later read recomputes come from one pair.
     env: envOf(fold, row, now),
+    pushTokenId: manifest.push?.target?.tokenId ?? null,
   };
 }
 
@@ -458,6 +484,10 @@ export interface RunRegistry {
   row: (runId: string) => RunRow | undefined;
   /** One run's node list, or undefined for a run this registry has not seen. */
   nodes: (runId: string) => RunNode[] | undefined;
+  /** THE RUN'S PUSH TOKEN ID, or `null` (PLAN 4.1). Separate from `row`
+   *  because the row is the WIRE and a revocation handle is not published:
+   *  only this process, which minted it, has a use for it. */
+  pushTokenOf: (runId: string) => string | null;
   /**
    * Where one run's work is placed, or undefined for a run this registry has
    * not seen. `undefined` rather than `UNKNOWN_ENV`, so a caller can tell "no
@@ -616,6 +646,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
         .filter((row): row is RunRow => row !== undefined),
     row: (runId) => entryOf(runId)?.row,
     nodes: (runId) => entryOf(runId)?.nodes,
+    pushTokenOf: (runId) => entryOf(runId)?.pushTokenId ?? null,
     env: (runId, now = Date.now()) => {
       const held = entryOf(runId);
       if (held === undefined) return undefined;

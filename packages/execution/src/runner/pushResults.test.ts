@@ -26,12 +26,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  describeCache,
-  DescribedCache,
-  PushOptions,
-  PushSummary,
-} from "@odu/cache/push";
+import type { PushOptions, PushSummary } from "@odu/cache/push";
 import {
   createLanePusher,
   type LanePusher,
@@ -39,7 +34,7 @@ import {
   resultPathsIn,
 } from "./pushResults";
 
-const CONFIG = { substituter: "https://cache.example/main", token: "odu_run" };
+const CONFIG = { origin: "https://odu.example.org", bucket: "main", token: "odu_run" };
 
 /** A workspace, and a store beside it that its links point into. */
 interface World {
@@ -83,23 +78,26 @@ const summary = (over: Partial<PushSummary> = {}): PushSummary => ({
   failed: 0,
   failures: [],
   served: [],
-  substituter: CONFIG.substituter,
+  substituter: `${CONFIG.origin}/cache/${CONFIG.bucket}`,
   pinned: null,
   pageUrl: "https://odu.example.org/#/cache/main",
   ...over,
 });
 
-const FACTS: DescribedCache = { origin: "https://odu.example.org", bucket: "main" };
-
-/** A pusher whose cache description and upload are both stated. */
+/** A pusher with a stated upload and a stated clock, so a push's own duration
+ *  is an exact number rather than whatever the machine took. */
 function laneWith(
   storeDir: string,
   push: (options: PushOptions) => Promise<PushSummary>,
 ): LanePusher {
+  let tick = 1_000;
   return createLanePusher({
     storeDir,
-    describe: (async () => FACTS) as unknown as typeof describeCache,
     push,
+    now: () => {
+      tick += 250;
+      return tick;
+    },
   });
 }
 
@@ -133,16 +131,25 @@ describe("what a lane finds to push", () => {
 
   it("reads the push configuration off a task's environment, and only a whole one", () => {
     expect(pushConfigOf(undefined)).toBeNull();
-    expect(pushConfigOf({ ODU_CACHE_SUBSTITUTER: "https://a" })).toBeNull();
+    expect(pushConfigOf({ ODU_CACHE_ORIGIN: "https://a" })).toBeNull();
+    expect(pushConfigOf({ ODU_CACHE_ORIGIN: "https://a", ODU_CACHE_BUCKET: "m" })).toBeNull();
     expect(pushConfigOf({ ODU_CACHE_TOKEN: "t" })).toBeNull();
     // A BLANK IS AN ABSENCE. An empty token would otherwise reach the push
     // client as a credential and fail there, naming the wrong thing.
     expect(
-      pushConfigOf({ ODU_CACHE_SUBSTITUTER: "https://a", ODU_CACHE_TOKEN: "" }),
+      pushConfigOf({
+        ODU_CACHE_ORIGIN: "https://a",
+        ODU_CACHE_BUCKET: "m",
+        ODU_CACHE_TOKEN: "",
+      }),
     ).toBeNull();
     expect(
-      pushConfigOf({ ODU_CACHE_SUBSTITUTER: "https://a", ODU_CACHE_TOKEN: "t" }),
-    ).toEqual({ substituter: "https://a", token: "t" });
+      pushConfigOf({
+        ODU_CACHE_ORIGIN: "https://a",
+        ODU_CACHE_BUCKET: "m",
+        ODU_CACHE_TOKEN: "t",
+      }),
+    ).toEqual({ origin: "https://a", bucket: "m", token: "t" });
   });
 });
 
@@ -158,13 +165,13 @@ describe("a lane that pushes", () => {
       });
 
       const first = await lane.push(w.workspace, CONFIG, () => {});
-      expect(first).toEqual({ paths: 1, bytes: 4096 });
+      expect(first).toEqual({ paths: 1, bytes: 4096, durationMs: 250 });
       expect(sent).toHaveLength(1);
       expect(sent[0]?.paths).toEqual([one]);
-      // THE BUCKET, NOT THE SUBSTITUTER: a substituter may be a store's own
-      // domain that takes no push, so the push goes to the origin the cache
-      // named about itself.
-      expect(sent[0]).toMatchObject({ bucket: "main", origin: FACTS.origin });
+      // WHERE THE DAEMON SAID, and nowhere else: the lane asks no server what
+      // a URL is, because a server a repository named is exactly the thing
+      // that must not decide where a write token goes.
+      expect(sent[0]).toMatchObject({ bucket: CONFIG.bucket, origin: CONFIG.origin });
       // AND THE TOKEN, AND ONLY THE TOKEN.
       expect(sent[0]?.env).toEqual({ ODU_CACHE_TOKEN: CONFIG.token });
 

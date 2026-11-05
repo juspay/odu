@@ -140,15 +140,6 @@ function noteSuffix(note: string | null): string {
   return note === null || note === "" ? "" : ` — ${note}`;
 }
 
-/** NAR bytes as a person reads them. Two decimals under a gigabyte, because a
- *  recipe's output is routinely tens of megabytes and `0 GiB` says nothing. */
-function mib(bytes: number): string {
-  const mega = bytes / (1024 * 1024);
-  return mega >= 1024
-    ? `${(mega / 1024).toFixed(2)} GiB`
-    : `${mega.toFixed(mega >= 10 ? 0 : 1)} MiB`;
-}
-
 /**
  * WHICH NODE A RUN OPENS ON when its address names none.
  *
@@ -344,7 +335,7 @@ function NodeRow(props: {
         <Show when={props.node.pushed}>
           {(pushed) => (
             <span class="node-pushed">
-              {`pushed ${pushed().paths} path${pushed().paths === 1 ? "" : "s"} · ${mib(pushed().bytes)}`}
+              {`pushed ${pushed().paths} path${pushed().paths === 1 ? "" : "s"} · ${bytes(pushed().bytes)} · ${duration(pushed().durationMs)}`}
             </span>
           )}
         </Show>
@@ -763,6 +754,11 @@ export function LogPanel(props: {
 export function Detail(props: {
   run: RunRow | undefined;
   frame: NodesFrame | undefined;
+  /** WHERE A BUCKET'S PAGE IS, from the shell (PLAN 4.1). A route is the
+   *  SHELL's vocabulary — `packages/web-ui/src/app.tsx` is the one speller of
+   *  `#/cache/<bucket>` — and a face that wrote one itself would be a second
+   *  place a cross-row address could drift. */
+  bucketHref: (bucket: string) => string;
   /** The page's own ticking clock — the SAME one the board's ages read, so a
    *  live run's timeline grows on one interval rather than this view's second
    *  idea of now. The run row carries the origin; the clock carries the end. */
@@ -901,7 +897,7 @@ export function Detail(props: {
                     {(target) => (
                       <>
                         {"pushes to "}
-                        <a href={`#/cache/${encodeURIComponent(target().bucket)}`}>
+                        <a class="link" href={props.bucketHref(target().bucket)}>
                           {target().bucket}
                         </a>
                         {noteSuffix(push().note)}

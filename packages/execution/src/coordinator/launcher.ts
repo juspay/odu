@@ -19,7 +19,15 @@
  */
 
 import { dirname, join } from "node:path";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { runSocketPath } from "@odu/run-client/dial";
 import { RUN_FILES } from "@odu/run-history/paths";
 import {
@@ -45,7 +53,10 @@ import {
 export interface LaunchPush {
   /** The URL the repository substitutes from, as its `flake.nix` names it. */
   readonly substituter: string;
-  /** The bucket that substituter serves, as its `nix-cache-info` says. */
+  /** `Odu-Origin`: where the push is aimed. The DAEMON resolved it from its
+   *  own bucket — nothing read it back off a server the repository named. */
+  readonly origin: string;
+  /** The bucket that substituter serves, as this daemon advertises it. */
   readonly bucket: string;
   /** How the token is revoked. Recorded on the manifest; the token is not. */
   readonly tokenId: string;
@@ -53,6 +64,11 @@ export interface LaunchPush {
    *  {@link LaunchRequest.push}. */
   readonly token: string;
 }
+
+/** How long a push note may be on an argv and in a manifest. Every byte of it
+ *  comes from a repository's own `nix` output, so it is bounded where it is
+ *  built (`@odu/cache/push`) AND where it is handed on. */
+export const PUSH_NOTE_MAX = 512;
 
 /** What a face asks for. Every field is decided before anything is started, so
  *  the request can be recorded, replayed, or refused without a process
@@ -200,11 +216,16 @@ export function launchArgv(request: LaunchRequest): string[] {
   // and no `--push-token`: an argv is public on the machine that runs it.
   if (request.push !== null) {
     args.push("--push", request.push.substituter);
+    args.push("--push-origin", request.push.origin);
     args.push("--push-bucket", request.push.bucket);
     args.push("--push-token-id", request.push.tokenId);
   }
   if (request.pushNote !== null) {
-    args.push("--push-note", request.pushNote);
+    // TRUNCATED HERE TOO. The note is built from a repository's own `nix`
+    // output; an argv has a per-argument ceiling (`MAX_ARG_STRLEN`), and a
+    // launch that failed because somebody wrote a long error message would
+    // look like a bug in odu.
+    args.push("--push-note", request.pushNote.slice(0, PUSH_NOTE_MAX));
   }
   return args;
 }
@@ -289,13 +310,31 @@ async function attemptLaunch(
   // exits (as this one does, the moment the run registers) must not leave the
   // child writing into a pipe nobody is reading. See `spawnCoordinator`.
   // THE RUN'S WRITE TOKEN, left where only the owner can read it (PLAN 4.1).
+  //
   // Written BEFORE the spawn, because the coordinator reads it as its first
-  // act; `mode` on the open rather than a chmod after, so the file is never
-  // group-readable for even an instant.
+  // act. `mode` ALONE was not enough: it applies only when the file is
+  // created, and a plain write follows a symlink — so a pre-existing
+  // `push.token` (any mode) or a link pointing out of the directory would
+  // have silently defeated both halves of the intent. Unlink first, then
+  // create with `wx` and `O_NOFOLLOW`: the open fails rather than writing a
+  // credential somewhere nobody chose.
   if (request.push !== null) {
     const tokenPath = pushTokenPath(request.runId, request.catalog ?? {});
     mkdirSync(dirname(tokenPath), { recursive: true });
-    writeFileSync(tokenPath, request.push.token, { mode: 0o600 });
+    rmSync(tokenPath, { force: true });
+    // `O_NOFOLLOW` has no string spelling in `fs`'s flag grammar, so the
+    // numeric flags are built directly: this must FAIL on a symlink rather
+    // than write a credential through one.
+    const handle = openSync(
+      tokenPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      writeFileSync(handle, request.push.token);
+    } finally {
+      closeSync(handle);
+    }
   }
   const spawned = spawnCoordinator(
     argv,
@@ -484,4 +523,17 @@ export function takePushToken(
   } catch {
     return null;
   }
+}
+
+/**
+ * Remove a run's token file without reading it — what a caller does when the
+ * launch it wrote the file for never produced a coordinator.
+ *
+ * The token is revoked on that path too, so this is not what makes it
+ * harmless; it is what stops a plaintext credential sitting in the catalog
+ * until retention takes it, which is a long time to leave one lying around
+ * for no reason.
+ */
+export function dropPushToken(runId: string, catalog: CatalogOptions = {}): void {
+  rmSync(pushTokenPath(runId, catalog), { force: true });
 }

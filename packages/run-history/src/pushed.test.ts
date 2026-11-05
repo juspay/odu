@@ -91,6 +91,7 @@ describe("the journal's pushed event", () => {
     bucket: "kolu-r2",
     paths: 12,
     bytes: 4_194_304,
+    durationMs: 2_500,
   } as const;
 
   it("round-trips as its own arm of the event union", () => {
@@ -106,14 +107,24 @@ describe("the journal's pushed event", () => {
   it("folds to per-node counts, newest write winning", () => {
     const fold = foldJournal([
       { seq: 1, at: 1, event },
-      { seq: 2, at: 2, event: { ...event, node: "ci::docs@x86_64-linux", paths: 1, bytes: 10 } },
+      {
+        seq: 2,
+        at: 2,
+        event: { ...event, node: "ci::docs@x86_64-linux", paths: 1, bytes: 10 },
+      },
       // A RE-RUN pushed again. The reader asking "what did this node warm"
       // means the attempt that stands, so the later line replaces the first.
-      { seq: 3, at: 3, event: { ...event, paths: 13, bytes: 5_000_000 } },
+      { seq: 3, at: 3, event: { ...event, paths: 13, bytes: 5_000_000, durationMs: 40 } },
     ]);
     expect([...fold.pushed.entries()]).toEqual([
-      ["ci::build@x86_64-linux", { bucket: "kolu-r2", paths: 13, bytes: 5_000_000 }],
-      ["ci::docs@x86_64-linux", { bucket: "kolu-r2", paths: 1, bytes: 10 }],
+      [
+        "ci::build@x86_64-linux",
+        { bucket: "kolu-r2", paths: 13, bytes: 5_000_000, durationMs: 40 },
+      ],
+      [
+        "ci::docs@x86_64-linux",
+        { bucket: "kolu-r2", paths: 1, bytes: 10, durationMs: 2_500 },
+      ],
     ]);
   });
 });

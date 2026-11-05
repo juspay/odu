@@ -1,13 +1,17 @@
 /**
- * A RUN THAT WILL NOT MOVE AGAIN GIVES ITS WRITE TOKEN BACK (PLAN 4.1).
+ * A RUN NOBODY IS SERVING ANY MORE GIVES ITS WRITE TOKEN BACK (PLAN 4.1).
  *
  * The revoke is driven off the PROJECTION rather than off the coordinator, and
  * that is the design: the coordinator writes `finalized` and then dies, and it
- * holds no authority over a cache in any case. Three things follow, and all
- * three are here:
+ * holds no authority over a cache in any case. Four things follow, and all
+ * four are here:
  *
  *   - a RUNNING run keeps its token, because its lane is still pushing;
- *   - a SETTLED one gives it back, whatever the outcome;
+ *   - a LINGERING one keeps it too. `--linger` exists so a node can be rerun
+ *     after the run drains, and revoking at first settle met that rerun with a
+ *     dead credential — reddening a node for a credential reason, on the one
+ *     path linger was added for;
+ *   - a run that RELEASED its endpoint gives it back, whatever the outcome;
  *   - a run whose OWNER IS LOST gives it back too — nobody wrote `finalized`
  *     there, and keying on that line alone would leave the credential of every
  *     crashed coordinator live until it expired.
@@ -20,6 +24,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { CI_CONTRACT_VERSION } from "@odu/service-client/surface";
 import { CI_ROW } from "@odu/service-client/surface";
 import { appendEvent, writeVerdict } from "@odu/run-history/store";
+import { releaseOwnership } from "@odu/run-history/owner";
 import {
   crashOwner,
   makeWorld,
@@ -77,7 +82,36 @@ describe("a run's write token at the end of the run", () => {
     }
   });
 
-  it("is revoked once the run has settled, whatever its outcome", async () => {
+  it("is KEPT by a lingering coordinator, whose reruns still push", async () => {
+    world = makeWorld();
+    const run = registerFixtureRun(world, {
+      repoRoot: "/code/app",
+      sha: SHA,
+      push: PUSH,
+    });
+    appendEvent(run.handle, run.token, { kind: "finalized", outcome: "passed" });
+    writeVerdict(run.handle, run.token, {
+      runId: run.runId,
+      outcome: "passed",
+      startedAt: 1_000,
+      finishedAt: 2_000,
+      failed: [],
+      errored: [],
+      cancelled: [],
+      unposted: [],
+    });
+    // SETTLED, and still SERVED: the owner is alive and its endpoint stands,
+    // which is exactly what `--linger` leaves behind.
+    const ports = recordingPorts();
+    const { close } = project(world, ports);
+    try {
+      expect(ports.pushRevokes).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("is revoked once the coordinator has let its endpoint go, whatever the outcome", async () => {
     world = makeWorld();
     const run = registerFixtureRun(world, {
       repoRoot: "/code/app",
@@ -96,6 +130,10 @@ describe("a run's write token at the end of the run", () => {
       cancelled: [],
       unposted: [],
     });
+
+    // THE CLEAN EXIT: `releaseOwnership` keeps the epoch and drops the
+    // endpoint, which is what says the live surface is gone.
+    releaseOwnership(run.token);
 
     const ports = recordingPorts();
     const { close } = project(world, ports);
@@ -148,6 +186,7 @@ describe("a run's write token at the end of the run", () => {
       cancelled: [],
       unposted: [],
     });
+    releaseOwnership(run.token);
     const ports = recordingPorts();
     const built = createOduService({
       ports,
@@ -180,6 +219,7 @@ describe("a run's write token at the end of the run", () => {
       push: { target: null, note: "no flake.nix" },
     });
     appendEvent(run.handle, run.token, { kind: "finalized", outcome: "passed" });
+    releaseOwnership(run.token);
     const ports = recordingPorts();
     const { close } = project(world, ports);
     try {

@@ -54,8 +54,13 @@ describe("a sharded recipe's environment", () => {
     const commands = Object.values(state.nodes).map((node) => node.command);
     expect(commands.length).toBeGreaterThan(0);
     for (const command of commands) {
+      // THE SHAPE, not every `=`: a real recipe runs
+      // `nix build --option foo=bar`, and `not.toContain("=")` would call
+      // that a leak. What must not appear is an ENV ASSIGNMENT in front of
+      // the command.
+      expect(command).not.toMatch(/(^|\s)[A-Z_]+=/);
       expect(command).not.toContain("ODU_SHARD_INDEX");
-      expect(command).not.toContain("=");
+      expect(command).not.toContain("ODU_CACHE_TOKEN");
     }
     // The recipe's own command, unchanged — and the INDEX is still readable,
     // off the node's name, which is where a shard's identity belongs.

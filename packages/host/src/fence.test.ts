@@ -129,16 +129,16 @@ const declaration = {
       // is an HTTP client of a cache (`@odu/cache/push`, the one door that is
       // not this row's server) plus the grant broker above, and it reaches no
       // database, no verb and no face. The row's own plugin names the broker
-      // tag; the board's run page links a bucket by its page URL.
-      "packages/ci/src/webPorts.ts": 12,
+      // tag. `detail.tsx` is NOT here: the run page's bucket link is a prop
+      // the shell fills, so the face spells no row's route at all.
+      "packages/ci/src/webPorts.ts": 6,
       "packages/ci/src/row.ts": 3,
-      "packages/ci/src/face/detail.tsx": 1,
       // THE ENGINE, carrying the same fact to the lane: the coordinator reads
       // the run's target off its argv and the runner pushes `result*` with
       // the same client. The word is `ODU_CACHE_TOKEN` and the substituter
       // the repo named — never the cache row.
-      "packages/execution/src/coordinator/run.ts": 3,
-      "packages/execution/src/runner/pushResults.ts": 3,
+      "packages/execution/src/coordinator/run.ts": 4,
+      "packages/execution/src/runner/pushResults.ts": 4,
       // The service's own sentence for a run that pushes nowhere.
       "packages/service/src/start.ts": 1,
       // THE RUNS' OWN WORDS ABOUT WHERE A RUN PUSHES (PLAN 4.1): one line of

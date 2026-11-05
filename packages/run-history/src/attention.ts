@@ -349,7 +349,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
    *  rather than per attempt: a re-run that pushes again replaces what the
    *  previous one claimed, and a reader asking "what did this node warm"
    *  means the attempt that stands. */
-  pushed: Map<string, { bucket: string; paths: number; bytes: number }>;
+  pushed: Map<string, { bucket: string; paths: number; bytes: number; durationMs: number }>;
 } {
   let roster: string[] = [];
   let scope: RunScope | null = null;
@@ -366,7 +366,10 @@ export function foldJournal(journal: readonly JournalEntry[]): {
     string,
     { context: string; lastError: string; attempts: number }
   >();
-  const pushed = new Map<string, { bucket: string; paths: number; bytes: number }>();
+  const pushed = new Map<
+    string,
+    { bucket: string; paths: number; bytes: number; durationMs: number }
+  >();
   const key = (node: string, attempt: number): string => `${node}#${attempt}`;
   const byAttempt = new Map<string, AttemptState>();
 
@@ -466,7 +469,12 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         });
         break;
       case "pushed":
-        pushed.set(e.node, { bucket: e.bucket, paths: e.paths, bytes: e.bytes });
+        pushed.set(e.node, {
+          bucket: e.bucket,
+          paths: e.paths,
+          bytes: e.bytes,
+          durationMs: e.durationMs ?? 0,
+        });
         break;
       case "finalized":
         finalized = e.outcome;

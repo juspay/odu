@@ -281,7 +281,7 @@ if [ -z "$token" ]; then
     fail "odu push: no token — \`token:\` is empty and this is a \`push\` event, which must publish its closure. Set the input from a repository secret: odu's own workflow reads \`secrets.ODU_CACHE_TOKEN\`, and a bucket page mints a write token once."
   fi
   say "odu push: no token, so nothing was pushed. Built $count store paths; a \`$event\` event is not required to publish."
-  summary "### Cache push — \`$cache\`
+  summary "### Cache push — \`${cache:-./flake.nix}\`
 
 **Built, pushed nothing.** No token: a \`$event\` event is not required to publish, so this step built $count store path(s) and stopped."
   if [ -n "$pin_requested" ]; then

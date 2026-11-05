@@ -1,40 +1,49 @@
 /**
  * WHAT A REPOSITORY ALREADY SAID ABOUT ITS CACHE — `flake.nix`'s `nixConfig`,
- * read (PLAN 4.1).
+ * read (PLAN 4.1) — and the restraint the reading runs under.
  *
- * Two properties, and both are about somebody else's file rather than about
- * odu: Nix accepts a multi-valued setting as a space-separated STRING or as a
- * LIST and a repository may have written either, and `substituters` and
+ * Two halves. The PARSE is about somebody else's file: Nix accepts a
+ * multi-valued setting as a space-separated STRING or as a LIST and a
+ * repository may have written either, and `substituters` and
  * `extra-substituters` are two spellings of one set. Get either wrong and a
  * repo that reads from a cache is told it names none.
  *
- * The `nix eval` is injected. The arms here are about parsing an answer, and a
- * suite that shelled out to Nix to assert "a string of two URLs is two
- * substituters" would be testing Nix.
+ * The EVALUATION is about a hostile one. `flake.nix` is the least trusted
+ * input odu has — on `odu ci run` over a contributor's branch it is
+ * attacker-controlled — and it is the only repository-supplied expression that
+ * executes on the SERVICE. The cases below are the three escapes that were
+ * open: reading the daemon's environment, reading its disk, and fetching.
  */
 
 import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { oduCachesOf, readFlakeNixConfig } from "./push";
+import {
+  FLAKE_EVAL_MAX_STDERR,
+  lastLine,
+  nixEvalFlakeConfig,
+  oduCachesOf,
+  readFlakeNixConfig,
+} from "./push";
 
-/** A directory with a `flake.nix` in it — the file's CONTENT never matters
- *  here, because the evaluation is injected; its existence is the gate. */
-function withFlake(): string {
+/** A directory with a `flake.nix` in it. For the PARSE cases the file's
+ *  content never matters — the evaluation is injected — and its existence is
+ *  the gate; for the EVALUATION cases it is the subject. */
+function withFlake(source = "{ nixConfig = {}; }\n"): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-flake-"));
-  writeFileSync(join(dir, "flake.nix"), "{ nixConfig = {}; }\n");
+  writeFileSync(join(dir, "flake.nix"), source);
   return dir;
 }
 
-const evaluating = (value: unknown) => () =>
+const evaluating = (value: unknown) => async () =>
   ({ ok: true as const, json: JSON.stringify(value) });
 
 describe("reading a flake's nixConfig", () => {
-  it("answers `no flake.nix` for a directory without one", () => {
+  it("answers `no flake.nix` for a directory without one", async () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-noflake-"));
     try {
-      expect(readFlakeNixConfig(dir, evaluating({}))).toEqual({
+      expect(await readFlakeNixConfig(dir, evaluating({}))).toEqual({
         ok: false,
         reason: "no flake.nix",
       });
@@ -43,25 +52,26 @@ describe("reading a flake's nixConfig", () => {
     }
   });
 
-  it("carries the LAST line of nix's stderr, which is where the fault is", () => {
+  it("says COULD NOT READ and quotes nix, rather than blaming the flake", async () => {
     const dir = withFlake();
     try {
-      const read = readFlakeNixConfig(dir, () => ({
+      const read = await readFlakeNixConfig(dir, async () => ({
         ok: false,
         stderr: "error: attribute 'nixConfig' missing",
       }));
       expect(read).toMatchObject({ ok: false });
       if (read.ok) return;
+      expect(read.reason).toContain("could not read nixConfig");
       expect(read.reason).toContain("attribute 'nixConfig' missing");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("reads a space-separated STRING as several substituters", () => {
+  it("reads a space-separated STRING as several substituters", async () => {
     const dir = withFlake();
     try {
-      const read = readFlakeNixConfig(
+      const read = await readFlakeNixConfig(
         dir,
         evaluating({ "extra-substituters": "https://a.example https://b.example" }),
       );
@@ -76,10 +86,10 @@ describe("reading a flake's nixConfig", () => {
     }
   });
 
-  it("unions `substituters` with `extra-substituters`, without repeats", () => {
+  it("unions `substituters` with `extra-substituters`, without repeats", async () => {
     const dir = withFlake();
     try {
-      const read = readFlakeNixConfig(
+      const read = await readFlakeNixConfig(
         dir,
         evaluating({
           substituters: ["https://a.example"],
@@ -97,10 +107,10 @@ describe("reading a flake's nixConfig", () => {
     }
   });
 
-  it("reads both spellings of the trusted keys", () => {
+  it("reads both spellings of the trusted keys", async () => {
     const dir = withFlake();
     try {
-      const read = readFlakeNixConfig(
+      const read = await readFlakeNixConfig(
         dir,
         evaluating({
           "trusted-public-keys": "one:AAA=",
@@ -115,10 +125,10 @@ describe("reading a flake's nixConfig", () => {
     }
   });
 
-  it("refuses a nixConfig that is not an attrset", () => {
+  it("refuses a nixConfig that is not an attrset", async () => {
     const dir = withFlake();
     try {
-      expect(readFlakeNixConfig(dir, evaluating(["a"]))).toEqual({
+      expect(await readFlakeNixConfig(dir, evaluating(["a"]))).toEqual({
         ok: false,
         reason: "flake.nix has no nixConfig attrset",
       });
@@ -126,6 +136,81 @@ describe("reading a flake's nixConfig", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("what `nix` is published saying", () => {
+  it("keeps the LAST line, which is where the fault is, and bounds it", () => {
+    expect(lastLine("trace: a\ntrace: b\nerror: the real one")).toBe("error: the real one");
+    const long = `error: ${"x".repeat(5_000)}`;
+    const said = lastLine(long);
+    // THE REASON BECOMES AN ARGV and a durable manifest field, and a
+    // repository controls every byte of it. A multi-hundred-KB error line
+    // would otherwise fail the launch with an unrelated-looking error.
+    expect(said.length).toBeLessThanOrEqual(FLAKE_EVAL_MAX_STDERR + 32);
+    expect(said).toContain("truncated");
+  });
+});
+
+/** The restrained evaluation against a REAL `nix`. These are the escapes the
+ *  first shape left open, so they are asserted against the thing that would
+ *  have been exploited rather than against a stub. */
+describe("evaluating a hostile flake.nix", () => {
+  const evaluate = async (source: string) => {
+    const dir = withFlake(source);
+    try {
+      // THE ENVIRONMENT IS AN ARGUMENT, and this is the case that proves
+      // what the evaluator does with it: a secret in the parent is not a
+      // secret the expression can reach.
+      return await nixEvalFlakeConfig(process.env)(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("evaluates an honest nixConfig", async () => {
+    const answered = await evaluate(
+      '{ nixConfig = { extra-substituters = [ "https://cache.example/main" ]; }; }\n',
+    );
+    expect(answered).toMatchObject({ ok: true });
+    if (!answered.ok) return;
+    expect(JSON.parse(answered.json)).toEqual({
+      "extra-substituters": ["https://cache.example/main"],
+    });
+  }, 120_000);
+
+  it("cannot read the daemon's environment", async () => {
+    // `$ODU_ROOT_TOKEN` lives in the daemon's environment, and this value is
+    // PUBLISHED: it reaches the run's setup log, the manifest and `run_read`.
+    process.env.ODU_FLAKE_EVAL_PROBE = "the-root-token";
+    try {
+      const answered = await evaluate(
+        '{ nixConfig = { extra-substituters = [ (builtins.getEnv "ODU_FLAKE_EVAL_PROBE") ]; }; }\n',
+      );
+      expect(answered).toMatchObject({ ok: true });
+      if (!answered.ok) return;
+      expect(answered.json).not.toContain("the-root-token");
+    } finally {
+      delete process.env.ODU_FLAKE_EVAL_PROBE;
+    }
+  }, 120_000);
+
+  it("cannot read a file outside the checkout", async () => {
+    const answered = await evaluate(
+      "{ nixConfig = { extra-substituters = [ (builtins.readFile /etc/hostname) ]; }; }\n",
+    );
+    expect(answered).toMatchObject({ ok: false });
+    if (answered.ok) return;
+    expect(answered.stderr).toContain("restricted mode");
+  }, 120_000);
+
+  it("cannot fetch", async () => {
+    const answered = await evaluate(
+      '{ nixConfig = { extra-substituters = [ (builtins.fetchurl "https://example.com/") ]; }; }\n',
+    );
+    expect(answered).toMatchObject({ ok: false });
+    if (answered.ok) return;
+    expect(answered.stderr).toContain("restricted mode");
+  }, 120_000);
 });
 
 describe("which substituters are odu caches", () => {
@@ -137,7 +222,7 @@ describe("which substituters are odu caches", () => {
     const asked: string[] = [];
     const send = (async (url: string) => {
       asked.push(url);
-      return url.startsWith("https://cache.ours")
+      return url === "https://cache.ours.example/main/nix-cache-info"
         ? new Response(INFO, { status: 200 })
         : new Response("StoreDir: /nix/store\n", { status: 200 });
     }) as unknown as typeof fetch;
@@ -152,12 +237,49 @@ describe("which substituters are odu caches", () => {
         bucket: "main",
       },
     ]);
-    // Both were asked — the resolution is a probe per substituter, and a cache
-    // that is not odu's is learnt rather than assumed from its hostname.
     expect(asked).toEqual([
       "https://cache.nixos.org/nix-cache-info",
       "https://cache.ours.example/main/nix-cache-info",
     ]);
+  });
+
+  it("dials neither a `file:` URL nor more than the cap", async () => {
+    // Bun's `fetch` serves `file:` URLs, and the list comes from a repository.
+    const asked: string[] = [];
+    const send = (async (url: string) => {
+      asked.push(url);
+      return new Response(INFO, { status: 200 });
+    }) as unknown as typeof fetch;
+    await oduCachesOf(
+      [
+        "file:///etc/passwd",
+        ...Array.from({ length: 20 }, (_, i) => `https://many${i}.example`),
+      ],
+      { send },
+    );
+    expect(asked.some((url) => url.startsWith("file:"))).toBe(false);
+    expect(asked.length).toBe(8);
+  });
+
+  it("does not follow a redirect to a URL nobody vetted", async () => {
+    const seen: RequestInit[] = [];
+    const send = (async (_url: string, init: RequestInit) => {
+      seen.push(init);
+      return new Response(INFO, { status: 200 });
+    }) as unknown as typeof fetch;
+    await oduCachesOf(["https://cache.ours.example/main"], { send });
+    expect(seen[0]?.redirect).toBe("manual");
+  });
+
+  it("gives up on a substituter that accepts and never answers", async () => {
+    // Without the deadline a `run.start` parks forever on one hostile URL.
+    const send = ((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })) as unknown as typeof fetch;
+    expect(
+      await oduCachesOf(["https://silent.example"], { send, timeoutMs: 10 }),
+    ).toEqual([]);
   });
 
   it("drops a substituter that will not answer at all", async () => {

@@ -78,6 +78,7 @@ import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { asHostSlot, fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { takePushToken } from "./launcher";
+import type { PushedFact } from "../runner/pushResults";
 import {
   ExecutionRoster,
   type ExecutionLane,
@@ -181,15 +182,19 @@ export interface RunArgs {
   requestId?: string;
   /**
    * WHERE THIS RUN PUSHES WHAT IT BUILDS (PLAN 4.1) — the substituter the
-   * checkout's `flake.nix` reads from, the bucket it serves, and the id the
-   * run's write token is revoked by.
+   * checkout's `flake.nix` reads from, the ORIGIN and bucket the daemon
+   * resolved it to, and the id the run's write token is revoked by.
+   *
+   * `origin` and `bucket` come from the daemon's own record of what it
+   * serves, never from a `nix-cache-info` body: the lane pushes to them
+   * directly and asks no server what it is.
    *
    * The TOKEN is not here: the launcher left it in `runs/<id>/push.token` and
    * this process reads and unlinks it at startup. Absent for a run that pushes
-   * nothing, which is every run whose checkout names no odu cache the daemon
-   * that launched it serves.
+   * nothing, which is every run whose checkout names no cache the daemon that
+   * launched it serves.
    */
-  push?: { substituter: string; bucket: string; tokenId: string };
+  push?: { substituter: string; origin: string; bucket: string; tokenId: string };
   /** The ONE line the setup node's log says about pushing — a skip reason, or
    *  the `trusted-public-keys` warning. Absent when there is nothing to say. */
   pushNote?: string;
@@ -642,14 +647,19 @@ async function orchestrate(
   // same answer as a checkout that names no cache.
   const pushToken = args.push === undefined ? null : takePushToken(args.runId);
   const pushing = args.push !== undefined && pushToken !== null ? args.push : null;
-  /** The two variables a lane's recipe node carries so the runner can push what
-   *  it built. The runner asks the substituter's own `nix-cache-info` which
-   *  bucket and which origin that is, exactly as `odu cache push --cache` does.
+  /** The variables a lane's recipe node carries so the runner can push what it
+   *  built: the RESOLVED origin and bucket, and the run's token. The lane asks
+   *  no server what the substituter is — the daemon already knew, and a body
+   *  that answered otherwise is exactly the thing that must not be believed.
    *  Empty for a run that pushes nothing, so no task gains a key. */
   const pushEnv: Record<string, string> =
     pushing === null || pushToken === null
       ? {}
-      : { ODU_CACHE_SUBSTITUTER: pushing.substituter, ODU_CACHE_TOKEN: pushToken };
+      : {
+          ODU_CACHE_ORIGIN: pushing.origin,
+          ODU_CACHE_BUCKET: pushing.bucket,
+          ODU_CACHE_TOKEN: pushToken,
+        };
   /** Every task, with the push environment on it. Applied HERE, once, where a
    *  lane's task list is first built — so a shard lane, an extend and a
    *  resurrection all carry it without a second place remembering to. */
@@ -1908,19 +1918,24 @@ async function orchestrate(
     }
   };
 
-  /** Nodes whose push has already been journalled. A lane republishes its
-   *  whole state on every frame, so without this one push would be written to
-   *  the journal once per subsequent node. */
-  const pushJournalled = new Set<string>();
+  /** What each node's push has already been journalled AS. A lane republishes
+   *  its whole state on every frame, so a bare "seen" set would write one
+   *  push once per subsequent node — and keying it by node ALONE meant a
+   *  re-run's push was never written at all, leaving the journal (and so
+   *  `run_read`, once the coordinator is gone) on the first attempt's counts
+   *  while the live board showed the new ones. The VALUE is the key. */
+  const pushJournalled = new Map<string, string>();
   /**
    * A lane node says it pushed (PLAN 4.1): put the counts on the public node
    * so the board can paint them, and the fact in the journal so a run read a
    * week later still says what it warmed.
    */
-  const notePushed = (id: string, pushed: { paths: number; bytes: number }): void => {
+  const notePushed = (id: string, pushed: PushedFact): void => {
     updateNode(id, { pushed });
-    if (pushing === null || pushJournalled.has(id)) return;
-    pushJournalled.add(id);
+    if (pushing === null) return;
+    const stamp = `${pushed.paths}:${pushed.bytes}:${pushed.durationMs}`;
+    if (pushJournalled.get(id) === stamp) return;
+    pushJournalled.set(id, stamp);
     history.pushed({ node: id, bucket: pushing.bucket, ...pushed });
   };
 
@@ -2001,10 +2016,15 @@ async function orchestrate(
       );
       if (args.pushNote !== undefined) appendLocal(id, `[odu] ${args.pushNote}\n`);
     } else {
-      appendLocal(
-        id,
-        `[odu] not pushing: ${args.pushNote ?? "this run was launched with no cache target"}\n`,
-      );
+      // THE REASON THAT ACTUALLY APPLIES. `pushNote` is the RESOLUTION's one
+      // line, and when a target WAS resolved it is the trusted-key warning —
+      // which read as "not pushing: … is pushed to …" on the one path where a
+      // target exists and its token did not arrive.
+      const why =
+        args.push !== undefined
+          ? "the run's write token was not handed over"
+          : (args.pushNote ?? "this run was launched with no cache target");
+      appendLocal(id, `[odu] not pushing: ${why}\n`);
     }
   };
 

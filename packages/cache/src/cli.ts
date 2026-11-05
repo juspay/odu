@@ -47,6 +47,7 @@ import {
   normalizeOrigin,
   oduCachesOf,
   pushToCache,
+  nixEvalFlakeConfig,
   readFlakeNixConfig,
   saveCredential,
 } from "./push";
@@ -474,7 +475,19 @@ async function pushCommand(rest: string[]): Promise<number> {
         process.stderr.write(`odu: cache push needs at least one path\n${CACHE_USAGE}`);
         return 1;
       }
-      const inferred = await inferredCache(values["token-file"], json);
+      // `--origin` NAMES THE SAME THING THE FLAKE DOES, and the inference is
+      // about to overwrite it. Refused out loud, exactly as `--cache
+      // --origin` is: a flag that is silently ignored is worse than one that
+      // conflicts.
+      if (values.origin !== undefined) {
+        process.stderr.write(
+          "odu: --origin needs a bucket to go with it — `odu cache push <bucket> " +
+            "--origin <url>`. With neither, the substituter is read from " +
+            "./flake.nix and names its own origin.\n",
+        );
+        return 1;
+      }
+      const inferred = await inferredCache(json);
       if ("error" in inferred) {
         process.stderr.write(`odu: ${inferred.error}\n`);
         return 1;
@@ -538,17 +551,28 @@ async function pushCommand(rest: string[]): Promise<number> {
  * THE CACHE `./flake.nix` ALREADY NAMES (PLAN 4.1) — `odu cache push` with no
  * `--cache` and no bucket.
  *
- * The same two readings the service makes at `run.start`, less the grant: this
- * is a CLIENT, with no daemon and no bucket of its own, so "is it an odu
- * cache" is the whole of the test. Two of them is a refusal naming both, for
- * the reason the run's resolver refuses: a repository builds for one cache,
- * and choosing would be this command inventing a policy.
+ * The same reading the service makes at `run.start`, less the grant: this is
+ * a CLIENT, with no daemon and no bucket of its own, so "is it an odu cache"
+ * is the whole of the test. Two of them is a refusal naming both, for the
+ * reason the run's resolver refuses: a repository builds for one cache, and
+ * choosing would be this command inventing a policy.
+ *
+ * **The probe is ANONYMOUS, and that is the whole difference from `--cache`.**
+ * With `--cache` the OPERATOR typed the URL — naming a cache is trusting it —
+ * and the push's own token rides one request early so a private bucket is
+ * discoverable. Here the REPOSITORY names the URL, so sending `$ODU_CACHE_TOKEN`
+ * or a `--token-file` would hand the operator's credential to whatever a flake
+ * points at, including `cache.nixos.org`, which most of them do. The cost is
+ * that a PRIVATE bucket cannot be inferred — its `nix-cache-info` is a 404 to
+ * an anonymous reader — and the refusal says to pass `--cache`.
  */
 async function inferredCache(
-  tokenFile: string | undefined,
   json: boolean,
 ): Promise<{ bucket: string; origin: string } | { error: string }> {
-  const config = readFlakeNixConfig(process.cwd());
+  const config = await readFlakeNixConfig(
+    process.cwd(),
+    nixEvalFlakeConfig(process.env),
+  );
   if (!config.ok) {
     return {
       error:
@@ -556,20 +580,13 @@ async function inferredCache(
         "bucket with `<bucket> --origin <url>`",
     };
   }
-  const found: { substituter: string; bucket: string; origin: string }[] = [];
-  for (const substituter of config.config.substituters) {
-    // THE PUSH'S OWN TOKEN, ONE REQUEST EARLIER, for the reason `--cache`
-    // sends one: a private bucket answers its `nix-cache-info` to nobody. Per
-    // substituter, because the credential is keyed by origin and these are
-    // different origins.
-    const token = await discoveryToken(process.env, substituter, tokenFile);
-    for (const cache of await oduCachesOf([substituter], { token })) found.push(cache);
-  }
+  const found = await oduCachesOf(config.config.substituters);
   const one = found[0];
   if (one === undefined) {
     return {
       error:
-        "no substituter in ./flake.nix nixConfig is an odu cache — name one with " +
+        "no substituter in ./flake.nix nixConfig answered as an odu cache — a " +
+        "PRIVATE bucket answers its nix-cache-info to nobody, so name it with " +
         "`--cache <substituter>`",
     };
   }

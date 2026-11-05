@@ -180,16 +180,28 @@ On a client, trust the bucket — the key `bucket_create` printed:
 
 **A run pushes to the cache its repository already reads from.** That
 `extra-substituters` line is the whole declaration: `odu ci run` evaluates the
-checkout's `flake.nix` `nixConfig`, asks each substituter's `nix-cache-info`
-which of them are odu caches, and pushes every recipe's `result*` closure to
-the one this daemon serves. Nothing goes in any recipe, no token goes in the
-repository, and the bucket name is never written twice. The run's write token
-is minted for that run, scoped to that one bucket, expires, and is revoked when
-the run settles — a push that fails makes the node RED, because green means
-warmed. A repository that names an odu cache this daemon does not serve is told
-once, in `_ci-setup`, and runs as before; one that names two is refused at
-start, because a repository builds for one cache. `run_read` answers `push`:
-the bucket and how much landed, or `target: null` and the reason.
+checkout's `flake.nix` `nixConfig` and pushes every recipe's `result*` closure
+to the substituter among them that **this daemon itself advertises** — the
+bucket's URL under the daemon's public origin, or a domain bound to it. The
+decision is made from the URL against the row's own addresses; nothing a
+server says about itself is believed, so a flake pointing at a host somebody
+else runs cannot collect a credential for a bucket here. Nothing goes in any
+recipe, no token goes in the repository, and the bucket name is never written
+twice. The run's write token is minted for that run, scoped to that one
+bucket, expires after 24 hours as a backstop and is revoked as soon as nothing
+is serving the run — a lingering coordinator keeps it, because a rerun still
+pushes. A push that fails makes the node RED, because green means warmed. A
+repository that names a substituter this daemon does not serve is told once,
+in `_ci-setup`, and runs as before; one that names two it does serve is
+refused at start, because a repository builds for one cache — except on a
+REPLAY, which runs without pushing rather than refusing to replay. `run_read`
+answers `push`: the bucket and how much landed, or `target: null` and the
+reason.
+
+Until organisations land, the bound on all of this is the operator's: there is
+no row saying which repository owns which bucket, so any checkout this daemon
+runs may push to any bucket it serves. `run.start` only ever reaches a
+checkout the operator handed it.
 
 A bucket can keep its objects **on S3 instead of the server's disk** — Cloudflare R2, AWS, Garage or versitygw. Declare the store and name it at creation:
 
@@ -559,7 +571,7 @@ odu mcp
 | `ci protect` | Configure GitHub required checks; preview with `--dry-run` | **Maintenance** → **Apply protection** |
 | `cache use <bucket>` | Print the nix.conf settings, a `nixConfig` block and netrc for a bucket | **Cache** |
 | `cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — (a machine's disk) |
-| `cache push <bucket> <path>…`, `cache push --cache <substituter> <path>…`, `cache push <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--cache` reads the push origin and the bucket off that cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig` (two odu caches there is a refusal). `--pin NAME` re-points that pin at the closure it landed | — (a build box's job) |
+| `cache push <bucket> <path>…`, `cache push --cache <substituter> <path>…`, `cache push <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--cache` reads the push origin and the bucket off that cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig` and probed ANONYMOUSLY — a repository named that URL, so no token is sent to it, and a private bucket must be named with `--cache` (two odu caches there is a refusal). `--pin NAME` re-points that pin at the closure it landed | — (a build box's job) |
 | `auth login <origin>` | Save a personal access token in `~/.config/odu/auth/credentials` | — (a machine's disk) |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport | — |
 

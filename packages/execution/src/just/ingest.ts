@@ -26,6 +26,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { posix } from "node:path";
 import type { PipelineSpec, TaskSpec } from "../common/spec";
 import { validatePipeline } from "../common/spec";
 
@@ -40,6 +41,15 @@ interface DumpRecipe {
 interface DumpModule {
   recipes: Record<string, DumpRecipe>;
   modules: Record<string, DumpModule>;
+  /** Where this module's justfile lives, relative to the root one — `""` for
+   *  the root itself. `just` runs a module's recipe HERE. */
+  module_path?: string;
+  settings?: {
+    /** `set working-directory := …`, relative to the module's own directory. */
+    working_directory?: string | null;
+    /** `set no-cd`, which pins every recipe to the invocation directory. */
+    no_cd?: boolean;
+  };
 }
 
 interface FlatRecipe {
@@ -138,6 +148,42 @@ function osAttributes(recipe: DumpRecipe): string[] {
     (attr): attr is string =>
       typeof attr === "string" && attr in OS_ATTR_MATCHERS,
   );
+}
+
+/**
+ * WHERE `just` WILL RUN THIS RECIPE, relative to the workspace root — or
+ * `null` when that IS the workspace root.
+ *
+ * A node's command is `just --no-deps <namepath>` from the workspace, and
+ * `just` does the chdir itself, so nothing about EXECUTION needs this. What
+ * needs it is PLAN 4.1: a recipe's `result*` links land in the directory it
+ * ran in, and for a module recipe that is the module's own directory — the
+ * shape `mod ci 'ci/mod.just'` gives, which is the shape odu itself ships. A
+ * glob of the workspace root alone would find nothing there and say nothing.
+ *
+ * Three rules, and `just`'s own order between them:
+ *
+ *   - a MODULE's recipe runs in the module's directory (`module_path`);
+ *   - `set working-directory := X` moves that, relative to it;
+ *   - `[no-cd]` on the recipe, or `set no-cd` on the module, cancels both and
+ *     leaves the recipe in the directory `just` was invoked from — which, for
+ *     every node odu runs, is the workspace root.
+ */
+export function workdirOf(module: DumpModule, recipe: DumpRecipe): string | null {
+  const noCd =
+    module.settings?.no_cd === true ||
+    recipe.attributes.some((attr) => attr === "no-cd");
+  if (noCd) return null;
+  const moduleDir = module.module_path ?? "";
+  const declared = module.settings?.working_directory ?? null;
+  const resolved =
+    declared === null || declared === ""
+      ? moduleDir
+      : // `posix` because this is a path INSIDE a repository, normalised the
+        // way the justfile wrote it; the lane joins it onto its own workspace.
+        posix.normalize(posix.join(moduleDir, declared));
+  const relative = resolved.replace(/^\.?\/*/, "").replace(/\/+$/, "");
+  return relative === "" || relative === "." ? null : relative;
 }
 
 /** Does a recipe with these OS-family attributes run on `platform`? Empty ⇒
@@ -244,6 +290,7 @@ export function pipelineFromDump(
   const tasks: TaskSpec[] = [...reachable.values()].map(
     ({ recipe, module }) => {
       const shards = shardCount(recipe);
+      const workdir = workdirOf(module, recipe);
       return {
         id: recipe.namepath,
         name: recipe.namepath,
@@ -252,6 +299,7 @@ export function pipelineFromDump(
           .map((dep) => resolveDep(module, dep.recipe)?.recipe.namepath)
           .filter((np): np is string => np !== undefined && reachable.has(np)),
         os: osAttributes(recipe),
+        ...(workdir === null ? {} : { workdir }),
         ...(shards === undefined ? {} : { shards }),
       };
     },

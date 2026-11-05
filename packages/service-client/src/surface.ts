@@ -161,6 +161,9 @@ export const HOST_CONTRACT_VERSION = "2.5";
  * host's version, not this one.
  *
  * 2.4: where the composed wire stood when each row took a version of its own.
+ * 2.5: a run's `push` — where it pushes and what it warmed — on a board row
+ *      and on `run_read`/`run_wait`, and `pushed` on a node (PLAN 4.1). Three
+ *      optional output fields; additive.
  */
 export const CI_CONTRACT_VERSION = "2.5";
 
@@ -684,15 +687,15 @@ export const RunRowSchema = Schema.Struct({
    * with a target, `note` carries the `trusted-public-keys` warning when there
    * is one. `optionalKey`, so a run recorded before this is a row without it
    * rather than a row claiming it pushed nowhere.
+   *
+   * The token's ID is deliberately ABSENT. It is on the MANIFEST, because the
+   * service revokes by it; it is a revocation handle, and a board row is read
+   * by every client that can list runs.
    */
   push: Schema.optionalKey(
     Schema.Struct({
       target: Schema.NullOr(
-        Schema.Struct({
-          substituter: Schema.String,
-          bucket: Schema.String,
-          tokenId: Schema.String,
-        }),
+        Schema.Struct({ substituter: Schema.String, bucket: Schema.String }),
       ),
       note: Schema.NullOr(Schema.String),
     }),
@@ -740,7 +743,13 @@ export const RunNodeSchema = Schema.Struct({
    *  target, a recipe that built no `result`, or one whose links an earlier
    *  node had already sent. */
   pushed: Schema.optionalKey(
-    Schema.Struct({ paths: Schema.Int, bytes: Schema.Int }),
+    Schema.Struct({
+      paths: Schema.Int,
+      bytes: Schema.Int,
+      /** How long the push took, SEPARATE from the node's own `durationMs`,
+       *  which stays the recipe's time. */
+      durationMs: Schema.Int,
+    }),
   ),
 });
 export type RunNode = typeof RunNodeSchema.Type;

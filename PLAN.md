@@ -54,8 +54,9 @@ object storage plus a lane pool. Hosting comes later, at a monthly price.
 
 - **Own data plane**, in TypeScript/Bun in this monorepo. Odu does not wrap
   Attic, celler or niks3.
-- **Pushes come from a post-build hook** on lane hosts. Explicit push is the
-  fallback.
+- **Pushes come from the RUN**, to the cache the repository already reads from
+  (4.1). Explicit push stays for a machine with no run behind it; the host
+  hook is deferred (4.3).
 - **Identity is a GitHub App.** Personal tokens cover non-humans; OIDC
   (Google) comes later for internal teams.[^identity]
 - **CI is triggered by forge webhooks**, and the CI-tagged justfile stays the
@@ -338,7 +339,7 @@ What each step delivers:
 | The first database in the tree | A small repository layer, so Postgres (6.1) is a swap |
 | Server mode touches every verb | Loopback mode's unchanged tests are the regression guard |
 | One box serving many developers | Reads leave odu in 2.8 |
-| Run-scoped push relaxes "lanes hold no credentials" | Scoped, write-only, run-lifetime tokens; the hook stays recommended |
+| Run-scoped push relaxes "lanes hold no credentials" | Scoped, write-only, run-lifetime tokens, revoked when nothing serves the run |
 | No chunking | Deliberate[^chutney]; revisit only if storage cost dominates |
 | Bun streaming backpressure | Measured, not assumed[^bun]; 2.8 takes odu off the read path anyway |
 
@@ -636,23 +637,36 @@ Commits and PR bodies use the earlier names.
     and non-NixOS hosts get documentation. The daemon runs the hook, so it
     cannot know which repo asked: one bucket per host, chosen by the host.
 
-[^runpush]: Target resolution at `run.start`, on the service: `nix eval --json
-    -f flake.nix nixConfig` (a plain attrset, no inputs fetched), then
-    `nix-cache-info` of each `substituters`/`extra-substituters` entry; those
-    answering `Odu-Bucket` are odu caches. **The interim write grant, until
-    orgs land in 3.1, is *this odu serves that bucket*:** `Odu-Origin` is the
-    daemon's own origin AND the bucket exists here. Another odu's cache is
-    skipped with `reads <url>, served elsewhere`; a non-odu substituter is
-    ignored in silence. None means no push; two is refused with both URLs,
-    because a repo builds for one cache — no override key until someone hits
-    this. The published key must appear in `trusted-public-keys`, else a
-    warning. `LaunchRequest` gains `push`; the service mints a write-only,
-    single-bucket token that expires with the run; the runner pushes each
-    recipe's `result*` closure through 2.9's direct upload, and a push that
-    fails reddens its node. The token is minted by the cache row for the ci
-    row through a `@odu/cordis` broker — no principal, no root token — and
-    revoked when the service's projection sees the run settle. The GitHub
-    Action gains the same inference, so its `cache:` input becomes optional.
+[^runpush]: Target resolution at `run.start`, on the service. `nix eval` of
+    the checkout's `nixConfig` — a plain attrset, no inputs fetched — then
+    **the URL rule: a substituter is a target when it is one this daemon
+    ADVERTISES for a bucket it serves** (the path form under its public
+    origin, a bucket's own domain, or a public bucket's store URL), confirmed
+    against what the cache row publishes. Nothing in a `nix-cache-info` body
+    decides anything: the probe shape let a flake naming an attacker's host
+    claim to be any bucket here, collect a write token for it, and have that
+    token posted to the attacker's server. The URL rule also resolves a
+    PRIVATE bucket, which an anonymous probe never could. The evaluation runs
+    under `restrict-eval`, with `allow-import-from-derivation false`, in an
+    explicit minimal environment and on a process-group deadline, because
+    `flake.nix` is the least trusted input odu has. None means no push; two is
+    refused with both URLs, because a repo builds for one cache — no override
+    key until someone hits this. The published key must appear in
+    `trusted-public-keys`, else a warning. **The interim bound, until orgs
+    land in 3.1, is the OPERATOR's:** any checkout this daemon runs may push
+    to any bucket it serves, because no row yet says which repository owns
+    which bucket — which is why `run.start` only reaches here for a checkout
+    the operator already handed it. `LaunchRequest` gains `push`; the service
+    mints a write-only, single-bucket token that expires with the run and
+    carries the RESOLVED origin and bucket to the lane, so the runner dials
+    nothing it was not told to; it pushes each recipe's `result*` closure —
+    globbed where the recipe actually ran — through 2.9's direct upload, and a
+    push that fails reddens its node. The token is minted by the cache row for
+    the ci row through a `@odu/cordis` broker (no principal, no root token),
+    kept out of the recipe's own environment, and revoked when the projection
+    sees nothing serving the run any more — not at first settle, which would
+    meet a `--linger` rerun with a dead credential. The GitHub Action gains the
+    same inference, so its `cache:` input becomes optional.
 
 [^pins]: The catalog records path ↔ run ↔ commit at push time; the bucket
     page's grouped Paths table shows it per group. `odu:pin` pins through the

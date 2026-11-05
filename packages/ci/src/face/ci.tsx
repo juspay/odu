@@ -76,6 +76,10 @@ export interface CiFaceProps {
   call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
   /** Move the address. The shell owns the router, so the face asks. */
   onRoute: (next: CiRoute) => void;
+  /** WHERE A BUCKET'S PAGE IS. The shell owns every cross-row address, the
+   *  way it owns the router: a run's page links the bucket it pushes to
+   *  (PLAN 4.1) and does not get to spell `#/cache/<name>` itself. */
+  bucketHref: (bucket: string) => string;
   /** The board's facts, built once by the shell so the tab keeps counting while
    *  another row is on screen. */
   ambient: CiAmbient;
@@ -739,6 +743,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
             run={selectedRun()}
             canRun={props.canRun}
             frame={frame()}
+            bucketHref={props.bucketHref}
             now={now()}
             pending={nodesSub.pending()}
             error={nodesSub.error()}

@@ -54,6 +54,7 @@ import {
   BucketDomains,
   type BucketDomains as BucketDomainsFacts,
   CacheGrants,
+  type GrantedBucket,
   CachePurge,
   Log,
   Metrics,
@@ -155,6 +156,9 @@ export interface CacheServer {
   /** The substituter URL for one bucket, as the cache row publishes it — the
    *  same string the board's row carries, for a route that takes no root token. */
   readonly substituterUrl: (name: string) => string;
+  /** WHICH BUCKET A SUBSTITUTER URL NAMES (PLAN 4.1), decided from the URL
+   *  against what this row advertises and never from a response body. */
+  readonly bucketAt: (substituter: string) => GrantedBucket | null;
   /** ANNOUNCE WHAT CHANGED OR WENT (PLAN 2.8): a finished store-to-store
    *  move, or a re-push that rewrote a text object. The CACHE names what it
    *  touched — it is the only thing that knows — and the ROW turns that into
@@ -423,6 +427,74 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
   /** WHERE A PUSH ADDRESSES IT. Always the path form: the push API needs the
    *  bucket's name, and a domain host answers `/cache/<name>` too. */
   const pushUrlOf = (name: string): string => `${opts.publicOrigin}${opts.mount}/${name}`;
+
+  /**
+   * WHICH BUCKET A SUBSTITUTER URL NAMES — the whole of PLAN 4.1's write
+   * grant, and the one question a repository cannot lie its way through.
+   *
+   * A run's target used to be decided by asking the URL for its
+   * `nix-cache-info` and believing the `Odu-Origin` / `Odu-Bucket` lines in
+   * the BODY. That made the grant a function of a server the repository
+   * chose: `extra-substituters = [ "https://evil.example/c" ]` plus a forged
+   * two-line answer claimed to be any bucket here, and collected a write
+   * token for it. Nothing in a body is evidence.
+   *
+   * So the URL is parsed against the three forms this row ADVERTISES, in the
+   * order a reader could have got them, and each is confirmed back through
+   * `urlOf`/`pushUrlOf` so a near-miss cannot pass:
+   *
+   *   - the path form under this daemon's public origin, which every bucket
+   *     answers at whatever else it has;
+   *   - a bucket's own domain, at the root of that name;
+   *   - a public bucket fronted by a store that publishes a URL.
+   *
+   * It dials nothing, so it costs no SSRF and no timeout, and it works for a
+   * PRIVATE bucket — whose `nix-cache-info` is a 404 to an anonymous reader,
+   * which is what made the probe unable to resolve one at all.
+   */
+  const bucketAt = (substituter: string): GrantedBucket | null => {
+    let url: URL;
+    try {
+      url = new URL(substituter.trim());
+    } catch {
+      return null;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    const path = url.pathname.replace(/\/+$/, "");
+    const origin = `${url.protocol}//${url.host}`;
+    const segments = path.split("/").filter((part) => part !== "");
+    const last = segments[segments.length - 1];
+    const row =
+      segments.length === 0
+        ? cache.bucketByDomain(url.host)
+        : last === undefined
+          ? null
+          : cache.bucket(last);
+    if (row === null) return null;
+    const facts = {
+      name: row.name,
+      public: row.isPublic,
+      domain: row.domain,
+      store: row.store,
+    };
+    // CONFIRMED AGAINST WHAT THIS ROW PUBLISHES, not against the parse: the
+    // steps above find a CANDIDATE, and only a URL the row would itself hand
+    // a reader is a grant.
+    const advertised = new Set(
+      [urlOf(facts), pushUrlOf(row.name), ...(row.domain === null ? [] : [`${scheme}//${row.domain}`])].map(
+        (one) => one.replace(/\/+$/, ""),
+      ),
+    );
+    if (!advertised.has(`${origin}${path}`)) return null;
+    return {
+      name: row.name,
+      publicKey: row.publicKey,
+      // WHERE A PUSH GOES — this daemon's own push origin, never a store's
+      // read domain, which takes no write at all.
+      origin: opts.publicOrigin,
+      substituter,
+    };
+  };
 
   const rowOf = (facts: BucketFacts): CacheBucket => ({
     ...facts,
@@ -900,6 +972,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         store: bucket?.store ?? LOCAL_STORE,
       });
     },
+    bucketAt,
     announceMoved,
   };
 }
@@ -1054,24 +1127,6 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     };
     yield* offer(BucketDomains, () => domains);
 
-    // AND THE GRANT A RUN ASKS FOR (PLAN 4.1): does this daemon serve that
-    // bucket, what key does it publish, and a write token scoped to it that
-    // expires with the run. Registered rather than offered, for the mount-order
-    // reason the `needs` list gives; withdrawn in the finalizer below, so a
-    // tenure whose cache has gone away mints nothing.
-    const withdrawGrants = grants.register({
-      // THE SAME STRING EVERY BUCKET'S `nix-cache-info` STATES as `Odu-Origin`
-      // — the proxy's origin when one stands in front, the bound one otherwise
-      // — because the whole of the interim write grant is "`Odu-Origin` is us".
-      origin: () => publicOrigin ?? boundOrigin,
-      bucket: (name) => {
-        const row = cache.bucket(name);
-        return row === null ? null : { name: row.name, publicKey: row.publicKey };
-      },
-      mint: (request) => cache.grantRunToken(request),
-      revoke: (id) => cache.revokeToken(id),
-    });
-
     const server = cacheServer({
       cache,
       // The address a client must be told: the proxy's when one stands in
@@ -1084,6 +1139,23 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       log: say,
     });
     announceMoved = server.announceMoved;
+
+    // AND THE GRANT A RUN ASKS FOR (PLAN 4.1): which bucket a substituter URL
+    // names here, and a write token scoped to it that expires with the run.
+    // Registered rather than offered, for the mount-order reason the `needs`
+    // list gives; withdrawn in the finalizer below, so a tenure whose cache
+    // has gone away mints nothing. Built AFTER the server because `bucketAt`
+    // is the server's URL knowledge — which is the whole grant.
+    const withdrawGrants = grants.register({
+      // THE SAME STRING EVERY BUCKET'S `nix-cache-info` STATES as `Odu-Origin`
+      // — the proxy's origin when one stands in front, the bound one
+      // otherwise. Asked only so a daemon serving no cache can skip the flake
+      // evaluation entirely.
+      origin: () => publicOrigin ?? boundOrigin,
+      bucketAt: (substituter) => server.bucketAt(substituter),
+      mint: (request) => cache.grantRunToken(request),
+      revoke: (id) => cache.revokeToken(id),
+    });
 
     // THE MOUNT, in the activation. The framework walks the arriving surface,
     // proves the whole route set disjoint across root and siblings, and hands
