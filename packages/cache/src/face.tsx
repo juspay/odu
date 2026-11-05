@@ -574,13 +574,6 @@ type Versions =
     }
   | { readonly kind: "failed"; readonly message: string };
 
-/** The two arms a row draws from: TypeScript narrows through a `Show`'s
- *  accessor only when the condition is the value itself. */
-const asHeld = (state: Versions): Extract<Versions, { kind: "held" }> | undefined =>
-  state.kind === "held" ? state : undefined;
-const asFailed = (state: Versions): Extract<Versions, { kind: "failed" }> | undefined =>
-  state.kind === "failed" ? state : undefined;
-
 /** How long the filter waits for the typing to stop before it asks. Short
  *  enough that a pause reads as an answer, long enough that a word typed at
  *  speed is one query rather than six. */
@@ -603,51 +596,61 @@ const FILTER_DEBOUNCE_MS = 200;
  * a nix.conf setting, and the credential half is of no use without the pair
  * above it. A reader who needs it (a private bucket) finds it where they are
  * already pasting.
+ *
+ * ONE TABLE, because a destination is three things that have to agree: the
+ * word on its tab, the block it produces, and the class the acceptance suite
+ * addresses that block by. Held as a list of names beside a switch for the
+ * text and a switch for the class, a seventh destination was three edits —
+ * and two of those switches had a default arm that would have taken it
+ * silently.
  */
-const SETUP_TABS = [
-  "nix.conf",
-  "NixOS",
-  "flake.nix",
-  "odu CLI",
-  "push",
-  "GitHub Actions",
-] as const;
-type SetupTab = (typeof SETUP_TABS)[number];
-
-/** What the chosen block IS, as the class the acceptance suite addresses it
- *  by: a client's lines, a push, or a workflow step. */
-function blockClassOf(where: SetupTab): string {
-  switch (where) {
-    case "push":
-      return "push-block";
-    case "GitHub Actions":
-      return "actions-push-block";
-    default:
-      return "consume-block";
-  }
+interface SetupDestination {
+  /** The word on the tab, and the block's accessible name. */
+  readonly name: string;
+  /** What the block IS, as the class the acceptance suite addresses it by: a
+   *  client's lines, a push, or a workflow step. */
+  readonly blockClass: string;
+  readonly text: (facts: SetupFacts) => string;
 }
+
+/** EVERYTHING ANY DESTINATION COULD NEED, gathered once: the two facts a
+ *  client trusts the bucket by, its name, the just-minted WRITE token while
+ *  the page may still show it, and the commit the push action is pinned to. */
+interface SetupFacts {
+  readonly url: string;
+  readonly publicKey: string;
+  readonly bucket: string;
+  readonly token: string | null;
+  readonly ref: string;
+}
+
+/** Non-empty by its type, because the page opens on the first of them. */
+const SETUP_TABS: readonly [SetupDestination, ...SetupDestination[]] = [
+  {
+    name: "nix.conf",
+    blockClass: "consume-block",
+    text: (facts) => `${nixConfBlock(facts)}\n\n${netrcBlock({ url: facts.url, home: null })}`,
+  },
+  { name: "NixOS", blockClass: "consume-block", text: nixOsBlock },
+  { name: "flake.nix", blockClass: "consume-block", text: flakeBlock },
+  { name: "odu CLI", blockClass: "consume-block", text: (facts) => useCommand(facts.bucket) },
+  {
+    name: "push",
+    blockClass: "push-block",
+    text: (facts) => pushBlock({ url: facts.url, token: facts.token }),
+  },
+  {
+    name: "GitHub Actions",
+    blockClass: "actions-push-block",
+    text: (facts) => actionsPushBlock({ url: facts.url, ref: facts.ref }),
+  },
+];
 
 /** The main column's two lists: what the bucket serves, and what is held in
  *  it against collection. Administration only — a reader who cannot list pins
  *  is drawn the paths with no tablist over them. */
 const BUCKET_TABS = ["Paths", "Pins"] as const;
 type BucketTab = (typeof BUCKET_TABS)[number];
-
-function snippetFor(
-  where: Exclude<SetupTab, "push" | "GitHub Actions">,
-  input: { readonly url: string; readonly publicKey: string; readonly bucket: string },
-): string {
-  switch (where) {
-    case "nix.conf":
-      return `${nixConfBlock(input)}\n\n${netrcBlock({ url: input.url, home: null })}`;
-    case "NixOS":
-      return nixOsBlock(input);
-    case "flake.nix":
-      return flakeBlock(input);
-    case "odu CLI":
-      return useCommand(input.bucket);
-  }
-}
 
 /** How much of a hash a column shows. Eight base-32 characters is 40 bits —
  *  enough that two builds of one package never collide on this page, and
@@ -687,6 +690,25 @@ export interface PathRow {
 }
 
 /**
+ * ONE STORED PATH AS A ROW, and the NAME is the caller's.
+ *
+ * A path listed on its own is labelled by its package; one listed UNDER its
+ * package's row is labelled by nothing, because the row above it already says
+ * the name. Everything else is the same reading of the same answer, and said
+ * twice — once for the ungrouped page, once for an open package's versions —
+ * it was two places to correct when a column moved.
+ */
+const pathRow = (path: CachePath, name: string): PathRow => ({
+  name,
+  storePath: path.storePath,
+  versions: 1,
+  bytes: path.narSize,
+  hits: path.hits,
+  pushed: path.created,
+  wanted: path.lastWanted,
+});
+
+/**
  * THE TABLE, FROM THE PAGE THE ROW ANSWERED — a view, and only a view.
  *
  * Grouping, aggregation and order are the row's (`bucket.paths` takes
@@ -705,15 +727,7 @@ export function pathRows(page: CachePaths): readonly PathRow[] {
       wanted: group.wanted,
     }));
   }
-  return page.paths.map((path) => ({
-    name: storePathParts(path.storePath).name,
-    storePath: path.storePath,
-    versions: 1,
-    bytes: path.narSize,
-    hits: path.hits,
-    pushed: path.created,
-    wanted: path.lastWanted,
-  }));
+  return page.paths.map((path) => pathRow(path, storePathParts(path.storePath).name));
 }
 
 /**
@@ -751,27 +765,35 @@ function HashCell(props: { storePath: string }): JSX.Element {
   );
 }
 
-function BucketPage(
-  props: AdminProps &
-    TokenField & {
-      name: string;
-      now: number;
-      onOpen: (bucket: string | null) => void;
-      canAdminister: boolean;
-      local: boolean;
-      tunnelRow: boolean;
-      pushActionRef: () => string | null;
-    },
-): JSX.Element {
-  /** THE REF THE PUSH BLOCK OFFERS — the daemon's own commit when it baked one,
-   *  else the placeholder. Read in the bindings below, so a cell that moves
-   *  redraws the block. */
-  const pushActionRef = (): string => props.pushActionRef() ?? ACTION_REF_PLACEHOLDER;
+/** The pages a reader asked for AFTER the first: what they held, and where
+ *  the page after them starts. */
+interface AppendedPages {
+  readonly rows: readonly PathRow[];
+  readonly next: string | null;
+}
 
-  /** Which file the snippet is being pasted into. A page's state and nothing
-   *  else: every tab is the same two facts. */
-  const [tab, setTab] = createSignal<SetupTab>("nix.conf");
-
+/**
+ * WHAT IS IN A BUCKET — the question, its pages, and the packages opened
+ * under them.
+ *
+ * ITS OWN COMPONENT because it changes for its own reason. Everything here
+ * moves when `bucket.paths` moves: its grouping, its orders, its cursors, the
+ * columns a header may sort by. The page around it moves when what a bucket
+ * IS moves: its retention, its tokens, the block a client pastes. Held in one
+ * component, a dozen signals belonging to a list stood between a reader and
+ * the six panels that have nothing to do with it.
+ *
+ * IT HOLDS NO CREDENTIAL, because `bucket.paths` is ungated for the reason
+ * the row gives: a bucket's path list is what the substituter already serves,
+ * one narinfo at a time, to anybody who can read the bucket.
+ */
+function BucketPaths(props: {
+  client: CacheClient;
+  call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
+  bucket: string;
+  /** The page's clock, stopped while this panel's tab is away. */
+  now: number;
+}): JSX.Element {
   /** What the person typed, and what the query is allowed to see. Two signals:
    *  the box must track every keystroke, and the request must not. */
   const [typed, setTyped] = createSignal("");
@@ -791,7 +813,7 @@ function BucketPage(
   // words and shows nothing.
   createEffect(
     on(
-      () => props.name,
+      () => props.bucket,
       () => {
         if (pending !== undefined) clearTimeout(pending);
         setTyped("");
@@ -824,11 +846,17 @@ function BucketPage(
     }
   };
 
-
-  /** A "more" page, appended to the first. Cleared whenever the QUERY changes,
-   *  because a cursor belongs to the question that minted it. */
-  const [appended, setAppended] = createSignal<readonly PathRow[]>([]);
-  const [extra, setExtra] = createSignal<string | null>(null);
+  /**
+   * THE PAGES AFTER THE FIRST, AS ONE VALUE — the rows they held, and where
+   * the next one starts.
+   *
+   * `null` is "nothing appended yet"; a `next` of `null` INSIDE it is "this
+   * is the end of the list". Those are different facts, and as a cursor
+   * signal beside the first page's they shared one spelling: a last page
+   * answering no cursor left the FIRST page's standing, so the button under
+   * the list stayed and asked for page two a second time, appending it twice.
+   */
+  const [appended, setAppended] = createSignal<AppendedPages | null>(null);
   const [failure, setFailure] = createSignal<string | null>(null);
   const [loadingMore, setLoadingMore] = createSignal(false);
 
@@ -890,10 +918,9 @@ function BucketPage(
   const [first, { refetch }] = createResource(
     // THE QUESTION IS THE KEY, and the same object is the payload: two
     // spellings of one thing would be two things to keep in agreement.
-    () => ({ bucket: props.name, ...query() }),
+    () => ({ bucket: props.bucket, ...query() }),
     async (asked): Promise<FirstPage> => {
-      setAppended([]);
-      setExtra(null);
+      setAppended(null);
       setFailure(null);
       setLoadingMore(false);
       // A NEW QUESTION RETIRES EVERY PAGE READ AGAINST THE OLD ONE.
@@ -913,14 +940,20 @@ function BucketPage(
   const more = (after: string): void => {
     const asked = current();
     setLoadingMore(true);
+    // ASKING AGAIN RETIRES THE LAST REFUSAL: it is a sentence about the page
+    // that failed, and left standing over the page that arrived it reports a
+    // failure this list no longer has.
+    setFailure(null);
     void props
-      .call(props.client.procedures.bucket.paths({ bucket: props.name, ...query(), after }))
+      .call(props.client.procedures.bucket.paths({ bucket: props.bucket, ...query(), after }))
       .then(
         (answer) => {
           if (asked !== current()) return; // the question moved on
           setLoadingMore(false);
-          setAppended([...appended(), ...pathRows(answer)]);
-          setExtra(answer.next ?? null);
+          setAppended((been) => ({
+            rows: [...(been?.rows ?? []), ...pathRows(answer)],
+            next: answer.next ?? null,
+          }));
         },
         (err: unknown) => {
           if (asked !== current()) return;
@@ -946,11 +979,14 @@ function BucketPage(
   const rows = createMemo<readonly PathRow[]>(() => {
     const answer = first();
     if (answer === undefined || !answer.ok) return [];
-    return [...answer.rows, ...appended()].map(stable);
+    return [...answer.rows, ...(appended()?.rows ?? [])].map(stable);
   });
+  /** WHERE THE NEXT PAGE STARTS — the cursor of the last page actually READ,
+   *  which is the appended one from the moment there is one. */
   const next = createMemo<string | null>(() => {
+    const been = appended();
+    if (been !== null) return been.next;
     const answer = first();
-    if (extra() !== null) return extra();
     return answer !== undefined && answer.ok ? answer.next : null;
   });
 
@@ -997,7 +1033,7 @@ function BucketPage(
     void props
       .call(
         props.client.procedures.bucket.paths({
-          bucket: props.name,
+          bucket: props.bucket,
           name,
           ...(filter() === "" ? {} : { filter: filter() }),
           ...(after === null ? {} : { after }),
@@ -1008,7 +1044,11 @@ function BucketPage(
       .then(
         (answer) => {
           if (asked !== current()) return;
-          const before = after === null ? [] : (asHeld(versions().get(name) ?? { kind: "reading" })?.versions ?? []);
+          // WHAT IS ALREADY DRAWN, read at the moment this page LANDS rather
+          // than when it was asked for: a cursor's page is appended to the
+          // versions on screen now.
+          const drawn = versions().get(name);
+          const before = after !== null && drawn?.kind === "held" ? drawn.versions : [];
           held(name, {
             kind: "held",
             versions: [...before, ...answer.paths],
@@ -1083,7 +1123,7 @@ function BucketPage(
       align: "right",
       width: "5.5rem",
       sortable: true,
-      cell: (row) => ago(row.pushed, pathsClock()),
+      cell: (row) => ago(row.pushed, props.now),
     },
     {
       key: "reads",
@@ -1098,7 +1138,7 @@ function BucketPage(
       label: "wanted",
       align: "right",
       width: "5.5rem",
-      cell: (row) => ago(row.wanted, pathsClock()),
+      cell: (row) => ago(row.wanted, props.now),
     },
   ];
   /**
@@ -1114,15 +1154,7 @@ function BucketPage(
   const versionsOf = (row: PathRow): readonly PathRow[] => {
     const state = openState(row.name);
     if (state === undefined || state.kind !== "held") return [];
-    return state.versions.map((version) => ({
-      name: "",
-      storePath: version.storePath,
-      versions: 1,
-      bytes: version.narSize,
-      hits: version.hits,
-      pushed: version.created,
-      wanted: version.lastWanted,
-    }));
+    return state.versions.map((version) => pathRow(version, ""));
   };
   /** What an open package's read has come to, when it is not rows: a read
    *  that is out, a refusal, or THE NEXT PAGE — which is a control, because
@@ -1152,7 +1184,7 @@ function BucketPage(
   // not this one's.
   createEffect(
     on(
-      () => [props.name, filter()] as const,
+      () => [props.bucket, filter()] as const,
       () => {
         setOpened(new Set<string>());
         setVersions(new Map());
@@ -1160,6 +1192,139 @@ function BucketPage(
       { defer: true },
     ),
   );
+
+  return (
+    <Panel
+      class="cache-paths"
+      title="Paths"
+      label="paths"
+      actions={
+        <>
+          <SearchInput
+            label="filter paths"
+            value={typed()}
+            placeholder="filter by path, e.g. openssl"
+            onValue={setTyped}
+          />
+          {/* ONE ROW PER PACKAGE, or one per path. The switch is beside the
+              filter because they are the same kind of decision: which of
+              what is here do I want to see.
+
+              ONE NAME, WHATEVER IT IS SET TO: `aria-pressed` carries the
+              state precisely because the name does not — a control that
+              renamed itself as it flipped would announce a different control
+              from the one that was pressed. */}
+          <button
+            type="button"
+            class="text-action"
+            aria-pressed={grouped()}
+            onClick={() => setGrouped(!grouped())}
+          >
+            group by name
+          </button>
+          {/* THE LIST IS A SNAPSHOT, and this page's only stale copy: the
+              facts line above follows the bucket's row as it publishes,
+              while a page read against this bucket is a page — a path a
+              build box pushed a minute ago is not in it until somebody
+              asks. */}
+          <button
+            type="button"
+            class="text-action"
+            disabled={first.loading}
+            onClick={() => refetch()}
+          >
+            {first.loading ? "reading…" : "refresh paths"}
+          </button>
+        </>
+      }
+    >
+      {/* THE FIRST PAGE'S OWN REFUSAL, from the resource's VALUE — see the
+          fetcher: a rejection would be an unhandled one. */}
+      <Show when={refusal() ?? failure()}>
+        {(message) => (
+          <div class="panel-body">
+            <Receipt tone="refused">{message()}</Receipt>
+            <button type="button" class="text-action" onClick={() => refetch()}>
+              try again
+            </button>
+          </div>
+        )}
+      </Show>
+      <Show
+        when={rows().length > 0}
+        fallback={
+          <Show when={refusal() === null && failure() === null}>
+            <p class="panel-body hint">
+              {first.loading
+                ? "reading…"
+                : filter() === ""
+                  ? "Nothing pushed to this bucket yet."
+                  : "No path matches that filter."}
+            </p>
+          </Show>
+        }
+      >
+        <Table
+          class="paths-table"
+          label="paths"
+          columns={columns}
+          rows={rows()}
+          sorted={{ key: column(), descending: descending() }}
+          onSort={(key) => sortBy(key as PathColumn)}
+          under={(row) => versionsOf(row)}
+          note={(row) => noteUnder(row)}
+        />
+      </Show>
+      <Show when={next()}>
+        {(after) => (
+          <div class="panel-foot">
+            <Button disabled={loadingMore() || first.loading} onClick={() => more(after())}>
+              {loadingMore() ? "reading…" : `Show ${PATH_PAGE_SIZE} more`}
+            </Button>
+          </div>
+        )}
+      </Show>
+    </Panel>
+  );
+}
+
+function BucketPage(
+  props: AdminProps &
+    TokenField & {
+      name: string;
+      now: number;
+      onOpen: (bucket: string | null) => void;
+      canAdminister: boolean;
+      local: boolean;
+      tunnelRow: boolean;
+      pushActionRef: () => string | null;
+    },
+): JSX.Element {
+  /** THE REF THE PUSH BLOCK OFFERS — the daemon's own commit when it baked one,
+   *  else the placeholder. Read in the bindings below, so a cell that moves
+   *  redraws the block. */
+  const pushActionRef = (): string => props.pushActionRef() ?? ACTION_REF_PLACEHOLDER;
+
+  /** THE AUTHORITY THE SETTINGS COLUMN IS DRAWN WITH, as the one value
+   *  {@link AdminProps} already names: the client, the UI edge, the
+   *  credential, and whether there is one to ask with. Seven panels spelling
+   *  those four out a prop at a time is seven places to thread one of them
+   *  wrongly, and not one of those panels answers any of the four
+   *  differently. */
+  const admin: AdminProps = {
+    get client() {
+      return props.client;
+    },
+    get call() {
+      return props.call;
+    },
+    rootToken: () => props.rootToken(),
+    armed: () => props.armed(),
+  };
+
+  /** Which file the snippet is being pasted into. A page's state and nothing
+   *  else: every destination is the same two facts. */
+  const [tab, setTab] = createSignal<SetupDestination>(SETUP_TABS[0]);
 
   /** THE TOKEN JUST MINTED HERE, held by the page so the push block can show
    *  it in its one showing. It belongs to ONE bucket: opening another clears
@@ -1200,20 +1365,15 @@ function BucketPage(
   const setupText = createMemo<string>(() => {
     const row = bucket();
     if (row === undefined) return "";
-    const where = tab();
-    if (where === "push") {
-      return pushBlock({
-        url: row.url,
-        token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
-      });
-    }
-    if (where === "GitHub Actions") {
-      return actionsPushBlock({ url: row.url, ref: pushActionRef() });
-    }
-    return snippetFor(where, {
+    return tab().text({
       url: row.url,
       publicKey: row.publicKey,
       bucket: props.name,
+      // A WRITE TOKEN AND ONLY A WRITE ONE: a read token dropped into a push
+      // block would be a credential that cannot do what the block around it
+      // says.
+      token: minted()?.scope === "write" ? (minted()?.token ?? null) : null,
+      ref: pushActionRef(),
     });
   });
 
@@ -1336,101 +1496,12 @@ function BucketPage(
                 aria-labelledby={props.canAdminister ? "bucket-tab-Paths" : undefined}
                 hidden={shown() !== "Paths"}
               >
-                <Panel
-                  class="cache-paths"
-                  title="Paths"
-                  label="paths"
-                  actions={
-                    <>
-                      <SearchInput
-                        label="filter paths"
-                        value={typed()}
-                        placeholder="filter by path, e.g. openssl"
-                        onValue={setTyped}
-                      />
-                      {/* ONE ROW PER PACKAGE, or one per path. The switch is
-                          beside the filter because they are the same kind of
-                          decision: which of what is here do I want to see.
-
-                          ONE NAME, WHATEVER IT IS SET TO: `aria-pressed`
-                          carries the state precisely because the name does
-                          not — a control that renamed itself as it flipped
-                          would announce a different control from the one
-                          that was pressed. */}
-                      <button
-                        type="button"
-                        class="text-action"
-                        aria-pressed={grouped()}
-                        onClick={() => setGrouped(!grouped())}
-                      >
-                        group by name
-                      </button>
-                      {/* THE LIST IS A SNAPSHOT, and this page's only stale
-                          copy: the facts line above follows the bucket's row
-                          as it publishes, while a page read against this
-                          bucket is a page — a path a build box pushed a
-                          minute ago is not in it until somebody asks. */}
-                      <button
-                        type="button"
-                        class="text-action"
-                        disabled={first.loading}
-                        onClick={() => refetch()}
-                      >
-                        {first.loading ? "reading…" : "refresh paths"}
-                      </button>
-                    </>
-                  }
-                >
-                  {/* THE FIRST PAGE'S OWN REFUSAL, from the resource's VALUE — see
-                      the fetcher: a rejection would be an unhandled one. */}
-                  <Show when={refusal() ?? failure()}>
-                    {(message) => (
-                      <div class="panel-body">
-                        <Receipt tone="refused">{message()}</Receipt>
-                        <button type="button" class="text-action" onClick={() => refetch()}>
-                          try again
-                        </button>
-                      </div>
-                    )}
-                  </Show>
-                  <Show
-                    when={rows().length > 0}
-                    fallback={
-                      <Show when={refusal() === null && failure() === null}>
-                        <p class="panel-body hint">
-                          {first.loading
-                            ? "reading…"
-                            : filter() === ""
-                              ? "Nothing pushed to this bucket yet."
-                              : "No path matches that filter."}
-                        </p>
-                      </Show>
-                    }
-                  >
-                    <Table
-                      class="paths-table"
-                      label="paths"
-                      columns={columns}
-                      rows={rows()}
-                      sorted={{ key: column(), descending: descending() }}
-                      onSort={(key) => sortBy(key as PathColumn)}
-                      under={(row) => versionsOf(row)}
-                      note={(row) => noteUnder(row)}
-                    />
-                  </Show>
-                  <Show when={next()}>
-                    {(after) => (
-                      <div class="panel-foot">
-                        <Button
-                          disabled={loadingMore() || first.loading}
-                          onClick={() => more(after())}
-                        >
-                          {loadingMore() ? "reading…" : `Show ${PATH_PAGE_SIZE} more`}
-                        </Button>
-                      </div>
-                    )}
-                  </Show>
-                </Panel>
+                <BucketPaths
+                  client={props.client}
+                  call={props.call}
+                  bucket={props.name}
+                  now={pathsClock()}
+                />
               </div>
               {/* KEYED ON THE NAME AND NOTHING ELSE: a half-typed pin belongs
                   to the bucket it was typed on, and to no particular tab. */}
@@ -1443,14 +1514,7 @@ function BucketPage(
                     aria-labelledby="bucket-tab-Pins"
                     hidden={shown() !== "Pins"}
                   >
-                    <BucketPins
-                      client={props.client}
-                      call={props.call}
-                      rootToken={props.rootToken}
-                      armed={props.armed}
-                      name={name}
-                      now={pinsClock()}
-                    />
+                    <BucketPins {...admin} name={name} now={pinsClock()} />
                   </div>
                 )}
               </Show>
@@ -1484,15 +1548,19 @@ function BucketPage(
                         type="button"
                         role="tab"
                         class="tab"
-                        aria-selected={tab() === where}
+                        aria-selected={tab().name === where.name}
                         onClick={() => setTab(where)}
                       >
-                        {where}
+                        {where.name}
                       </button>
                     )}
                   </For>
                 </div>
-                <pre class={`use-block ${blockClassOf(tab())}`} role="tabpanel" aria-label={tab()}>
+                <pre
+                  class={`use-block ${tab().blockClass}`}
+                  role="tabpanel"
+                  aria-label={tab().name}
+                >
                   {setupText()}
                 </pre>
               </Panel>
@@ -1536,46 +1604,31 @@ function BucketPage(
                       moment there is one. */}
                   <Show when={props.armed()}>
                     <BucketTokens
-                      client={props.client}
-                      call={props.call}
-                      rootToken={props.rootToken}
-                      armed={props.armed}
+                      {...admin}
                       minted={minted()}
                       onMinted={setMinted}
                       name={name}
                       now={props.now}
                     />
                     <BucketRetention
-                      client={props.client}
-                      call={props.call}
-                      rootToken={props.rootToken}
-                      armed={props.armed}
+                      {...admin}
                       name={name}
                       retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
                     />
                     <BucketDomain
-                      client={props.client}
-                      call={props.call}
-                      rootToken={props.rootToken}
-                      armed={props.armed}
+                      {...admin}
                       name={name}
                       domain={bucket()?.domain ?? null}
                       tunnelRow={props.tunnelRow}
                     />
                     <BucketMigrate
-                      client={props.client}
-                      call={props.call}
-                      rootToken={props.rootToken}
-                      armed={props.armed}
+                      {...admin}
                       name={name}
                       store={bucket()?.store ?? LOCAL_STORE}
                       migration={bucket()?.migration ?? null}
                     />
                     <BucketGc
-                      client={props.client}
-                      call={props.call}
-                      rootToken={props.rootToken}
-                      armed={props.armed}
+                      {...admin}
                       name={name}
                       now={props.now}
                       retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
@@ -1588,10 +1641,7 @@ function BucketPage(
                     <div class="danger-zone">
                       <h2 class="danger-zone-head">Danger zone</h2>
                       <BucketDelete
-                        client={props.client}
-                        call={props.call}
-                        rootToken={props.rootToken}
-                        armed={props.armed}
+                        {...admin}
                         name={name}
                         onDeleted={() => props.onOpen(null)}
                       />
@@ -1649,7 +1699,7 @@ interface Read<T> {
  */
 function reading<T>(
   key: () => string | null,
-  gate: { readonly rootToken: () => string; readonly armed: () => boolean },
+  gate: Pick<AdminProps, "rootToken" | "armed">,
   ask: (bucket: string) => Promise<T>,
 ): Read<T> {
   const [answer, { refetch }] = createResource(

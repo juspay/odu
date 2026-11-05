@@ -118,6 +118,16 @@ export interface DetailControls {
 const STATUS_ORDER = Object.keys(NODE_STATUS) as NodeStatus[];
 
 /**
+ * DID THIS NODE GO WRONG — the one reading of a node's verdict that two
+ * decisions on this page depend on: the node a run opens on, and the node
+ * Retry is drawn for. They are the same question asked twice, and spelled
+ * twice the page could open on a failure whose own row offered no way to run
+ * it again.
+ */
+const wentWrong = (node: RunNode): boolean =>
+  node.status === "failed" || node.status === "errored";
+
+/**
  * WHICH NODE A RUN OPENS ON when its address names none.
  *
  * A run page whose log pane is empty has asked the one question the page
@@ -140,9 +150,7 @@ const STATUS_ORDER = Object.keys(NODE_STATUS) as NodeStatus[];
  */
 export function openingNode(nodes: readonly RunNode[]): RunNode | null {
   const readable = nodes.filter((node) => node.attempt > 0);
-  const wrong = readable.find(
-    (node) => node.status === "failed" || node.status === "errored",
-  );
+  const wrong = readable.find(wentWrong);
   if (wrong !== undefined) return wrong;
   const running = readable.find((node) => node.status === "running");
   if (running !== undefined) return running;
@@ -329,12 +337,7 @@ function NodeRow(props: {
           what that control says. */}
       <Show when={props.canRun}>
       <span class="node-controls">
-        <Show
-          when={
-            props.node.attempt > 0 &&
-            (props.node.status === "failed" || props.node.status === "errored")
-          }
-        >
+        <Show when={props.node.attempt > 0 && wentWrong(props.node)}>
           <Button
             title={`retry ${props.node.id} — odu decides whether that is a new attempt or a linked run`}
             disabled={props.busy}

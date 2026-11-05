@@ -581,6 +581,28 @@ const cursorOf = (
 };
 
 /**
+ * THE CURSOR FOR A PAGE'S LAST ROW — the mint {@link cursorOf} parses, and
+ * the only one.
+ *
+ * The ordered values are named by the ORDER WORDS themselves, so the pairing
+ * of a `sort` with the value a page is positioned by is decided once: both
+ * page reads hand over the same record of four facts, and a fifth
+ * {@link PathSort} is a type error at each of them rather than a cursor that
+ * quietly carries the wrong number.
+ */
+const cursorFor = (
+  sort: PathSort,
+  last: Record<PathSort, string | number>,
+  key: string,
+): string => `${sort}|${last[sort]}|${key}`;
+
+/** THE SUBSTRING A PAGE IS NARROWED BY, or `null` for the whole bucket. An
+ *  absent filter and an empty box are one question, and a read that spelled
+ *  that out at each of the places it asks could answer them differently. */
+const narrowing = (filter: string | null): string | null =>
+  filter === null || filter === "" ? null : filter;
+
+/**
  * WHAT EACH ORDER IS, IN SQL — the column a row is ordered by, the one a
  * GROUP is ordered by, and whether the cursor's value is a number.
  *
@@ -957,11 +979,12 @@ export function openCacheRepo(path: string): CacheRepo {
       const order = PATH_ORDER[page.sort];
       const where = ["bucket = ?"];
       const params: unknown[] = [bucket];
-      if (page.filter !== null && page.filter !== "") {
+      const filter = narrowing(page.filter);
+      if (filter !== null) {
         // `instr` rather than `LIKE`: the filter is a SUBSTRING a person typed,
         // and `%` or `_` in it would be a wildcard nobody meant.
         where.push("instr(store_path, ?) > 0");
-        params.push(page.filter);
+        params.push(filter);
       }
       if (page.name !== undefined && page.name !== null) {
         where.push("name = ?");
@@ -995,15 +1018,16 @@ export function openCacheRepo(path: string): CacheRepo {
         // holds the pairing of a position with the order it is a position in.
         next:
           more && last !== undefined
-            ? `${page.sort}|${
-                page.sort === "name"
-                  ? text(last, "name")
-                  : page.sort === "size"
-                    ? integer(last, "nar_size")
-                    : page.sort === "reads"
-                      ? integer(last, "hits")
-                      : integer(last, "created")
-              }|${text(last, "store_path")}`
+            ? cursorFor(
+                page.sort,
+                {
+                  name: text(last, "name"),
+                  size: integer(last, "nar_size"),
+                  pushed: integer(last, "created"),
+                  reads: integer(last, "hits"),
+                },
+                text(last, "store_path"),
+              )
             : null,
       };
     },
@@ -1012,9 +1036,10 @@ export function openCacheRepo(path: string): CacheRepo {
       const order = PATH_ORDER[page.sort];
       const where = ["bucket = ?"];
       const params: unknown[] = [bucket];
-      if (page.filter !== null && page.filter !== "") {
+      const filter = narrowing(page.filter);
+      if (filter !== null) {
         where.push("instr(store_path, ?) > 0");
-        params.push(page.filter);
+        params.push(filter);
       }
       // THE KEYSET IS ON THE AGGREGATE, so it is a HAVING: the count, the sums
       // and the two clocks exist only after the grouping, and a WHERE could
@@ -1044,19 +1069,13 @@ export function openCacheRepo(path: string): CacheRepo {
             // filter matched rather than one it hid.
             "(SELECT inner.store_path FROM object AS inner " +
             "WHERE inner.bucket = object.bucket AND inner.name = object.name " +
-            (page.filter === null || page.filter === ""
-              ? ""
-              : "AND instr(inner.store_path, ?) > 0 ") +
+            (filter === null ? "" : "AND instr(inner.store_path, ?) > 0 ") +
             "ORDER BY inner.created DESC, inner.store_path DESC LIMIT 1) AS store_path " +
             `FROM object WHERE ${where.join(" AND ")} GROUP BY name ` +
             (having.length === 0 ? "" : `HAVING ${having.join(" AND ")} `) +
             `ORDER BY ${order.group} ${way}, name ${way} LIMIT ?`,
         )
-        .all(
-          ...((page.filter === null || page.filter === ""
-            ? params
-            : [page.filter, ...params]) as never[]),
-        ) as Row[];
+        .all(...((filter === null ? params : [filter, ...params]) as never[])) as Row[];
       const more = found.length > page.limit;
       const rows = (more ? found.slice(0, page.limit) : found).map((row) => ({
         name: text(row, "name"),
@@ -1072,15 +1091,11 @@ export function openCacheRepo(path: string): CacheRepo {
         rows,
         next:
           more && last !== undefined
-            ? `${page.sort}|${
-                page.sort === "name"
-                  ? last.name
-                  : page.sort === "size"
-                    ? last.bytes
-                    : page.sort === "reads"
-                      ? last.hits
-                      : last.pushed
-              }|${last.name}`
+            ? cursorFor(
+                page.sort,
+                { name: last.name, size: last.bytes, pushed: last.pushed, reads: last.hits },
+                last.name,
+              )
             : null,
       };
     },
