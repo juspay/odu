@@ -18,7 +18,9 @@
  * remove. `./authority.test.ts` derives the set it polices from the imports
  * that reach here, so a command cannot be exempted by forgetting to list it.
  *
- *   odu ci run [recipe[@platform]…]        start a run here, then watch it
+ *   odu ci run [recipe[@platform]…]        start a run here, watch it, and push
+ *                                          what it builds to the cache the repo
+ *                                          already reads from (PLAN 4.1)
  *                                          (Ctrl-C stops WATCHING, not the run)
  *   odu ci wait [--run R]                  bounded, resumable attention
  *   odu ci rerun [--run R] <selector>      retry; odu decides live vs replay
@@ -69,6 +71,11 @@ run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH
     [--no-wait] [--request-id ID] [--progress json] [-o json]
                               # start a run in THIS checkout and watch it.
                               # Ctrl-C stops watching; the run keeps going.
+                              # Every recipe's result* closure is pushed to
+                              # the odu cache this repository's flake.nix
+                              # nixConfig already reads from, when this daemon
+                              # serves it. Nothing in any recipe, no token;
+                              # _ci-setup says where, or why not.
 wait [--run R] [--after CURSOR] [--deadline-ms N] [--settle] [-o json]
                               # bounded, resumable. Returns on the first red
                               # you can act on, not on settle. Exits: 0 passed

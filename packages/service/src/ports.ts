@@ -42,6 +42,21 @@ import type { Caller } from "./caller";
 
 // ── starting a run ──────────────────────────────────────────────────────────
 
+
+/** The target and the credential, as a launch carries them. Spelled beside
+ *  {@link LaunchRequest} because the engine takes the same shape — see
+ *  `@odu/execution/coordinator/launcher`. */
+export interface LaunchPush {
+  readonly substituter: string;
+  readonly bucket: string;
+  /** How the token is revoked at finalize. Recorded on the manifest; the
+   *  token itself never is. */
+  readonly tokenId: string;
+  /** The plaintext write token. It travels to the lane as process environment
+   *  and appears in no log, no journal and no command line. */
+  readonly token: string;
+}
+
 /** What the service asks for when it accepts a `run.start`. Every field is
  *  decided before anything is started, so the request can be recorded,
  *  replayed or refused without a process existing. */
@@ -72,6 +87,19 @@ export interface LaunchRequest {
   readonly supersede: boolean;
   /** Park the coordinator at settle instead of tearing down. */
   readonly linger: boolean;
+  /**
+   * WHERE THIS RUN PUSHES WHAT IT BUILDS, and the credential to do it with
+   * (PLAN 4.1) — or `null` for a run that pushes nothing.
+   *
+   * Resolved here and NOT part of the request digest: a repeated `requestId`
+   * re-resolves, because the cache a checkout reads from is a fact about the
+   * world and the digest is a fact about what the caller sent.
+   */
+  readonly push: LaunchPush | null;
+  /** The ONE line the run's setup log says about pushing: why nothing is being
+   *  pushed, or the `trusted-public-keys` warning when something is. Null when
+   *  there is nothing to say. */
+  readonly pushNote: string | null;
 }
 
 export interface LaunchReceipt {
@@ -86,6 +114,63 @@ export interface LaunchReceipt {
 }
 
 export type RunLauncher = (request: LaunchRequest) => Promise<LaunchReceipt>;
+
+// ── where a run's builds are pushed ─────────────────────────────────────────
+
+/**
+ * THE CACHE A REPOSITORY ALREADY READS FROM, resolved (PLAN 4.1).
+ *
+ * The `extra-substituters` line in `flake.nix`'s `nixConfig` is the whole
+ * declaration; a run pushes what it builds to the one odu cache named there
+ * that THIS daemon serves. Everything about how that is learnt — evaluating a
+ * flake, asking a `nix-cache-info`, knowing which buckets are ours — belongs to
+ * the composition root, which is why it is a port.
+ */
+export interface PushTarget {
+  /** The URL the repository substitutes from. */
+  readonly substituter: string;
+  /** `Odu-Origin`: where a push is aimed. */
+  readonly origin: string;
+  /** `Odu-Bucket`: which bucket at that origin. */
+  readonly bucket: string;
+  /** The published key is missing from `trusted-public-keys`, so the repo can
+   *  push to this cache and will not trust what it reads back. A warning, not
+   *  a refusal: the bytes are still worth storing. Null when the key is there. */
+  readonly keyWarning: string | null;
+}
+
+export type PushResolution =
+  | { readonly kind: "target"; readonly target: PushTarget }
+  /** Nothing to push to, and WHY — no flake, an eval that failed, no odu cache
+   *  in `nixConfig`, or one this daemon does not serve. The run proceeds
+   *  exactly as it did before and the sentence lands in its setup log. */
+  | { readonly kind: "skipped"; readonly reason: string }
+  /** Two odu caches this daemon serves. A repository builds for ONE cache, so
+   *  this REFUSES the start rather than choosing — there is no override key
+   *  until somebody hits it. */
+  | { readonly kind: "ambiguous"; readonly substituters: readonly string[] };
+
+/** The run's own write token: the id to revoke it by, and the plaintext, which
+ *  exists only in this value and in the lane's process environment. */
+export interface PushGrant {
+  readonly tokenId: string;
+  readonly token: string;
+}
+
+export interface PushPort {
+  /** What `flake.nix` says, and which of it this daemon can grant. Async and
+   *  network-bound, which is why it is not part of {@link CheckoutProbe}. */
+  resolve: (checkout: string) => Promise<PushResolution>;
+  /** Mint the run's write token for a resolved bucket. `null` when the bucket
+   *  has gone between resolution and launch. */
+  grant: (request: {
+    bucket: string;
+    runId: string;
+    expiresAt: number;
+  }) => PushGrant | null;
+  /** Let a run's token go. Idempotent. */
+  revoke: (tokenId: string) => void;
+}
 
 // ── retrying a recorded run ─────────────────────────────────────────────────
 
@@ -418,6 +503,11 @@ export interface ServicePorts {
   launch: RunLauncher;
   retry: RunRetrier;
   cancel: RunCanceller;
+  /** Where this checkout's run pushes, and the credential for it. A SECOND
+   *  port beside the checkout probe rather than a field on it: the probe is
+   *  synchronous and pure filesystem, and this evaluates a flake and dials a
+   *  substituter. */
+  push: PushPort;
   probeCheckout: CheckoutProbe;
   pipeline: PipelineReader;
   probeVenues: VenueProber;

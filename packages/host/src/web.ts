@@ -123,6 +123,7 @@ import {
   BucketDomains,
   Build,
   Bundle,
+  CacheGrants,
   CachePurge,
   DaemonHome,
   Log,
@@ -134,6 +135,7 @@ import {
   type RowAgent,
   NixStore,
   PublicOrigin,
+  grantsBroker,
   purgeBroker,
   RootToken,
   RowContracts,
@@ -421,6 +423,12 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // nothing, which is how a cache collects on a daemon that has never heard
     // of an edge.
     const purges = purgeBroker();
+    // AND WHERE A RUN ASKS FOR ITS WRITE TOKEN (PLAN 4.1) — the same shape,
+    // the other direction: the runs' row asks, the cache row answers, and the
+    // runs' row is mounted first. With no cache registered every question
+    // answers "no bucket here", which is a daemon whose runs simply do not
+    // push.
+    const grants = grantsBroker();
     // THE SCRAPE'S CONTRIBUTORS, the same shape for the same reason: many rows
     // register, one route reads. The host renders `/metrics` and counts
     // nothing itself — a host that read a row's database to publish its hit
@@ -440,6 +448,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await run(provide(host, CachePurge, () => purges));
     await run(provide(host, StateDir, () => stateDir));
     await run(provide(host, RootToken, () => rootToken));
+    await run(provide(host, CacheGrants, () => grants));
     await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
     await run(provide(host, DaemonHome, () => home.dir));
     await run(provide(host, BoundOrigin, () => origin));

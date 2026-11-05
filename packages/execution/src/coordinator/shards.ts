@@ -186,9 +186,18 @@ export function installShardTopology(
     nodes[projection.rootId] = pendingNode({
       id: projection.rootId,
       name: shardNamepath(topology.rootId, index, topology.total),
-      command:
-        `ODU_SHARD_INDEX=${index} ODU_SHARD_TOTAL=${topology.total} ` +
-        root.command,
+      // THE RECIPE'S COMMAND, AND NOTHING PREPENDED TO IT.
+      //
+      // This string used to lead with `ODU_SHARD_INDEX=… ODU_SHARD_TOTAL=…`,
+      // which was a second, DISPLAYED spelling of what `tasksForShard` already
+      // puts in `TaskSpec.env` for the runner to hand to `spawn`. It said
+      // nothing the node's own name does not — `ci::e2e (2/4)` is the index and
+      // the total — and it made a node's `command` a place a task's environment
+      // lands. PLAN 4.1 puts `$ODU_CACHE_TOKEN` in that same `env`, and a
+      // command string is public: it rides the run's journal, every face that
+      // paints a node, and `run_read`. One rule, cheaply kept: a task's
+      // environment goes to `spawn` and never into a command.
+      command: root.command,
       needs:
         index === 0
           ? [...root.needs, SETUP].map((dep) => fanId(dep, platform))

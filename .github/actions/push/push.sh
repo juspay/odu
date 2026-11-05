@@ -6,9 +6,15 @@
 #
 #   - uses: juspay/odu/.github/actions/push@<sha>
 #     with:
-#       cache: https://cache.kolu.dev/kolu-r2
+#       cache: https://cache.kolu.dev/kolu-r2    # optional: see below
 #       token: ${{ secrets.ODU_CACHE_TOKEN }}
 #       pin: ${{ github.ref_name == github.event.repository.default_branch }}
+#
+# `cache:` is OPTIONAL (PLAN 4.1). Omit it and `odu cache push` reads the
+# substituter out of `./flake.nix`'s `nixConfig` — the same
+# `extra-substituters` line the repository already keeps in order to READ from
+# that cache. The inference has one implementation, odu's; this script only
+# decides whether to pass `--cache`.
 #
 # ## The pusher is this checkout's odu
 #
@@ -118,10 +124,17 @@ trim() {
 # (`repo_root` below) and the two helpers beside it are addressed from here.
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# THE ONE FACT THIS ACTION IS GIVEN: the substituter URL. Where a push is
-# TAKEN and which bucket it lands in are the cache's to state — `odu cache
-# push --cache` reads them off its `nix-cache-info` — because reads come from
-# the store now and a read address is no longer a push address.
+# THE ONE FACT THIS ACTION IS GIVEN, and now an OPTIONAL one (PLAN 4.1): the
+# substituter URL. Where a push is TAKEN and which bucket it lands in are the
+# cache's to state — `odu cache push --cache` reads them off its
+# `nix-cache-info` — because reads come from the store now and a read address
+# is no longer a push address.
+#
+# EMPTY MEANS "ASK THE FLAKE". `odu cache push` with no `--cache` reads
+# `./flake.nix`'s `nixConfig` and pushes to the one odu cache named there —
+# the same `extra-substituters` line the repository already keeps in order to
+# READ from that cache. So the inference lives in ONE implementation, odu's,
+# and this script never learns to evaluate a flake.
 cache=$(trim "${ODU_PUSH_CACHE:-}")
 cache=${cache%/}
 token=$(trim "${ODU_PUSH_TOKEN:-}")
@@ -129,7 +142,10 @@ pin=$(trim "${ODU_PUSH_PIN:-}")
 requested=$(printf '%s' "${ODU_PUSH_PATHS:-}" | tr -s '[:space:]' '\n' | sed '/^$/d')
 event=${GITHUB_EVENT_NAME:-local}
 
-[ -n "$cache" ] || fail "odu push: the \`cache:\` input is empty — give the substituter URL your nix.conf uses, e.g. https://cache.kolu.dev/kolu-r2."
+cache_args=()
+if [ -n "$cache" ]; then
+  cache_args=(--cache "$cache")
+fi
 
 command -v nix >/dev/null 2>&1 ||
   fail "odu push: \`nix\` is not on PATH, and this action never installs it. Install Nix in an earlier step — with the bucket's \"GitHub Actions\" block as its \`nix_conf\` — and run this action after it."
@@ -300,7 +316,7 @@ set +e
 # `${pin_args[@]+…}` and not `"${pin_args[@]}"`: a macOS runner's bash is 3.2,
 # where an empty array expanded under `set -u` is an unbound variable. The pin
 # NAME is argv's business — it is not a secret; the token is still never there.
-ODU_CACHE_TOKEN="$token" "$odu" cache push --cache "$cache" --output json \
+ODU_CACHE_TOKEN="$token" "$odu" cache push ${cache_args[@]+"${cache_args[@]}"} --output json \
   ${pin_args[@]+"${pin_args[@]}"} \
   "${targets[@]}" > "$result"
 status=$?
@@ -324,7 +340,7 @@ substituter=$(jq -r '.substituter' "$result")
 pinned_name=$(jq -r '.pinned.name // empty' "$result")
 pinned_paths=$(jq -r '.pinned.rootPaths // empty' "$result")
 
-summary "### Cache push — \`$cache\`
+summary "### Cache push — \`${cache:-$substituter}\`
 
 | pushed | already present | skipped (upstream) | failed |
 | ---: | ---: | ---: | ---: |

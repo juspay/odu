@@ -188,6 +188,10 @@ export const CacheTokenSchema = Schema.Struct({
   bucketGlob: Schema.String,
   scope: CacheScopeSchema,
   expires: Schema.NullOr(Schema.Number),
+  /** WHAT MINTED IT — `run <id>` for a run's own write token (PLAN 4.1), null
+   *  for an administrator's. `optionalKey` so a daemon older than this field
+   *  still decodes here. */
+  label: Schema.optionalKey(Schema.NullOr(Schema.String)),
   lastUsed: Schema.NullOr(Schema.Number),
   revoked: Schema.Boolean,
   created: Schema.Number,
@@ -1068,7 +1072,7 @@ export const CACHE_KEY = "cache";
  * own rows are untouched, and `gc.run` does not take the field, which is why
  * the two verbs stopped sharing an input schema.
  */
-export const CACHE_CONTRACT_VERSION = "4.5";
+export const CACHE_CONTRACT_VERSION = "4.6";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

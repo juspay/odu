@@ -46,6 +46,7 @@ import type {
   LaunchRequest,
   RetryOutcome,
   RetryRequest,
+  PushResolution,
   ServicePorts,
 } from "./ports";
 
@@ -84,6 +85,11 @@ export function registerFixtureRun(
     now?: number;
     scope?: RunScope;
     parentRunId?: string | null;
+    /** Where this run pushed, when a suite is about PLAN 4.1's record. */
+    push?: {
+      target: { substituter: string; bucket: string; tokenId: string } | null;
+      note: string | null;
+    };
   },
 ): { handle: RunHandle; token: OwnershipToken; runId: string } {
   const now = opts.now ?? Date.now();
@@ -107,6 +113,7 @@ export function registerFixtureRun(
       build: { oduVersion: "0.0.0", self: null, runnerFlake: null },
       parentRunId: opts.parentRunId ?? null,
       requestId: null,
+      ...(opts.push === undefined ? {} : { push: opts.push }),
       ...(opts.branch === undefined ? {} : { branch: opts.branch }),
     },
     {
@@ -336,6 +343,11 @@ export interface RecordingPorts extends ServicePorts {
   holds: VenueHoldRequest[];
   releases: VenueReleaseRequest[];
   protects: ProtectRequest[];
+  /** Every push target this service RESOLVED, every grant it minted and every
+   *  token it let go — the three a suite asserts PLAN 4.1 against. */
+  pushResolves: string[];
+  pushGrants: { bucket: string; runId: string; expiresAt: number }[];
+  pushRevokes: string[];
 }
 
 type VenueProbeRequest = Parameters<ServicePorts["probeVenues"]>[0];
@@ -362,6 +374,9 @@ export function recordingPorts(opts: {
   hold?: (request: VenueHoldRequest) => VenueHoldOutcome;
   release?: (request: VenueReleaseRequest) => { results: readonly VenueReleaseResult[] };
   protect?: (request: ProtectRequest) => ProtectOutcome;
+  /** Where a checkout pushes. The default is the ordinary world of a unit
+   *  suite: nothing resolves, so no run pushes and no token is minted. */
+  push?: (checkout: string) => PushResolution;
 } = {}): RecordingPorts {
   const launches: LaunchRequest[] = [];
   const retries: RetryRequest[] = [];
@@ -370,6 +385,9 @@ export function recordingPorts(opts: {
   const holds: VenueHoldRequest[] = [];
   const releases: VenueReleaseRequest[] = [];
   const protects: ProtectRequest[] = [];
+  const pushResolves: string[] = [];
+  const pushGrants: { bucket: string; runId: string; expiresAt: number }[] = [];
+  const pushRevokes: string[] = [];
   return {
     launches,
     retries,
@@ -378,6 +396,30 @@ export function recordingPorts(opts: {
     holds,
     releases,
     protects,
+    pushResolves,
+    pushGrants,
+    pushRevokes,
+    push: {
+      resolve: async (checkout) => {
+        pushResolves.push(checkout);
+        return (
+          opts.push?.(checkout) ?? {
+            kind: "skipped",
+            reason: "the stub resolves no cache",
+          }
+        );
+      },
+      grant: (request) => {
+        pushGrants.push(request);
+        return {
+          tokenId: `tok-${pushGrants.length}`,
+          token: `odu_stub_${pushGrants.length}`,
+        };
+      },
+      revoke: (tokenId) => {
+        pushRevokes.push(tokenId);
+      },
+    },
     launch: async (request) => {
       launches.push(request);
       return (

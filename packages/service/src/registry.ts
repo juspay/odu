@@ -188,6 +188,7 @@ function nodesOf(
   runId: string,
   roster: readonly string[],
   latest: ReadonlyMap<string, AttemptState>,
+  pushed: ReadonlyMap<string, { paths: number; bytes: number }>,
 ): RunNode[] {
   // The ROSTER's order, because that is the schedule a dashboard paints. A node
   // the fold saw but the roster does not list is appended: a run whose roster
@@ -214,6 +215,7 @@ function nodesOf(
       });
       continue;
     }
+    const warmed = pushed.get(id);
     out.push({
       id,
       // A started attempt with no status line yet IS running: the journal's
@@ -227,6 +229,13 @@ function nodesOf(
       durationMs: attempt.durationMs,
       host: attempt.placement.host,
       logKey: formatLogKey({ runId, node: id, attempt: attempt.attempt }),
+      // WHAT THIS NODE WARMED (PLAN 4.1). Absent rather than zeroed, for the
+      // reason the schema gives: a node that pushed nothing and a run that
+      // never had a cache are the same absence to a reader. The two counts
+      // only — the bucket is the RUN's, and it is on the row.
+      ...(warmed === undefined
+        ? {}
+        : { pushed: { paths: warmed.paths, bytes: warmed.bytes } }),
     });
   }
   return out;
@@ -397,13 +406,17 @@ function project(
     // cursor: that one advances only through events actually delivered, and
     // this read delivered none.
     cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
+    // WHERE THIS RUN PUSHES (PLAN 4.1), copied off the manifest. A record
+    // written before the field simply has no key, which is what lets a board
+    // show nothing rather than claim the run pushed nowhere.
+    ...(manifest.push === undefined ? {} : { push: manifest.push }),
   };
   return {
     fingerprint: stamp,
     owner,
     alive,
     row,
-    nodes: nodesOf(handle.runId, fold.roster, fold.latest),
+    nodes: nodesOf(handle.runId, fold.roster, fold.latest, fold.pushed),
     // The ROW just built, so the elapsed time on this frame and the one every
     // later read recomputes come from one pair.
     env: envOf(fold, row, now),

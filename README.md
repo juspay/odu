@@ -75,6 +75,19 @@ ODU_CACHE_TOKEN=... odu cache push main ./result
 
 The token's plaintext is printed once; save it with `odu cache login`. Check each verb's input schema in `packages/cache/src/surface.ts`.
 
+**A run pushes to the cache its repository already reads from.** One
+`extra-substituters` line in `flake.nix` `nixConfig` — the line a consumer
+keeps in order to READ from a bucket — is the whole declaration, and
+`odu ci run` pushes every recipe's `result*` closure there. No step in any
+recipe, no token in the repository, no second place a bucket name can go
+stale. The run's write token is minted for that run, scoped to that one
+bucket, and revoked when the run settles; a push that fails makes the node
+RED, because green means warmed. A repository that reads from an odu cache
+this daemon does not serve is told once, in `_ci-setup`, and runs exactly as
+before; one that names two is refused at start, because a repository builds
+for one cache. The run's page names the bucket and each node says what it
+warmed.
+
 | What | How | On the board |
 | --- | --- | --- |
 | Create a bucket; print its substituter URL and public key. `"upstreamKeys": []` takes everything, including upstream-signed closures (more disk); `"store": "r2"` keeps its objects in a declared S3 store | `odu surface cache bucket_create` | Cache → **Create bucket** |
@@ -82,7 +95,7 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | `odu cache use <bucket>` | a bucket's page |
 | Scoped, expiring, revocable tokens; the plaintext is shown once | `odu surface cache token_mint\|token_list\|token_revoke` | a bucket's **Tokens** |
 | Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — |
-| Upload only the paths the bucket is missing; long NARs are chunked. `--cache <substituter>` reads the push origin and the bucket off the cache's own `nix-cache-info`. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…`, `odu cache push --cache <substituter> <path>…` | — |
+| Upload only the paths the bucket is missing; long NARs are chunked. `--cache <substituter>` reads the push origin and the bucket off the cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…`, `odu cache push --cache <substituter> <path>…`, `odu cache push <path>…` | — |
 | Give a bucket a DNS name of its own through a Cloudflare tunnel | `odu surface cache bucket_domain` | bucket → **Domain** |
 | How long a path outlives the last time anything wanted it, in days | `odu surface cache bucket_retention` | a bucket's **Retention** |
 | Move a bucket's objects to another declared store, serving from the old one until the copy is done | `odu surface cache bucket_migrate` | a bucket's **Move to another store** |
@@ -97,13 +110,13 @@ The token's plaintext is printed once; save it with `odu cache login`. Check eac
 
 **A bucket keeps what nobody wants for 90 days.** Retention counts from `lastWanted` — renewed by a push and by the `missing` query a push asks first, never by a read, because reads are leaving odu and a clock a read wound would make the busiest paths look idle first. A pin holds a closure past that — CI takes one with `pin: ${{ github.ref_name == github.event.repository.default_branch }}` in the push action, under a name derived from the repository, the ref and the system — and the reference closure of anything kept is kept. The row collects every bucket once a day on its own; the bucket page's **Run GC** (`cache gc_run`) is that same collection asked for sooner, and its **Dry run** (`cache gc_plan`) says what it would take before you press it. The plan alone takes `retentionDays`, a whole number of days from `lastWanted` to ask about — `0` answers what is here that nothing references and no pin holds — and it writes nothing: only `cache bucket_retention` changes what a bucket keeps, and `gc_run` has no such field, so a retention the plan asked about can never be one a collection evicts by. Retention, pins and collection are the board and the API; the CLI's only word in this is `--pin` on a push.
 
-**Each row versions its own surface.** A client is admitted on the host's major and the majors of the rows it reads, so a cache change never refuses a client that reads only runs. Cache **3.0** removed the deprecated `held` list and `odu cache push --wait`; **3.1** adds a bucket's `store`; **4.0** moves retention onto `lastWanted` and drops the old last-access field a path and `stats.read` used to carry, and adds `bucket.retention`, `pin.list`, `pin.delete` and `gc.plan`; **4.1** adds `readsFrom`, a store's `publicUrl`, a bucket's `migration` and `bucket.migrate`; **4.2** adds `writesTo` — whether a push's bytes go straight into the bucket's store — and the upload negotiation that answers it; **4.3** adds `bucket.delete` (`cache_bucket_delete` to an agent), which takes a bucket's objects out of its store and then the bucket itself; **4.4** adds `gc.plan`'s optional `retentionDays`, the dry run's own retention, which `gc.run` deliberately does not take. **4.5** adds `bucket.paths`' `group`, `name`, `sort` and `descending`: a bucket grouped by package and ordered by the row, counted over the whole of it. A chunked push names its parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
+**Each row versions its own surface.** A client is admitted on the host's major and the majors of the rows it reads, so a cache change never refuses a client that reads only runs. Cache **3.0** removed the deprecated `held` list and `odu cache push --wait`; **3.1** adds a bucket's `store`; **4.0** moves retention onto `lastWanted` and drops the old last-access field a path and `stats.read` used to carry, and adds `bucket.retention`, `pin.list`, `pin.delete` and `gc.plan`; **4.1** adds `readsFrom`, a store's `publicUrl`, a bucket's `migration` and `bucket.migrate`; **4.2** adds `writesTo` — whether a push's bytes go straight into the bucket's store — and the upload negotiation that answers it; **4.3** adds `bucket.delete` (`cache_bucket_delete` to an agent), which takes a bucket's objects out of its store and then the bucket itself; **4.4** adds `gc.plan`'s optional `retentionDays`, the dry run's own retention, which `gc.run` deliberately does not take; **4.5** adds `bucket.paths`' `group`, `name`, `sort` and `descending`: a bucket grouped by package and ordered by the row, counted over the whole of it. **4.6** adds a token's `label`, so a run's own write token reads `run <id>` on the bucket page. Runs **2.5** adds a run's `push` — where it pushes and what it warmed — on the board row and on `run_read`, and `pushed` on a node. A chunked push names its parts as its own (`x-odu-upload`), so concurrent pushers of one path never mix them.
 
 | Row | Contract | Who reads it |
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
-| `ci` (runs) | 2.4 | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
-| `cache` | **4.5** | `odu cache`, `odu surface cache`, the board |
+| `ci` (runs) | **2.5** | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
+| `cache` | **4.6** | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
 | `metrics` (the host's own fragment) | 1.0 | `odu surface metrics`, a Prometheus at `/metrics` |
@@ -119,6 +132,10 @@ it — and to show a project's own bucket — the flake settings are:
   };
 }
 ```
+
+This block is also the whole of what a RUN needs: `odu ci run` reads it, and a
+repository whose cache is served by the daemon running the build pushes every
+recipe's `result*` closure there.
 
 `nix copy --to http://127.0.0.1:18440/cache/main ./result` works with no odu code on
 the client. The [cache page](https://odu.kolu.dev/docs/cache/) has the

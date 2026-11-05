@@ -840,6 +840,13 @@ async function relaunch(
     // A replay is machinery, not a person at a terminal waiting to read a
     // socket afterwards. It tears down like any other run.
     linger: false,
+    // WHERE A REPLAY PUSHES IS NOT THE PARENT'S (PLAN 4.1). The cache a
+    // checkout reads from is a fact about the world, and the parent's TOKEN was
+    // revoked when it settled — so neither is replayable. The LAUNCHER a root
+    // supplies resolves it again, exactly as `run.start` does; this package
+    // has no way to ask a cache anything.
+    push: null,
+    pushNote: null,
   };
   // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, for the same
   // reason the live path marks before its rerun call: from here on, a lost

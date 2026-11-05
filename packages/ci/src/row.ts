@@ -36,6 +36,7 @@ import {
 } from "@odu/service-client/verbs";
 import {
   BoundOrigin,
+  CacheGrants,
   Build,
   Bundle,
   DaemonHome,
@@ -58,9 +59,15 @@ export const CI_AGENT: RowAgent = {
 
 export const ciRow = definePlugin({
   name: CI_ROW,
-  needs: [DaemonHome, BoundOrigin, Build, Log, Shutdown, RowContracts, Metrics],
+  needs: [DaemonHome, BoundOrigin, Build, Log, Shutdown, RowContracts, Metrics, CacheGrants],
   apply: Effect.gen(function* () {
     const metrics = yield* Metrics;
+    // WHERE A RUN ASKS WHETHER IT MAY PUSH, and for the token to do it with
+    // (PLAN 4.1). A broker the host makes, not the cache row's package: the
+    // cache is mounted AFTER this row (it waits on the `Bundle` offered
+    // below), so a `needs` edge to the cache itself would be a deadlock. With
+    // no cache registered every question answers no and no run pushes.
+    const grants = yield* CacheGrants;
     const home = yield* DaemonHome;
     const origin = yield* BoundOrigin;
     const build = yield* Build;
@@ -73,7 +80,7 @@ export const ciRow = definePlugin({
     // THE COMPOSITION, bound: the ports to the engine. Everything the runs must
     // CAUSE — launch, retry, cancel, the checkout probe, the pipeline, the
     // venues, the forge — arrives here, and the engine knows none of it.
-    const { ports } = webPorts();
+    const { ports } = webPorts(grants);
     const service: OduService = createOduService({
       ports,
       origin,

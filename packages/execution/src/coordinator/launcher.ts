@@ -18,7 +18,8 @@
  * same field is what lets the child link itself to the run it replays.
  */
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { runSocketPath } from "@odu/run-client/dial";
 import { RUN_FILES } from "@odu/run-history/paths";
 import {
@@ -33,6 +34,25 @@ import {
   spawnCoordinator,
   waitForReadiness,
 } from "./spawn";
+
+/**
+ * THE TARGET AND THE CREDENTIAL a run pushes with (PLAN 4.1).
+ *
+ * Structurally the shape `@odu/service` names; spelled here for the reason the
+ * module header gives — neither package may import the other, and the root
+ * that binds the port is where they meet.
+ */
+export interface LaunchPush {
+  /** The URL the repository substitutes from, as its `flake.nix` names it. */
+  readonly substituter: string;
+  /** The bucket that substituter serves, as its `nix-cache-info` says. */
+  readonly bucket: string;
+  /** How the token is revoked. Recorded on the manifest; the token is not. */
+  readonly tokenId: string;
+  /** The write token. Never on an argv, never in a log — see
+   *  {@link LaunchRequest.push}. */
+  readonly token: string;
+}
 
 /** What a face asks for. Every field is decided before anything is started, so
  *  the request can be recorded, replayed, or refused without a process
@@ -89,6 +109,23 @@ export interface LaunchRequest {
   /** Park at settle rather than tearing down. Carried because it is the
    *  CALLER's shape of run, not the launcher's policy. */
   readonly linger: boolean;
+  /**
+   * WHERE THIS RUN PUSHES WHAT IT BUILDS, and the credential for it (PLAN
+   * 4.1). `null` for a run that pushes nothing, which is every run whose
+   * checkout reads from no odu cache this daemon serves.
+   *
+   * The TOKEN is the one field of a launch that never reaches an argv. It is
+   * written to a private file beside the run's own log
+   * ({@link pushTokenPath}), the coordinator reads it once and unlinks it, and
+   * from there it travels to the lane inside the `run.configure` payload. A
+   * `ps` on the machine, the coordinator's log, the journal and `run_read` are
+   * all places it is deliberately absent from.
+   */
+  readonly push: LaunchPush | null;
+  /** The one line the run's `_ci-setup` log says about pushing: why nothing is
+   *  being pushed, or the `trusted-public-keys` warning when something is.
+   *  Null when there is nothing to say. */
+  readonly pushNote: string | null;
 }
 
 export interface LaunchReceipt {
@@ -157,6 +194,17 @@ export function launchArgv(request: LaunchRequest): string[] {
   }
   if (request.requestId !== null) {
     args.push("--request-id", request.requestId);
+  }
+  // WHERE THIS RUN PUSHES (PLAN 4.1), and the one line its setup log owes —
+  // but NOT the token, which is the whole reason there is a `--push-token-id`
+  // and no `--push-token`: an argv is public on the machine that runs it.
+  if (request.push !== null) {
+    args.push("--push", request.push.substituter);
+    args.push("--push-bucket", request.push.bucket);
+    args.push("--push-token-id", request.push.tokenId);
+  }
+  if (request.pushNote !== null) {
+    args.push("--push-note", request.pushNote);
   }
   return args;
 }
@@ -240,6 +288,15 @@ async function attemptLaunch(
   // path exists to be named before the process does — and a launcher that
   // exits (as this one does, the moment the run registers) must not leave the
   // child writing into a pipe nobody is reading. See `spawnCoordinator`.
+  // THE RUN'S WRITE TOKEN, left where only the owner can read it (PLAN 4.1).
+  // Written BEFORE the spawn, because the coordinator reads it as its first
+  // act; `mode` on the open rather than a chmod after, so the file is never
+  // group-readable for even an instant.
+  if (request.push !== null) {
+    const tokenPath = pushTokenPath(request.runId, request.catalog ?? {});
+    mkdirSync(dirname(tokenPath), { recursive: true });
+    writeFileSync(tokenPath, request.push.token, { mode: 0o600 });
+  }
   const spawned = spawnCoordinator(
     argv,
     request.checkout,
@@ -385,4 +442,46 @@ export function coordinatorLogPath(
   // evidence partition can see this file. Spelling it here is how it came to
   // survive expiry forever.
   return join(handleFor(runId, catalog).dir, RUN_FILES.coordinatorLog);
+}
+
+/**
+ * Where a launch leaves the run's write token for the coordinator it is about
+ * to start (PLAN 4.1) — `runs/<runId>/push.token`, mode 0600.
+ *
+ * The handoff is a file because the two alternatives are both public on the
+ * machine: an argv is visible to `ps`, and a transient unit's environment to
+ * `systemctl show`. The coordinator reads it once and unlinks it, so a live run
+ * does not have one; a leftover means a coordinator that died before it got
+ * there, and the token it holds expires on its own.
+ */
+export function pushTokenPath(
+  runId: string,
+  catalog: CatalogOptions = {},
+): string {
+  return join(handleFor(runId, catalog).dir, RUN_FILES.pushToken);
+}
+
+/**
+ * Read the run's write token and remove the file — the COORDINATOR's half of
+ * the handoff {@link pushTokenPath} describes, spelled beside it so the two
+ * ends of one protocol cannot drift.
+ *
+ * `null` when there is no file: a run launched without a push target, a
+ * coordinator somebody started by hand, or a second read — there is no second
+ * read, because the first unlinked it. The caller then pushes nothing, which is
+ * the same answer a checkout naming no cache gets.
+ */
+export function takePushToken(
+  runId: string | undefined,
+  catalog: CatalogOptions = {},
+): string | null {
+  if (runId === undefined) return null;
+  const path = pushTokenPath(runId, catalog);
+  try {
+    const token = readFileSync(path, "utf-8").trim();
+    rmSync(path, { force: true });
+    return token === "" ? null : token;
+  } catch {
+    return null;
+  }
 }

@@ -112,9 +112,9 @@ object storage plus a lane pool. Hosting comes later, at a monthly price.
   row supplies it. Sessions are leases, so revoking one cuts its sockets. Roles
   are each row's own rule.[^server]
 - **Push paths, in order of preference:**
-  1. the hook (Phase 4.1);
+  1. the run pushes, to the cache the repo already reads from (Phase 4.1);
   2. `odu cache push` or the GitHub Action, from anywhere (landed);
-  3. run-scoped push (Phase 4.2).
+  3. the host hook, for everything a lane builds (Phase 4.3).
 - **Deployment shapes:**
 
   | Shape | What it is |
@@ -292,12 +292,18 @@ What each step delivers:
 
 ### Phase 4: CI pushes for you
 
-- **4.1 The hook.** Every build on a configured lane lands in the bucket, with
-  no step in any recipe. A cache outage only queues paths. The host owner
-  installs the hook, so lanes still hold no credentials.[^hook]
-- **4.2 Run-scoped push and provenance.** `odu run --push` pushes with a token
-  that lives as long as the run. A cached path links back to the run and
-  commit that built it, and a recipe can pin its closure.[^runpush]
+- **4.1 The run pushes.** A repo that reads from an odu cache builds for it:
+  the `extra-substituters` line already in `flake.nix` `nixConfig` is the only
+  declaration, and `odu ci run` pushes every recipe's outputs there. Nothing in
+  any recipe, no token in the repo, no second place to name the bucket.
+  Readers of a cache they can't write to build as before and are told once.[^runpush]
+- **4.2 Provenance and pins.** A path on the bucket page links to the run and
+  commit that built it. `[metadata("odu:pin")]` on a recipe keeps its closure
+  out of GC under `<repo>@<ref>/<system>`, the same pin the Action makes.[^pins]
+- **4.3 The hook.** For hosts whose every build should land in one org bucket:
+  the host owner installs it, lanes still hold no repo credentials, and a cache
+  outage only queues paths. Deferred until a lane's own store stops being
+  enough.[^hook]
 
 ### Phase 5: hosted CI
 
@@ -346,8 +352,8 @@ Each fact was checked in the source when it was written.
 | F2 | Without `auth`, whoever reaches the listener is the owner | Loopback mode is the regression guard |
 | F3 | The cache's SQLite is the only database; runs live in per-user files | Postgres is the cache's swap alone |
 | F4 | Every public command is a client of the service (`authority.test.ts`) | `odu cache push` is admissible: it is an HTTP client of the cache |
-| F5 | `post-build-hook` is a Nix daemon setting; lane provisioning never edits `nix.conf` | The hook is host configuration (4.1) |
-| F6 | Lane hosts never see credentials; GitHub posting happens on the coordinator | 4.2 relaxes this, bounded |
+| F5 | `post-build-hook` is a Nix daemon setting; lane provisioning never edits `nix.conf` | The hook is host configuration (4.3); 4.1 needs no daemon setting |
+| F6 | Lane hosts never see credentials; GitHub posting happens on the coordinator | 4.1 relaxes this, bounded to one run and one bucket |
 | F7 | A run needs an absolute checkout on the service's machine | Hosted CI needs managed clones (5.1) |
 | F8 | Hosts are per user (`hosts.json`) | Org-scoped venues (5.1) |
 | F9 | The flake exports odu, the runner, the web UI and `services.odu`; its `nixConfig` names `https://cache.kolu.dev/kolu-r2` | Odu is its own cache's first consumer |
@@ -366,7 +372,7 @@ Commits and PR bodies use the earlier names.
 | PR 1 | 1.2 | | PR 3d | 2.8 |
 | PR 1.5 | 1.3 | | PR 3g | 2.9 |
 | PR 2 (+hotfix) | 1.4 | | PR 4 | 3.1 |
-| PR 2.5 | 1.5 | | PR 5, 6 | 4.1, 4.2 |
+| PR 2.5 | 1.5 | | PR 5, 6 | 4.1, 4.2 (4.3 deferred) |
 | PR 3e | 1.6 | | PR 7, 8 | 5.1, 5.2 |
 | PR 3a | 2.1 | | PR 9, 10 | 5.3, 5.4 |
 | PR 3b (+fix) | 2.2 | | PR 11 | folded into 2.4–2.9 |
@@ -627,12 +633,30 @@ Commits and PR bodies use the earlier names.
 [^hook]: `odu cache hook` appends `OUT_PATHS` to a crash-safe queue and returns.
     `odu cache hookd` drains it with batching, missing-path queries and
     retries. `services.odu.lane` installs both with the host's own write token,
-    and non-NixOS hosts get documentation.
+    and non-NixOS hosts get documentation. The daemon runs the hook, so it
+    cannot know which repo asked: one bucket per host, chosen by the host.
 
-[^runpush]: `LaunchRequest` gains `push`. The service mints a write-only,
-    single-bucket token for the run. The runner pushes each recipe's `result*`
-    closure, and the catalog records it. `[metadata("odu:pin")]` pins a
-    recipe's closure.
+[^runpush]: Target resolution at `run.start`, on the service: `nix eval --json
+    -f flake.nix nixConfig` (a plain attrset, no inputs fetched), then
+    `nix-cache-info` of each `substituters`/`extra-substituters` entry; those
+    answering `Odu-Bucket` are odu caches. **The interim write grant, until
+    orgs land in 3.1, is *this odu serves that bucket*:** `Odu-Origin` is the
+    daemon's own origin AND the bucket exists here. Another odu's cache is
+    skipped with `reads <url>, served elsewhere`; a non-odu substituter is
+    ignored in silence. None means no push; two is refused with both URLs,
+    because a repo builds for one cache — no override key until someone hits
+    this. The published key must appear in `trusted-public-keys`, else a
+    warning. `LaunchRequest` gains `push`; the service mints a write-only,
+    single-bucket token that expires with the run; the runner pushes each
+    recipe's `result*` closure through 2.9's direct upload, and a push that
+    fails reddens its node. The token is minted by the cache row for the ci
+    row through a `@odu/cordis` broker — no principal, no root token — and
+    revoked when the service's projection sees the run settle. The GitHub
+    Action gains the same inference, so its `cache:` input becomes optional.
+
+[^pins]: The catalog records path ↔ run ↔ commit at push time; the bucket
+    page's grouped Paths table shows it per group. `odu:pin` pins through the
+    run's token, re-pointing the pin of the same name.
 
 [^repos]: `run.start` accepts a repository plus a SHA as well as an absolute
     checkout. The in-house VM pool is one org's inventory, and `hosts.json`

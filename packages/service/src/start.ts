@@ -1,7 +1,7 @@
 /**
  * `run.start` — accept a run, or say exactly why not.
  *
- * Four things happen here and the ORDER is the design:
+ * Five things happen here and the ORDER is the design:
  *
  *   1. **Is this a request at all?** A request id outside the grammar is
  *      refused before anything is claimed, because a claim has to be filed
@@ -21,7 +21,15 @@
  *      even an error: it is almost certainly the run the caller wanted, so the
  *      answer is that run, addressed, with `accepted: false` — and
  *      `supersede: true` is how a caller says it really did mean to take it.
- *   4. **Launch through the port.** How a coordinator comes to exist is not
+ *   4. **Resolve where this run PUSHES** (PLAN 4.1). The cache the checkout's
+ *      `flake.nix` already reads from, if this daemon serves it, plus a write
+ *      token minted for this run. Deliberately AFTER the receipt and
+ *      deliberately NOT in the digest: the digest is what the caller sent, and
+ *      where a checkout pushes is a fact about the world — so a replayed
+ *      request re-resolves rather than replaying yesterday's bucket. The one
+ *      arm that is a REFUSAL is two odu caches, because a repository builds
+ *      for one.
+ *   5. **Launch through the port.** How a coordinator comes to exist is not
  *      this package's business — see `./ports`.
  *
  * What this does NOT do is decide anything about the run. Selectors, platforms,
@@ -43,7 +51,7 @@ import {
 import { Effect } from "effect";
 import { callerOf } from "./caller";
 import type { Principal } from "@odu/cordis/principal";
-import type { CheckoutProbe, RunLauncher } from "./ports";
+import type { CheckoutProbe, LaunchPush, PushPort, RunLauncher } from "./ports";
 import {
   claimReceipt,
   completeReceipt,
@@ -58,11 +66,24 @@ import {
 export interface StartDeps {
   launch: RunLauncher;
   probeCheckout: CheckoutProbe;
+  push: PushPort;
   requests: ReceiptStore;
   catalog?: CatalogOptions;
   host: string;
   now: () => number;
 }
+
+/**
+ * HOW LONG A RUN'S WRITE TOKEN MAY LIVE (PLAN 4.1) — a BACKSTOP, not the
+ * lifetime.
+ *
+ * The ordinary end of one of these is the revoke at finalize, which happens
+ * whatever the outcome and usually within minutes of the run stopping. This
+ * bounds the case a revoke cannot cover: a daemon that dies with runs in
+ * flight. Long enough that it never expires under a slow run, short enough
+ * that a forgotten credential is not a permanent one.
+ */
+export const RUN_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 /** The scope a start asks for, in the catalog's own vocabulary. Built once so
  *  the receipt, the launch request and the answer all describe one selection. */
@@ -111,6 +132,11 @@ export function digestOfRequest(input: StartInput, scope: RunScope): string {
     // requests that differ only in it are two requests, and repeating one under
     // the other's id is a conflict rather than a replay.
     input.supersede ?? false,
+    // WHERE THE RUN PUSHES IS DELIBERATELY ABSENT (PLAN 4.1). It is not
+    // something the caller sent — it is read out of the checkout's `flake.nix`
+    // and off a substituter — so putting it here would make the digest a
+    // function of the world again, which is the exact fault `expectedSha`
+    // replaced a HEAD read to avoid. A replayed `requestId` re-resolves.
   ]);
 }
 
@@ -400,6 +426,56 @@ async function start(
   }
 
   const runId = claim.receipt.plannedRunId;
+  // ── WHERE THIS RUN PUSHES (PLAN 4.1) ──
+  //
+  // After the receipt and after the checkout, because it is the most expensive
+  // question asked here — a `nix eval` and one HTTP request per substituter —
+  // and every cheaper refusal above it must answer first. Its result is NOT in
+  // the digest: see the module header.
+  const resolved = await deps.push.resolve(input.checkout);
+  if (resolved.kind === "ambiguous") {
+    return refuseAndRecord(
+      deps,
+      input.requestId,
+      "checkout_refused",
+      `odu: ${input.checkout} reads from two odu caches — ` +
+        `${resolved.substituters.join(" and ")}. A repository builds for one ` +
+        "cache; name a single one in flake.nix nixConfig.",
+    );
+  }
+  const target = resolved.kind === "target" ? resolved.target : null;
+  // THE TOKEN, minted only once there is somewhere to push to and only for
+  // this run. `expiresAt` is the backstop for a daemon that dies before it can
+  // revoke; the ordinary end is the revoke at finalize.
+  const grant =
+    target === null
+      ? null
+      : deps.push.grant({
+          bucket: target.bucket,
+          runId,
+          expiresAt: deps.now() + RUN_TOKEN_LIFETIME_MS,
+        });
+  const push: LaunchPush | null =
+    target === null || grant === null
+      ? null
+      : {
+          substituter: target.substituter,
+          bucket: target.bucket,
+          tokenId: grant.tokenId,
+          token: grant.token,
+        };
+  // ONE LINE FOR THE SETUP LOG: why nothing is pushed, or what is wrong with
+  // the repo's trust settings while something is. Never both, because there is
+  // only one of them to say at a time. A BARE sentence — how a setup log is
+  // prefixed belongs to the coordinator, and two owners of that prefix is one
+  // too many.
+  const pushNote =
+    resolved.kind === "skipped"
+      ? resolved.reason
+      : target !== null && grant === null
+        ? `the bucket "${target.bucket}" is no longer served here`
+        : (target?.keyWarning ?? null);
+
   // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, because from
   // here on "my reply went missing" and "nothing happened" stop being the same
   // thing — a launcher that is still running has not published a manifest yet,
@@ -426,8 +502,14 @@ async function start(
     // cancel-then-confirm; this only has to not lose the word.
     supersede: input.supersede ?? false,
     linger: input.linger ?? false,
+    // WHERE THIS RUN PUSHES, and the one line its setup log says about it.
+    push,
+    pushNote,
   });
   if (!launched.ok) {
+    // THE TOKEN GOES BACK. Nothing ever reached a lane, so a credential left
+    // live for a day would be a grant with no run behind it.
+    if (push !== null) deps.push.revoke(push.tokenId);
     return refuseAndRecord(
       deps,
       input.requestId,

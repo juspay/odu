@@ -190,8 +190,12 @@
   .node-attempt,
   .node-host,
   .node-duration,
-  .node-exit { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
+  .node-exit,
+  .node-pushed { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
   .node-exit { color: var(--red-ink); }
+  /* WHAT A NODE WARMED (PLAN 4.1) — the one cell on this row that is good
+   * news, so it reads as a fact rather than as muted trim. */
+  .node-pushed { color: var(--green-ink); }
   .node-controls { display: flex; gap: 0.3rem; flex: none; }
 
   /* ── the lane timeline ────────────────────────────────────────────────────
@@ -535,6 +539,9 @@
   .detail-ref { color: var(--ink); font: 0.85rem var(--mono); }
   .detail-scope { color: var(--muted); font: 0.8rem var(--mono); }
   .detail-parent { color: var(--violet-ink); font: 0.8rem var(--mono); }
+  /* WHERE THIS RUN'S BUILDS GO (PLAN 4.1). Mono like the other header facts,
+   * because the bucket name is a string a person pastes. */
+  .detail-push { color: var(--muted); font: 0.8rem var(--mono); }
   .detail-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
   /* TWO TO THREE. The node list holds ids that are a namepath and a platform

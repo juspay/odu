@@ -53,6 +53,7 @@ import {
   Bundle,
   BucketDomains,
   type BucketDomains as BucketDomainsFacts,
+  CacheGrants,
   CachePurge,
   Log,
   Metrics,
@@ -933,6 +934,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     BoundOrigin,
     PublicOrigin,
     CachePurge,
+    CacheGrants,
     Log,
     Metrics,
   ],
@@ -948,6 +950,11 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // every daemon has it; whether a CDN row registered on it is not this
     // row's business, and with none registered an announcement is a no-op.
     const purges = yield* CachePurge;
+    // WHERE A RUN ASKS FOR ITS WRITE TOKEN (PLAN 4.1). Same shape and same
+    // reason as the purge broker above, with the arrow reversed: the runs' row
+    // asks, this one answers, and the runs' row is mounted FIRST (it offers
+    // `Bundle`), so a `needs` edge from there to here would be a deadlock.
+    const grants = yield* CacheGrants;
     const log = yield* Log;
     // WHERE THIS ROW'S NUMBERS GO. The host made one registry for the tenure
     // and serves `/metrics` from it; the row registers a contributor below and
@@ -1046,6 +1053,24 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
       bucketOf,
     };
     yield* offer(BucketDomains, () => domains);
+
+    // AND THE GRANT A RUN ASKS FOR (PLAN 4.1): does this daemon serve that
+    // bucket, what key does it publish, and a write token scoped to it that
+    // expires with the run. Registered rather than offered, for the mount-order
+    // reason the `needs` list gives; withdrawn in the finalizer below, so a
+    // tenure whose cache has gone away mints nothing.
+    const withdrawGrants = grants.register({
+      // THE SAME STRING EVERY BUCKET'S `nix-cache-info` STATES as `Odu-Origin`
+      // — the proxy's origin when one stands in front, the bound one otherwise
+      // — because the whole of the interim write grant is "`Odu-Origin` is us".
+      origin: () => publicOrigin ?? boundOrigin,
+      bucket: (name) => {
+        const row = cache.bucket(name);
+        return row === null ? null : { name: row.name, publicKey: row.publicKey };
+      },
+      mint: (request) => cache.grantRunToken(request),
+      revoke: (id) => cache.revokeToken(id),
+    });
 
     const server = cacheServer({
       cache,
@@ -1168,6 +1193,10 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // error from the surface an operator consults when things are already
     // going wrong.
     yield* Effect.addFinalizer(() => Effect.sync(withdrawMetrics));
+    // AND THE GRANT, for the same reason and in the same place: a mint that
+    // reached a closed database would be a run told it may push to a bucket
+    // that is no longer being served.
+    yield* Effect.addFinalizer(() => Effect.sync(withdrawGrants));
     // THE SCHEDULE, ROW-OWNED LIKE THE MIGRATION AND IN THE SAME IDIOM: a
     // cache nobody administers must still stop growing, so the row collects
     // itself daily and the operator's button is that collection asked for

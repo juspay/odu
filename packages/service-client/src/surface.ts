@@ -162,7 +162,7 @@ export const HOST_CONTRACT_VERSION = "2.5";
  *
  * 2.4: where the composed wire stood when each row took a version of its own.
  */
-export const CI_CONTRACT_VERSION = "2.4";
+export const CI_CONTRACT_VERSION = "2.5";
 
 /** THE RUNS' ROW NAME — the word the identity cell's `rows` publishes them
  *  under, a face's needs name them by, and the plugin's own name (what the
@@ -676,6 +676,27 @@ export const RunRowSchema = Schema.Struct({
   /** A cursor positioned at the row's own reading of the journal, so a caller
    *  that starts watching from the board resumes rather than replaying. */
   cursor: Schema.String,
+  /**
+   * WHERE THIS RUN PUSHES WHAT IT BUILDS (PLAN 4.1) — the cache its
+   * `flake.nix` already reads from, when this daemon serves it.
+   *
+   * `target` is null for a run that pushes nothing and `note` says why;
+   * with a target, `note` carries the `trusted-public-keys` warning when there
+   * is one. `optionalKey`, so a run recorded before this is a row without it
+   * rather than a row claiming it pushed nowhere.
+   */
+  push: Schema.optionalKey(
+    Schema.Struct({
+      target: Schema.NullOr(
+        Schema.Struct({
+          substituter: Schema.String,
+          bucket: Schema.String,
+          tokenId: Schema.String,
+        }),
+      ),
+      note: Schema.NullOr(Schema.String),
+    }),
+  ),
 });
 export type RunRow = typeof RunRowSchema.Type;
 
@@ -714,6 +735,13 @@ export const RunNodeSchema = Schema.Struct({
   /** How to ask for this attempt's output — derived once, here, so no face
    *  reassembles the three fields a log is addressed by. */
   logKey: Schema.String,
+  /** WHAT THIS NODE PUT IN THE CACHE (PLAN 4.1), read off the journal's
+   *  `pushed` event. Absent for a node that pushed nothing — a run with no
+   *  target, a recipe that built no `result`, or one whose links an earlier
+   *  node had already sent. */
+  pushed: Schema.optionalKey(
+    Schema.Struct({ paths: Schema.Int, bytes: Schema.Int }),
+  ),
 });
 export type RunNode = typeof RunNodeSchema.Type;
 
@@ -1245,6 +1273,26 @@ const AttentionAnswerSchema = Schema.Struct({
     }),
   ),
   endpoint: Schema.NullOr(Schema.String),
+  /**
+   * WHERE THIS RUN PUSHED WHAT IT BUILT (PLAN 4.1) — the bucket a green run
+   * warmed, or the sentence saying why it warmed nothing.
+   *
+   * On the ANSWER, not only on the board row, because an agent that reads a
+   * run through `run_read` and nothing else must be able to tell "green, and
+   * the cache has it" from "green, and the next machine will build it again".
+   */
+  push: Schema.optionalKey(
+    Schema.Struct({
+      target: Schema.NullOr(
+        Schema.Struct({ substituter: Schema.String, bucket: Schema.String }),
+      ),
+      note: Schema.NullOr(Schema.String),
+      /** Store paths this run put in the bucket, summed over its nodes, and
+       *  the NAR bytes they cost. */
+      paths: Schema.Int,
+      bytes: Schema.Int,
+    }),
+  ),
 });
 export type AttentionAnswer = typeof AttentionAnswerSchema.Type;
 

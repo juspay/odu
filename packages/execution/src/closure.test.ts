@@ -28,7 +28,17 @@ const MANIFEST = JSON.parse(
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
 /** Pinned as a literal set: every entry is a wall this package leans on. */
-const EXPECTED_DEPENDENCIES = ["@odu/run-client", "@odu/run-history", "effect"];
+const EXPECTED_DEPENDENCIES = [
+  // THE ONE CROSS-ROW EDGE (PLAN 4.1), and it is narrow: the lane runner
+  // reaches `@odu/cache/push` — the HTTP client door, not the cache row's
+  // server, its database or its face — because a run pushes what it built and
+  // the bytes have to leave from the machine holding them. The fence permits
+  // ci→cache; what it forbids is either row reaching `@odu/auth`.
+  "@odu/cache",
+  "@odu/run-client",
+  "@odu/run-history",
+  "effect",
+];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed — a
  *  manifest cannot name them (see the root bunfig.toml), so the set is pinned

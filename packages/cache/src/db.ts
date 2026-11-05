@@ -90,6 +90,10 @@ export interface TokenRow {
   bucketGlob: string;
   scope: Scope;
   expires: number | null;
+  /** WHAT MINTED IT, for a person reading the bucket's Tokens list. A run's
+   *  own token says `run <id>`; one an administrator minted says nothing, so
+   *  `null` is the ordinary value and not a gap. */
+  label: string | null;
   lastUsed: number | null;
   revoked: boolean;
   created: number;
@@ -528,6 +532,14 @@ export const MIGRATIONS: readonly string[] = [
   UPDATE object SET name = substr(store_path, instr(store_path, '-') + 1);
   CREATE INDEX object_name ON object (bucket, name, created);
   `,
+  // Migration 17 — WHAT MINTED A TOKEN (PLAN 4.1). A run mints its own
+  // write token for the bucket its flake reads from, and an operator reading
+  // the bucket's Tokens list must be able to tell one of those from a
+  // credential a person issued. Null for every token that predates this, which
+  // is the same thing an administrator's mint still writes.
+  `
+  ALTER TABLE token ADD COLUMN label TEXT;
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -654,6 +666,7 @@ const tokenOf = (row: Row): TokenRow => ({
   bucketGlob: text(row, "bucket_glob"),
   scope: text(row, "scope") as Scope,
   expires: row["expires"] === null ? null : integer(row, "expires"),
+  label: maybeText(row, "label"),
   lastUsed: row["last_used"] === null ? null : integer(row, "last_used"),
   revoked: integer(row, "revoked") !== 0,
   created: integer(row, "created"),
@@ -815,14 +828,15 @@ export function openCacheRepo(path: string): CacheRepo {
 
     putToken(row) {
       db.run(
-        `INSERT INTO token (id, hash, bucket_glob, scope, expires, last_used, revoked, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO token (id, hash, bucket_glob, scope, expires, label, last_used, revoked, created)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           row.id,
           row.hash,
           row.bucketGlob,
           row.scope,
           row.expires,
+          row.label,
           row.lastUsed,
           row.revoked ? 1 : 0,
           row.created,

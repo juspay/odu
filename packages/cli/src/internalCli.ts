@@ -78,6 +78,10 @@ async function runCoordinator(rest: string[]): Promise<number> {
       "run-id": { type: "string" },
       "parent-run": { type: "string" },
       "request-id": { type: "string" },
+      push: { type: "string" },
+      "push-bucket": { type: "string" },
+      "push-token-id": { type: "string" },
+      "push-note": { type: "string" },
     },
   });
   if (values.progress !== undefined && values.progress !== "json") {
@@ -109,6 +113,23 @@ async function runCoordinator(rest: string[]): Promise<number> {
       ...(values["request-id"] === undefined
         ? {}
         : { requestId: values["request-id"] }),
+      // WHERE THIS RUN PUSHES (PLAN 4.1). Three flags and no token: the
+      // launcher left that in `runs/<id>/push.token`, which the coordinator
+      // reads and unlinks. An argv is public on the machine.
+      ...(values.push === undefined ||
+      values["push-bucket"] === undefined ||
+      values["push-token-id"] === undefined
+        ? {}
+        : {
+            push: {
+              substituter: values.push,
+              bucket: values["push-bucket"],
+              tokenId: values["push-token-id"],
+            },
+          }),
+      ...(values["push-note"] === undefined
+        ? {}
+        : { pushNote: values["push-note"] }),
     },
     {
       face: cliRunFace({

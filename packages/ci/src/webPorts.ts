@@ -46,10 +46,16 @@ import { type CatalogOptions, listRuns } from "@odu/run-history/store";
 import { readPipeline } from "./pipelinePort";
 import { holdVenue, probeVenues, releaseVenue } from "./venuePort";
 import { protectBranch } from "./protectPort";
+import { oduCachesOf, readFlakeNixConfig } from "@odu/cache/push";
+import type { CacheGrants } from "@odu/cordis/services";
+import { RUN_TOKEN_LIFETIME_MS } from "@odu/service/start";
 import type {
   CancelOutcome,
   CancelRequest,
   CheckoutFacts,
+  PushPort,
+  PushResolution,
+  PushTarget,
   ServicePorts,
 } from "@odu/service/ports";
 
@@ -107,6 +113,91 @@ export function probeCheckout(
   };
 }
 
+/**
+ * WHERE A CHECKOUT'S RUN PUSHES — the resolution PLAN 4.1 turns on, and the
+ * one port that reads a repository's Nix configuration.
+ *
+ * Three steps, and each narrows the previous one:
+ *
+ *   1. **The repository's own declaration.** `flake.nix`'s `nixConfig`, which
+ *      a consumer already keeps because it is how it READS from the cache.
+ *      Nothing else is asked of the repo — no recipe step, no token, no key.
+ *   2. **Which of those substituters are odu caches.** Each one's
+ *      `nix-cache-info`, which an odu cache answers with `Odu-Origin` and
+ *      `Odu-Bucket`. A substituter that says neither is somebody else's cache
+ *      (`cache.nixos.org` is in a great many flakes) and is ignored in silence.
+ *   3. **Which of THOSE this daemon may write to.** The interim write grant,
+ *      until orgs land in PLAN 3.1, is *this odu serves that bucket*:
+ *      `Odu-Origin` is this daemon's own origin AND the bucket exists here.
+ *      Another odu's cache is skipped with a sentence naming it, because
+ *      "I cannot write there" is a different fact from "you named nothing".
+ *
+ * Two grantable caches REFUSE the run, with both URLs. A repository builds for
+ * one cache; choosing between two would be this port inventing a policy, and
+ * the override key stays unwritten until somebody hits the case.
+ */
+export function resolvePush(
+  checkout: string,
+  grants: CacheGrants,
+): Promise<PushResolution> {
+  return resolvePushWith(checkout, grants, readFlakeNixConfig, oduCachesOf);
+}
+
+/** The resolution, with its two readings of the world injected — the seam the
+ *  suite states a flake and a set of substituters through. */
+export async function resolvePushWith(
+  checkout: string,
+  grants: CacheGrants,
+  readConfig: typeof readFlakeNixConfig,
+  describeAll: typeof oduCachesOf,
+): Promise<PushResolution> {
+  const config = readConfig(checkout);
+  if (!config.ok) return { kind: "skipped", reason: config.reason };
+  if (config.config.substituters.length === 0) {
+    return { kind: "skipped", reason: "flake.nix nixConfig names no substituters" };
+  }
+  const odu = await describeAll(config.config.substituters);
+  if (odu.length === 0) {
+    return {
+      kind: "skipped",
+      reason: "no substituter in flake.nix nixConfig is an odu cache",
+    };
+  }
+  const ours = grants.origin();
+  const grantable: PushTarget[] = [];
+  const elsewhere: string[] = [];
+  for (const cache of odu) {
+    const bucket = cache.origin === ours ? grants.bucket(cache.bucket) : null;
+    if (bucket === null) {
+      elsewhere.push(`reads ${cache.substituter}, served elsewhere`);
+      continue;
+    }
+    grantable.push({
+      substituter: cache.substituter,
+      origin: cache.origin,
+      bucket: bucket.name,
+      // A REPOSITORY THAT CANNOT VERIFY WHAT IT READS is still worth pushing
+      // for — the bytes are correct and the next machine may trust the key —
+      // so this is a warning and never a refusal.
+      keyWarning: config.config.trustedPublicKeys.includes(bucket.publicKey)
+        ? null
+        : `${cache.substituter} is pushed to, but its key is missing from ` +
+          `trusted-public-keys — add "${bucket.publicKey}" to flake.nix ` +
+          "nixConfig or nothing will substitute from it",
+    });
+  }
+  if (grantable.length === 0) {
+    return { kind: "skipped", reason: elsewhere.join("; ") };
+  }
+  if (grantable.length > 1) {
+    return {
+      kind: "ambiguous",
+      substituters: grantable.map((target) => target.substituter),
+    };
+  }
+  return { kind: "target", target: grantable[0] as PushTarget };
+}
+
 /** What the web face needs from its root: the ports, and nothing else — the
  *  cache is a row that constructs itself. */
 export interface WebPorts {
@@ -129,13 +220,62 @@ export function configured(value: string | undefined): string | null {
  * Nothing is read from the environment here: every fact the ports need arrives
  * from the host, which is the one place that reads one.
  */
-export function webPorts(): WebPorts {
+export function webPorts(grants: CacheGrants): WebPorts {
   const launcher = packagedLauncher();
   // ONE forge for this service's life, and the SAME implementation the
   // coordinator constructs for its statuses. Two constructions of `gh` in one
   // product is two places a credential decision would have to be threaded
   // through, which is exactly what the port exists to stop.
   const forge = ghForge();
+  const push: PushPort = {
+    resolve: (checkout) => resolvePush(checkout, grants),
+    grant: ({ bucket, runId, expiresAt }) => {
+      const minted = grants.mint({ bucket, label: `run ${runId}`, expiresAt });
+      return minted === null ? null : { tokenId: minted.id, token: minted.token };
+    },
+    revoke: (tokenId) => grants.revoke(tokenId),
+  };
+  /**
+   * The launcher a REPLAY goes through — the same one, with the push target
+   * resolved again from the checkout it is about to run in.
+   *
+   * A replay is a new run, with a new id and a new token, and the cache its
+   * checkout reads from is a fact about the world rather than about the run
+   * being replayed. Freezing the parent's bucket into it would be the same
+   * mistake recording a resolved host pool would be, and replaying its TOKEN
+   * is not even possible: that one was revoked when the parent settled.
+   */
+  const replayLauncher: typeof launcher = async (request) => {
+    const resolved = await push.resolve(request.checkout);
+    if (resolved.kind !== "target") {
+      return launcher({
+        ...request,
+        push: null,
+        pushNote:
+          resolved.kind === "skipped"
+            ? resolved.reason
+            : `this checkout reads from two odu caches (${resolved.substituters.join(", ")})`,
+      });
+    }
+    const granted = push.grant({
+      bucket: resolved.target.bucket,
+      runId: request.runId,
+      expiresAt: Date.now() + RUN_TOKEN_LIFETIME_MS,
+    });
+    return launcher({
+      ...request,
+      push:
+        granted === null
+          ? null
+          : {
+              substituter: resolved.target.substituter,
+              bucket: resolved.target.bucket,
+              tokenId: granted.tokenId,
+              token: granted.token,
+            },
+      pushNote: resolved.target.keyWarning,
+    });
+  };
   const ports: ServicePorts = {
     // The engine's `LaunchRequest` still spells the caller's inventory as the
     // flat `hostsFile` it has always taken; the port hands it a Caller. The
@@ -154,10 +294,11 @@ export function webPorts(): WebPorts {
           ? {}
           : { expectAttempt: request.expectAttempt }),
         ...(request.catalog === undefined ? {} : { catalog: request.catalog }),
-        launcher,
+        launcher: replayLauncher,
       }),
     cancel: cancelThroughSocket,
     probeCheckout,
+    push,
     // The five that made `odu ci hosts`, `odu ci lease`, `odu ci release`,
     // `odu ci dump`, `odu ci graph` and `odu ci protect` clients of the shared
     // authority rather than six programs doing their own work in whatever

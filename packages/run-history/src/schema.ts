@@ -244,6 +244,34 @@ export const RunManifestSchema = Schema.Struct({
    *  Present only on imported records, so a reader never mistakes a
    *  reconstructed history for a first-hand one. */
   importedFrom: Schema.optionalKey(Schema.String),
+  /**
+   * WHERE THIS RUN PUSHED WHAT IT BUILT, and what it said about doing so
+   * (PLAN 4.1).
+   *
+   * `target` is null for a run that pushed nothing, and `note` then says why —
+   * no flake, no odu cache in its `nixConfig`, or one this daemon does not
+   * serve. With a target, `note` carries the `trusted-public-keys` warning when
+   * there is one and is null otherwise.
+   *
+   * `tokenId` is the handle the token is REVOKED by at finalize. The token
+   * itself is never here, never in the journal and never in a log: the manifest
+   * is a durable record of a run, and a credential in one would outlive every
+   * bound this design puts on it.
+   *
+   * `optionalKey`, so every record written before this stays decodable.
+   */
+  push: Schema.optionalKey(
+    Schema.Struct({
+      target: Schema.NullOr(
+        Schema.Struct({
+          substituter: Schema.String,
+          bucket: Schema.String,
+          tokenId: Schema.String,
+        }),
+      ),
+      note: Schema.NullOr(Schema.String),
+    }),
+  ),
 });
 export type RunManifest = typeof RunManifestSchema.Type;
 
@@ -395,6 +423,26 @@ export const RunEventSchema = Schema.Union([
     node: Schema.String,
     /** Did the lane actually take the reset? */
     applied: Schema.Boolean,
+  }),
+  /**
+   * A NODE'S OUTPUTS LANDED IN THE CACHE (PLAN 4.1) — the durable half of
+   * "green means warmed".
+   *
+   * Written when a recipe exits 0 and its `result*` closure was pushed, so a
+   * reader of a finished run can say what that run put in the bucket without
+   * the bucket having to be asked. `paths` counts what the bucket SERVES as a
+   * result (stored plus already-present), which is the same list the push
+   * client verifies; `bytes` is what crossed the wire.
+   *
+   * A push that FAILED is not one of these: it makes the node red, with the
+   * client's own sentence in that node's log, like any other failure.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("pushed"),
+    node: Schema.String,
+    bucket: Schema.String,
+    paths: Schema.Int,
+    bytes: Schema.Int,
   }),
   /** The run reached a terminal outcome. Sequence-wise the last line any
    *  writer appends. */

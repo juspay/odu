@@ -135,6 +135,19 @@ The receipt carries `runId`, `requestId`, `sha`, `scope`, a usually-null
 positioned at the run's beginning — pass that cursor straight into your first
 `run_wait` so you resume rather than replay.
 
+**A run pushes what it builds, and nothing in the repository says so twice.**
+The `extra-substituters` line already in `flake.nix` `nixConfig` — the line a
+consumer keeps in order to READ from a bucket — is the whole declaration;
+`run_start` resolves it, and every recipe's `result*` closure is pushed to the
+one odu cache the serving daemon has. There is no request field, no flag, no
+recipe step and no token in the tree: do NOT add `odu cache push` to a justfile
+to get this. `run_read` answers `push` — the bucket and how much landed, or
+`target: null` and a `note` saying why nothing was pushed (no flake, no odu
+cache named there, or one this daemon does not serve). A push that fails makes
+that node RED, so a green run means the cache is warm. Two odu caches this
+daemon serves is a `checkout_refused` at start naming both: a repository builds
+for one cache.
+
 **Lost replies are why `requestId` exists.** Mint one id per *intent*, never per
 attempt. If a reply is lost — a timeout, a killed tool call, a restarted harness
 — repeat the call with **the same id and the same input**: you get the recorded
@@ -678,6 +691,14 @@ declares.
 
 ## What changed (state it honestly if asked)
 
+- **A RUN PUSHES WHAT IT BUILDS** (`ci` 2.5, PLAN 4.1): every recipe's
+  `result*` closure goes to the odu cache the repository's `flake.nix`
+  `nixConfig` already reads from, when the serving daemon has it. No recipe
+  step, no token in the tree, no request field, no flag. The run's write token
+  is minted for that run, scoped to that one bucket and revoked at finalize
+  (it reads `run <id>` in the bucket page's Tokens list, cache 4.6); a push
+  that fails reddens its node. `run_read` answers `push`, and a node answers
+  `pushed`.
 - **The daemon can be scraped** (`metrics` 1.0, PLAN 6.2): `GET /metrics` is a
   Prometheus exposition of the cache row's hit rates and storage, the runs'
   durations and lane use. It needs the root token or a `metrics` token
@@ -701,7 +722,7 @@ declares.
   with a domain bound (clear the domain first) and one with a move in flight. Admin only,
   and on the board it is the bucket page's **Delete this bucket**, which makes you type
   the bucket's name first.
-- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 4.5,
+- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.5, `cache` at 4.6,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
   major of a row **it reads** differs. The refusal names that row
   (`serves the cache row at 4.0; this build reads cache 3.1`): run `odu web --upgrade`.
@@ -714,12 +735,17 @@ declares.
   refuses by design.
 - The repository ships a GitHub Actions push step
   (`juspay/odu/.github/actions/push@<sha>`), which verifies its own push. Its
-  only address input is `cache:` — the substituter URL.
+  `cache:` input is the substituter URL and is now OPTIONAL: omitted, the push
+  reads it out of `./flake.nix`'s `nixConfig`, the one declaration a repository
+  that reads from the cache already keeps.
 - `odu cache push --cache <substituter>` is the same discovery in a shell: it
   GETs `<substituter>/nix-cache-info`, requires `Odu-Origin` and `Odu-Bucket`,
   and pushes to them. It is exclusive with `<bucket> --origin <url>`, which
   stays for a person who has both in hand. A cache that states neither — or
-  does not answer — is refused with a sentence naming the URL.
+  does not answer — is refused with a sentence naming the URL. With NEITHER a
+  `--cache` nor a bucket, `odu cache push <path>…` reads the substituter out of
+  `./flake.nix`'s `nixConfig` and pushes to the one odu cache named there; two
+  is a refusal listing both.
 - `odu cache push --pin NAME` re-points a pin at the closure the push landed
   (nothing is pinned if a path was refused). The push action takes `pin: true`
   instead of a name and derives `<owner>/<repo>@<ref>/<system>`; when to pin is

@@ -638,6 +638,36 @@ export interface Cache {
     bucket: BucketRow,
     input: { name: string; paths: readonly string[] },
   ): Promise<CacheOutcome<PinFacts>>;
+  /**
+   * A WRITE TOKEN FOR ONE RUN AND ONE BUCKET — what the `ci` row mints when a
+   * repository's `flake.nix` reads from a bucket this daemon serves (PLAN
+   * 4.1), through `@odu/cordis`'s grant broker.
+   *
+   * NOT an admin verb, and deliberately not reached through one. `tokenMint`
+   * authorises a PERSON holding the root token; there is no person here. The
+   * caller is the runs' row in this same process, acting on a run this daemon
+   * has already accepted, and handing it a fabricated root token so it could
+   * call the administrative verb would be an authority invented to satisfy a
+   * check — the same reasoning {@link Cache.collect} is separate for.
+   *
+   * What bounds it instead is the GRANT: scope `write`, a glob of exactly this
+   * bucket, and an expiry in MILLISECONDS rather than the whole days the
+   * administrative mint takes, because a run is shorter than a day. The run
+   * revokes it at finalize whatever the outcome; the expiry is the backstop
+   * for a daemon that died first.
+   *
+   * `null` when no such bucket is served here.
+   */
+  grantRunToken(request: {
+    bucket: string;
+    /** What the bucket page's Tokens list shows — `run <id>`. */
+    label: string;
+    /** Wall-clock milliseconds. */
+    expiresAt: number;
+  }): { id: string; token: string } | null;
+  /** Let a token go, by id. Idempotent — an unknown id is not an error,
+   *  because a finalize cannot know whether a restart already revoked. */
+  revokeToken(id: string): void;
   /** The admin face. */
   admin: CacheAdmin;
   /** BEFORE MOUNT: prove `CA:`, sweep orphan objects and abandoned temp files.
@@ -1408,6 +1438,10 @@ export function createCache(options: CacheOptions): Cache {
         bucketGlob: glob,
         scope: input.scope,
         expires: input.expiresDays === null ? null : now() + input.expiresDays * 24 * 60 * 60 * 1000,
+        // AN ADMINISTRATOR'S MINT SAYS NOTHING ABOUT ITSELF. The label is a
+        // run's (PLAN 4.1); a person holding the root token is the ordinary
+        // case and has no second name to carry.
+        label: null,
         lastUsed: null,
         revoked: false,
         created: now(),
@@ -2453,6 +2487,37 @@ export function createCache(options: CacheOptions): Cache {
     collect: () => collectNow(repo.buckets(), true),
 
     pinAs: (bucket, input) => pinChecked(bucket, input, "write"),
+
+    // THE RUN'S OWN WRITE TOKEN (PLAN 4.1). No principal, no root token, and
+    // no admin verb — see the interface for why those would be an authority
+    // invented rather than one held. The bucket must exist HERE: a grant for a
+    // name this daemon does not serve is the whole of what "served elsewhere"
+    // means on the resolver's side.
+    grantRunToken: ({ bucket, label, expiresAt }) => {
+      const row = repo.bucket(bucket);
+      if (row === null) return null;
+      const token = mintToken();
+      const id = mintTokenId();
+      repo.putToken({
+        id,
+        hash: hashToken(token),
+        // EXACTLY this bucket. `globMatches` takes a comma-separated list of
+        // patterns and a bare name is the narrowest one expressible, so a run
+        // that pushes to the bucket it reads from can reach nothing else.
+        bucketGlob: row.name,
+        scope: "write",
+        expires: expiresAt,
+        label,
+        lastUsed: null,
+        revoked: false,
+        created: now(),
+      });
+      return { id, token };
+    },
+
+    revokeToken: (id) => {
+      repo.setTokenRevoked(id, true);
+    },
 
     admin,
 

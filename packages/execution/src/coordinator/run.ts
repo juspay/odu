@@ -77,6 +77,7 @@ import type { TaskSpec } from "../common/spec";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { asHostSlot, fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
+import { takePushToken } from "./launcher";
 import {
   ExecutionRoster,
   type ExecutionLane,
@@ -178,6 +179,20 @@ export interface RunArgs {
   /** The launcher's idempotency key, recorded on the manifest so a receipt and
    *  a run can be matched up after the fact. */
   requestId?: string;
+  /**
+   * WHERE THIS RUN PUSHES WHAT IT BUILDS (PLAN 4.1) — the substituter the
+   * checkout's `flake.nix` reads from, the bucket it serves, and the id the
+   * run's write token is revoked by.
+   *
+   * The TOKEN is not here: the launcher left it in `runs/<id>/push.token` and
+   * this process reads and unlinks it at startup. Absent for a run that pushes
+   * nothing, which is every run whose checkout names no odu cache the daemon
+   * that launched it serves.
+   */
+  push?: { substituter: string; bucket: string; tokenId: string };
+  /** The ONE line the setup node's log says about pushing — a skip reason, or
+   *  the `trusted-public-keys` warning. Absent when there is nothing to say. */
+  pushNote?: string;
 }
 
 /**
@@ -617,10 +632,35 @@ async function orchestrate(
     }
   }
 
+  // ── WHERE THIS RUN PUSHES (PLAN 4.1) ──
+  //
+  // The token the launcher left beside this run's own log, read ONCE and
+  // unlinked: from here it exists in this process's memory and in the
+  // `run.configure` payload each lane is sent, and nowhere a second reader
+  // could find it. A missing file with `--push` set is a launch that was never
+  // given one, so the run proceeds without pushing rather than refusing — the
+  // same answer as a checkout that names no cache.
+  const pushToken = args.push === undefined ? null : takePushToken(args.runId);
+  const pushing = args.push !== undefined && pushToken !== null ? args.push : null;
+  /** The two variables a lane's recipe node carries so the runner can push what
+   *  it built. The runner asks the substituter's own `nix-cache-info` which
+   *  bucket and which origin that is, exactly as `odu cache push --cache` does.
+   *  Empty for a run that pushes nothing, so no task gains a key. */
+  const pushEnv: Record<string, string> =
+    pushing === null || pushToken === null
+      ? {}
+      : { ODU_CACHE_SUBSTITUTER: pushing.substituter, ODU_CACHE_TOKEN: pushToken };
+  /** Every task, with the push environment on it. Applied HERE, once, where a
+   *  lane's task list is first built — so a shard lane, an extend and a
+   *  resurrection all carry it without a second place remembering to. */
+  const withPushEnv = (tasks: readonly TaskSpec[]): TaskSpec[] =>
+    Object.keys(pushEnv).length === 0
+      ? [...tasks]
+      : tasks.map((task) => ({ ...task, env: { ...(task.env ?? {}), ...pushEnv } }));
   const platforms = Object.keys(poolsByPlatform).sort();
   const tasksByPlatform = new Map<string, TaskSpec[]>();
   for (const platform of platforms) {
-    const tasks = laneTasks(spec, platform, selectors, args.noDeps);
+    const tasks = withPushEnv(laneTasks(spec, platform, selectors, args.noDeps));
     if (tasks.length > 0) {
       const sharded = tasks.filter((task) => task.shards !== undefined);
       if (args.linger && sharded.length > 0) {
@@ -783,6 +823,16 @@ async function orchestrate(
     ...(args.runId === undefined ? {} : { runId: args.runId }),
     ...(args.parentRunId === undefined ? {} : { parentRunId: args.parentRunId }),
     ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
+    // WHERE THIS RUN PUSHES, as a durable fact about the run (PLAN 4.1). The
+    // token id so a finalize can revoke it; never the token.
+    ...(args.push === undefined && args.pushNote === undefined
+      ? {}
+      : {
+          push: {
+            target: args.push ?? null,
+            note: args.pushNote ?? null,
+          },
+        }),
   });
   // On stderr (every face's `info` writes there), so the NDJSON stdout contract
   // `--progress json` promises is untouched. This one line is how an operator
@@ -1858,6 +1908,22 @@ async function orchestrate(
     }
   };
 
+  /** Nodes whose push has already been journalled. A lane republishes its
+   *  whole state on every frame, so without this one push would be written to
+   *  the journal once per subsequent node. */
+  const pushJournalled = new Set<string>();
+  /**
+   * A lane node says it pushed (PLAN 4.1): put the counts on the public node
+   * so the board can paint them, and the fact in the journal so a run read a
+   * week later still says what it warmed.
+   */
+  const notePushed = (id: string, pushed: { paths: number; bytes: number }): void => {
+    updateNode(id, { pushed });
+    if (pushing === null || pushJournalled.has(id)) return;
+    pushJournalled.add(id);
+    history.pushed({ node: id, bucket: pushing.bucket, ...pushed });
+  };
+
   const installShardNodes = (platform: string, plan: ShardPlan): void => {
     runtime.ctx.cells.nodes.set(installShardTopology(store.get(), platform, plan));
     display.update(store.get());
@@ -1923,6 +1989,23 @@ async function orchestrate(
     const id = fanId(SETUP, platform);
     if (store.get().nodes[id]?.status !== "pending") return;
     updateNode(id, { status: "running", startedAt: Date.now() });
+    // THE ONE LINE THIS RUN OWES ABOUT PUSHING (PLAN 4.1) — where it is
+    // pushing, or why it is not. Written here because `_ci-setup` is the node
+    // every face already opens first, and because a run must be able to say
+    // "nothing went to a cache" without an operator having to deduce it from
+    // an absence.
+    if (pushing !== null) {
+      appendLocal(
+        id,
+        `[odu] pushing results to ${pushing.substituter} (bucket ${pushing.bucket})\n`,
+      );
+      if (args.pushNote !== undefined) appendLocal(id, `[odu] ${args.pushNote}\n`);
+    } else {
+      appendLocal(
+        id,
+        `[odu] not pushing: ${args.pushNote ?? "this run was launched with no cache target"}\n`,
+      );
+    }
   };
 
   /** Provisioning can emit thousands of lines in one transport callback. The
@@ -2624,6 +2707,7 @@ async function orchestrate(
             startedAt: laneNode.startedAt,
             durationMs: laneNode.durationMs,
           });
+          if (laneNode.pushed !== undefined) notePushed(id, laneNode.pushed);
           const plan = planFor(platform, laneId);
           if (plan !== undefined) {
             refreshShardAggregate(platform, plan);
@@ -3154,6 +3238,7 @@ async function orchestrate(
               // the whole burst lane settles.
               if (laneId === SETUP) updateNode(publicId, patch);
               else verdicts.offer(publicId, patch);
+              if (laneNode.pushed !== undefined) notePushed(publicId, laneNode.pushed);
               if (laneId === plan.rootId) {
                 refreshShardAggregate(platform, plan);
               }

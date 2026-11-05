@@ -128,6 +128,28 @@ const wentWrong = (node: RunNode): boolean =>
   node.status === "failed" || node.status === "errored";
 
 /**
+ * A PUSH NOTE AS A TRAILING CLAUSE, or nothing (PLAN 4.1).
+ *
+ * One sentence arrives from the service — the reason nothing is being pushed,
+ * or the `trusted-public-keys` warning when something is — and both read the
+ * same way after the target: "pushes to kolu — its key is missing from…". A
+ * reason with no note is the launch that was simply given no target, which the
+ * surrounding words already say.
+ */
+function noteSuffix(note: string | null): string {
+  return note === null || note === "" ? "" : ` — ${note}`;
+}
+
+/** NAR bytes as a person reads them. Two decimals under a gigabyte, because a
+ *  recipe's output is routinely tens of megabytes and `0 GiB` says nothing. */
+function mib(bytes: number): string {
+  const mega = bytes / (1024 * 1024);
+  return mega >= 1024
+    ? `${(mega / 1024).toFixed(2)} GiB`
+    : `${mega.toFixed(mega >= 10 ? 0 : 1)} MiB`;
+}
+
+/**
  * WHICH NODE A RUN OPENS ON when its address names none.
  *
  * A run page whose log pane is empty has asked the one question the page
@@ -315,6 +337,16 @@ function NodeRow(props: {
         </Show>
         <Show when={props.node.exitCode !== null && props.node.exitCode !== 0}>
           <span class="node-exit">{`exit ${props.node.exitCode ?? 0}`}</span>
+        </Show>
+        {/* WHAT THIS NODE WARMED (PLAN 4.1). Absent on a node that pushed
+            nothing, which is most of them: a recipe that builds no `result`,
+            or one whose links an earlier node in this run already sent. */}
+        <Show when={props.node.pushed}>
+          {(pushed) => (
+            <span class="node-pushed">
+              {`pushed ${pushed().paths} path${pushed().paths === 1 ? "" : "s"} · ${mib(pushed().bytes)}`}
+            </span>
+          )}
         </Show>
         {/* The drawn half of the `title` above. This control is hand-spelled
             rather than built from `Button` — it is a row of labelled cells —
@@ -854,6 +886,31 @@ export function Detail(props: {
               )}
             </Show>
             <span class="detail-sub">{props.run?.repoRoot ?? ""}</span>
+            {/* WHERE THIS RUN'S BUILDS GO (PLAN 4.1) — the bucket, linked to
+                its own page, or the one sentence saying why nothing is being
+                pushed. On the HEADER rather than beside a node, because a push
+                target is a property of the run: every node sends to the same
+                bucket, or to none. */}
+            <Show when={props.run?.push}>
+              {(push) => (
+                <span class="detail-push">
+                  <Show
+                    when={push().target}
+                    fallback={<>{`not pushing${noteSuffix(push().note)}`}</>}
+                  >
+                    {(target) => (
+                      <>
+                        {"pushes to "}
+                        <a href={`#/cache/${encodeURIComponent(target().bucket)}`}>
+                          {target().bucket}
+                        </a>
+                        {noteSuffix(push().note)}
+                      </>
+                    )}
+                  </Show>
+                </span>
+              )}
+            </Show>
           </>
         }
         actions={

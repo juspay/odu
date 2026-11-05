@@ -60,6 +60,8 @@ function request(over: Partial<LaunchRequest> = {}): LaunchRequest {
     hostsFile: null,
     supersede: false,
     linger: false,
+    push: null,
+    pushNote: null,
     ...over,
   };
 }

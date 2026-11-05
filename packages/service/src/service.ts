@@ -322,6 +322,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                   {
                     launch: opts.ports.launch,
                     probeCheckout: opts.ports.probeCheckout,
+                    push: opts.ports.push,
                     requests,
                     catalog,
                     host: hostname(),
@@ -720,9 +721,43 @@ export function createOduService(opts: ServiceOptions): OduService {
       ),
   );
 
+  /**
+   * THE RUN TOKENS THIS PROCESS HAS ALREADY LET GO (PLAN 4.1).
+   *
+   * The revoke itself is idempotent, so this is not for correctness — it is so
+   * that a board holding a thousand settled runs does not issue a thousand
+   * SQLite updates on the tick that first projects the catalog.
+   */
+  const revokedPushTokens = new Set<string>();
+  /**
+   * A RUN THAT WILL NOT MOVE AGAIN GIVES ITS WRITE TOKEN BACK.
+   *
+   * Driven off the PROJECTION rather than off the coordinator, and that is the
+   * design: the coordinator writes `finalized` and then dies, and it holds no
+   * authority over a cache in any case. The service minted the token, the
+   * service can see the run reach a terminal state — `owner_lost` included,
+   * where nobody wrote `finalized` at all — and the service revokes it.
+   *
+   * Crash-safe for free: the first refresh after a restart upserts every run
+   * in the catalog, so a token whose daemon died mid-run is revoked the moment
+   * its successor projects that run. A daemon that never comes back is covered
+   * by the token's own expiry.
+   */
+  const revokeSettledPushTokens = (rows: readonly RunRow[]): void => {
+    for (const row of rows) {
+      const tokenId = row.push?.target?.tokenId;
+      if (tokenId === undefined) continue;
+      if (row.state === "provisioning" || row.state === "running") continue;
+      if (revokedPushTokens.has(tokenId)) continue;
+      revokedPushTokens.add(tokenId);
+      opts.ports.push.revoke(tokenId);
+    }
+  };
+
   /** Re-project the catalog and publish what moved. */
   const refresh = (): void => {
     const delta = registry.refresh(now());
+    revokeSettledPushTokens(delta.upserted);
     for (const row of delta.upserted) runtime.ctx.collections.runs.upsert(row.runId, row);
     for (const runId of delta.removed) runtime.ctx.collections.runs.remove(runId);
     for (const key of watched) {

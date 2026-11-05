@@ -41,7 +41,15 @@ import type { SurfaceDispatch } from "@kolu/surface/link";
 import { Effect } from "effect";
 import { existsSync } from "node:fs";
 import { CACHE_MOUNT } from "./paths";
-import { describeCache, discoveryToken, normalizeOrigin, pushToCache, saveCredential } from "./push";
+import {
+  describeCache,
+  discoveryToken,
+  normalizeOrigin,
+  oduCachesOf,
+  pushToCache,
+  readFlakeNixConfig,
+  saveCredential,
+} from "./push";
 import {
   CACHE_KEY,
   CacheRefused,
@@ -88,6 +96,11 @@ login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
 push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [-o json]
 push --cache <substituter> <path>…
+push <path>…                  with neither, the substituter is read from
+                              ./flake.nix's nixConfig — the one declaration a
+                              repository that READS from an odu cache already
+                              has. Two odu caches named there is a refusal,
+                              because a repository builds for one
                               upload only the paths the bucket is missing.
                               Talks to the cache directly, from HERE. Where a
                               NAR's bytes go is the BUCKET's answer: on an S3
@@ -103,7 +116,8 @@ push --cache <substituter> <path>…
                               already has: the cache names its own push origin
                               and bucket in nix-cache-info, so a workflow keeps
                               one fact instead of three. Exclusive with
-                              <bucket> --origin
+                              <bucket> --origin, and unnecessary when
+                              ./flake.nix names exactly one odu cache
                               --pin re-points that named pin at the closure
                               this push landed, so garbage collection keeps it.
                               The write token is the authority; nothing is
@@ -431,12 +445,44 @@ async function pushCommand(rest: string[]): Promise<number> {
     paths = positionals;
   } else {
     const [named, ...rest] = positionals;
-    if (named === undefined || rest.length === 0) {
-      process.stderr.write(`odu: cache push needs a bucket and at least one path\n${CACHE_USAGE}`);
-      return 1;
+    // A BARE WORD IS A BUCKET, and everything else is a path: that is the same
+    // test `--cache` applies in the other direction, and it is what lets the
+    // inferred form share this grammar without a flag to tell them apart. An
+    // absolute path, a flake installable and something on this disk are paths;
+    // a bare word is a bucket name.
+    const looksLikeBucket =
+      named !== undefined &&
+      !(named.startsWith("/") || named.includes("#") || existsSync(named));
+    if (looksLikeBucket) {
+      if (rest.length === 0) {
+        process.stderr.write(
+          `odu: cache push needs a bucket and at least one path\n${CACHE_USAGE}`,
+        );
+        return 1;
+      }
+      bucket = named;
+      paths = rest;
+    } else {
+      // ── NEITHER SPELLING: THE REPOSITORY ALREADY SAID IT (PLAN 4.1) ──
+      //
+      // `flake.nix`'s `nixConfig` is the one declaration a repo that READS
+      // from an odu cache keeps, so a push from inside that repo needs no
+      // second copy of the bucket name. The client has no notion of "served
+      // here" — that is the service's grant, not a pusher's — so ANY odu cache
+      // in the config qualifies, and two is a refusal naming both.
+      if (positionals.length === 0) {
+        process.stderr.write(`odu: cache push needs at least one path\n${CACHE_USAGE}`);
+        return 1;
+      }
+      const inferred = await inferredCache(values["token-file"], json);
+      if ("error" in inferred) {
+        process.stderr.write(`odu: ${inferred.error}\n`);
+        return 1;
+      }
+      bucket = inferred.bucket;
+      origin = inferred.origin;
+      paths = positionals;
     }
-    bucket = named;
-    paths = rest;
   }
   try {
     const summary = await pushToCache({
@@ -486,5 +532,61 @@ async function pushCommand(rest: string[]): Promise<number> {
     process.stderr.write(`odu: ${err instanceof Error ? err.message : String(err)}\n`);
     return 1;
   }
+}
+
+/**
+ * THE CACHE `./flake.nix` ALREADY NAMES (PLAN 4.1) — `odu cache push` with no
+ * `--cache` and no bucket.
+ *
+ * The same two readings the service makes at `run.start`, less the grant: this
+ * is a CLIENT, with no daemon and no bucket of its own, so "is it an odu
+ * cache" is the whole of the test. Two of them is a refusal naming both, for
+ * the reason the run's resolver refuses: a repository builds for one cache,
+ * and choosing would be this command inventing a policy.
+ */
+async function inferredCache(
+  tokenFile: string | undefined,
+  json: boolean,
+): Promise<{ bucket: string; origin: string } | { error: string }> {
+  const config = readFlakeNixConfig(process.cwd());
+  if (!config.ok) {
+    return {
+      error:
+        `${config.reason} — name the cache with \`--cache <substituter>\`, or the ` +
+        "bucket with `<bucket> --origin <url>`",
+    };
+  }
+  const found: { substituter: string; bucket: string; origin: string }[] = [];
+  for (const substituter of config.config.substituters) {
+    // THE PUSH'S OWN TOKEN, ONE REQUEST EARLIER, for the reason `--cache`
+    // sends one: a private bucket answers its `nix-cache-info` to nobody. Per
+    // substituter, because the credential is keyed by origin and these are
+    // different origins.
+    const token = await discoveryToken(process.env, substituter, tokenFile);
+    for (const cache of await oduCachesOf([substituter], { token })) found.push(cache);
+  }
+  const one = found[0];
+  if (one === undefined) {
+    return {
+      error:
+        "no substituter in ./flake.nix nixConfig is an odu cache — name one with " +
+        "`--cache <substituter>`",
+    };
+  }
+  if (found.length > 1) {
+    return {
+      error:
+        `./flake.nix nixConfig names ${found.length} odu caches ` +
+        `(${found.map((cache) => cache.substituter).join(", ")}) — a repository pushes ` +
+        "to one, so name it with `--cache <substituter>`",
+    };
+  }
+  if (!json) {
+    process.stderr.write(
+      `./flake.nix reads from ${one.substituter}, which is bucket "${one.bucket}" ` +
+        `on ${one.origin}\n`,
+    );
+  }
+  return { bucket: one.bucket, origin: one.origin };
 }
 

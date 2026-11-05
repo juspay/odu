@@ -325,6 +325,100 @@ export function purgeBroker(): CachePurge {
   };
 }
 
+/**
+ * MAY THIS RUN PUSH TO THAT BUCKET, AND WITH WHAT — the port the `ci` row mints
+ * a run's write token through, and the `cache` row answers on.
+ *
+ * It is a BROKER for the same reason {@link CachePurge} is, and the direction is
+ * the mirror image: the runs' row asks, the cache row answers — and the runs'
+ * row is mounted FIRST (it offers `Bundle`, which the cache is held pending on).
+ * A row that had to `yield*` its answerer's service would be a deadlock, not a
+ * dependency. The host makes one broker per tenure, both rows name it, and with
+ * nobody registered every question answers "no such bucket here": a daemon
+ * serving no cache runs exactly as it did before, and nothing is refused.
+ *
+ * **No principal crosses it.** The grant is not a surface verb and has no
+ * caller to authorise: the ci row is in the same process as the cache row, the
+ * run it mints for is one this daemon just accepted, and the token it gets back
+ * is write-scoped to one bucket and expires. Administrative cache verbs keep
+ * needing the root token; this is not one of them.
+ */
+export interface CacheGrants {
+  /** The origin this cache states as `Odu-Origin` in every bucket's
+   *  `nix-cache-info` — the address a push is aimed at. `null` when no cache is
+   *  registered. */
+  origin(): string | null;
+  /** Does this daemon serve that bucket, and what key does it publish? `null`
+   *  when it does not (or when no cache is registered at all). */
+  bucket(name: string): { name: string; publicKey: string } | null;
+  /**
+   * A WRITE TOKEN FOR ONE RUN AND ONE BUCKET. `expiresAt` is wall-clock
+   * milliseconds — a run is shorter than the day the administrative mint
+   * rounds to. `label` is what the bucket page's Tokens list shows, so an
+   * operator reading it sees `run <id>` rather than an anonymous credential.
+   *
+   * `null` when no cache is registered or the bucket is gone.
+   */
+  mint(request: {
+    bucket: string;
+    label: string;
+    expiresAt: number;
+  }): { id: string; token: string } | null;
+  /** Let a minted token go, by id. Idempotent: an unknown id is not an error,
+   *  because the caller revoking at finalize cannot know whether a restart
+   *  already did. */
+  revoke(id: string): void;
+  /** Install the answerer. Returns its withdrawal; throws
+   *  {@link GrantClaimRefused} when one is already installed. */
+  register(grantor: CacheGrantor): () => void;
+}
+
+/** What the cache row registers — the three questions, less the broker's own
+ *  absent-answerer defaults. */
+export interface CacheGrantor {
+  origin(): string;
+  bucket(name: string): { name: string; publicKey: string } | null;
+  mint(request: {
+    bucket: string;
+    label: string;
+    expiresAt: number;
+  }): { id: string; token: string } | null;
+  revoke(id: string): void;
+}
+
+/** A second grantor claimed the broker. A distinct class so a row's `apply` can
+ *  fail with a sentence rather than a message match. */
+export class GrantClaimRefused extends Error {
+  readonly _tag = "GrantClaimRefused";
+  constructor() {
+    super(
+      "odu: a cache grantor is already installed on this daemon — exactly one " +
+        "row may mint a run's write token",
+    );
+  }
+}
+
+export const CacheGrants = serviceTag<CacheGrants>("odu:cacheGrants");
+
+/** A broker with no grantor. ONE per daemon, made by whoever owns the tenure. */
+export function grantsBroker(): CacheGrants {
+  let installed: { readonly grantor: CacheGrantor } | null = null;
+  return {
+    origin: () => installed?.grantor.origin() ?? null,
+    bucket: (name) => installed?.grantor.bucket(name) ?? null,
+    mint: (request) => installed?.grantor.mint(request) ?? null,
+    revoke: (id) => installed?.grantor.revoke(id),
+    register(grantor) {
+      if (installed !== null) throw new GrantClaimRefused();
+      const claim = { grantor };
+      installed = claim;
+      return () => {
+        if (installed === claim) installed = null;
+      };
+    },
+  };
+}
+
 // ── what a row publishes ────────────────────────────────────────────────────
 
 /** ONE BUCKET'S OWN NAME, as the cache row publishes it. */

@@ -160,6 +160,24 @@ export const NodeStateSchema = Schema.Struct({
   startedAt: Schema.NullOr(Schema.Number),
   /** Wall-clock run time in ms once terminal; `null` otherwise. */
   durationMs: Schema.NullOr(Schema.Number),
+  /**
+   * WHAT THIS NODE PUT IN THE CACHE (PLAN 4.1) — set by the lane runner when a
+   * recipe exits 0 and its `result*` closure was pushed.
+   *
+   * `optionalKey` and absent by default, because absent is the ordinary
+   * answer: a run with no push target, a recipe that built no `result`, and a
+   * node that only re-pushed paths an earlier node in this run already sent all
+   * mean "nothing new went to the bucket", and `0` would be a claim this field
+   * is not entitled to make about a run that never pushed at all.
+   */
+  pushed: Schema.optionalKey(
+    Schema.Struct({
+      /** Store paths the bucket serves as a result of this node. */
+      paths: Schema.Int,
+      /** Bytes this node's uploads sent. */
+      bytes: Schema.Int,
+    }),
+  ),
 });
 export type NodeState = typeof NodeStateSchema.Type;
 

@@ -53,6 +53,12 @@ import { transitiveDependents } from "../common/nodeId";
 import { createGroupReaper } from "./reap";
 import { hasSnapshot, narrateSnapshot, prepareWorkspace } from "./workspace";
 import { createSnapshotUploads } from "./snapshotUpload";
+import {
+  createLanePusher,
+  type LanePusher,
+  type PushedFact,
+  pushConfigOf,
+} from "./pushResults";
 
 /** Lane-local setup node id — same namepath as fan-in `_ci-setup@plat`. */
 export const SETUP_NODE_ID = SETUP_NAMEPATH;
@@ -71,8 +77,17 @@ export interface LaneRunner {
   dispose(): void;
 }
 
-export function createLaneRunner(): LaneRunner {
+export function createLaneRunner(
+  deps: {
+    /** WHERE THIS LANE'S OUTPUTS GO (PLAN 4.1), and what it has already sent.
+     *  One per runner process, because both are facts about the LANE rather
+     *  than about any node: a path node A pushed is on the bucket for node B
+     *  too. Injected so a suite can state a bucket that refuses without one. */
+    pusher?: LanePusher;
+  } = {},
+): LaneRunner {
   const uploads = createSnapshotUploads();
+  const pusher = deps.pusher ?? createLanePusher();
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
 
@@ -510,6 +525,36 @@ export function createLaneRunner(): LaneRunner {
     };
     child.stdout?.on("data", onOutput);
     child.stderr?.on("data", onOutput);
+    const taskEnv = config?.tasks.find((task) => task.id === node.id)?.env;
+    /** `close` arrived while a push was still running. The log terminal is a
+     *  promise that nothing more is coming, and the push client's lines are
+     *  still coming — so the frame waits for it. */
+    let closeSeen = false;
+    let pushing = false;
+    const endLog = (): void => {
+      if (inv.phase === "closed") return;
+      inv.phase = "closed";
+      tail.end(node.id);
+    };
+    /** Stamp the terminal status, after whatever post-exit work this node
+     *  owed. Split out of `finish` because a push runs between the two, and a
+     *  node that read `ok` before its push landed would be a green that had
+     *  warmed nothing. */
+    const stamp = (
+      status: NodeStatus,
+      exitCode: number | null,
+      pushed: PushedFact | null,
+    ): void => {
+      if (!current()) return;
+      setNode(node.id, {
+        status,
+        exitCode,
+        durationMs: Date.now() - startedAt,
+        ...(pushed === null ? {} : { pushed }),
+      });
+      if (closeSeen) endLog();
+      tick();
+    };
     const finish = (status: NodeStatus, exitCode: number | null): void => {
       // `exit` and `error` can BOTH fire for one invocation (a child that fails
       // to spawn emits no exit; one that spawns and dies emits no error), so the
@@ -523,20 +568,40 @@ export function createLaneRunner(): LaneRunner {
       // log left unterminated here would cost a 15s drain and then a truncation
       // notice stamped on a node that finished, which is the class of lie the
       // notice exists to prevent.
-      if (child.pid === undefined) {
-        inv.phase = "closed";
-        tail.end(node.id);
-      }
+      if (child.pid === undefined) endLog();
       // The direct child is gone, but a stray it backgrounded (with its stdio
       // redirected, so `cat` still saw EOF) may survive in the group — reap it
       // rather than leaving the group unowned forever.
       if (child.pid !== undefined) reaper.reap(child.pid);
-      setNode(node.id, {
-        status,
-        exitCode,
-        durationMs: Date.now() - startedAt,
-      });
-      tick();
+      // ── WHAT THIS RECIPE BUILT GOES TO THE CACHE (PLAN 4.1) ──
+      //
+      // Only a GREEN node: a failed recipe's `result` is the previous run's
+      // link, and pushing it would store bytes this run never produced. Only a
+      // CONFIGURED one: a run with no cache target carries no token on any
+      // task and takes this branch never.
+      const pushConfig = status === "ok" ? pushConfigOf(taskEnv) : null;
+      if (pushConfig === null || workspace === undefined) {
+        stamp(status, exitCode, null);
+        return;
+      }
+      pushing = true;
+      void pusher
+        .push(workspace, pushConfig, (line) => {
+          if (current()) tail.append(node.id, `${line}\n`);
+        })
+        .then((pushed) => {
+          pushing = false;
+          stamp("ok", exitCode, pushed);
+        })
+        .catch((err: unknown) => {
+          pushing = false;
+          const message = err instanceof Error ? err.message : String(err);
+          // GREEN MEANS WARMED. The recipe passed and its outputs did not
+          // reach the bucket, so the node is red with the client's own
+          // sentence in its log — the same shape as any other failure.
+          if (current()) tail.append(node.id, `\n[odu] push failed: ${message}\n`);
+          stamp("failed", exitCode, null);
+        });
     };
     child.on("error", (err) => {
       if (current()) {
@@ -552,8 +617,12 @@ export function createLaneRunner(): LaneRunner {
     // coordinator can wait on instead of a race it loses (juspay/odu#87).
     child.on("close", () => {
       if (!current() || inv.phase === "closed") return;
-      inv.phase = "closed";
-      tail.end(node.id);
+      closeSeen = true;
+      // A push still owes this log its lines; `stamp` ends the frame when it
+      // is done. Without this the coordinator would be told the node's output
+      // was complete and then be sent more of it.
+      if (pushing) return;
+      endLog();
     });
   };
 

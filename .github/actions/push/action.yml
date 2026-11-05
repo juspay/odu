@@ -106,11 +106,17 @@ inputs:
   cache:
     description: >-
       The SUBSTITUTER URL your nix.conf substitutes from, e.g.
-      https://cache.kolu.dev/kolu-r2 — the one line this action needs. It
-      reads that cache's nix-cache-info for the push origin (Odu-Origin) and
-      the bucket (Odu-Bucket), so neither is spelled here and neither can
-      drift. A cache that states neither is refused, naming the URL.
-    required: true
+      https://cache.kolu.dev/kolu-r2. It reads that cache's nix-cache-info for
+      the push origin (Odu-Origin) and the bucket (Odu-Bucket), so neither is
+      spelled here and neither can drift. A cache that states neither is
+      refused, naming the URL.
+      OMIT IT when your flake.nix already names the cache: with no value,
+      `odu cache push` reads ./flake.nix's nixConfig — the same
+      extra-substituters line you keep in order to READ from that cache — and
+      pushes to the one odu cache it finds there. Two is a refusal naming
+      both, because a repository builds for one cache.
+    required: false
+    default: ""
   token:
     description: >-
       A bucket write token (a bucket page mints one, once). Empty on a pull

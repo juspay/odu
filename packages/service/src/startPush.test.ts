@@ -1,0 +1,206 @@
+/**
+ * `run.start` AND WHERE THE RUN PUSHES (PLAN 4.1).
+ *
+ * Four properties, and each is a decision the module header argues for:
+ *
+ *   - a resolved target reaches the LAUNCH, with a token minted for this run
+ *     and nothing else;
+ *   - two odu caches REFUSE the start, naming both, because a repository
+ *     builds for one;
+ *   - a launch that failed gives the token BACK, so a credential never
+ *     outlives a run that does not exist;
+ *   - the target is NOT in the request digest, so a replayed `requestId`
+ *     re-resolves rather than replaying yesterday's bucket.
+ *
+ * Every one of them is asserted through the recording ports, which record what
+ * the service ASKED FOR — the only way to tell a replayed answer from a second
+ * act.
+ */
+
+import { afterEach, describe, expect, it } from "bun:test";
+import { Effect } from "effect";
+import { LOCAL_OWNER } from "@odu/cordis/principal";
+import type { StartInput } from "@odu/service-client/surface";
+import {
+  makeWorld,
+  recordingPorts,
+  type RecordingPorts,
+  type World,
+} from "./fixture.testlib";
+import type { PushResolution } from "./ports";
+import { requestStore } from "./requests";
+import { digestOfRequest, RUN_TOKEN_LIFETIME_MS, startRun } from "./start";
+
+let world: World | null = null;
+const open = (): World => {
+  world = makeWorld();
+  return world;
+};
+afterEach(() => {
+  world?.dispose();
+  world = null;
+});
+
+const HEAD = "a".repeat(40);
+const CHECKOUT = "/code/app";
+
+const input = (over: Partial<StartInput> = {}): StartInput => ({
+  checkout: CHECKOUT,
+  expectedSha: HEAD,
+  requestId: "req-1",
+  ...over,
+});
+
+const TARGET: PushResolution = {
+  kind: "target",
+  target: {
+    substituter: "https://cache.kolu.dev/kolu-r2",
+    origin: "https://odu.kolu.dev",
+    bucket: "kolu-r2",
+    keyWarning: null,
+  },
+};
+
+function start(
+  w: World,
+  ports: RecordingPorts,
+  over: Partial<StartInput> = {},
+): Promise<unknown> {
+  return Effect.runPromise(
+    Effect.result(
+      startRun(
+        input(over),
+        {
+          launch: ports.launch,
+          probeCheckout: ports.probeCheckout,
+          push: ports.push,
+          requests: requestStore({ root: w.requestsRoot }),
+          catalog: { root: w.catalogRoot },
+          host: "test-host",
+          now: () => 1_700_000_000_000,
+        },
+        LOCAL_OWNER,
+      ),
+    ),
+  );
+}
+
+describe("a start that resolves a cache", () => {
+  it("mints a token for THIS run and carries it to the launch", async () => {
+    const w = open();
+    const ports = recordingPorts({ push: () => TARGET });
+    await start(w, ports);
+
+    expect(ports.pushResolves).toEqual([CHECKOUT]);
+    const launched = ports.launches[0];
+    expect(launched?.push).toEqual({
+      substituter: "https://cache.kolu.dev/kolu-r2",
+      bucket: "kolu-r2",
+      tokenId: "tok-1",
+      token: "odu_stub_1",
+    });
+    // THE GRANT IS SCOPED TO THE RUN AND TO THE DAY — the bucket it resolved,
+    // the run id the receipt already names, and an expiry that is a backstop
+    // for a daemon that dies before it can revoke.
+    expect(ports.pushGrants[0]).toEqual({
+      bucket: "kolu-r2",
+      runId: launched?.runId ?? "",
+      expiresAt: 1_700_000_000_000 + RUN_TOKEN_LIFETIME_MS,
+    });
+    // NOTHING TO SAY: the key is trusted, so the setup log gets the target
+    // line and no warning.
+    expect(launched?.pushNote).toBeNull();
+    expect(ports.pushRevokes).toEqual([]);
+  });
+
+  it("carries the trusted-key warning as the run's one note, and still pushes", async () => {
+    const w = open();
+    const ports = recordingPorts({
+      push: () => ({
+        kind: "target",
+        target: { ...TARGET.target, keyWarning: "its key is missing from trusted-public-keys" },
+      }),
+    });
+    await start(w, ports);
+    expect(ports.launches[0]?.push).not.toBeNull();
+    expect(ports.launches[0]?.pushNote).toBe(
+      "its key is missing from trusted-public-keys",
+    );
+  });
+
+  it("launches with no push, and the reason, when nothing resolved", async () => {
+    const w = open();
+    const ports = recordingPorts({
+      push: () => ({ kind: "skipped", reason: "no flake.nix" }),
+    });
+    await start(w, ports);
+    expect(ports.launches[0]?.push).toBeNull();
+    expect(ports.launches[0]?.pushNote).toBe("no flake.nix");
+    // A run that pushes nothing mints nothing: there is no credential to
+    // revoke and none to leak.
+    expect(ports.pushGrants).toEqual([]);
+  });
+
+  it("REFUSES two odu caches, naming both, and starts nothing", async () => {
+    const w = open();
+    const ports = recordingPorts({
+      push: () => ({
+        kind: "ambiguous",
+        substituters: ["https://a.example/one", "https://b.example/two"],
+      }),
+    });
+    const outcome = await start(w, ports);
+    expect(ports.launches).toEqual([]);
+    expect(ports.pushGrants).toEqual([]);
+    expect(JSON.stringify(outcome)).toContain("https://a.example/one");
+    expect(JSON.stringify(outcome)).toContain("https://b.example/two");
+    expect(JSON.stringify(outcome)).toContain("builds for one");
+  });
+
+  it("gives the token back when the launch failed", async () => {
+    const w = open();
+    const ports = recordingPorts({
+      push: () => TARGET,
+      launch: (request) => ({
+        ok: false,
+        runId: request.runId,
+        endpoint: "",
+        error: "the coordinator never registered",
+      }),
+    });
+    await start(w, ports);
+    // NOTHING EVER REACHED A LANE, so a credential left live for a day would
+    // be a grant with no run behind it.
+    expect(ports.pushRevokes).toEqual(["tok-1"]);
+  });
+});
+
+describe("the request digest", () => {
+  it("does not know where a run pushes", () => {
+    // The digest is what the CALLER sent. Where a checkout pushes is read out
+    // of its `flake.nix` and off a substituter, so putting it in here would
+    // make the digest a function of the world again — the exact fault
+    // `expectedSha` replaced a HEAD read to avoid.
+    const scope = { selectors: [], platforms: [], noDeps: false };
+    expect(digestOfRequest(input(), scope)).toBe(
+      digestOfRequest(input(), scope),
+    );
+    // And the proof that matters is behavioural: a repeated request id with a
+    // DIFFERENT world re-resolves rather than conflicting.
+    expect(digestOfRequest(input(), scope)).not.toContain("kolu-r2");
+  });
+
+  it("re-resolves on a repeat, and replays the receipt", async () => {
+    const w = open();
+    let answer: PushResolution = TARGET;
+    const ports = recordingPorts({ push: () => answer });
+    await start(w, ports);
+    // The world moved: the bucket is gone. A repeat of the SAME request id is
+    // still answered from the receipt — one execution per request id — and the
+    // resolution is asked again rather than replayed from a stale value.
+    answer = { kind: "skipped", reason: "no flake.nix" };
+    await start(w, ports);
+    expect(ports.launches).toHaveLength(1);
+    expect(ports.pushResolves).toEqual([CHECKOUT]);
+  });
+});

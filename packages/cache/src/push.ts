@@ -27,7 +27,10 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   credentialsPath as sharedCredentialsPath,
   normalizeOrigin,
@@ -256,6 +259,180 @@ function infoField(text: string, field: string): string | null {
   return null;
 }
 
+// ── what a repository already says about its cache ──────────────────────────
+
+/**
+ * THE ONE DECLARATION A REPOSITORY ALREADY HAS — `flake.nix`'s `nixConfig`
+ * (PLAN 4.1).
+ *
+ * A repo that reads from an odu cache names it exactly once, in the
+ * `extra-substituters` line a consumer pastes out of `odu cache use`. Nothing
+ * else needs to be true for a run to push there: no recipe step, no token in
+ * the tree, no `.odu` key, no second place a bucket name can go stale.
+ *
+ * **`-f flake.nix`, not `nix flake metadata`.** `nixConfig` is a plain attrset
+ * at the top of the file, so evaluating the FILE answers it without fetching a
+ * single input — which on a cold checkout is the difference between a
+ * millisecond and a download of nixpkgs. The cost is that a `nixConfig` built
+ * by a `let` over an input would not evaluate; no repository writes one, and a
+ * failure is reported rather than guessed at.
+ *
+ * **A value is a string or a list.** Nix accepts both spellings for every
+ * multi-valued setting, and a repository that writes
+ * `extra-substituters = "a b"` means the same two caches as one that writes a
+ * list of two.
+ */
+export interface FlakeNixConfig {
+  /** `substituters` ∪ `extra-substituters`, in declaration order. */
+  substituters: readonly string[];
+  /** `trusted-public-keys` ∪ `extra-trusted-public-keys`. */
+  trustedPublicKeys: readonly string[];
+}
+
+export type FlakeNixConfigOutcome =
+  | { ok: true; config: FlakeNixConfig }
+  /** No `flake.nix`, or one `nix eval` would not read. `reason` is a sentence
+   *  naming which — it is what a run's setup log prints, so it has to say why
+   *  nothing was pushed rather than merely that nothing was. */
+  | { ok: false; reason: string };
+
+/** How a `nix eval` is run. Injected so the resolver's arms — no flake, an
+ *  eval error, a `nixConfig` of the wrong shape — are stated without a Nix. */
+export type NixEval = (
+  dir: string,
+) => { ok: true; json: string } | { ok: false; stderr: string };
+
+/** One multi-valued `nixConfig` setting as a list of words, from either
+ *  spelling. Anything else (a number, a bool, a nested attrset) contributes
+ *  nothing: the settings this reads are lists of strings and a repository that
+ *  wrote something else did not name a substituter. */
+function settingWords(value: unknown): string[] {
+  if (typeof value === "string") {
+    return value.split(/\s+/).filter((word) => word !== "");
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => (typeof item === "string" ? settingWords(item) : []));
+  }
+  return [];
+}
+
+/** Both spellings of one setting, in declaration order and without repeats. */
+function unioned(config: Record<string, unknown>, plain: string): string[] {
+  const out: string[] = [];
+  for (const key of [plain, `extra-${plain}`]) {
+    for (const word of settingWords(config[key])) {
+      if (!out.includes(word)) out.push(word);
+    }
+  }
+  return out;
+}
+
+/** `nix eval --json -f flake.nix nixConfig`, with no input fetched. */
+export const nixEvalFlakeConfig: NixEval = (dir) => {
+  const result = spawnSync(
+    "nix",
+    ["eval", "--json", "-f", "flake.nix", "nixConfig"],
+    { cwd: dir, encoding: "utf-8", timeout: FLAKE_EVAL_TIMEOUT_MS },
+  );
+  if (result.status === 0) return { ok: true, json: result.stdout };
+  const said = (result.stderr ?? "").trim().split("\n").filter((line) => line.trim() !== "");
+  return {
+    ok: false,
+    // THE LAST LINE, which is where `nix eval` puts the fault; the ones above
+    // it are the trace. One line, because this reaches a run's setup log and a
+    // forty-line Nix trace there is noise standing in front of the answer.
+    stderr: said[said.length - 1]?.trim() ?? (result.error?.message ?? "nix eval failed"),
+  };
+};
+
+/** How long a `nixConfig` evaluation may take. It fetches nothing and parses
+ *  one file, so this is a backstop against a hung `nix`, not a budget. */
+const FLAKE_EVAL_TIMEOUT_MS = 30_000;
+
+/** What a checkout's `flake.nix` declares about the caches it reads from. */
+export function readFlakeNixConfig(
+  dir: string,
+  evaluate: NixEval = nixEvalFlakeConfig,
+): FlakeNixConfigOutcome {
+  if (!existsSync(join(dir, "flake.nix"))) {
+    return { ok: false, reason: "no flake.nix" };
+  }
+  const evaluated = evaluate(dir);
+  if (!evaluated.ok) {
+    return { ok: false, reason: `flake.nix nixConfig could not be read — ${evaluated.stderr}` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(evaluated.json);
+  } catch {
+    return { ok: false, reason: "flake.nix nixConfig did not evaluate to JSON" };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, reason: "flake.nix has no nixConfig attrset" };
+  }
+  const config = parsed as Record<string, unknown>;
+  return {
+    ok: true,
+    config: {
+      substituters: unioned(config, "substituters"),
+      trustedPublicKeys: unioned(config, "trusted-public-keys"),
+    },
+  };
+}
+
+/** A substituter that answered as an odu cache — the URL asked, and the two
+ *  lines it said about itself. */
+export interface OduSubstituter extends DescribedCache {
+  substituter: string;
+}
+
+/** How long one `nix-cache-info` probe may take. Bounded because this runs on
+ *  the path of `run.start`, which a caller is waiting on, and a substituter
+ *  that is down must cost a timeout rather than the run. */
+export const CACHE_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * WHICH OF THESE SUBSTITUTERS ARE ODU CACHES — asked of each one, in parallel,
+ * with a bounded wait.
+ *
+ * A substituter that does not answer, or answers without `Odu-Origin` and
+ * `Odu-Bucket`, is IGNORED rather than refused: `cache.nixos.org` is in a great
+ * many `nixConfig`s and is nobody's push target. The refusals this resolution
+ * can produce are about odu caches, which is what {@link describeCache} already
+ * says and the reason this reuses it rather than parsing the file again.
+ */
+export async function oduCachesOf(
+  substituters: readonly string[],
+  options: {
+    send?: typeof fetch;
+    /** The credential a PRIVATE bucket's `nix-cache-info` needs. */
+    token?: string | null;
+    timeoutMs?: number;
+  } = {},
+): Promise<OduSubstituter[]> {
+  const send = options.send ?? fetch;
+  const timeoutMs = options.timeoutMs ?? CACHE_PROBE_TIMEOUT_MS;
+  // `typeof fetch` carries Bun's `preconnect` property, which a plain lambda
+  // cannot have and `describeCache` never calls. The cast names that gap
+  // rather than widening the parameter every other caller depends on.
+  const bounded = ((input: string, init?: RequestInit) =>
+    send(input, { ...(init ?? {}), signal: AbortSignal.timeout(timeoutMs) })) as typeof fetch;
+  const described = await Promise.all(
+    substituters.map(async (substituter) => {
+      try {
+        const facts = await describeCache(substituter, bounded, options.token ?? null);
+        return { substituter, ...facts };
+      } catch {
+        // NOT AN ODU CACHE, or not reachable. Either way this is not the
+        // repository's push target and saying so would be noise on every run
+        // of every repo that substitutes from nixos.org.
+        return null;
+      }
+    }),
+  );
+  return described.filter((one): one is OduSubstituter => one !== null);
+}
+
 /** The token, in the order the docs promise: `--token-file`, then
  *  `$ODU_CACHE_TOKEN`, then the credentials entry for the bucket's origin. */
 export async function resolveToken(
@@ -279,6 +456,15 @@ export type ClosureEntry = PathInfo;
 
 export interface PushSummary {
   pushed: number;
+  /**
+   * HOW MUCH THIS PUSH STORED — the NAR size of every path it uploaded, summed.
+   *
+   * The UNCOMPRESSED size, which is what the closure states and what a reader
+   * comparing it with `nix path-info -S` expects; what crossed the wire is
+   * whatever zstd made of it. Zero when nothing was uploaded, a closure the
+   * bucket already held included.
+   */
+  bytes: number;
   /** Paths the bucket already has, or would not take because an upstream key
    *  signed them. The server says which is which. */
   skippedUpstream: number;
@@ -432,6 +618,8 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     );
   }
   let pushed = 0;
+  /** NAR bytes this push stored, summed as each upload lands. */
+  let bytes = 0;
   /** What the bucket answered the negotiation with — one store, one mode. */
   let mode: UploadMode | null = null;
 
@@ -449,6 +637,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         });
         if (outcome.ok) {
           pushed += 1;
+          bytes += entry.narSize;
           mode = outcome.mode;
           say(`✅ ${storePath} stored`);
           continue;
@@ -486,6 +675,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
       : await pinClosure(resolved, headers, options.pin, served, say);
   return {
     pushed,
+    bytes,
     mode,
     skippedUpstream: answer.skippedUpstream.length,
     skippedDerivation,
