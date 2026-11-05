@@ -71,21 +71,39 @@ function mintedToken(answer: { stdout: string }): string {
   return payload.token;
 }
 
-/** THE ARRANGE, registered under two texts: a scenario that pushes BEFORE it
- *  opens the page (the page is then read as it stands), and one that opens the
- *  page FIRST and pushes into it — which is the scenario that grades the
+/** WHAT A SCENARIO WANTS IN A BUCKET: a file's base NAME — which becomes the
+ *  store path's name, and therefore the table's group — and the bytes it
+ *  holds, which decide the NAR's size. Two specs of the same name are two
+ *  builds of one package; two sizes are what a sort by size is about. */
+interface FileSpec {
+  readonly name: string;
+  readonly body: string;
+}
+
+/** THE ARRANGE, registered under several texts: a scenario that pushes BEFORE
+ *  it opens the page (the page is then read as it stands), and one that opens
+ *  the page FIRST and pushes into it — which is the scenario that grades the
  *  property the row exists for, a push arriving with no reload. */
 function arrangePush(world: OduWorld, howMany = 1): void {
+  arrangeFiles(
+    world,
+    Array.from({ length: howMany }, (_, index) => {
+      const name = unique(index === 0 ? "path" : `path-${index}`);
+      return { name, body: `odu web acceptance: ${name}\n` };
+    }),
+  );
+}
+
+function arrangeFiles(world: OduWorld, specs: readonly FileSpec[]): void {
   const bucket = unique("bucket");
   // LEAF FILES, added straight to the store: a path with no references, so the
   // narinfo needs no referrers and the import cannot sit at 202 waiting for
-  // them. More than one when the scenario is about NARROWING a list.
+  // them. A DIRECTORY EACH, because two builds of one package are the same
+  // base name with different bytes and one directory cannot hold both.
   const paths: string[] = [];
-  const dir = mkdtempSync(join(tmpdir(), "odu-wa-cache-"));
-  for (let index = 0; index < howMany; index += 1) {
-    const name = unique(index === 0 ? "path" : `path-${index}`);
-    const file = join(dir, name);
-    writeFileSync(file, `odu web acceptance: ${name}\n`);
+  for (const spec of specs) {
+    const file = join(mkdtempSync(join(tmpdir(), "odu-wa-cache-")), spec.name);
+    writeFileSync(file, spec.body);
     const added = spawnSync("nix", ["store", "add-file", file], {
       env: world.service.env,
       encoding: "utf-8",
@@ -200,6 +218,30 @@ Given("a bucket with two paths pushed from the CLI", function (this: OduWorld) {
   arrangePush(this, 2);
 });
 
+/** THREE BUILDS OF ONE PACKAGE: the same base name, different bytes, so the
+ *  store gives each its own hash and the table has a group to draw. */
+Given(
+  "a bucket with three builds of one package pushed from the CLI",
+  function (this: OduWorld) {
+    const name = unique("widget");
+    arrangeFiles(this, [1, 2, 3].map((build) => ({ name, body: `build ${build}\n` })));
+  },
+);
+
+/** A BIG ONE AND A SMALL ONE, the big one pushed FIRST so the default order
+ *  (newest push at the top) is not already the order a sort by size would
+ *  produce. `cachePathNames[0]` is the large path. */
+Given("a bucket with a large and a small path pushed from the CLI", function (this: OduWorld) {
+  arrangeFiles(this, [
+    { name: unique("large"), body: "x".repeat(400_000) },
+    { name: unique("small"), body: "x\n" },
+  ]);
+});
+
+Given("a bucket with {int} paths pushed from the CLI", function (this: OduWorld, count: number) {
+  arrangePush(this, count);
+});
+
 When("a bucket with one path is pushed from the CLI", function (this: OduWorld) {
   arrangePush(this);
 });
@@ -241,23 +283,31 @@ When("I filter the paths by the first path's name", async function (this: OduWor
   await this.page.getByRole("searchbox", { name: "filter paths" }).fill(name);
 });
 
+/** A ROW OF THE PATHS TABLE — the grouped row for a package, or a version
+ *  under an open one. The GC panel keeps an `ol.paths` of its own, so these
+ *  are addressed through the table rather than by the word "path". */
+function pathRow(world: OduWorld, name: string): Locator {
+  return world.page.locator("table.paths-table tbody tr", { hasText: name }).first();
+}
+
 Then("both pushed paths are listed", async function (this: OduWorld) {
   for (const name of this.cachePathNames ?? []) {
-    await this.page.locator("ol.paths li", { hasText: name }).first().waitFor({ timeout: 30_000 });
+    await pathRow(this, name).waitFor({ timeout: 30_000 });
   }
 });
 
 Then("the first path is listed", async function (this: OduWorld) {
   const name = this.cachePathNames?.[0];
   assert.ok(name !== undefined, "no path was arranged");
-  await this.page.locator("ol.paths li", { hasText: name }).first().waitFor({ timeout: 30_000 });
+  await pathRow(this, name).waitFor({ timeout: 30_000 });
 });
 
 Then("the second path is not listed", async function (this: OduWorld) {
   const name = this.cachePathNames?.[1];
   assert.ok(name !== undefined, "no second path was arranged");
   await this.waitUntil(
-    async () => (await this.page.locator("ol.paths li", { hasText: name }).count()) === 0,
+    async () =>
+      (await this.page.locator("table.paths-table tbody tr", { hasText: name }).count()) === 0,
     "the second path to disappear",
   );
 });
@@ -336,24 +386,104 @@ Then("the page offers the netrc lines a Nix client needs", async function (this:
 Then("the pushed path is listed", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no path was arranged");
-  await this.page.locator("li", { hasText: name }).first().waitFor({ timeout: 30_000 });
+  await pathRow(this, name).waitFor({ timeout: 30_000 });
 });
 
-/** WANTED, not read. The row prints the clock GC decides by, and the push that
- *  arranged this scenario has just renewed it — so what is asserted is the
- *  SHAPE of the fact rather than a number that moves while the page is open. */
+/** WANTED, not read. The table's last column is the clock GC decides by, and
+ *  the push that arranged this scenario has just renewed it — so what is
+ *  asserted is the SHAPE of the fact rather than a number that moves while
+ *  the page is open. The column is read by position because that is what a
+ *  reader compares it by: the one under the `wanted` header. */
 Then("that path says when it was last wanted", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no path was arranged");
-  const row = this.page.locator("ol.paths li", { hasText: name }).first();
-  await row.waitFor({ timeout: 30_000 });
+  const cell = pathRow(this, name).locator("td").last();
+  await cell.waitFor({ timeout: 30_000 });
   await until("the path's row to say when it was last wanted", async () =>
-    /wanted \d+[smhd] ago/.test(await row.innerText()) ? true : null,
+    /^\d+[smhd] ago$/.test((await cell.innerText()).trim()) ? true : null,
   );
 });
 
 Then("no path is listed", async function (this: OduWorld) {
-  await this.page.locator("ol.paths li").first().waitFor({ state: "detached", timeout: 30_000 });
+  await this.page
+    .locator("table.paths-table tbody tr")
+    .first()
+    .waitFor({ state: "detached", timeout: 30_000 });
+});
+
+/** WHAT THE TABLE HOLDS AFTER A REFRESH — a count of grouped rows, because
+ *  the question is whether the page asked the row again, not which path
+ *  survived. */
+Then("one path is listed", async function (this: OduWorld) {
+  const rows = this.page.locator("table.paths-table tbody tr.table-row");
+  await this.waitUntil(
+    async () => (await rows.count()) === 1,
+    "the path table to hold exactly one row",
+  );
+});
+
+/** THE GROUPED ROWS — one per package, whatever each holds. */
+Then("the paths table holds {int} rows", async function (this: OduWorld, count: number) {
+  const rows = this.page.locator("table.paths-table tbody tr.table-row");
+  await this.waitUntil(
+    async () => (await rows.count()) === count,
+    `the paths table to hold ${count} rows`,
+  );
+});
+
+/** …and the versions under an open one, which are a different kind of row:
+ *  the count is what the group's own line claimed. */
+Then(
+  "the paths table holds {int} version rows",
+  async function (this: OduWorld, count: number) {
+    const rows = this.page.locator("table.paths-table tbody tr.table-sub-row");
+    await this.waitUntil(
+      async () => (await rows.count()) === count,
+      `the paths table to hold ${count} version rows`,
+    );
+  },
+);
+
+Then("that package is one row saying {string}", async function (this: OduWorld, text: string) {
+  const name = this.cachePathName;
+  assert.ok(name !== undefined && name !== "", "no package was arranged");
+  await this.saysThat(pathRow(this, name), `the row for ${name}`, text);
+});
+
+When("I expand that package", async function (this: OduWorld) {
+  const name = this.cachePathName;
+  assert.ok(name !== undefined && name !== "", "no package was arranged");
+  await pathRow(this, name).locator("button.disclosure-summary").click();
+});
+
+/** THE ORDER IS CHOSEN IN THE HEADER, so this presses the header — the same
+ *  gesture a person makes, and the one a keyboard can make too. */
+When("I sort the paths by {string}", async function (this: OduWorld, column: string) {
+  await this.page
+    .locator("table.paths-table thead")
+    .getByRole("button", { name: column, exact: true })
+    .click();
+});
+
+Then(
+  "the {string} column says it is sorted {string}",
+  async function (this: OduWorld, column: string, direction: string) {
+    const head = this.page.locator(`table.paths-table th:has(button:text-is("${column}"))`);
+    await this.waitUntil(
+      async () => (await head.getAttribute("aria-sort")) === direction,
+      `the ${column} column to say it is sorted ${direction}`,
+    );
+  },
+);
+
+/** WHICH PATH IS AT THE TOP — by name, because the name is what a person
+ *  reads there, and the arrangement knows which one is the large one. */
+Then("the {string} path is first", async function (this: OduWorld, which: string) {
+  const names = this.cachePathNames ?? [];
+  const wanted = which === "large" ? names[0] : names[1];
+  assert.ok(wanted !== undefined, "no large and small path were arranged");
+  const first = this.page.locator("table.paths-table tbody tr.table-row").first();
+  await this.saysThat(first, "the table's first row", wanted);
 });
 
 Then("the page says nothing matches", async function (this: OduWorld) {
@@ -394,9 +524,24 @@ Then("the cache says {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.page.locator(".cache"), "the cache view", text);
 });
 
+/** The create form is folded away until somebody wants it: a list of buckets
+ *  is what the screen is, and the form for a new one is a choice. */
+async function openCreateForm(world: OduWorld): Promise<void> {
+  const summary = world.page
+    .locator('section[aria-label="new bucket"] button.disclosure-summary')
+    .first();
+  await summary.waitFor({ timeout: 30_000 });
+  if ((await summary.getAttribute("aria-expanded")) !== "true") await summary.click();
+}
+
+When("I open the new bucket form", async function (this: OduWorld) {
+  await openCreateForm(this);
+});
+
 When("I name a new bucket", async function (this: OduWorld) {
   const name = unique("board");
   this.cacheBucket = name;
+  await openCreateForm(this);
   await this.page.getByPlaceholder("new bucket name").fill(name);
 });
 
@@ -427,6 +572,7 @@ Given("a bucket created from the board", async function (this: OduWorld) {
   await typeRootTokenIfAsked(this.page);
   const name = unique("board");
   this.cacheBucket = name;
+  await openCreateForm(this);
   await this.page.getByPlaceholder("new bucket name").fill(name);
   await this.page.getByRole("button", { name: "Create bucket", exact: true }).click();
   await this.page.getByRole("heading", { name, exact: true }).waitFor({ timeout: 30_000 });
@@ -473,6 +619,17 @@ Then("the page's substituter URL is {string}", async function (this: OduWorld, h
   );
 });
 
+/** WHICH BLOCK THE SET-UP PANEL IS SHOWING. The six things a person pastes
+ *  are one block behind a tablist now — the panel used to be three stacked
+ *  panels above the paths — so a step that reads the push block chooses it
+ *  first. `nix.conf` is the tab the panel opens on, so a reader of
+ *  `pre.consume-block` needs nothing. */
+async function openSetupTab(world: OduWorld, name: string): Promise<void> {
+  const tab = world.page.getByRole("tab", { name, exact: true });
+  await tab.waitFor({ timeout: 30_000 });
+  if ((await tab.getAttribute("aria-selected")) !== "true") await tab.click();
+}
+
 Then("the page's netrc block names {string}", async function (this: OduWorld, host: string) {
   const text = await this.page.locator("pre.consume-block").innerText();
   assert.ok(
@@ -481,15 +638,21 @@ Then("the page's netrc block names {string}", async function (this: OduWorld, ho
   );
 });
 
-Then("the push block still names the bucket's path", async function (this: OduWorld) {
-  const name = this.cacheBucket;
-  assert.ok(name !== undefined, "no bucket was arranged");
-  const text = await this.page.locator("pre.push-block").innerText();
-  // Naming the bucket is unchanged by a DOMAIN: the push block names the
-  // bucket and the daemon's origin, never the substituter URL.
-  assert.ok(
-    text.includes(`odu cache push ${name} <paths> --origin ${this.service.origin}`),
-    `the push block lost the bucket's origin form: ${text}`,
+/** ONE FACT, AND IT IS THE ONE ABOVE IT. Since `--cache`, a push names the
+ *  substituter URL and the cache states the rest in its own `nix-cache-info`
+ *  — so a bucket that has just been given a DOMAIN has a push block that
+ *  follows it, and the two blocks on the page cannot name two caches. */
+Then("the push block names the same cache the nix.conf block does", async function (
+  this: OduWorld,
+) {
+  const conf = await this.page.locator("pre.consume-block").innerText();
+  const url = /extra-substituters = (\S+)/.exec(conf)?.[1];
+  assert.ok(url !== undefined, `the nix.conf block names no substituter: ${conf}`);
+  await openSetupTab(this, "push");
+  await this.saysThat(
+    this.page.locator("pre.push-block"),
+    "the push block",
+    `odu cache push --cache ${url} <paths>`,
   );
 });
 
@@ -728,24 +891,35 @@ When("I revoke the minted token", async function (this: OduWorld) {
  *  talks to the cache's HTTP API with a bucket credential, so a token the page
  *  minted wrongly fails here rather than three steps later. */
 function pushWithMintedToken(world: OduWorld): string {
+  return pushManyWithMintedToken(world, 1)[0] as string;
+}
+
+/** The same push, with `count` leaf paths in one command: a pin over a
+ *  dozen-path closure is what the roots disclosure exists for, and twelve
+ *  `nix store add-file`s in one push is the cheapest honest way to arrange
+ *  one. */
+function pushManyWithMintedToken(world: OduWorld, count: number): string[] {
   const bucket = world.cacheBucket;
   const token = minted(world).token;
   assert.ok(bucket !== undefined && token !== undefined, "no bucket or token");
   const dir = mkdtempSync(join(tmpdir(), "odu-wa-cache-"));
-  const name = unique("pinned");
-  const file = join(dir, name);
-  writeFileSync(file, `odu web acceptance: ${name}\n`);
-  const added = spawnSync("nix", ["store", "add-file", file], {
-    env: world.service.env,
-    encoding: "utf-8",
-  });
-  assert.strictEqual(added.status, 0, `nix store add-file failed: ${added.stderr}`);
-  const path = added.stdout.trim();
-  const pushed = oduCli(world.service, ["cache", "push", bucket, path, "-o", "json"], {
+  const paths: string[] = [];
+  for (let index = 0; index < count; index++) {
+    const name = unique("pinned");
+    const file = join(dir, name);
+    writeFileSync(file, `odu web acceptance: ${name}\n`);
+    const added = spawnSync("nix", ["store", "add-file", file], {
+      env: world.service.env,
+      encoding: "utf-8",
+    });
+    assert.strictEqual(added.status, 0, `nix store add-file failed: ${added.stderr}`);
+    paths.push(added.stdout.trim());
+  }
+  const pushed = oduCli(world.service, ["cache", "push", bucket, ...paths, "-o", "json"], {
     ODU_CACHE_TOKEN: token,
   });
   assert.strictEqual(pushed.status, 0, `odu cache push failed: ${pushed.stderr}`);
-  return path;
+  return paths;
 }
 
 When("a path is pushed with that token from the CLI", function (this: OduWorld) {
@@ -763,12 +937,51 @@ When("two paths are pushed with that token from the CLI", function (this: OduWor
   this.cachePaths = paths;
 });
 
+/** A CLOSURE BIG ENOUGH TO BE A WALL — twelve leaf paths in one push, which
+ *  is two more than a pin row draws before it folds the rest away. */
+When("twelve paths are pushed with that token from the CLI", function (this: OduWorld) {
+  const paths = pushManyWithMintedToken(this, 12);
+  this.cachePath = paths[0] as string;
+  this.cachePaths = paths;
+});
+
+/** THE PINS ARE A TAB NOW, beside the paths: they are both "what is in this
+ *  bucket", and the roots of every pin printed down the sidebar were most of
+ *  this page's DOM. */
+When("I open the pins", async function (this: OduWorld) {
+  await this.page.getByRole("tab", { name: "Pins", exact: true }).click();
+  await this.page.locator('section[aria-label="pins"]').waitFor({ timeout: 30_000 });
+  // The tab is the list AND the form that adds to it; a scenario that says it
+  // opened the pins has both in front of it.
+  await openPinForm(this);
+});
+
+When("I open the paths", async function (this: OduWorld) {
+  await this.page.getByRole("tab", { name: "Paths", exact: true }).click();
+  await this.page.locator(".cache-paths").waitFor({ timeout: 30_000 });
+});
+
+/** The pin form is folded away until somebody wants it: the list is what the
+ *  tab is for, and making one pin is a choice. */
+async function openPinForm(world: OduWorld): Promise<void> {
+  const summary = world.page
+    .locator('section[aria-label="pins"] button.disclosure-summary')
+    .first();
+  await summary.waitFor({ timeout: 30_000 });
+  if ((await summary.getAttribute("aria-expanded")) !== "true") await summary.click();
+}
+
+async function pinPaths(world: OduWorld, name: string, paths: readonly string[]): Promise<void> {
+  await openPinForm(world);
+  await world.page.getByLabel("pin name", { exact: true }).fill(name);
+  await world.page.getByLabel("store paths", { exact: true }).fill(paths.join("\n"));
+  await world.page.getByRole("button", { name: "Pin closure", exact: true }).click();
+}
+
 async function pinThatPath(world: OduWorld, name: string): Promise<void> {
   const path = world.cachePath;
   assert.ok(path !== undefined, "no path was pushed");
-  await world.page.getByLabel("pin name", { exact: true }).fill(name);
-  await world.page.getByLabel("store paths to pin", { exact: true }).fill(path);
-  await world.page.getByRole("button", { name: "Pin closure", exact: true }).click();
+  await pinPaths(world, name, [path]);
 }
 
 When("I pin that path as {string}", async function (this: OduWorld, name: string) {
@@ -780,21 +993,83 @@ When("I pin the first path as {string}", async function (this: OduWorld, name: s
   await pinThatPath(this, name);
 });
 
+When("I pin every pushed path as {string}", async function (this: OduWorld, name: string) {
+  const paths = this.cachePaths;
+  assert.ok(paths !== undefined && paths.length > 0, "no paths were pushed");
+  await pinPaths(this, name, paths);
+});
+
+/** One pin's row in the table. */
+function pinRow(world: OduWorld, name: string): Locator {
+  return world.page.locator("table.pins-table tr.table-row", { hasText: name }).first();
+}
+
+/** What that pin holds, which is a row of its OWN under it: a note row is a
+ *  sibling of the row it belongs to, so it carries the pin's name. */
+function pinRoots(world: OduWorld, name: string): Locator {
+  return world.page.locator(`table.pins-table [data-pin="${name}"]`);
+}
+
+/** Open what a pin holds, once. */
+async function openRoots(world: OduWorld, name: string): Promise<void> {
+  const summary = pinRow(world, name).locator("button.disclosure-summary").first();
+  await summary.waitFor({ timeout: 30_000 });
+  // The open bit is the LIST's now, not the platform's, and it is announced
+  // on the control: a second click would close what this is about to read.
+  if ((await summary.getAttribute("aria-expanded")) !== "true") await summary.click();
+}
+
+When("I expand what the pin {string} holds", async function (this: OduWorld, name: string) {
+  await openRoots(this, name);
+});
+
 /** WHAT A PIN HOLDS, beside the button that takes it away: a name on its own
- *  says that something is kept, never what, and a pin nobody can read is a pin
- *  nobody dares remove. */
+ *  says that something is kept, never what, and a pin nobody can read is a
+ *  pin nobody dares remove. The disclosure is opened by the `When` above —
+ *  an assertion that acted could not tell "drawn" from "reachable". */
 Then(
   "the pin {string} is listed holding that path",
   async function (this: OduWorld, name: string) {
     const path = this.cachePath;
     assert.ok(path !== undefined, "no path was pushed");
-    await this.saysThat(
-      this.page.locator("ul.pins li", { hasText: name }),
-      `the pin ${name}`,
-      path,
+    await this.saysThat(pinRoots(this, name), `the pin ${name}`, path);
+  },
+);
+
+/** THE WALL THIS PAGE NO LONGER DRAWS, counted in the DOM rather than
+ *  described: a pin of a big closure renders ten store paths, whatever its
+ *  closure holds, until somebody asks for the rest. */
+Then(
+  "the pin {string} renders {int} store paths",
+  async function (this: OduWorld, name: string, count: number) {
+    const roots = pinRoots(this, name).locator("code.path");
+    await this.waitUntil(
+      async () => (await roots.count()) === count,
+      `the pin ${name} to render ${count} store paths`,
     );
   },
 );
+
+/** …and they are not merely off the bottom of a long list: they are not drawn
+ *  at all until the disclosure is open. */
+Then("the pin {string} keeps its roots folded away", async function (this: OduWorld, name: string) {
+  // NOT DRAWN AT ALL, not merely hidden: the disclosure's box is mounted when
+  // it is open, which is the whole reason a pin of a 1 789-path closure is one
+  // row until somebody asks.
+  await pinRow(this, name).waitFor({ timeout: 30_000 });
+  assert.strictEqual(
+    await pinRoots(this, name).locator("code.path").count(),
+    0,
+    `the pin ${name} drew its roots before anybody asked for them`,
+  );
+});
+
+Then("the pin {string} shows its roots", async function (this: OduWorld, name: string) {
+  await pinRoots(this, name)
+    .locator("code.path")
+    .first()
+    .waitFor({ state: "visible", timeout: 30_000 });
+});
 
 When("I unpin {string}", async function (this: OduWorld, name: string) {
   await this.page.getByRole("button", { name: `unpin ${name}`, exact: true }).click();
@@ -886,7 +1161,10 @@ When("I set the retention to {string} days", async function (this: OduWorld, day
  *  by its exact label so it can never resolve to the retention control above
  *  — the two being told apart is most of what this scenario is about. */
 When("I set the dry run retention to {string} days", async function (this: OduWorld, days: string) {
-  await this.page.getByLabel("dry run retention days", { exact: true }).fill(days);
+  // `retention` INSIDE the collection's own panel: the settings column has a
+  // `retention days` field of its own, and the two are different questions —
+  // this one asks, that one keeps.
+  await gcSection(this).getByLabel("retention", { exact: true }).fill(days);
 });
 
 /** THE FACTS LINE at the top of the bucket page, which is drawn from the row
@@ -929,18 +1207,12 @@ Then("the dry run does not name the pinned path", async function (this: OduWorld
   );
 });
 
-/** THIS BUCKET'S line of the stats, not the cache-wide one beneath it: every
- *  scenario in this worker shares one daemon, so the whole cache's totals are
- *  somebody else's paths and would match a count this scenario never caused. */
-Then("the bucket's own stats say {string}", async function (this: OduWorld, text: string) {
-  await this.saysThat(this.page.locator("dl.stats dd").first(), "this bucket's stats", text);
-});
-
 Then("the push block names the minted token", async function (this: OduWorld) {
   const token = minted(this).token;
   assert.ok(token !== undefined, "no token was minted");
   // The once-shown moment is when a person pastes it into a CI secret, so the
   // push block carries it while the page can still show it.
+  await openSetupTab(this, "push");
   await this.saysThat(this.page.locator("pre.push-block"), "the push block", token);
 });
 

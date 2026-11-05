@@ -113,13 +113,14 @@ Then(
     assert.ok(states.length > 0, "the run listed no nodes, so this asserted nothing");
 
     // The three row shapes whose controls cell differs — the exact thing that
-    // used to vary the track: nothing (a node that has not started), `Cancel
-    // node` (one still running), `Retry` (one that has stopped). A run holding
-    // only one of them cannot speak to the defect.
+    // used to vary the track: nothing (a node that has not started, and a node
+    // that passed), `Cancel node` (one still running), `Retry` (one that
+    // FAILED). A run holding only one of them cannot speak to the defect,
+    // which is what the fixture's fourth recipe is for.
     const shapes: Record<string, (controls: string) => boolean> = {
       "no controls": (controls) => controls === "",
       "a running node's Cancel": (controls) => controls.includes("Cancel node"),
-      "a stopped node's Retry": (controls) => controls.includes("Retry"),
+      "a failed node's Retry": (controls) => controls.includes("Retry"),
     };
     for (const [wanted, holds] of Object.entries(shapes)) {
       assert.ok(

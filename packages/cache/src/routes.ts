@@ -461,10 +461,6 @@ export interface ConsumerFacts extends Omit<CacheBucketIdentity, "readsFrom"> {
   readonly use: string;
   /** The command that prints the block in a terminal. */
   readonly command: string;
-  /** The daemon's PUBLIC ORIGIN — where THIS INSTANCE is. The push's `see`
-   *  link is built from it; the page's own link is attribution to the PRODUCT
-   *  (`served by odu`), a fixed site, never a call to action. */
-  readonly board: string;
 }
 
 /** The HTML a person reads; every block is text and is escaped here, once. */
@@ -549,10 +545,7 @@ ${blocks.map(([title, text]) => block(title, text)).join("\n")}
 <p class="hint">Or let a terminal print them: <code>${escape(facts.command)}</code></p>
 <h2>Push to it</h2>
 <p class="hint">A write token comes from this bucket's page on the board — an admin mints one. The push exports it where the build runs.</p>
-${block(
-  "push",
-  pushBlock({ origin: facts.board, bucket: facts.name, token: null }),
-)}
+${block("push", pushBlock({ url: facts.url, token: null }))}
 <script>
 document.addEventListener("click", function (event) {
   var button = event.target.closest("[data-copy]");
@@ -576,13 +569,11 @@ export function cacheRoutes(
   /** The substituter URL a bucket publishes. The ROW knows the deployment's
    *  public origin; a route suite that does not passes the path form. */
   urlFor: (name: string) => string = (name) => `${CACHE_MOUNT}/${name}`,
-  /** Where the board is, for the public page's one link. */
-  boardUrl: string = "/",
 ): ClaimedRoutes<ReturnType<typeof cacheLayer>> {
-  return { layer: cacheLayer(cache, urlFor, boardUrl), paths: CACHE_ROUTE_PATHS };
+  return { layer: cacheLayer(cache, urlFor), paths: CACHE_ROUTE_PATHS };
 }
 
-function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: string) {
+function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
   /** The public page and its JSON form — one handler for both spellings. */
   const consumerFacts = (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
@@ -603,7 +594,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string, boardUrl: st
         upstreamKeys: [...bucket.upstreamKeys],
         use: useBlock({ url, publicKey: bucket.publicKey, home: null }),
         command: useCommand(bucket.name),
-        board: boardUrl,
       };
       if ((request.headers["accept"] ?? "").includes("application/json")) {
         return HttpServerResponse.jsonUnsafe(facts);

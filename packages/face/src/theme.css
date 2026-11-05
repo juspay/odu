@@ -153,17 +153,23 @@
      * both themes. On the near-black canvas the two halves are usually the
      * same value; on the near-white one they part company, because a hue that
      * is fine as a bar under a heading is not fine as `exit 3`.
+     *
+     * AND THE INK IS MEASURED ON THE TINT, not on the canvas. A pill sets its
+     * own background — the same hue at 13% — so `✔ passed` is read against a
+     * surface slightly closer to its own colour than the page is, and the
+     * light theme's inks cleared 4.5:1 on white while measuring 3.7 there.
+     * These values clear it where the type actually sits.
      */
     --green: light-dark(#0ca678, #2fbf7f);
-    --green-ink: light-dark(#077a58, #3ddc97);
+    --green-ink: light-dark(#056146, #3ddc97);
     --amber: light-dark(#b47500, #f2c14e);
-    --amber-ink: light-dark(#8f5d00, #f2c14e);
+    --amber-ink: light-dark(#7a4f00, #f2c14e);
     --red: light-dark(#e5484d, #ff6b5e);
-    --red-ink: light-dark(#c42a30, #ff8a7f);
+    --red-ink: light-dark(#ab1f26, #ff8a7f);
     --violet: light-dark(#7c5cff, #a98bff);
-    --violet-ink: light-dark(#6b45e8, #c2abff);
+    --violet-ink: light-dark(#5a34d6, #c2abff);
     --cyan: light-dark(#0e9ab0, #3fd0de);
-    --cyan-ink: light-dark(#0a7385, #3fd0de);
+    --cyan-ink: light-dark(#086070, #3fd0de);
 
     /* SELECTION — which filter, which attempt, which node's log is open, and
        where the keyboard is. Its own token rather than a reach for cyan at
@@ -734,7 +740,7 @@
   }
 
   .kv + .kv { border-top: 1px solid var(--line); }
-  .kv-key { color: var(--muted); font-size: 0.8rem; }
+
 
   .kv-value {
     min-width: 0;
@@ -813,10 +819,19 @@
 
   .field { display: grid; gap: 0.35rem; min-width: 0; }
 
+  /* ONE RULE FOR EVERY LABEL. A field's label, a fieldset's legend and the
+     key beside a value all name the thing next to them, and three typefaces
+     for one job is what a reader reads as three kinds of thing. (A table's
+     header keeps its own: it labels a COLUMN, which is read down rather than
+     across.) */
   .field label,
-  .field-label {
+  .field-label,
+  .toggles legend,
+  .kv-key {
     font: 500 0.78rem var(--mono);
     color: var(--muted);
+    letter-spacing: normal;
+    text-transform: none;
   }
 
   .hint {
@@ -882,13 +897,7 @@
     background: var(--panel);
   }
 
-  .toggles legend {
-    padding: 0 0.35rem;
-    color: var(--quiet);
-    font: 500 0.72rem var(--mono);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
+  .toggles legend { padding: 0 0.35rem; }
 
   .toggle {
     display: flex;
@@ -983,6 +992,15 @@
   .link:hover:not(:disabled) { color: var(--cyan); }
   .text-action:disabled { color: var(--muted); cursor: default; }
 
+  /* A TEXT ACTION THAT IS A SWITCH — "group by name". `aria-pressed` is the
+     state (the label stays put, so a reader is not handed a different
+     control each press), and this is that state for the eye. */
+  .text-action[aria-pressed="true"] {
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: inset 0 -2px 0 var(--select);
+  }
+
   /* ── the confirmation ─────────────────────────────────────────────────────
    *
    * A native `<dialog>`, so Esc closes it, the backdrop is the browser's,
@@ -1051,10 +1069,6 @@
     scrollbar-width: thin;
   }
 
-  /* The dim half of a store path — the hash nobody reads — so the NAME is what
-     the eye lands on. */
-  .path-hash { color: var(--quiet); }
-
   /* A LINE OF SMALL FACTS under a name — when a path was pushed and how often
      it was read, how long a session has left, which bucket a route carries.
      Every row draws one, which is why it is here, and it is named for what it
@@ -1066,6 +1080,136 @@
     color: var(--muted);
     font: 0.78rem var(--mono);
   }
+
+  /* THE SAME LINE, MADE OF DATA (`Facts`) — and readable: the VALUE is the
+     body's colour, because a fact drawn in the colour of furniture is a fact
+     nobody reads. `muted` is for a clause that qualifies the one before it. */
+  .facts-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.9rem;
+    min-width: 0;
+    color: var(--ink);
+    font: 0.78rem var(--mono);
+  }
+
+  .facts-line .fact { display: inline-flex; gap: 0.35rem; min-width: 0; }
+  .facts-line .fact-label { color: var(--muted); }
+  .facts-line .fact.muted { color: var(--muted); }
+
+  /* ── a table ──────────────────────────────────────────────────────────────
+   *
+   * `fixed`, always: the widths are the columns' and nothing inside a cell
+   * may widen the table past the box it sits in. That is the whole reason
+   * this is a primitive — a page that lets a long string set a column's
+   * width gets a sideways scrollbar and loses whatever sat beside it.
+   */
+  .table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+  }
+
+  .table th {
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--line);
+    color: var(--muted);
+    font: 500 0.72rem var(--mono);
+    letter-spacing: 0.06em;
+    text-align: left;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .table td {
+    padding: 0.4rem 0.6rem;
+    border-top: 1px solid var(--line);
+    vertical-align: baseline;
+    /* A CELL CLIPS. The whole string is in the row's `title`, and the table
+       keeps the width its column was given. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* The first and last cells keep the panel's own gutter. */
+  .table th:first-child, .table td:first-child { padding-left: 1rem; }
+  .table th:last-child, .table td:last-child { padding-right: 1rem; }
+
+  /* A CELL'S CONTENTS CLIP WITH IT: a flex child's floor is its content, so
+     without this the name pushes past the width its column was given. */
+  .table td > * { max-width: 100%; min-width: 0; }
+  .table td .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A COUNT BESIDE A NAME is a qualifier, not a second name. */
+  .table td .versions { color: var(--muted); }
+
+  .table .right {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .table th .sort {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+  }
+
+  .table th .sort:hover { color: var(--ink); }
+  .table th .arrow { margin-left: 0.25rem; }
+  .table th[aria-sort="ascending"],
+  .table th[aria-sort="descending"] { color: var(--ink); }
+
+  .table .table-sub-row td { color: var(--muted); }
+  /* A SUB-ROW IS UNDER the row above it, and says so. */
+  .table .table-sub-row td:first-child { padding-left: 2rem; }
+  .table .table-note td { color: var(--muted); font-size: 0.75rem; }
+
+  /* ── a disclosure ─────────────────────────────────────────────────────────
+   *
+   * The summary is a CONTROL, so it looks like one — the same text action
+   * every other "open this" on the board is — and the caret is drawn from
+   * `aria-expanded`, which is the state's one representation.
+   */
+  .disclosure { display: grid; gap: 0.3rem; min-width: 0; }
+
+  .disclosure-summary {
+    justify-self: start;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--cyan-ink);
+    font: 500 0.78rem var(--mono);
+    cursor: pointer;
+  }
+
+  .disclosure-summary:hover { color: var(--cyan); }
+  .disclosure-summary::before { content: "▸"; font-size: 0.7rem; }
+  .disclosure-summary[aria-expanded="true"]::before { content: "▾"; }
+
+  /* ── a form's width ───────────────────────────────────────────────────────
+   *
+   * Capped, so a text input is not a screen wide and a button is not a bar
+   * with its label stranded in the middle. The controls start where the
+   * labels do.
+   */
+  .fields {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-width: 40rem;
+    min-width: 0;
+  }
+
+  .fields > .btn { align-self: flex-start; }
 
   .stats { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 0.9rem; margin: 0; }
   .stats dt { font: 500 0.78rem var(--mono); color: var(--muted); }
@@ -1131,6 +1275,31 @@
     gap: 1.5rem;
     padding: 1.3rem 1rem;
     border-right: 1px solid var(--line);
+  }
+
+  /* IT STAYS PUT WHILE A SCREEN SCROLLS. The rail is "what is this server
+     doing" — which rows exist, what each is saying, who you are — and the
+     counts on it are the reason a person leaves a page. A bucket page is
+     hundreds of paths long, so a rail that scrolled away took the way out
+     with it.
+
+     55rem, NOT 52: the rail asks for 15rem and the screen for 40rem, so
+     `.app`'s wrap happens at their sum — below it the rail is a full-width
+     band. The breakpoint is the WRAP, not the narrow reflow below it.
+
+     And `max-height`, not `height`: a media query is measured against the
+     viewport INCLUDING a classic scrollbar while flexbox wraps on the
+     content box, so for a scrollbar's width the rail can be a band and still
+     match this query. A band told to be its own height is harmless there; a
+     band told to fill the viewport paints over the screen beside it. */
+  @media (min-width: 55rem) {
+    .sidebar {
+      position: sticky;
+      top: 0;
+      max-height: 100dvh;
+      overflow: auto;
+      scrollbar-width: thin;
+    }
   }
 
   .sidebar-head {

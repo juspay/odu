@@ -722,9 +722,16 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 bucket: input.bucket,
                 filter: input.filter ?? null,
                 after: input.after ?? null,
+                group: input.group ?? null,
+                name: input.name ?? null,
+                sort: input.sort ?? null,
+                descending: input.descending ?? null,
               }),
             (page) => ({
               paths: page.paths.map((path) => ({ ...path })),
+              ...(page.groups === null
+                ? {}
+                : { groups: page.groups.map((group) => ({ ...group })) }),
               ...(page.next === null ? {} : { next: page.next }),
             }),
           ),
@@ -1068,13 +1075,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // collected by a host that has to know what a row is. The row answers a
     // bucket's anonymous consumer facts from the same URL builder the board's
     // row uses, so the page and a cURL cannot disagree about the address.
-    routes.add(
-      cacheRoutes(
-        cache,
-        (name) => server.substituterUrl(name),
-        publicOrigin ?? boundOrigin,
-      ),
-    );
+    routes.add(cacheRoutes(cache, (name) => server.substituterUrl(name)));
 
     // AND THE ROW'S NUMBERS, registered beside its routes: the counters the
     // tee has been keeping since this apply started, plus the per-bucket

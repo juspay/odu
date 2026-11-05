@@ -50,7 +50,7 @@ describe("the copy a bucket page and the docs share", () => {
 
   it("the docs quote the push block the page prints", () => {
     expect(DOCS).toContain(
-      pushBlock({ origin: "https://odu.example.com", bucket: "main", token: null }).trimEnd(),
+      pushBlock({ url: "https://odu.example.com/cache/main", token: null }).trimEnd(),
     );
   });
 
@@ -84,16 +84,26 @@ describe("the copy a bucket page and the docs share", () => {
   });
 
   it("fills in a just-minted token, and the placeholder otherwise", () => {
-    const origin = "https://odu.example.com";
-    expect(pushBlock({ origin, bucket: "main", token: "odc_secret" })).toContain(
+    const url = "https://odu.example.com/cache/main";
+    expect(pushBlock({ url, token: "odc_secret" })).toContain(
       "export ODU_CACHE_TOKEN=odc_secret",
     );
-    expect(pushBlock({ origin, bucket: "main", token: null })).toContain(
+    expect(pushBlock({ url, token: null })).toContain(
       `ODU_CACHE_TOKEN=${WRITE_TOKEN_PLACEHOLDER}`,
     );
-    expect(pushBlock({ origin, bucket: "main", token: null })).toContain(
-      `odu cache push main <paths> --origin ${origin}`,
-    );
+  });
+
+  it("names ONE fact — the substituter — and never a bucket or an origin", () => {
+    // The push origin and the bucket are the CACHE's to state, in its own
+    // `nix-cache-info`, exactly as the Actions block above has it. A block
+    // that spelled them here is three facts a reader keeps current for a
+    // bucket that may gain a domain or move stores.
+    const block = pushBlock({ url: "https://odu.example.com/cache/main/", token: null });
+    // The trailing slash is dropped: `--cache <url>/` and `--cache <url>` are
+    // the same cache, and only one of them is what `odu cache use` printed.
+    expect(block).toContain("odu cache push --cache https://odu.example.com/cache/main <paths>");
+    expect(block).not.toContain("--origin");
+    expect(block).not.toContain("/cache/main/");
   });
 
   it("names the credential each block needs", () => {

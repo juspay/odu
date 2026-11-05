@@ -94,7 +94,10 @@ export const CacheBucketSchema = Schema.Struct({
   url: Schema.String,
   /** WHERE A PUSH ADDRESSES THIS BUCKET: always `<origin>/cache/<name>`, so the
    *  push API works through a bucket domain without the domain needing to name
-   *  a bucket in its path. The page's push block and the docs use this. */
+   *  a bucket in its path. It is the address the cache states in its own
+   *  `nix-cache-info` (`Odu-Origin`/`Odu-Bucket`) and a client resolves from
+   *  `--cache <substituter>`; the page's push block and the docs name the
+   *  SUBSTITUTER (`url`) and let the cache answer with this. */
   pushUrl: Schema.String,
   /** When the last narinfo landed here; `null` for a bucket nothing has been
    *  pushed to. */
@@ -479,12 +482,54 @@ const StatsOutputSchema = Schema.Struct({
 });
 export type CacheStats = typeof StatsOutputSchema.Type;
 
-/** One page of a bucket's paths, newest first.
+/**
+ * A STORE PATH'S TWO HALVES: the hash a person compares two builds by, and
+ * the name they are looking for.
  *
- *  The cursor is the LAST row of the page you were given, opaque to the caller
- *  and stable against a push landing between two pages: it names a position in
- *  `(created, storePath)` order rather than an offset, so a new path at the top
- *  shifts nothing you are about to read. */
+ * `/nix/store/<32 base-32 characters>-<name>` — and a path that is not that
+ * shape keeps all of itself under `name`, because inventing a hash for it
+ * would be a guess printed in a monospace column.
+ *
+ * HERE, not in the view and not in the database: the name is what a bucket's
+ * paths are GROUPED by, so the rule belongs beside the contract that carries
+ * it. The row applies it when a path is stored; the board applies it to
+ * label a row and to split the hash off.
+ */
+export function storePathParts(storePath: string): {
+  readonly hash: string;
+  readonly name: string;
+} {
+  const slash = storePath.lastIndexOf("/");
+  const dash = storePath.indexOf("-", slash + 1);
+  // A STORE PATH HAS A DIRECTORY AND A DASH. Without both, the string is
+  // something else — a filter's leftovers, a row from another cache — and
+  // the first hyphen in it is not a hash boundary.
+  if (slash === -1 || dash === -1) return { hash: "", name: storePath };
+  return { hash: storePath.slice(slash + 1, dash), name: storePath.slice(dash + 1) };
+}
+
+/** WHAT A PAGE OF PATHS MAY BE ORDERED BY — the wire's word, and the one the
+ *  storage maps to a column and the board draws a header for. Declared here
+ *  because it is a CONTRACT: the ledger watches this list. */
+export const PathSortSchema = Schema.Literals(["name", "size", "pushed", "reads"]);
+export type PathSort = typeof PathSortSchema.Type;
+
+/**
+ * ONE PAGE OF A BUCKET'S PATHS — as paths, as PACKAGES, or as one package's
+ * versions.
+ *
+ * The cursor is the LAST row of the page you were given, opaque to the caller
+ * and stable against a push landing between two pages: it names a POSITION in
+ * the order you asked for rather than an offset, so a new path at the top
+ * shifts nothing you are about to read.
+ *
+ * GROUPING AND ORDERING ARE THE ROW'S, not a reader's. A client that grouped
+ * a page it had already been given would state the page's totals — "6
+ * versions, 1.3 GiB" over whatever happened to be in the first hundred — and
+ * say the number changed when somebody pressed "show more". The counts, the
+ * sums and the order are therefore computed over the WHOLE bucket, in SQL,
+ * and paged like anything else.
+ */
 const PathsInputSchema = Schema.Struct({
   bucket: Schema.String.check(Schema.isMinLength(1)),
   /** A substring the store path must contain — the board's filter box, and the
@@ -492,9 +537,49 @@ const PathsInputSchema = Schema.Struct({
   filter: Schema.optionalKey(Schema.String),
   /** Absent means the first page. */
   after: Schema.optionalKey(Schema.String),
+  /** `name` answers `groups` — one row per package, over the whole bucket.
+   *  Absent answers `paths`. */
+  group: Schema.optionalKey(Schema.Literals(["name"])),
+  /** One package's versions, as paths. Exclusive with `group`: a group of one
+   *  name opened is this call. */
+  name: Schema.optionalKey(Schema.String),
+  /** What the page is ordered by — of the group's aggregate when grouped.
+   *  Absent is `pushed`, which with the default direction is exactly the
+   *  order every release before 4.5 answered in.
+   *
+   *  `reads` is the one order whose column MOVES while a reader pages: a
+   *  narinfo served between two pages changes a row's `hits`, so a keyset
+   *  page on it may repeat or skip a row. The other three are immutable
+   *  facts about a path. */
+  sort: Schema.optionalKey(PathSortSchema),
+  /** Absent is TRUE — biggest, newest, most read, Z before A. The board
+   *  sends what its header says; it does not rely on a default. */
+  descending: Schema.optionalKey(Schema.Boolean),
 });
+
+/** One PACKAGE in a bucket: every version of a store path's name, summed. */
+export const CachePathGroupSchema = Schema.Struct({
+  /** The store path's name — everything after the hash. */
+  name: Schema.String,
+  /** How many versions of it the bucket holds. */
+  versions: Schema.Int,
+  /** Summed over them: what this package costs the bucket, and how often
+   *  anything of it has been fetched. */
+  bytes: Schema.Int,
+  hits: Schema.Int,
+  /** The NEWEST version's push, and the latest want across all of them — a
+   *  version nobody wants must not make the package look idle. */
+  pushed: Schema.Number,
+  wanted: Schema.Number,
+  /** The newest version's store path: the hash a reader compares by. */
+  storePath: Schema.String,
+});
+export type CachePathGroup = typeof CachePathGroupSchema.Type;
+
 const PathsOutputSchema = Schema.Struct({
   paths: Schema.Array(CachePathSchema),
+  /** Present, and the whole answer, when `group` was asked for. */
+  groups: Schema.optionalKey(Schema.Array(CachePathGroupSchema)),
   /** Absent when this is the last page. */
   next: Schema.optionalKey(Schema.String),
 });
@@ -502,10 +587,11 @@ export type CachePaths = typeof PathsOutputSchema.Type;
 
 // ── what both faces print ───────────────────────────────────────────────────
 
-/** How many paths one `cache.paths` page carries: what the board's list renders
- *  without a scroll, and what a person reading a bucket wants before deciding to
- *  filter. Here because the VERB's page and the VIEW's page are one number. */
-export const PATH_PAGE_SIZE = 100;
+/** How many rows one `cache.paths` page carries — packages, paths, or one
+ *  package's versions. Twenty: what a bucket page shows without becoming a
+ *  wall, and what a reader scans before deciding to filter instead. Here
+ *  because the VERB's page and the VIEW's page are one number. */
+export const PATH_PAGE_SIZE = 20;
 
 /**
  * HOW LONG A BUCKET KEEPS WHAT NOBODY WANTS, when its creator says nothing.
@@ -631,11 +717,8 @@ export function netrcBlock(input: {
       return input.url;
     }
   })();
-  return `# netrc — Nix reads only the file named by netrc-file, never ~/.netrc,
-# and it does NOT expand ~ there: give it an absolute path.${
-    input.home === null
-      ? "\n# (replace <home> below with yours — a page cannot know it)\nnetrc-file = <home>/.netrc"
-      : `\nnetrc-file = ${input.home}/.netrc`
+  return `# netrc — an absolute path, no ~${
+    input.home === null ? "\nnetrc-file = <home>/.netrc" : `\nnetrc-file = ${input.home}/.netrc`
   }
 machine ${authority} password ${READ_TOKEN_PLACEHOLDER}`;
 }
@@ -669,21 +752,25 @@ export function useCommand(bucket: string): string {
  * example, from one function (the docs quote it; `useCopy.test.ts` holds the
  * two together).
  *
- * The bucket is named, and the ORIGIN is the daemon's public origin, so the
- * command works on a build box that never ran `odu cache login` and through a
- * bucket's domain or the instance's own name alike. `token` is the JUST-MINTED
- * write token while the page can still show it — the once-shown moment is
- * exactly when a person pastes it into a CI secret — and `null` (the
- * placeholder) otherwise.
+ * ONE FACT, THE SUBSTITUTER URL — the same string the `nix.conf` block above
+ * it carries, and the same one {@link actionsPushBlock} names. Since `--cache`
+ * (cache 4.x), the cache states where a push goes in its own
+ * `nix-cache-info` — `Odu-Origin` and `Odu-Bucket` — so a block that spelled
+ * the bucket and the daemon's origin made a reader keep three facts current
+ * for a bucket that may move stores or gain a domain. `token` is the
+ * JUST-MINTED write token while the page can still show it — the once-shown
+ * moment is exactly when a person pastes it into a CI secret — and `null`
+ * (the placeholder) otherwise.
  */
 export function pushBlock(input: {
-  readonly origin: string;
-  readonly bucket: string;
+  /** The substituter URL the bucket publishes: its domain when it has one,
+   *  its store's public URL, or the mount path on this daemon. */
+  readonly url: string;
   readonly token: string | null;
 }): string {
-  return `# push — a write token, exported where the build runs (a build secret)
+  return `# push — a write token, where the build runs
 export ODU_CACHE_TOKEN=${input.token ?? WRITE_TOKEN_PLACEHOLDER}
-odu cache push ${input.bucket} <paths> --origin ${input.origin.replace(/\/$/, "")}
+odu cache push --cache ${input.url.replace(/\/$/, "")} <paths>
 `;
 }
 
@@ -718,15 +805,11 @@ export function actionsPushBlock(input: {
    *  when its build baked none. */
   readonly ref: string;
 }): string {
-  return `# .github/workflows — with Nix installed in an earlier step
+  return `# .github/workflows — Nix installed in an earlier step
 - uses: juspay/odu/.github/actions/push@${input.ref}
   with:
     cache: ${input.url.replace(/\/$/, "")}
     token: \${{ secrets.ODU_CACHE_TOKEN }}
-    # No \`paths\`: every package, dev shell and check of this flake, for the
-    # runner's system. Name \`paths\` to push only what you name. \`pin\` holds
-    # what this push landed, under a name derived from the repository, the
-    # ref and the system.
     pin: \${{ github.ref_name == github.event.repository.default_branch }}
 `;
 }
@@ -985,7 +1068,7 @@ export const CACHE_KEY = "cache";
  * own rows are untouched, and `gc.run` does not take the field, which is why
  * the two verbs stopped sharing an input schema.
  */
-export const CACHE_CONTRACT_VERSION = "4.4";
+export const CACHE_CONTRACT_VERSION = "4.5";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

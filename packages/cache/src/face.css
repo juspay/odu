@@ -2,8 +2,10 @@
  * THE CACHE'S OWN SCREENS, in Night shift.
  *
  * `@odu/face`'s `theme.css` carries the tokens, the primitives `./ui` renders
- * and the page shell. THIS file carries what only a bucket has: the pin list,
- * which is the one list on this board that is not a line per thing.
+ * and the page shell — and since the bucket page was decomplected, that
+ * includes the TABLE, the FACTS line, the DISCLOSURE and a form's width.
+ * What is left here is what only a bucket has: its two tabs, a pin's roots,
+ * and the rule at the end of the settings column.
  *
  * It is here, beside the view that emits these class names, because a row owns
  * everything about itself. Loaded by `scripts/build-web-ui.ts`, which finds
@@ -13,14 +15,30 @@
  */
 
 @layer layout {
+  /* ── the main column's two tabs ───────────────────────────────────────────
+   *
+   * BOTH PANELS ARE MOUNTED and the chosen one is shown, so a switch keeps
+   * the paths already paged in and the half-typed pin. `[hidden]` is the UA's
+   * `display: none`, and nothing here may set a `display` on the host or that
+   * rule would lose to it.
+   *
+   * `min-width: 0` for the reason every column on this page carries it: a
+   * flex item's floor is its CONTENT, so one wide child — a table, a store
+   * path — would push the whole page sideways and take the settings column
+   * off the screen with it.
+   */
+  .tab-host { min-width: 0; }
+  .tab-host[hidden] { display: none; }
+
   /* ── a bucket's pins ──────────────────────────────────────────────────────
    *
    * A PIN IS THREE FACTS AND A LIST OF ROOTS, and that is why it is not the
-   * `.facts` row every other list here is. `ul.pins` keeps the `.facts`
-   * grammar for the row — the hairline, the control on the right — and this
-   * stacks the left half of it.
+   * one-line row every other list here is. `ul.pins` keeps the `.facts`
+   * grammar — the hairline, the control on the right — and this stacks the
+   * left half of it.
    */
   .pins .pin {
+    flex: 1 1 18rem;
     display: grid;
     gap: 0.3rem;
     min-width: 0;
@@ -34,24 +52,20 @@
     min-width: 0;
   }
 
-  /* THE REPOSITORY A RUN OF PINS BELONGS TO. A heading inside the list rather
-     than a list per repository: a pin is a pin whichever heading it sits
-     under, and splitting the `<ul>` would split the grammar with it. Caps and
-     letter-spacing carry the size, the way every label strip on this board
-     does. */
+  /* THE REPOSITORY A RUN OF PINS BELONGS TO — a heading, in the body's
+     colour: it names the thing under it, and a heading nobody can read is a
+     list with no headings. */
   .pin-group {
     display: block;
     padding: 0.9rem 0 0.3rem;
     border-top: 1px solid var(--line);
-    color: var(--quiet);
-    font: 500 0.72rem var(--mono);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    color: var(--ink);
+    font: 600 0.8rem var(--mono);
     overflow-wrap: anywhere;
   }
 
-  /* The first heading sits under the Pin-closure control, which already has
-     the panel's own spacing above it. */
+  /* The first heading sits under the Pin-closure form, which already has the
+     panel's own spacing above it. */
   .pins > .pin-group:first-child { padding-top: 0; border-top: 0; }
 
   /* WHAT THE PIN HOLDS. Each root is a store path: it wraps nowhere and
@@ -68,7 +82,57 @@
     overflow-x: auto;
     white-space: nowrap;
     font-size: 0.75rem;
-    color: var(--quiet);
+    color: var(--ink-2);
     scrollbar-width: thin;
+  }
+
+  /* ── the end of the settings column ──────────────────────────────────────
+   *
+   * Every control above it changes what a bucket does and can be changed
+   * back; the one below it ends the bucket. A rule and a heading, so a reader
+   * scrolling the sidebar is told what the rest of the column is before they
+   * reach a button — the `btn-danger` inside it is the second telling.
+   */
+  .danger-zone {
+    display: grid;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    padding-top: 1.1rem;
+    border-top: 1px solid var(--line-strong);
+  }
+
+  .danger-zone-head {
+    margin: 0;
+    color: var(--red-ink);
+    font: 500 0.72rem var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  /* ARMED OR NOT, SAID IN PAINT. The gate is the whole control here — the
+     button does nothing until the bucket's name has been typed back — and a
+     red outline that looks the same either way makes a person press a dead
+     button to find out. So: grey and outlined while it cannot fire, SOLID
+     red the moment it can. (`.btn-danger` stays outlined everywhere else on
+     the board; "Cancel run" is a warning, this one ends a bucket.) */
+  .danger-zone .btn-danger:disabled {
+    border-color: var(--line-strong);
+    background: transparent;
+    color: var(--muted);
+    opacity: 1;
+  }
+
+  .danger-zone .btn-danger:not(:disabled) {
+    border-color: var(--red);
+    background: var(--red);
+    /* The canvas, not a fixed white: the red is lighter in the dark theme,
+       so the readable label there is the dark one. */
+    color: var(--canvas);
+    font-weight: 600;
+  }
+
+  .danger-zone .btn-danger:not(:disabled):hover {
+    background: color-mix(in srgb, var(--red) 85%, black);
+    color: var(--canvas);
   }
 }

@@ -152,18 +152,25 @@ Then("the page shows the bucket list", async function (this: OduWorld) {
 
 Then("the page offers a Create bucket control", async function (this: OduWorld) {
   // The ADMIN's half of the pair: the row's floor is `admin`, and the shell
-  // draws the form only when the person holds it.
-  await this.page
-    .getByRole("button", { name: "Create bucket" })
-    .waitFor({ timeout: 30_000 });
+  // draws the form only when the person holds it. The form is FOLDED on a
+  // screen whose job is the bucket list, so what an admin is offered is the
+  // disclosure that opens it — and the control inside it, once opened.
+  const summary = this.page
+    .locator('section[aria-label="new bucket"] button.disclosure-summary')
+    .first();
+  await summary.waitFor({ timeout: 30_000 });
+  if ((await summary.getAttribute("aria-expanded")) !== "true") await summary.click();
+  await this.page.getByRole("button", { name: "Create bucket" }).waitFor({ timeout: 30_000 });
 });
 
 Then("the page offers no Create bucket control", async function (this: OduWorld) {
   // THE MEMBER's half, and it is the same control the admin scenario presses —
   // a hidden button is not a permission, so the CLI refusal above is the other
-  // half of the proof.
+  // half of the proof. The panel that would fold it away is not drawn either.
   const controls = await this.page.getByRole("button", { name: "Create bucket" }).count();
   assert.strictEqual(controls, 0, "a member was drawn a Create bucket control");
+  const form = await this.page.locator('section[aria-label="new bucket"]').count();
+  assert.strictEqual(form, 0, "a member was drawn the new bucket form");
 });
 
 Then("the API lists buckets as this person", function (this: OduWorld) {

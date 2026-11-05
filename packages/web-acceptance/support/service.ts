@@ -441,22 +441,33 @@ slow:
 `;
 
 /**
- * THREE ROW SHAPES AT ONCE — one settled, one running, one still waiting.
+ * FOUR ROW SHAPES AT ONCE — one passed, one failed, one running, one still
+ * waiting.
  *
  * The timeline's scale is only testable against a list whose rows differ in the
  * way that used to break it: a node's CONTROLS cell is empty while it waits,
- * holds `Cancel node` while it runs and `Retry` once it has stopped, and the
+ * holds `Cancel node` while it runs and `Retry` once it has FAILED, and the
  * track used to be sized inside the button beside that cell. `fast-red` holds
- * two of the three (nothing in it ever waits), which is why this fixture exists
+ * two of those (nothing in it ever waits), which is why this fixture exists
  * rather than another assertion on that one: `last` cannot start until `slow`
  * stops, and `slow` outlasts any scenario's patience.
+ *
+ * `bad` is here for the Retry shape alone. Retry is drawn on a node that went
+ * WRONG and on no other — a passed node's retry answers no question, so
+ * `quick` draws no control — and a fixture whose only settled lane was green
+ * would leave the widest controls cell untested while still looking like it
+ * covered it.
  */
 export const TIMELINE_SHAPES = `[parallel]
 [metadata("ci")]
-default: quick slow last
+default: quick bad slow last
 
 quick:
     echo "quick done"
+
+bad:
+    echo "the stopped lane failed"
+    exit 1
 
 slow:
     sleep 120

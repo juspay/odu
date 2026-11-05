@@ -41,6 +41,7 @@ import {
 } from "solid-js";
 import { ansiSpans } from "./ansi";
 import {
+  isActive,
   type LaneSpan,
   laneSpan,
   runElapsedMs,
@@ -117,6 +118,46 @@ export interface DetailControls {
 const STATUS_ORDER = Object.keys(NODE_STATUS) as NodeStatus[];
 
 /**
+ * DID THIS NODE GO WRONG — the one reading of a node's verdict that two
+ * decisions on this page depend on: the node a run opens on, and the node
+ * Retry is drawn for. They are the same question asked twice, and spelled
+ * twice the page could open on a failure whose own row offered no way to run
+ * it again.
+ */
+const wentWrong = (node: RunNode): boolean =>
+  node.status === "failed" || node.status === "errored";
+
+/**
+ * WHICH NODE A RUN OPENS ON when its address names none.
+ *
+ * A run page whose log pane is empty has asked the one question the page
+ * exists to answer — "what went wrong" — and then made the reader answer it:
+ * the failure is already drawn, red, in the list beside the blank pane. So the
+ * page opens on the evidence, in the order a person would click:
+ *
+ *   - the FIRST node that went wrong, because that is what a red run is about
+ *     and the first one is the one the others may be consequences of;
+ *   - else the one that is RUNNING, which is where a live run's output is;
+ *   - else the LAST node with an attempt, which is where a green run ended.
+ *
+ * Nodes with no attempt are skipped throughout: they have no log to read, and
+ * their row's button is disabled for the same reason.
+ *
+ * It is a CHOICE OF ADDRESS and not a selection kept beside one — `ci.tsx`
+ * turns this into the log key the panel subscribes by, so the pane and the
+ * `#/run/<id>` a person pasted still describe the same thing and a click on
+ * another node still moves the address as it always did.
+ */
+export function openingNode(nodes: readonly RunNode[]): RunNode | null {
+  const readable = nodes.filter((node) => node.attempt > 0);
+  const wrong = readable.find(wentWrong);
+  if (wrong !== undefined) return wrong;
+  const running = readable.find((node) => node.status === "running");
+  if (running !== undefined) return running;
+  return readable[readable.length - 1] ?? null;
+}
+
+/**
  * A LANE'S HEADER — one platform's worth of the DAG, named, counted and
  * DRAWN.
  *
@@ -158,6 +199,14 @@ function LaneHead(props: {
     }
     return out;
   };
+  /** Is there anything in this lane left to stop? A lane whose every node has
+   *  settled cannot be cancelled — the verb would be refused, and a control
+   *  that can only be refused is a control that lies about what the page can
+   *  do. */
+  const unfinished = (): boolean =>
+    props.nodes.some(
+      (node) => node.status === "running" || node.status === "pending",
+    );
   return (
     <li class="lane">
       {/* A node id with no `@` names no platform. It should not happen — the
@@ -199,8 +248,9 @@ function LaneHead(props: {
           one piece of furniture in a row of facts. */}
       <LaneStrip cells={laneCells(props.nodes)} />
       {/* A lane with no platform has no lane to cancel: `run.cancel` addresses a
-          lane BY platform, so the button here would name nothing. */}
-      <Show when={props.canRun && props.platform !== ""}>
+          lane BY platform, so the button here would name nothing — and a lane
+          that has already stopped has nothing left to drop. */}
+      <Show when={props.canRun && props.platform !== "" && unfinished()}>
         <Button
           title={`drop the ${props.platform} lane; the rest of the run continues`}
           disabled={props.busy}
@@ -277,17 +327,17 @@ function NodeRow(props: {
       {/* ONLY WHERE THEY APPLY. These two used to be on every row and disabled on
           most of them. A disabled button that can never be pressed is noise, and
           a control's absence is the honest statement that the action does not
-          apply: Retry needs an attempt to retry and a node that has stopped;
-          Cancel node needs something running to stop. */}
+          apply: Retry needs an attempt that WENT WRONG; Cancel node needs
+          something running to stop.
+
+          Retry on a node that PASSED is the one that reads as a control and is
+          not: re-running work whose verdict is already green answers no
+          question a person opened this page with, and it sat on every row of a
+          finished run. The way to run green work again is Run again, which is
+          what that control says. */}
       <Show when={props.canRun}>
       <span class="node-controls">
-        <Show
-          when={
-            props.node.attempt > 0 &&
-            props.node.status !== "running" &&
-            props.node.status !== "pending"
-          }
-        >
+        <Show when={props.node.attempt > 0 && wentWrong(props.node)}>
           <Button
             title={`retry ${props.node.id} — odu decides whether that is a new attempt or a linked run`}
             disabled={props.busy}
@@ -475,14 +525,14 @@ export function LogPanel(props: {
 
   return (
     <section class="log" aria-label="Node output">
+      {/* A PHRASE, not a paragraph, for the fallback below. The page opens on a
+          node by itself — see {@link openingNode} — so an empty pane is reached
+          only by a run with no readable work in it yet, where two sentences
+          about how attempts keep their logs are two sentences about nothing on
+          screen. */}
       <Show
         when={props.node}
-        fallback={
-          <p class="empty">
-            Pick a node to read its output. Every attempt keeps its own log, so a
-            retry never overwrites the one you are reading.
-          </p>
-        }
+        fallback={<p class="empty">select a node</p>}
       >
         {(node) => (
           <div class="log-body">
@@ -640,10 +690,12 @@ export function LogPanel(props: {
               >
                 Wrap
               </Button>
-              {/* FOLLOWING, or the way back to it. The marker's hue is the LOG's
-                  state — amber while it can still grow, grey once it is closed —
-                  so "following" on a finished log does not read as a pane still
-                  waiting for something that is never coming. */}
+              {/* FOLLOWING, or the way back to it — and the marker is drawn
+                  only while the attempt is OPEN. A finished attempt's log
+                  cannot grow, so "following" on one is a pane announcing it is
+                  waiting for something that is never coming. "Jump to latest"
+                  stays either way: scrolling back to the end of a log is worth
+                  a control whether or not the end is still moving. */}
               <span class="log-follow">
                 <Show
                   when={stuck()}
@@ -662,12 +714,10 @@ export function LogPanel(props: {
                     </Button>
                   }
                 >
-                  <span
-                    class={`glyph hue-${props.tail?.open === true ? "amber" : "grey"}`}
-                  >
-                    ●
-                  </span>
-                  following
+                  <Show when={props.tail?.open === true}>
+                    <span class="glyph hue-amber">●</span>
+                    following
+                  </Show>
                 </Show>
               </span>
             </footer>
@@ -712,6 +762,14 @@ export function Detail(props: {
   onBack: () => void;
 }): JSX.Element {
   const busy = createMemo(() => props.control.kind === "pending");
+  /** IS THERE STILL A RUN TO STOP? `isActive` is the board's own reading —
+   *  provisioning or running — so the page and the row cannot disagree about
+   *  whether this run is live, which is what decides every cancel on it. A run
+   *  the page has not read yet is not assumed live: a cancel that appears and
+   *  then vanishes is worse than one that arrives a tick late. */
+  const live = createMemo(
+    () => props.run !== undefined && isActive(props.run),
+  );
   const nodes = createMemo<RunNode[]>(() => [...(props.frame?.nodes ?? [])]);
   /** The nodes, grouped by the kind of machine that runs them, in the order
    *  the frame first mentions each platform — the coordinator's own order,
@@ -801,10 +859,13 @@ export function Detail(props: {
         actions={
           /* The run-wide controls, and only those. `Run again` is a NEW run at
              the same commit and the same selection; `Cancel run` is this
-             one's teardown. The per-lane cancels used to sit here too — a row
-             of near-identical buttons whose only difference was a platform
-             triple, detached from the nodes they were about. Each rides its
-             own lane now, and a node's retry rides its node. */
+             one's teardown — and it is drawn only while there IS a run to tear
+             down. A finished run's cancel can do nothing but be refused, and it
+             sat beside Run again on every settled page, which is the one place
+             a mis-click costs most. The per-lane cancels used to sit here too —
+             a row of near-identical buttons whose only difference was a
+             platform triple, detached from the nodes they were about. Each
+             rides its own lane now, and a node's retry rides its node. */
           <Show when={props.canRun}>
             <div class="detail-controls">
               <Button
@@ -814,14 +875,16 @@ export function Detail(props: {
               >
                 Run again
               </Button>
-              <Button
-                class="btn-danger"
-                title="stop the whole run"
-                disabled={busy()}
-                onClick={() => setConfirmingCancel(true)}
-              >
-                Cancel run
-              </Button>
+              <Show when={live()}>
+                <Button
+                  class="btn-danger"
+                  title="stop the whole run"
+                  disabled={busy()}
+                  onClick={() => setConfirmingCancel(true)}
+                >
+                  Cancel run
+                </Button>
+              </Show>
             </div>
           </Show>
         }

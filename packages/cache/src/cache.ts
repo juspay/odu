@@ -31,8 +31,9 @@ import type {
   PinAuthor,
   Scope,
   TokenRow,
+  PathSort,
 } from "./db";
-import { cursorFor, openCacheRepo } from "./db";
+import { openCacheRepo } from "./db";
 import {
   closureOf,
   type GcBucketPlan,
@@ -373,18 +374,33 @@ export interface CacheAdmin {
   }): Promise<CacheOutcome<GcPreview>>;
   stats(input: { authority: Authority }): Promise<CacheOutcome<CacheStats>>;
   /**
-   * ONE PAGE of a bucket's stored paths, newest first.
+   * ONE PAGE of a bucket's stored paths — as paths, as PACKAGES (`group`), or
+   * as one package's versions (`name`), in the order asked for.
    *
    * No root token: the same reasoning as `describe`. A bucket's PATH LIST is
    * what the substituter already serves one narinfo at a time to anyone who can
    * read the bucket, so a listing that demanded the operator's secret would be
    * a credential on a question the protocol answers for free.
+   *
+   * THE GROUPING AND THE ORDER ARE THIS ROW'S. A caller holding one page
+   * cannot count a bucket, and a caller that tried would state its page's
+   * totals as the bucket's.
    */
   paths(input: {
     bucket: string;
     filter: string | null;
     after: string | null;
-  }): Promise<CacheOutcome<{ paths: readonly PathPageRow[]; next: string | null }>>;
+    group?: "name" | null;
+    name?: string | null;
+    sort?: PathSort | null;
+    descending?: boolean | null;
+  }): Promise<
+    CacheOutcome<{
+      paths: readonly PathPageRow[];
+      groups: readonly PathGroupPageRow[] | null;
+      next: string | null;
+    }>
+  >;
 }
 
 /** WHAT A DELETED BUCKET'S STORE GAVE UP: the keys removed under its prefix
@@ -404,6 +420,19 @@ export interface PathPageRow {
   hits: number;
   /** When a push or a `missing` query last said somebody wants it. */
   lastWanted: number;
+}
+
+/** One PACKAGE, as a grouped `paths` lists it: every version of one store
+ *  path's name, counted and summed by the database. */
+export interface PathGroupPageRow {
+  name: string;
+  versions: number;
+  bytes: number;
+  hits: number;
+  pushed: number;
+  wanted: number;
+  /** The newest version's path — the hash a reader compares by. */
+  storePath: string;
 }
 
 /** The verdict on a presented credential. `status` is what the route answers
@@ -1693,23 +1722,45 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      const page = repo.objectsPage(bucket.name, {
+      // THE TWO NARROWINGS ARE EXCLUSIVE and the schema cannot say so, so the
+      // row does: a call that asks for the packages AND for one package's
+      // versions means one of them, and guessing which is a wrong answer with
+      // no complaint attached to it.
+      if (input.group === "name" && input.name !== undefined && input.name !== null) {
+        return {
+          ok: false,
+          code: "bad_input",
+          message:
+            "group and name are exclusive: ask for the packages, or for one package's versions",
+        };
+      }
+      const page = {
         limit: PATH_PAGE_SIZE,
         after: input.after,
         filter: input.filter,
-      });
-      const last = page.rows.at(-1);
+        sort: input.sort ?? "pushed",
+        // BIGGEST, NEWEST, MOST READ, Z BEFORE A — one rule for every order
+        // rather than a taste per column. The board sends what its header
+        // says, so nothing drawn there depends on this default.
+        descending: input.descending ?? true,
+      };
+      if (input.group === "name") {
+        const grouped = repo.objectGroupsPage(bucket.name, page);
+        return { ok: true, value: { paths: [], groups: grouped.rows, next: grouped.next } };
+      }
+      const listed = repo.objectsPage(bucket.name, { ...page, name: input.name ?? null });
       return {
         ok: true,
         value: {
-          paths: page.rows.map((row) => ({
+          paths: listed.rows.map((row) => ({
             storePath: row.storePath,
             narSize: row.narSize,
             created: row.created,
             hits: row.hits,
             lastWanted: row.lastWanted,
           })),
-          next: page.more && last !== undefined ? cursorFor(last) : null,
+          groups: null,
+          next: listed.next,
         },
       };
     },

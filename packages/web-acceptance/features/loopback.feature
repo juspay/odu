@@ -16,10 +16,15 @@ Feature: A daemon with no door keeps every run control
     Then the address names a run
     And there should be no page errors
 
+  # NO "Cancel run" HERE. A finished run has nothing to stop, so the page draws
+  # no cancel at any scope — the control a settled page used to offer could only
+  # ever be refused. What this scenario still guards is the regression it was
+  # written for: with no door, the caller is the local owner and the controls
+  # that DO apply to a settled run are drawn. The live cancel, in this same
+  # doorless world, is `packages/ci/e2e/features/live_run.feature`.
   Scenario: A settled loopback run still offers its controls
     Given a settled red run of the failing fixture
     And I open that run
     Then the run page offers "Run again"
-    And the run page offers "Cancel run"
     And the run page offers "Retry"
     And there should be no page errors

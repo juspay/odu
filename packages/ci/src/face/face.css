@@ -97,6 +97,13 @@
   .row-earlier { display: block; color: var(--quiet); font: 0.78rem/1.4 var(--mono); }
   .row-lanes { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
 
+  /* THE WHOLE-RUN CELL — what the pipeline column draws for a row whose nodes
+     the board does not hold (a superseded run; see `board.tsx`'s
+     `nodesByRun`). WIDE on purpose: eleven pixels beside a neighbouring row's
+     forty would read as a run with one node in it, and a bar reads as what it
+     is — one run, one verdict. */
+  .row-summary .cell { width: 3.25rem; }
+
   /* ── one run's nodes ────────────────────────────────────────────────────── */
 
   .node-list {
@@ -133,10 +140,10 @@
   .node-open {
     display: flex;
     align-items: center;
-    /* WRAPPING, because the nodes panel is a column and not a page. A node id
-       is a namepath and a platform — `packages/web-acceptance/e2e@aarch64-darwin`
-       — and beside it sit an attempt, a host, a duration and an exit code.
-       Held on one line in a 26 rem column that text SHATTERS. */
+    /* WRAPPING, because the nodes panel is a column and not a page. The id
+       itself is held to one line and clipped (below), but beside it sit an
+       attempt, a host, a duration and an exit code, and those still need a
+       second line on a narrow column rather than a row that scrolls. */
     flex-wrap: wrap;
     gap: 0.5rem;
     flex: 1;
@@ -162,12 +169,22 @@
   /* A basis rather than `auto`, and it is what keeps the glyph and the id on
      ONE line. Flex breaks a line on an item's HYPOTHETICAL size, before any
      shrinking — so an id wider than the column starts a line of its own and
-     leaves the status glyph sitting alone above it. */
+     leaves the status glyph sitting alone above it.
+
+     ONE LINE, CLIPPED AT THE END. A node id is a namepath and a platform —
+     `packages/web-acceptance/e2e@aarch64-darwin` — and wrapping it mid-triple
+     (`audit@x86_64-` / `linux`) breaks the one string on the row a person
+     matches against a terminal. `min-width: 0` is what lets a flex item
+     shrink below its content so the ellipsis can happen at all; the whole id
+     stays in the row's `title`, in the log panel's head, and in the DOM. */
   .node-id {
     flex: 1 1 8rem;
+    min-width: 0;
     font-family: var(--mono);
     font-size: 0.8rem;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .node-attempt,
@@ -371,6 +388,13 @@
     /* The one place sideways scrolling is right: a log line is a log line, and
        wrapping one changes what it says. Scoped to this box. */
     overflow: auto;
+    /* AS TALL AS THE LOG IS, between a floor and the viewport. A fixed box is
+       wrong in both directions: a seven-line log floating in four hundred
+       pixels of black says the reader is missing something, and a log with
+       nothing in it still has to look like a console rather than a hairline.
+       So a few lines of floor, content height in between, and a cap that
+       leaves the page itself scrollable. */
+    min-height: 7rem;
     max-height: 60vh;
     white-space: pre;
     scrollbar-width: thin;
@@ -513,9 +537,13 @@
   .detail-parent { color: var(--violet-ink); font: 0.8rem var(--mono); }
   .detail-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
+  /* TWO TO THREE. The node list holds ids that are a namepath and a platform
+     triple, and the console beside it holds lines; a 26 rem cap on the left
+     column cut every id at the same place however much room the window had.
+     The ratio is the geometry, so both halves grow with the page. */
   .detail-body {
     display: grid;
-    grid-template-columns: minmax(18rem, 26rem) minmax(0, 1fr);
+    grid-template-columns: minmax(18rem, 2fr) minmax(0, 3fr);
     gap: 1.25rem;
     align-items: start;
   }
@@ -554,15 +582,19 @@
       flex-direction: column;
     }
 
-    /* AND THE CARD GROWS INSIDE THAT COLUMN. `.log` is the grid item and
-       stretches on its own; `.log-body` is a flex CHILD of it, and a flex
-       child's default is `0 1 auto` — so without this the console sat at its
-       content height in the middle of a full-height column, and the frame
-       looked like it had never applied. */
-    .app-frame .log-body { flex: 1 1 auto; }
+    /* AND THE CARD IS AS TALL AS ITS LOG. `.log` is the grid item and
+       stretches on its own; the card inside it does NOT — `flex: 0 1 auto`
+       keeps it at content height and lets it SHRINK when the log is longer
+       than the column, which is the cap. `1 1 auto` here is what made every
+       run page a full-height black box: a four-line log was stretched to the
+       bottom of the viewport because the column was, and the pane said
+       nothing about how much log there was. */
+    .app-frame .log-body { flex: 0 1 auto; }
 
     .app-frame .log-text {
-      flex: 1 1 auto;
+      flex: 0 1 auto;
+      /* The column is the cap in the frame, so the viewport one would only
+         fight it; the floor stays, for the one-line log. */
       max-height: none;
     }
   }
@@ -585,7 +617,11 @@
     gap: 0.35rem;
   }
 
-  .venue-age { color: var(--quiet); font: 0.78rem var(--mono); }
+  /* THE PROBE'S AGE AND SLICE ride a `Facts` line, which brings its own type
+     and colour; the paragraph around it is only the hook the acceptance suite
+     reads, so all it owes the layout is to drop the browser's margins and let
+     `.screen`'s gap space it. */
+  .venue-age { margin: 0; }
 
   @container (max-width: 60rem) {
     .detail-body { grid-template-columns: minmax(0, 1fr); }

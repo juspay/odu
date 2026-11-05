@@ -162,7 +162,7 @@ async function harness(
     admin: await mint(cache, "admin"),
   };
   const { handler, dispose } = HttpRouter.toWebHandler(
-    cacheRoutes(cache, (name) => `${CACHE_MOUNT}/${name}`, boardOrigin).layer,
+    cacheRoutes(cache, (name) => `${CACHE_MOUNT}/${name}`).layer,
     { disableLogger: true },
   );
   // The tests below name a path as a BUCKET names it (`/main/nix-cache-info`),
@@ -279,14 +279,10 @@ describe("a bucket's consumer facts", () => {
       publicKey: string;
       upstreamKeys: string[];
       use: string;
-      board: string;
     };
     expect(facts).toMatchObject({
       name: "main",
       publicKey: expect.stringContaining("main-1:"),
-      // THE INSTANCE'S OWN ADDRESS, not the bucket's name: the push's `see`
-      // link and anything else that needs the board read it from here.
-      board: "https://odu.example.org",
     });
     expect(facts.url).toContain("/cache/main");
     expect(facts.upstreamKeys).toEqual(["cache.nixos.org-1"]);
@@ -314,6 +310,11 @@ describe("a bucket's consumer facts", () => {
     expect(body.split(`<button type="button" data-copy>`).length - 1).toBe(5);
     // A PUBLIC BUCKET IS READ WITH NO CREDENTIAL, so netrc is not on its page.
     expect(body.includes("netrc-file")).toBe(false);
+    // THE PUSH BLOCK NAMES ONE FACT — the substituter this very page is
+    // served at. The bucket and the push origin are what its `nix-cache-info`
+    // states, so a page read at a bucket's own domain cannot print a stale
+    // daemon address beside it.
+    expect(body).toContain(`odu cache push --cache ${facts.url} &lt;paths&gt;`);
     // THE HEALTH FILE, at the substituter's root, as a link a person clicks.
     expect(body).toContain(
       `<a href="/cache/main/nix-cache-info">nix-cache-info</a>`,

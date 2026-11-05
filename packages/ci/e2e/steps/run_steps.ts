@@ -119,8 +119,10 @@ Given(
     });
     this.ownRuns.push(runId);
     this.runId = runId;
-    // Not waited on: the three shapes exist only WHILE the run is going, and
-    // the browser is where they are supposed to appear.
+    // Not waited on: the shapes exist only WHILE the run is going, and the
+    // browser is where they are supposed to appear. The fixture also holds a
+    // lane that FAILS, because that — not a lane that merely stopped — is the
+    // row a Retry is drawn on, which is the widest of the controls cells.
   },
 );
 

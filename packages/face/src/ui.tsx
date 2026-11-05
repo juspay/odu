@@ -376,13 +376,222 @@ export function KeyValue(props: {
 }
 
 /**
+ * A TABLE, FROM COLUMNS AND ROWS AS DATA.
+ *
+ * Every table on this board was otherwise a page's own `<table>` with its own
+ * widths, its own alignment, its own `aria-sort` and its own nowrap rules —
+ * the same five decisions made again per screen, and made differently. Here
+ * they are made once:
+ *
+ *   - the LAYOUT IS FIXED and the widths come from the columns, so a long
+ *     string is clipped inside its cell instead of widening the table past
+ *     the column it sits in (which is how a page acquires a sideways
+ *     scrollbar and loses the panel beside it);
+ *   - a `right` column is right-aligned, tabular and never wrapped, because
+ *     that is what "a figure compared down a column" means;
+ *   - a sortable header is a BUTTON with `aria-sort` on its cell and a glyph
+ *     the accessible name does not include.
+ *
+ * The row classes carry the primitive's own name (`table-row`), because a
+ * board already has a `.row` — a list row on the runs screen — and a `<tr>`
+ * that inherited it was laid out as a GRID inside a table.
+ *
+ * A row's SUB-ROWS are rows of the same shape (`under`), so a disclosure
+ * draws the same six cells rather than a second grammar; a `note` is one
+ * full-width row under them, which is where "reading…", a refusal, or "the
+ * newest 20 of 105" belongs.
+ */
+export interface TableColumn<T> {
+  /** Also the sort key this header asks for, when `sortable`. */
+  readonly key: string;
+  readonly label: string;
+  /** Figures are compared down the column, so they go right. */
+  readonly align?: "left" | "right";
+  /** A fixed width. The column that gives none takes what is left. */
+  readonly width?: string;
+  readonly sortable?: boolean;
+  readonly cell: (row: T) => JSX.Element;
+}
+
+export function Table<T>(props: {
+  columns: ReadonlyArray<TableColumn<T>>;
+  rows: readonly T[];
+  class?: string;
+  label?: string;
+  /** Which column the rows arrived ordered by, and which way. */
+  sorted?: { readonly key: string; readonly descending: boolean };
+  onSort?: (key: string) => void;
+  /** Rows drawn under a row, in the same columns. */
+  under?: (row: T) => readonly T[];
+  /** One full-width row under those, when there is something to say. */
+  note?: (row: T) => JSX.Element | null;
+}): JSX.Element {
+  const sortOf = (column: TableColumn<T>): "ascending" | "descending" | "none" | undefined => {
+    if (props.sorted === undefined || column.sortable !== true) return undefined;
+    if (props.sorted.key !== column.key) return "none";
+    return props.sorted.descending ? "descending" : "ascending";
+  };
+  const cells = (row: T): JSX.Element => (
+    <For each={props.columns}>
+      {(column) => <td class={column.align === "right" ? "right" : undefined}>{column.cell(row)}</td>}
+    </For>
+  );
+  return (
+    <table class={props.class === undefined ? "table" : `table ${props.class}`} aria-label={props.label}>
+      <thead>
+        <tr>
+          <For each={props.columns}>
+            {(column) => (
+              <th
+                scope="col"
+                class={column.align === "right" ? "right" : undefined}
+                // THE WIDTH RIDES THE HEADER CELL. A `<colgroup>` is the other
+                // way to say this and it does not survive a cloned template
+                // with markers between its `<col>`s; `table-layout: fixed`
+                // reads the first row either way.
+                style={column.width === undefined ? undefined : { width: column.width }}
+                aria-sort={sortOf(column)}
+              >
+                <Show when={column.sortable === true} fallback={column.label}>
+                  <button type="button" class="sort" onClick={() => props.onSort?.(column.key)}>
+                    {column.label}
+                    {/* THE GLYPH IS DECORATION: `aria-sort` on the cell is the
+                        announcement, and a name that changed when pressed
+                        would be a different control each time. */}
+                    <span class="arrow" aria-hidden="true">
+                      {sortOf(column) === "ascending"
+                        ? "↑"
+                        : sortOf(column) === "descending"
+                          ? "↓"
+                          : ""}
+                    </span>
+                  </button>
+                </Show>
+              </th>
+            )}
+          </For>
+        </tr>
+      </thead>
+      <tbody>
+        <For each={props.rows}>
+          {(row) => (
+            <>
+              <tr class="table-row">{cells(row)}</tr>
+              <For each={props.under?.(row) ?? []}>
+                {(under) => <tr class="table-sub-row">{cells(under)}</tr>}
+              </For>
+              <Show when={props.note?.(row)}>
+                {(note) => (
+                  <tr class="table-note">
+                    <td colSpan={props.columns.length}>{note()}</td>
+                  </tr>
+                )}
+              </Show>
+            </>
+          )}
+        </For>
+      </tbody>
+    </table>
+  );
+}
+
+/**
+ * A LINE OF FACTS ABOUT ONE THING — what a row says about itself under its
+ * name, and what a panel says about the thing it administers.
+ *
+ * The VALUE is in the body's colour and the label beside it is not: a fact
+ * nobody can read is not a fact, and every list on this board had drifted
+ * into its own shade of grey. `muted` is for a clause that qualifies the one
+ * before it, never for the number itself.
+ */
+export interface Fact {
+  readonly label?: string;
+  readonly value: JSX.Element;
+  readonly muted?: boolean;
+}
+
+export function Facts(props: { items: readonly Fact[] }): JSX.Element {
+  return (
+    <span class="facts-line">
+      <For each={props.items}>
+        {(fact) => (
+          <span class={fact.muted === true ? "fact muted" : "fact"}>
+            <Show when={fact.label}>{(label) => <span class="fact-label">{label()}</span>}</Show>
+            {fact.value}
+          </span>
+        )}
+      </For>
+    </span>
+  );
+}
+
+/**
+ * SOMETHING FOLDED AWAY, and the control that unfolds it.
+ *
+ * A `<details>` holds its own state, which is exactly the problem: the lists
+ * on this board are re-minted by a republish, and the platform's state dies
+ * with the element. So the OPEN BIT IS THE CALLER'S, held by whatever key
+ * outlives the row, and this is the button and the box.
+ */
+export function Disclosure(props: {
+  summary: JSX.Element;
+  open: boolean;
+  onToggle: () => void;
+  children: JSX.Element;
+}): JSX.Element {
+  return (
+    <div class="disclosure">
+      <button
+        type="button"
+        class="disclosure-summary"
+        aria-expanded={props.open}
+        onClick={() => props.onToggle()}
+      >
+        {props.summary}
+      </button>
+      <Show when={props.open}>{props.children}</Show>
+    </div>
+  );
+}
+
+/**
+ * THE WIDTH OF A FORM, decided once.
+ *
+ * A column of fields stretched to whatever contains it gives a text input the
+ * width of a screen and turns a button into a bar with its label in the
+ * middle of nowhere. Fields cap; the controls under them stay their own size
+ * and start at the left, where the labels are.
+ */
+export function Fields(props: { children: JSX.Element }): JSX.Element {
+  return <div class="fields">{props.children}</div>;
+}
+
+/**
+ * WHAT HAPPENED WHEN SOMETHING WAS COPIED, in a word a control can draw.
+ *
+ * `navigator.clipboard` is the whole implementation, and its refusal is an
+ * ANSWER rather than a swallowed failure: a page served over plain HTTP on a
+ * tailnet name has no clipboard at all, and a control that silently did
+ * nothing there would be the worst one on the page.
+ */
+export type Copied = "copied" | "refused" | "no clipboard";
+
+export async function copyText(text: string): Promise<Copied> {
+  const clipboard = globalThis.navigator?.clipboard;
+  if (clipboard === undefined) return "no clipboard";
+  try {
+    await clipboard.writeText(text);
+    return "copied";
+  } catch {
+    return "refused";
+  }
+}
+
+/**
  * TAKE THIS STRING.
  *
- * `navigator.clipboard` is the whole implementation, and its refusal is drawn
- * rather than swallowed: a page served over plain HTTP on a tailnet name has
- * no clipboard at all, and a button that silently did nothing there would be
- * the worst control on the page. The label says what happened and goes back to
- * itself, so one button is its own receipt.
+ * The label says what happened and goes back to itself, so one button is its
+ * own receipt.
  *
  * `data-copy` rides the element because the acceptance suite counts the copy
  * controls a bucket page offers, and a count is the only way to assert "every
@@ -394,18 +603,10 @@ export function CopyButton(props: { text: string; label?: string }): JSX.Element
   onCleanup(() => clearTimeout(reset));
   const press = (): void => {
     clearTimeout(reset);
-    const clipboard = globalThis.navigator?.clipboard;
-    if (clipboard === undefined) {
-      // No secure context, no clipboard API. Said out loud rather than
-      // swallowed: a board on a plain-HTTP tailnet name is a real deployment.
-      setSaid("no clipboard");
-      return;
-    }
-    void clipboard.writeText(props.text).then(
-      () => setSaid("copied"),
-      () => setSaid("refused"),
-    );
-    reset = setTimeout(() => setSaid(null), 1400);
+    void copyText(props.text).then((answer) => {
+      setSaid(answer);
+      reset = setTimeout(() => setSaid(null), 1400);
+    });
   };
   return (
     <button type="button" class="btn copy" data-copy onClick={press}>

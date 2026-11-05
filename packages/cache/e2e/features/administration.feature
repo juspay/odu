@@ -2,9 +2,9 @@ Feature: An admin administers the cache from the board
   # The board does everything `odu surface cache …` does. Each scenario here is
   # one verb of the cache row, reached through its control on the page — create
   # (with the upstream switch), retention, token mint / list / revoke, pin /
-  # pin list / unpin, the dry run, GC and stats — and the one arrange step that
-  # leaves the page (a push) uses the token the page minted, which is the proof
-  # that the token is real.
+  # pin list / unpin (the Pins tab beside Paths), the dry run, GC and the facts
+  # line's recount — and the one arrange step that leaves the page (a push)
+  # uses the token the page minted, which is the proof that the token is real.
   #
   # @signed-in:admin: the row's floor for administration, on a daemon with a
   # door. A member is drawn none of these controls (auth.feature) and the row
@@ -15,21 +15,23 @@ Feature: An admin administers the cache from the board
   @signed-in:admin
   Scenario: An empty bucket name is refused by the row, in its words
     Given I open the cache
-    When I press "Create bucket"
+    When I open the new bucket form
+    And I press "Create bucket"
     Then the cache says "a bucket needs a name"
     And there should be no page errors
 
   @signed-in:admin
   Scenario: A bucket gets a name of its own from its page
-    # THE NAME CHANGES WHAT THE PAGE SHOWS A CLIENT, and nothing else on this
-    # page moved: the substituter URL, the nix.conf block and the netrc machine
-    # are the domain, while the push block keeps the path the API addresses.
+    # THE NAME CHANGES WHAT THE PAGE SHOWS A CLIENT, and the push block is one
+    # of the things it changes: the substituter URL, the nix.conf block, the
+    # netrc machine and the push's `--cache` are the one name, because the
+    # cache states the push origin and the bucket itself.
     Given a bucket created from the board
     When I name the bucket "cache.e2e.test"
     Then the page's substituter URL is "cache.e2e.test"
     And the domain answer says "Point its DNS record here."
     And the page's netrc block names "cache.e2e.test"
-    And the push block still names the bucket's path
+    And the push block names the same cache the nix.conf block does
     And there should be no page errors
 
   # A PUBLIC BUCKET'S FACTS NEED NO ACCOUNT, and that is a PROTOCOL read: the
@@ -125,12 +127,36 @@ Feature: An admin administers the cache from the board
     Given a bucket created from the board
     And I mint a "write" token
     When a path is pushed with that token from the CLI
+    And I open the pins
     And I pin that path as "release"
     Then the cache says "Pinned release"
-    And the pin "release" is listed holding that path
+    When I expand what the pin "release" holds
+    Then the pin "release" is listed holding that path
     When I unpin "release"
     Then the cache says "Unpinned release"
     And the pin list says nothing is pinned
+    And there should be no page errors
+
+  # A PIN IS ONE ROW, WHATEVER IT HOLDS. A pin a CI push takes over a flake's
+  # outputs holds thousands of paths, and printing them inline made seven pins
+  # nine tenths of this page's DOM — with the controls under them off the
+  # screen. The row carries the COUNT; the roots are an audit somebody asks
+  # for, and ten of them is what asking first gets.
+  Scenario: A pin of a big closure is one row, and its roots are a click away
+    Given a bucket created from the board
+    And I mint a "write" token
+    When twelve paths are pushed with that token from the CLI
+    And I open the pins
+    And I pin every pushed path as "release"
+    Then the cache says "Pinned release"
+    And the cache says "12 paths in its closure"
+    And the pin "release" keeps its roots folded away
+    When I expand what the pin "release" holds
+    Then the pin "release" shows its roots
+    And the pin "release" renders 10 store paths
+    When I press "show all 12"
+    Then the pin "release" renders 12 store paths
+    And the pin "release" is listed holding that path
     And there should be no page errors
 
   # THE ONE CONTROL WITH NO UNDO, so the button is dead until the bucket's own
@@ -160,6 +186,7 @@ Feature: An admin administers the cache from the board
     Given a bucket created from the board
     And I mint a "write" token
     And two paths are pushed with that token from the CLI
+    And I open the pins
     And I pin the first path as "release"
     Then the cache says "Pinned release"
     When I set the retention to "0" days
@@ -171,8 +198,14 @@ Feature: An admin administers the cache from the board
     When I press "Run GC"
     Then the cache says "Collected: evicted 1 path"
     And the dry run says "would take nothing here"
-    When I press "refresh stats"
-    Then the bucket's own stats say "1 paths"
+    # THE FACTS LINE FOLLOWS THE ROW, with nothing pressed: the collection
+    # republished the bucket, so the number at the top is already the new one.
+    Then the bucket's facts say "1 paths"
+    # THE LIST DOES NOT — it is a page read when the tab was opened, and
+    # **refresh paths** is what asks again.
+    When I open the paths
+    And I press "refresh paths"
+    Then one path is listed
     And there should be no page errors
 
   # THE QUESTION ASKED WITHOUT ANSWERING IT FIRST. The scenario above had to
@@ -185,10 +218,11 @@ Feature: An admin administers the cache from the board
     Given a bucket created from the board
     And I mint a "write" token
     And two paths are pushed with that token from the CLI
+    And I open the pins
     And I pin the first path as "release"
     Then the cache says "Pinned release"
     When I set the dry run retention to "0" days
-    And I press "Dry run"
+    And I press "Dry run at 0 days"
     Then the dry run says "At 0 days' retention"
     And the dry run says "would take 1 path"
     And the dry run names the unpinned path
@@ -203,7 +237,8 @@ Feature: An admin administers the cache from the board
   @signed-in:admin
   Scenario: An empty pin is refused by the row, in its words
     Given a bucket created from the board
-    When I press "Pin closure"
+    When I open the pins
+    And I press "Pin closure"
     Then the cache says "a pin needs a name"
     And there should be no page errors
 

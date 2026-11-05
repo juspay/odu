@@ -5,9 +5,11 @@
  * Two pages, because they answer two questions:
  *
  *   - **Machines** (`#/machines`) — where would a run go, and who holds it?
- *     The service's LAST probe, read off the `venues` cell with its age — a
- *     probe SSH-dials every machine, so opening the page dials none, and
- *     **Probe machines** asks for a fresh one (narrowable to platforms). Then
+ *     The configured fleet as a table, read off the `venues` cell. The service
+ *     has no verb that lists machines WITHOUT dialling them, so the page asks
+ *     for one probe when it opens on an empty cell and otherwise draws the
+ *     reading the service already kept; **Probe machines** refreshes it
+ *     (narrowable to platforms). Then
  *     `venue.hold` / `venue.release` for a checkout, the hold the CLI calls a
  *     lease. It is a ROW of the shell's rail now rather than a page behind the
  *     board, which is why it draws no way back: the rail is the way back.
@@ -36,15 +38,18 @@ import { ago } from "@odu/cordis/format";
 import {
   BackLink,
   Button,
+  Facts,
   Field,
   PageHead,
   Panel,
   Pill,
   Receipt,
+  Table,
+  type TableColumn,
   TextInput,
   Toggle,
 } from "@odu/face/ui";
-import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
 import type { Effect } from "effect";
 import { requestId } from "./format";
 import type { VenueRow } from "./types";
@@ -73,35 +78,54 @@ function ControlAnswer(props: { control: Control }): JSX.Element {
 
 // ── machines ────────────────────────────────────────────────────────────────
 
-/** How one venue reads, in a phrase. */
-function venueState(row: VenueRow, now: number): string {
-  switch (row.state) {
-    case "free":
-      return "free";
-    case "local":
-      return "local — no remote lock";
-    case "down":
-      return `down — ${row.error ?? "unreachable"}`;
-    case "busy": {
-      const held = row.heldBy;
-      if (held === null) return "busy";
-      const minutes = Math.max(0, Math.round((now - held.sinceMs) / 60_000));
-      return `held by ${held.holder}${held.run === null ? " (a hold)" : ` for ${held.run}`} · ${minutes}m`;
-    }
-  }
+/** WHO HOLDS THIS MACHINE, in the width of a column. A machine nobody holds
+ *  says so with a dash rather than a sentence, because this column is read
+ *  down rather than across. */
+function venueHolder(row: VenueRow, now: number): string {
+  if (row.state === "local") return "local — no remote lock";
+  const held = row.heldBy;
+  if (held === null) return "—";
+  const minutes = Math.max(0, Math.round((now - held.sinceMs) / 60_000));
+  return `${held.holder}${held.run === null ? "" : ` · ${held.run}`} · ${minutes}m`;
 }
 
 /** WHAT A MACHINE'S STATE IS WORTH IN COLOUR. The four venue states are the
  *  same kind of fact a run's status is — can work land here or not — so they
  *  wear the same five hues and nothing else on this page is coloured at all.
  *  A total `Record`, so a fifth venue state is a type error rather than an
- *  uncoloured card. */
+ *  uncoloured cell. */
 const VENUE_HUE: Record<VenueRow["state"], "green" | "amber" | "grey" | "red"> = {
   free: "green",
   local: "green",
   busy: "amber",
   down: "red",
 };
+
+/** THE FLEET, ONE ROW PER VENUE — which machine, which platform, how it last
+ *  read, and who has it. A table and not a grid of cards: the question this
+ *  page answers ("is anything free?") is asked of the whole fleet at once, and
+ *  that is read down a column. The clock arrives as a thunk because the holder
+ *  column ages between probes while the rows themselves do not move. */
+function venueColumns(now: () => number): ReadonlyArray<TableColumn<VenueRow>> {
+  return [
+    { key: "host", label: "Machine", cell: (row) => row.host },
+    { key: "platform", label: "Platform", width: "13rem", cell: (row) => <code>{row.platform}</code> },
+    {
+      key: "state",
+      label: "State",
+      width: "7rem",
+      cell: (row) => <Pill hue={VENUE_HUE[row.state]}>{row.state}</Pill>,
+    },
+    {
+      key: "slot",
+      label: "Slot",
+      align: "right",
+      width: "5rem",
+      cell: (row) => `${row.slot + 1}/${row.slots}`,
+    },
+    { key: "holder", label: "Holder", width: "20rem", cell: (row) => venueHolder(row, now()) },
+  ];
+}
 
 export function Machines(props: {
   client: CiClient;
@@ -110,29 +134,41 @@ export function Machines(props: {
   canRun: boolean;
 }): JSX.Element {
   const [platforms, setPlatforms] = createSignal("");
-  /** THE LAST PROBE, A FACT THE SERVICE KEEPS — read on open, never fired by
-   *  it. A probe dials every machine it is asked about, so a page that probed
-   *  per visit would cost a fleet of SSH connections per glance and wait on the
-   *  slowest dead box. The person asks for a fresh one with the button; the cell
-   *  moves, and this page (and every other open one) redraws from it. */
+  /** THE LAST PROBE, A FACT THE SERVICE KEEPS. A probe dials every machine it
+   *  is asked about, so a page that probed per visit would cost a fleet of SSH
+   *  connections per glance and wait on the slowest dead box. The cell is what
+   *  this page (and every other open one) redraws from when anyone asks for a
+   *  fresh reading. */
   const reading = props.client.cells.venues.use();
   const probing = createControl(props.call);
-  const probe = (): void => {
-    const names = tokens(platforms());
+  const probeFor = (names: readonly string[]): void => {
     probing.run(
-      props.client.procedures.venue.probe(names.length === 0 ? {} : { platforms: names }),
+      props.client.procedures.venue.probe(names.length === 0 ? {} : { platforms: [...names] }),
       (answer) => `Probed ${answer.rows.length} venue${answer.rows.length === 1 ? "" : "s"}.`,
     );
   };
-  /** HOW MANY MACHINES ARE UP, in the page's one sentence of state. A machine
-   *  that is `down` is the only one work cannot land on — busy is a machine
-   *  doing exactly what it is for — so that is the line the count is drawn at,
-   *  and it is the same line `venueState` words below. */
+  /** ONE PROBE WHEN THE PAGE OPENS ON AN EMPTY CELL. The service exposes no
+   *  verb that lists the configured machines without dialling them —
+   *  `venue.probe` reads the hosts file and nothing else does — so a page that
+   *  waited for the button showed two forms and no fleet. A kept reading is
+   *  drawn as it stands instead, which is what keeps the fan-out at once per
+   *  service rather than once per glance. */
+  let askedOnOpen = false;
+  createEffect(() => {
+    // `undefined` is "the cell has not answered yet"; `null` is "it answered,
+    // and nothing has probed since this service started".
+    const answer = reading.value();
+    if (answer === undefined || askedOnOpen) return;
+    askedOnOpen = true;
+    if (answer === null) probeFor([]);
+  });
+  /** HOW MANY MACHINES ARE UP, in the page's one line of state. A machine that
+   *  is `down` is the only one work cannot land on — busy is a machine doing
+   *  exactly what it is for — so that is the line the count is drawn at. */
   const upLine = createMemo<string | undefined>(() => {
     const answer = reading.value();
-    // `undefined` is "not asked yet" and `null` is "asked, and the cell is
-    // empty". Neither is a count, and both draw no sentence rather than a
-    // confident `0 of 0 up`.
+    // Neither "not asked yet" nor "asked, and empty" is a count, and both draw
+    // no line rather than a confident `0 of 0 up`.
     if (answer === undefined || answer === null) return undefined;
     const rows = answer.rows;
     const up = rows.filter((row) => row.state !== "down").length;
@@ -183,24 +219,20 @@ export function Machines(props: {
   return (
     <section class="screen ops" aria-label="machines">
       {/* The probe is the page's one whole-screen action, so it rides the head
-          beside the sentence it refreshes. The field it narrows sits under
-          them, because a platform list is a thing you type rather than a thing
-          you press. */}
+          beside the line it refreshes. The field it narrows sits under them,
+          because a platform list is a thing you type rather than a thing you
+          press. */}
       <PageHead
         title="Machines"
         sub={upLine()}
         actions={
-          <Button disabled={probing.busy()} onClick={probe}>
+          <Button disabled={probing.busy()} onClick={() => probeFor(tokens(platforms()))}>
             {probing.busy() ? "Probing…" : "Probe machines"}
           </Button>
         }
       />
       <div class="form">
-        <Field
-          id="venue-platforms"
-          label="Platforms"
-          hint="Space-separated. Empty means every configured platform — a probe dials each machine, so naming one skips the rest. It narrows the hold below too."
-        >
+        <Field id="venue-platforms" label="Platforms" hint="space-separated; empty means all">
           <TextInput
             id="venue-platforms"
             value={platforms()}
@@ -210,54 +242,38 @@ export function Machines(props: {
         </Field>
       </div>
       <Show when={probing.fault()}>{(message) => <Receipt tone="refused">{message()}</Receipt>}</Show>
-      <Show
-        when={reading.value()}
-        fallback={
-          <p class="empty">
-            No probe since this service started — press Probe machines to dial them.
-          </p>
-        }
-      >
+      <Show when={reading.value()} fallback={<p class="empty">no probe yet</p>}>
         {(answer) => (
           <>
-            {/* WHAT THIS READING IS, said in full under the cards: which
-                platforms were asked for and which hosts file answered. The age
-                is in the head as well, because that is the fact that decides
-                whether to trust the cards at all. */}
-            <p class="hint venue-age">
-              {`Probed ${ago(answer().at, props.now)}` +
-                (answer().platforms.length === 0 ? ", every platform" : `, for ${answer().platforms.join(" ")}`) +
-                ". " +
-                (answer().source === null ? "No hosts file — local lanes only." : `From ${answer().source}.`)}
+            {/* WHAT THIS READING IS: its age, the slice it covers, and the
+                hosts file that answered — facts, not a sentence. The age leads
+                because it is what decides whether to trust the rows under it,
+                and `.venue-age` is the acceptance suite's hook for exactly
+                that phrase. */}
+            <p class="venue-age">
+              <Facts
+                items={[
+                  { value: `Probed ${ago(answer().at, props.now)}` },
+                  {
+                    label: "platforms",
+                    value: answer().platforms.length === 0 ? "all" : answer().platforms.join(" "),
+                  },
+                  { label: "hosts", value: answer().source ?? "local lanes only", muted: true },
+                ]}
+              />
             </p>
             <For each={answer().warnings}>{(warning) => <p class="fault">{warning}</p>}</For>
-            {/* ONE CARD PER MACHINE — the host it is, the platform it serves,
-                which slot of how many, and who has it. A grid rather than a
-                list of lines because a machine is a THING a person thinks
-                about one at a time ("is darwin up?"), unlike a token or a path,
-                which are read down a column.
-
-                A `div` and not a `ul`: `.venues li` dresses a list row —
-                hairlines, no padding of its own — and a card is the other
-                presentation. The acceptance suite reads this block by
-                `.venues`, which rides the container either way. */}
-            <div class="cards venues">
-              <For each={answer().rows}>
-                {(row) => (
-                  <article class="card">
-                    <div class="fact-line">
-                      <strong>{row.host}</strong>
-                      <Pill hue={VENUE_HUE[row.state]}>{row.state}</Pill>
-                    </div>
-                    <div class="stack">
-                      <code>{row.platform}</code>
-                      <span class="hint">{`slot ${row.slot + 1}/${row.slots}`}</span>
-                      <span class="hint">{venueState(row, props.now)}</span>
-                    </div>
-                  </article>
-                )}
-              </For>
-            </div>
+            {/* `.venues` is the acceptance suite's hook for the fleet, and it
+                rides the container whichever element draws it. */}
+            <Table
+              class="venues"
+              label="venues"
+              columns={venueColumns(() => props.now)}
+              rows={answer().rows}
+              // A dead machine's reason is the one fact that does not fit a
+              // column: it is a sentence from ssh, as long as ssh wants.
+              note={(row) => (row.error === null ? null : row.error)}
+            />
           </>
         )}
       </Show>
@@ -265,14 +281,10 @@ export function Machines(props: {
       {/* A HOLD IS A STATE CHANGE, so it is the runs' floor: drawn for a
           member, refused by the service below one. */}
       <Show when={props.canRun}>
-        <Panel
-          title="Hold a machine"
-          note="A hold is recorded against a checkout and outlives this page — release it when done. The platforms above narrow it; empty means every one."
-          label="hold"
-        >
+        <Panel title="Hold a machine" label="hold">
           <div class="panel-body">
             <div class="admin-section">
-              <Field id="hold-checkout" label="Checkout" hint="The absolute path the hold is for.">
+              <Field id="hold-checkout" label="Checkout">
                 <TextInput id="hold-checkout" value={checkout()} placeholder="/code/app" onValue={setCheckout} />
               </Field>
               <Toggle id="no-wait" checked={noWait()} onChecked={setNoWait}>
