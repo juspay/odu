@@ -15,7 +15,8 @@ Feature: An admin administers the cache from the board
   @signed-in:admin
   Scenario: An empty bucket name is refused by the row, in its words
     Given I open the cache
-    When I press "Create bucket"
+    When I open the new bucket form
+    And I press "Create bucket"
     Then the cache says "a bucket needs a name"
     And there should be no page errors
 

@@ -534,6 +534,10 @@ async function openCreateForm(world: OduWorld): Promise<void> {
   if ((await summary.getAttribute("aria-expanded")) !== "true") await summary.click();
 }
 
+When("I open the new bucket form", async function (this: OduWorld) {
+  await openCreateForm(this);
+});
+
 When("I name a new bucket", async function (this: OduWorld) {
   const name = unique("board");
   this.cacheBucket = name;
