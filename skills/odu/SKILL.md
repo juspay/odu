@@ -392,7 +392,7 @@ docs, "Set up an R2 bucket"):
   "auto"; credentialsFile; publicUrl?; }` — `publicUrl` being the custom domain
   bound to that bucket, an origin with no path, which public buckets on the
   store are then advertised at.
-The cache row is at contract 4.5 (3.0 removed `held` and `--wait`; 3.1 added
+The cache row is at contract 4.6 (3.0 removed `held` and `--wait`; 3.1 added
 `store` and the `stores` resource; 4.0 moved retention onto `lastWanted` — the
 old last-access field is gone from a path and from `stats_read` — and added
 `bucket_retention`, `pin_list`, `pin_delete`, `gc_plan` and `orphans`; 4.1 added
@@ -401,7 +401,9 @@ old last-access field is gone from a path and from `stats_read` — and added
 upload negotiation; 4.3 added `bucket_delete`; 4.4 added `gc_plan`'s
 `retentionDays`, the dry run's own retention, which `gc_run` does not take; 4.5
 added `bucket_paths`' `group`, `name`, `sort` and `descending` — a bucket
-counted and ordered by the row rather than by whoever holds one page).
+counted and ordered by the row rather than by whoever holds one page; 4.6 added
+`label` on a token's public half, so the Tokens list says `run <id>` for a
+credential odu minted for a run).
 
 - **WRITES LEAVE ODU TOO, on an S3 store.** `odu cache push` asks the bucket
   where a NAR's bytes go before it sends any. A bucket whose store takes its
@@ -754,10 +756,14 @@ declares.
   does not answer — is refused with a sentence naming the URL. With NEITHER a
   `--cache` nor a bucket, `odu cache push <path>…` reads the substituter out of
   `./flake.nix`'s `nixConfig` and pushes to the one odu cache named there; two
-  is a refusal listing both. That inference probes ANONYMOUSLY — the URL came
-  out of a repository, so no saved credential is sent to it — which means a
-  PRIVATE bucket cannot be inferred and must be named with `--cache` or
-  `<bucket> --origin`.
+  is a refusal listing both. That inference probes ANONYMOUSLY, and the push
+  that follows uses ONLY a credential saved for that origin
+  (`odu cache login`): the URL came out of a repository, so `--token-file` and
+  `$ODU_CACHE_TOKEN` — which are credentials for wherever a push ends up — are
+  out of scope, and a flake pointing at somebody else's host collects nothing.
+  With none saved the push goes out anonymously and the bucket's 401 says so.
+  A PRIVATE bucket therefore cannot be inferred and must be named with
+  `--cache` or `<bucket> --origin`.
 - `odu cache push --pin NAME` re-points a pin at the closure the push landed
   (nothing is pinned if a path was refused). The push action takes `pin: true`
   instead of a name and derives `<owner>/<repo>@<ref>/<system>`; when to pin is

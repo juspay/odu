@@ -80,7 +80,9 @@ export const ciRow = definePlugin({
     // THE COMPOSITION, bound: the ports to the engine. Everything the runs must
     // CAUSE — launch, retry, cancel, the checkout probe, the pipeline, the
     // venues, the forge — arrives here, and the engine knows none of it.
-    const { ports } = webPorts(grants);
+    // THE DAEMON'S ENVIRONMENT, read HERE — the row is what the host
+    // composes, and `webPorts` reads none of its own.
+    const { ports } = webPorts(grants, process.env);
     const service: OduService = createOduService({
       ports,
       origin,

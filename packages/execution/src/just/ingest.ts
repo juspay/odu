@@ -41,11 +41,15 @@ interface DumpRecipe {
 interface DumpModule {
   recipes: Record<string, DumpRecipe>;
   modules: Record<string, DumpModule>;
-  /** Where this module's justfile lives, relative to the root one — `""` for
-   *  the root itself. `just` runs a module's recipe HERE. */
-  module_path?: string;
+  /** THE ABSOLUTE PATH OF THIS MODULE'S JUSTFILE, and the only field that
+   *  says where a module LIVES. `module_path` is its NAMEPATH (`a::b`) — not
+   *  a path at all, and identical for `mod a "a/mod.just"` and
+   *  `mod a "tooling/mod.just"`. */
+  source?: string;
   settings?: {
-    /** `set working-directory := …`, relative to the module's own directory. */
+    /** `set working-directory := …`, relative to the module's own directory —
+     *  or ABSOLUTE, which `just` honours verbatim and which therefore takes
+     *  the recipe out of the workspace entirely. */
     working_directory?: string | null;
     /** `set no-cd`, which pins every recipe to the invocation directory. */
     no_cd?: boolean;
@@ -151,39 +155,81 @@ function osAttributes(recipe: DumpRecipe): string[] {
 }
 
 /**
- * WHERE `just` WILL RUN THIS RECIPE, relative to the workspace root — or
- * `null` when that IS the workspace root.
+ * WHERE `just` WILL RUN THIS RECIPE, relative to the workspace root — `null`
+ * when that IS the workspace root, and an ABSOLUTE path when the recipe runs
+ * outside the workspace altogether.
  *
  * A node's command is `just --no-deps <namepath>` from the workspace, and
  * `just` does the chdir itself, so nothing about EXECUTION needs this. What
  * needs it is PLAN 4.1: a recipe's `result*` links land in the directory it
  * ran in, and for a module recipe that is the module's own directory — the
  * shape `mod ci 'ci/mod.just'` gives, which is the shape odu itself ships. A
- * glob of the workspace root alone would find nothing there and say nothing.
+ * glob of the workspace root alone finds nothing there.
  *
  * Three rules, and `just`'s own order between them:
  *
- *   - a MODULE's recipe runs in the module's directory (`module_path`);
- *   - `set working-directory := X` moves that, relative to it;
+ *   - a MODULE's recipe runs in the module's own DIRECTORY;
+ *   - `set working-directory := X` moves that, relative to it, unless X is
+ *     absolute, in which case `just` uses X verbatim;
  *   - `[no-cd]` on the recipe, or `set no-cd` on the module, cancels both and
  *     leaves the recipe in the directory `just` was invoked from — which, for
  *     every node odu runs, is the workspace root.
+ *
+ * The module's directory comes from the dump's `source`, which is the
+ * absolute path of its justfile. NOT from `module_path`: that is the module's
+ * NAMEPATH, so `mod ci 'tooling/mod.just'` answers `ci`, and every nested
+ * module answers `a::b` — never a directory, even when the name happens to
+ * match one. Both shapes globbed a directory that does not exist, found
+ * nothing and said nothing, which is the one silent failure 4.1 has.
  */
-export function workdirOf(module: DumpModule, recipe: DumpRecipe): string | null {
+export function workdirOf(
+  module: DumpModule,
+  recipe: DumpRecipe,
+  /** The ROOT module's `source`, whose directory is the workspace root. */
+  rootSource: string | undefined,
+): string | null {
   const noCd =
     module.settings?.no_cd === true ||
     recipe.attributes.some((attr) => attr === "no-cd");
   if (noCd) return null;
-  const moduleDir = module.module_path ?? "";
   const declared = module.settings?.working_directory ?? null;
+  // ABSOLUTE WINS OUTRIGHT, as it does in `just`: the module's own directory
+  // is not consulted at all, and the answer leaves the workspace.
+  if (declared !== null && posix.isAbsolute(declared)) {
+    return posix.normalize(declared);
+  }
+  const moduleDir =
+    module.source === undefined || rootSource === undefined
+      ? ""
+      : posix.relative(posix.dirname(rootSource), posix.dirname(module.source));
   const resolved =
     declared === null || declared === ""
       ? moduleDir
       : // `posix` because this is a path INSIDE a repository, normalised the
         // way the justfile wrote it; the lane joins it onto its own workspace.
         posix.normalize(posix.join(moduleDir, declared));
-  const relative = resolved.replace(/^\.?\/*/, "").replace(/\/+$/, "");
+  // A `..` THAT CLIMBS PAST THE ROOT is the absolute case in relative
+  // clothing — `ci/mod.just` with `set working-directory := '../..'` — so it
+  // is answered the same way rather than being joined onto a workspace it is
+  // not inside.
+  if (resolved.startsWith("..")) {
+    return rootSource === undefined
+      ? null
+      : posix.normalize(posix.join(posix.dirname(rootSource), resolved));
+  }
+  const relative = withoutEdgeSlashes(resolved);
   return relative === "" || relative === "." ? null : relative;
+}
+
+/** `./a/b/` → `a/b`, trimmed by LOOP rather than by `/\/+$/`: the input is a
+ *  repository's own string and a backtracking trim over it is quadratic. */
+function withoutEdgeSlashes(path: string): string {
+  let from = 0;
+  if (path.startsWith("./")) from = 2;
+  while (path.charCodeAt(from) === 47) from += 1;
+  let end = path.length;
+  while (end > from && path.charCodeAt(end - 1) === 47) end -= 1;
+  return path.slice(from, end);
 }
 
 /** Does a recipe with these OS-family attributes run on `platform`? Empty ⇒
@@ -290,7 +336,9 @@ export function pipelineFromDump(
   const tasks: TaskSpec[] = [...reachable.values()].map(
     ({ recipe, module }) => {
       const shards = shardCount(recipe);
-      const workdir = workdirOf(module, recipe);
+      // THE ROOT'S OWN `source`, whose directory is the workspace root every
+      // module's directory is expressed against.
+      const workdir = workdirOf(module, recipe, (dump as DumpModule).source);
       return {
         id: recipe.namepath,
         name: recipe.namepath,

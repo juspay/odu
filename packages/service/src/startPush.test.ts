@@ -29,7 +29,7 @@ import {
 } from "./fixture.testlib";
 import type { PushResolution } from "./ports";
 import { requestStore } from "./requests";
-import { digestOfRequest, RUN_TOKEN_LIFETIME_MS, startRun } from "./start";
+import { RUN_TOKEN_LIFETIME_MS, startRun } from "./start";
 
 let world: World | null = null;
 const open = (): World => {

@@ -127,4 +127,37 @@ describe("the journal's pushed event", () => {
       ],
     ]);
   });
+
+  it("RETRACTS a node's push when a new attempt starts", () => {
+    // A rerun's push often finds nothing new — every path the recipe builds
+    // is already on the bucket from the attempt before — and the old counts
+    // would then stand for good over an attempt that pushed nothing: the
+    // board and `run_read` claiming `pushed 12 paths` for a node that is
+    // still running. A new attempt is exactly the moment the claim stops
+    // being about the node a reader is looking at.
+    const started = {
+      kind: "attempt_started",
+      node: "ci::build@x86_64-linux",
+      attempt: 2,
+      placement: { platform: "x86_64-linux", host: null },
+    } as const;
+    expect([
+      ...foldJournal([
+        { seq: 1, at: 1, event },
+        { seq: 2, at: 2, event: started },
+      ]).pushed.entries(),
+    ]).toEqual([]);
+
+    // AND A RERUN THAT DOES PUSH says so again, so the retraction is not a
+    // one-way door.
+    expect([
+      ...foldJournal([
+        { seq: 1, at: 1, event },
+        { seq: 2, at: 2, event: started },
+        { seq: 3, at: 3, event: { ...event, paths: 2, bytes: 20, durationMs: 7 } },
+      ]).pushed.entries(),
+    ]).toEqual([
+      ["ci::build@x86_64-linux", { bucket: "kolu-r2", paths: 2, bytes: 20, durationMs: 7 }],
+    ]);
+  });
 });

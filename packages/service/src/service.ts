@@ -742,9 +742,17 @@ export function createOduService(opts: ServiceOptions): OduService {
    * node can be rerun after the run drains, and a lingering coordinator is a
    * settled row with a live endpoint. Revoking at first settle met that rerun
    * with a dead credential and reddened the node for a reason that had nothing
-   * to do with the recipe — on the retry path linger was added for. A run that
-   * has released its endpoint (`releaseOwnership` nulls it) or lost its owner
-   * is one nothing can push from again.
+   * to do with the recipe — on the retry path linger was added for.
+   *
+   * **And serving is LIVENESS, not a recorded address.** `row.endpoint` is
+   * whatever the owner file says; a coordinator killed -9 after writing
+   * `finalized` never runs `releaseOwnership`, so its row stays settled with
+   * that endpoint standing for good — and a skip keyed on the address alone
+   * would leave that run's write token live until its expiry, on a daemon
+   * that can see the process is gone. So the skip asks the projection's own
+   * liveness, the same answer an `owner_lost` state is built from. A run that
+   * released its endpoint, lost its owner, or kept an endpoint nothing is
+   * behind is one nothing can push from again.
    *
    * Crash-safe for free: the first refresh after a restart upserts every run
    * in the catalog, so a token whose daemon died mid-run is revoked the moment
@@ -754,8 +762,15 @@ export function createOduService(opts: ServiceOptions): OduService {
   const revokeFinishedPushTokens = (rows: readonly RunRow[]): void => {
     for (const row of rows) {
       if (row.state === "provisioning" || row.state === "running") continue;
-      // STILL SERVING: a lingering coordinator, whose reruns still push.
-      if (row.endpoint !== null && row.state === "settled") continue;
+      // STILL SERVING: a LIVE lingering coordinator, whose reruns still push.
+      // A recorded endpoint with no process behind it is a dead coordinator.
+      if (
+        row.endpoint !== null &&
+        row.state === "settled" &&
+        registry.ownerAliveOf(row.runId)
+      ) {
+        continue;
+      }
       // The id is deliberately NOT on the wire row — a revocation handle is
       // not something every browser that can list runs needs — so it is read
       // from the projection that holds the manifest.

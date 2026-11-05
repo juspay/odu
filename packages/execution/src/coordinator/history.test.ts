@@ -672,6 +672,35 @@ describe("recording who asked for a retry", () => {
   });
 });
 
+describe("recording what a node warmed", () => {
+  it("writes every field of the push, the duration included", () => {
+    // THE FIELD THE TYPES ALONE DID NOT CARRY. `durationMs` existed on the
+    // event schema and in the fold, and the writer's own fact type left it
+    // out — so the number was right on the live coordinator's cell and
+    // became `0` the moment the run finalized, which is the reading every
+    // catalog consumer gets. A fold test cannot see this: it hand-builds the
+    // event this writer is the only producer of.
+    const { history, handle } = started();
+
+    history.pushed({
+      node: NODE,
+      bucket: "kolu-r2",
+      paths: 12,
+      bytes: 4_194_304,
+      durationMs: 2_500,
+    });
+
+    expect(readJournal(handle).entries.at(-1)?.event).toEqual({
+      kind: "pushed",
+      node: NODE,
+      bucket: "kolu-r2",
+      paths: 12,
+      bytes: 4_194_304,
+      durationMs: 2_500,
+    });
+  });
+});
+
 describe("settle → retry → settle, through the real writer and the real reader", () => {
   // The mismatch a fold test cannot see. `resumed` is cleared by a `finalized`
   // line and by nothing else, so the reader's correctness depends entirely on

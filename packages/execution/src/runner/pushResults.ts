@@ -4,17 +4,21 @@
  * A repository that reads from an odu cache builds for it. The whole of what a
  * repository declares is the `extra-substituters` line already in its
  * `flake.nix`; the service resolved that to a bucket and minted a write token
- * for this run, and both arrive here as the node's own process environment
- * (`ODU_CACHE_SUBSTITUTER`, `ODU_CACHE_TOKEN`). Nothing in any recipe, no token
- * in the tree, no second place a bucket name can go stale.
+ * for this run, and the three facts that follow from that — the origin the
+ * push goes to, the bucket, and the token — arrive on the node's own task
+ * environment (`ODU_CACHE_ORIGIN`, `ODU_CACHE_BUCKET`, `ODU_CACHE_TOKEN`),
+ * which the runner reads and the recipe's child never sees. Nothing in any
+ * recipe, no token in the tree, no second place a bucket name can go stale.
  *
  * ## `result*`, and nothing else
  *
  * `nix build` writes `./result`, `./result-doc`, `./result-2`. Those symlinks
  * are the one convention every Nix repository already keeps, and they are what
- * a recipe's outputs ARE — so the lane globs the workspace root after a recipe
- * exits 0 and pushes the closure of whatever it finds. A recipe that builds
- * nothing leaves no link, and nothing is pushed and nothing is said.
+ * a recipe's outputs ARE — so the lane globs the directory the recipe RAN in
+ * (`TaskSpec.workdir`: `just` runs a module's recipe in the module's own
+ * directory, which the workspace root is not) after it exits 0, and pushes
+ * the closure of whatever it finds. A recipe that builds nothing leaves no
+ * link, and nothing is pushed and nothing is said.
  *
  * ## A target is pushed ONCE per run
  *
@@ -102,12 +106,12 @@ export interface PushedFact {
  * store is a file a recipe wrote, not an output.
  */
 export function resultPathsIn(workspace: string, storeDir: string = nixStoreDir()): string[] {
-  let entries: string[];
-  try {
-    entries = readdirSync(workspace);
-  } catch {
-    return [];
-  }
+  // A DIRECTORY THAT IS NOT THERE IS A THROW, not an empty list. That was the
+  // silent half of the module-workdir bug: a wrong answer about where a
+  // recipe ran globbed a path that does not exist, found nothing, and left a
+  // green run that pushed nothing with no line anywhere saying why. The lane
+  // turns this into a line on the node.
+  const entries = readdirSync(workspace);
   const prefix = storeDir.endsWith("/") ? storeDir : `${storeDir}/`;
   const resolved: string[] = [];
   for (const entry of entries.sort()) {
@@ -176,7 +180,21 @@ export function createLanePusher(
 
   return {
     async push(workdir, config, say) {
-      const found = resultPathsIn(workdir, deps.storeDir);
+      let found: string[];
+      try {
+        found = resultPathsIn(workdir, deps.storeDir);
+      } catch (err) {
+        // WHERE A RECIPE RAN IS DERIVED from the justfile's own dump, so it
+        // can be derived wrongly — and the failure mode of a wrong answer is
+        // a run that pushes nothing and says nothing, which is the one thing
+        // 4.1 must never do. A line on the node rather than a red one: the
+        // recipe did its job, and this is odu's reading of the dump failing.
+        say(
+          `[odu] not pushing: ${workdir} could not be read ` +
+            `(${err instanceof Error ? err.message : String(err)})`,
+        );
+        return null;
+      }
       const fresh = found.filter((path) => !sent.has(path));
       if (fresh.length === 0) return null;
       const startedAt = now();

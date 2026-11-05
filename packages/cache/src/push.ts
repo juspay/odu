@@ -173,6 +173,48 @@ export interface DescribedCache {
  *  short lines; the bound exists because the URL can come from a repository. */
 const CACHE_INFO_MAX_BYTES = 8 * 1024;
 
+/**
+ * The first `limit` bytes of a response, READ AS THEY ARRIVE and then stopped.
+ *
+ * `(await response.text()).slice(limit)` is not a bound: it buffers whatever
+ * the server sends and truncates afterwards, so a URL out of somebody's
+ * `flake.nix` answering a gigabyte costs a gigabyte of this process's memory
+ * before a single byte is discarded. Reading the stream lets the cancel
+ * happen at the limit, which also closes the connection.
+ *
+ * Decoded as UTF-8 with no regard for a character split across the cut: this
+ * reads `Key: value` ASCII lines, and the only cost of a mangled final rune
+ * is a field that does not parse — on a body already eight kilobytes past
+ * where a real `nix-cache-info` ended.
+ */
+async function boundedText(response: Response, limit: number): Promise<string> {
+  const body = response.body;
+  if (body === null) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let held = 0;
+  try {
+    while (held < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const take = value.subarray(0, limit - held);
+      chunks.push(take);
+      held += take.length;
+    }
+  } finally {
+    // CANCEL, not just release: a server still streaming must be hung up on
+    // rather than left to fill a buffer nobody reads.
+    await reader.cancel().catch(() => {});
+  }
+  const joined = new Uint8Array(held);
+  let at = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, at);
+    at += chunk.length;
+  }
+  return new TextDecoder().decode(joined);
+}
+
 export async function describeCache(
   substituter: string,
   send: typeof fetch = fetch,
@@ -207,10 +249,7 @@ export async function describeCache(
           "may read this bucket";
     throw new Error(`${url} answered ${response.status} ${why}`);
   }
-  // BOUNDED. A `nix-cache-info` is five short lines; a server that streams a
-  // gigabyte in its place is not one, and only the first two fields are read
-  // in any case.
-  const text = (await response.text()).slice(0, CACHE_INFO_MAX_BYTES);
+  const text = await boundedText(response, CACHE_INFO_MAX_BYTES);
   const origin = infoField(text, ODU_ORIGIN_FIELD);
   const bucket = infoField(text, ODU_BUCKET_FIELD);
   if (origin === null || bucket === null) {
@@ -626,21 +665,44 @@ export async function oduCachesOf(
   return described.filter((one): one is OduSubstituter => one !== null);
 }
 
-/** The token, in the order the docs promise: `--token-file`, then
- *  `$ODU_CACHE_TOKEN`, then the credentials entry for the bucket's origin. */
+/**
+ * The token, in the order the docs promise: `--token-file`, then
+ * `$ODU_CACHE_TOKEN`, then the credentials entry for the bucket's origin.
+ *
+ * WHO NAMED THE ORIGIN decides whether the first two are consulted at all.
+ * `--token-file` and `$ODU_CACHE_TOKEN` are ORIGIN-AGNOSTIC: they are a
+ * credential for whatever address this push ends up at, which is exactly
+ * right when the OPERATOR typed that address (`odu cache push <bucket>`,
+ * `--cache <url>`, `--origin <url>` — naming a cache is trusting it) and
+ * exactly wrong when a REPOSITORY did. One `extra-substituters` line in a
+ * contributor's `flake.nix` would otherwise collect `$ODU_CACHE_TOKEN` — a
+ * workflow secret, on the spelling this change made the recommended one.
+ *
+ * For a repository-named origin only the credentials FILE is consulted, and
+ * an entry there is keyed by origin: a machine that has logged in to that
+ * address has already decided to trust it.
+ */
 export async function resolveToken(
   env: PushEnv,
   origin: string,
   tokenFile: string | undefined,
+  namedBy: OriginNamedBy = "operator",
 ): Promise<string | null> {
-  if (tokenFile !== undefined) {
-    return (await readFile(tokenFile, "utf8")).trim();
+  if (namedBy === "operator") {
+    if (tokenFile !== undefined) {
+      return (await readFile(tokenFile, "utf8")).trim();
+    }
+    const fromEnv = env.ODU_CACHE_TOKEN?.trim();
+    if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
   }
-  const fromEnv = env.ODU_CACHE_TOKEN?.trim();
-  if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
   const entries = await readCredentials(env);
   return entries[normalizeOrigin(origin)] ?? null;
 }
+
+/** WHO CHOSE THE ADDRESS THIS PUSH GOES TO — the operator, by typing a bucket,
+ *  a `--cache` or an `--origin`, or the repository, through its `flake.nix`.
+ *  See {@link resolveToken}: it decides which credentials are in scope. */
+export type OriginNamedBy = "operator" | "repository";
 
 /** The closure this client uploads. Named for what the caller means; the shape
  *  is the store's, and the parser behind it is the store's too — one answer to
@@ -716,6 +778,10 @@ export interface PushOptions {
   env: PushEnv;
   /** `--origin`, which beats a stored credential. */
   origin?: string;
+  /** WHO NAMED that origin. `"repository"` — the inferred push, where the
+   *  address came out of somebody's `flake.nix` — narrows the credentials in
+   *  scope to the ones saved for it; see {@link resolveToken}. */
+  originNamedBy?: OriginNamedBy;
   tokenFile?: string;
   /** Uploads in flight WITHIN one dependency depth. */
   concurrency?: number;
@@ -759,15 +825,34 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const say = options.onLine ?? (() => {});
   const resolved = await resolveBucket(options.env, options.bucket, options.origin);
   if ("error" in resolved) throw new Error(resolved.error);
-  const token = await resolveToken(options.env, resolved.origin, options.tokenFile);
-  if (token === null) {
+  const namedBy = options.originNamedBy ?? "operator";
+  const token = await resolveToken(
+    options.env,
+    resolved.origin,
+    options.tokenFile,
+    namedBy,
+  );
+  if (token === null && namedBy === "operator") {
     throw new Error(
       `no token for ${resolved.origin} — pass --token-file, set $ODU_CACHE_TOKEN, ` +
         `or run \`odu cache login ${resolved.origin}\``,
     );
   }
+  /** WHAT TO SAY WHEN THE BUCKET REFUSES AN ANONYMOUS PUSH — null when there
+   *  is a credential, so the bucket's own sentence stands alone. An inferred
+   *  push with nothing saved for that origin goes out with no `Authorization`
+   *  at all rather than with a credential meant for somewhere else, and the
+   *  401 is then the honest answer plus the one thing to do about it. */
+  const anonymousHint =
+    token === null
+      ? `the substituter came from ./flake.nix and nothing is saved for ` +
+        `${resolved.origin}, so this push was anonymous — run ` +
+        `\`odu cache login ${resolved.origin}\`, or name the cache yourself ` +
+        "with `odu cache push <bucket> --origin <url>`"
+      : null;
   const base = `${resolved.origin}${CACHE_MOUNT}/${resolved.name}`;
-  const headers = { authorization: `Bearer ${token}` };
+  const headers: Record<string, string> =
+    token === null ? {} : { authorization: `Bearer ${token}` };
 
   const platform: PushPlatform = options.platform ?? {
     closure: (paths) => nixClosure(paths, null),
@@ -791,7 +876,14 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
           skippedUpstream: [] as readonly string[],
           substituter: null,
         }
-      : await askMissing(resolved, headers, closure);
+      : await askMissing(resolved, headers, closure).catch((err: unknown) => {
+          // THE FIRST AUTHENTICATED CALL, so an anonymous push's 401 lands
+          // here. The bucket's own sentence first, then what to do.
+          const said = err instanceof Error ? err.message : String(err);
+          throw anonymousHint === null
+            ? err
+            : new Error(`${said} — ${anonymousHint}`);
+        });
   const present = closure.size - answer.missing.length;
   const alreadyPresent = present - answer.skippedUpstream.length;
   // ONE PREAMBLE, then a line per path: what the closure is, what the bucket

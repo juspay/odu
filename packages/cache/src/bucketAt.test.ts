@@ -92,6 +92,24 @@ describe("the bucket a substituter URL names", () => {
     expect(server.bucketAt(`${PUBLIC}/cache/main`)).not.toBeNull();
   });
 
+  it("answers the URL IT advertises, never the string it was asked about", async () => {
+    // `substituter` is published: the `_ci-setup` line, the manifest,
+    // `run_read` and the board all print it. Userinfo is no part of the match
+    // and the push was always going to `origin`, so this is not a wrong
+    // grant — but `pushing results to https://evil.example@cache.ours/…` on
+    // four surfaces is a spoof the design's own rule forbids: nothing a
+    // repository supplies is believed, including a spelling.
+    const server = await row([{ name: "main" }]);
+    expect(server.bucketAt(`https://evil.example@odu.example.org/cache/main`)).toMatchObject({
+      name: "main",
+      substituter: `${PUBLIC}/cache/main`,
+    });
+    // A trailing slash is normalised away for the same reason.
+    expect(server.bucketAt(`${PUBLIC}/cache/main/`)).toMatchObject({
+      substituter: `${PUBLIC}/cache/main`,
+    });
+  });
+
   it("answers a PRIVATE bucket, which no anonymous probe could have found", async () => {
     // The probe could not resolve one at all: a private bucket's
     // `nix-cache-info` is a 404 to a reader without a token, so every repo

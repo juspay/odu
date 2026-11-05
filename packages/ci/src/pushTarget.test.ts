@@ -177,4 +177,30 @@ describe("resolving where a checkout pushes", () => {
       substituters: [`${OURS}/cache/main`, `${OURS}/cache/spare`],
     });
   });
+
+  it("looks at a BOUNDED number of substituters", async () => {
+    // The list is a repository's, this loop is on the daemon's single event
+    // loop during `run.start`, and the only other bound on its length is the
+    // eval's 64 KiB stdout cap. A branch declaring ten thousand of them would
+    // otherwise be a repeatable way to spend the daemon's time.
+    const asked: string[] = [];
+    const grants = grantsBroker();
+    grants.register({
+      origin: () => OURS,
+      bucketAt: (substituter) => {
+        asked.push(substituter);
+        return null;
+      },
+      mint: () => ({ id: "tok-1", token: "odu_test" }),
+      revoke: () => {},
+    });
+    const many = Array.from({ length: 10_000 }, (_, i) => `https://many${i}.example`);
+    const resolved = await resolvePushWith("/checkouts/flood", grants, flakeSaying(many));
+    expect(resolved).toMatchObject({ kind: "skipped" });
+    expect(asked.length).toBe(16);
+    // AND THE SENTENCE IS BOUNDED WITH IT: the reason becomes an argv and a
+    // durable manifest field, so it names what was looked at, not the list.
+    if (resolved.kind !== "skipped") return;
+    expect(resolved.reason).not.toContain("many20.example");
+  });
 });

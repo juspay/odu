@@ -488,6 +488,11 @@ export interface RunRegistry {
    *  because the row is the WIRE and a revocation handle is not published:
    *  only this process, which minted it, has a use for it. */
   pushTokenOf: (runId: string) => string | null;
+  /** IS THE PROCESS THAT OWNS THIS RUN STILL THERE — the liveness this
+   *  projection already computed for the row, published because `endpoint` on
+   *  the wire is the RECORDED one and cannot tell a lingering coordinator
+   *  from a killed one. A run this registry has not seen is not alive. */
+  ownerAliveOf: (runId: string) => boolean;
   /**
    * Where one run's work is placed, or undefined for a run this registry has
    * not seen. `undefined` rather than `UNKNOWN_ENV`, so a caller can tell "no
@@ -647,6 +652,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
     row: (runId) => entryOf(runId)?.row,
     nodes: (runId) => entryOf(runId)?.nodes,
     pushTokenOf: (runId) => entryOf(runId)?.pushTokenId ?? null,
+    ownerAliveOf: (runId) => entryOf(runId)?.alive ?? false,
     env: (runId, now = Date.now()) => {
       const held = entryOf(runId);
       if (held === undefined) return undefined;

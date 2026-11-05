@@ -20,6 +20,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  describeCache,
   FLAKE_EVAL_MAX_STDERR,
   lastLine,
   nixEvalFlakeConfig,
@@ -287,5 +288,35 @@ describe("which substituters are odu caches", () => {
       throw new Error("ENOTFOUND");
     }) as unknown as typeof fetch;
     expect(await oduCachesOf(["https://gone.example"], { send })).toEqual([]);
+  });
+
+  it("stops READING a body that will not stop, rather than truncating it after", async () => {
+    // `(await response.text()).slice(limit)` is not a bound: it buffers
+    // whatever the server sends and discards afterwards, so a URL out of
+    // somebody's `flake.nix` answering a gigabyte costs a gigabyte of this
+    // process's memory first. What proves the difference is a stream that
+    // never ends — `.text()` on this never resolves at all.
+    let produced = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        produced += 1;
+        controller.enqueue(new TextEncoder().encode("x".repeat(4096)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const send = (async () =>
+      new Response(endless, { status: 200 })) as unknown as typeof fetch;
+
+    // The two `Odu-` lines never arrive, so this refuses — having READ the
+    // cap and hung up, which is the whole assertion.
+    await expect(
+      describeCache("https://flood.example", send),
+    ).rejects.toThrow(/does not say where it is pushed to/);
+    expect(cancelled).toBe(true);
+    // 8 KiB of 4 KiB chunks: a handful, not a gigabyte.
+    expect(produced).toBeLessThan(8);
   });
 });

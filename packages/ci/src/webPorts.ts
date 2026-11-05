@@ -152,15 +152,21 @@ export function probeCheckout(
 export function resolvePush(
   checkout: string,
   grants: CacheGrants,
+  /** The daemon's own environment, HANDED IN — this module reads none. The
+   *  evaluator forwards only the names that LOCATE a Nix store out of it,
+   *  which is what keeps `$ODU_ROOT_TOKEN` out of reach of a
+   *  `builtins.getEnv` in somebody's `flake.nix`. */
+  env: NodeJS.ProcessEnv,
 ): Promise<PushResolution> {
-  // THE DAEMON'S OWN ENVIRONMENT, handed in rather than reached for: the
-  // evaluator takes a parent environment and forwards only the names that
-  // LOCATE a Nix store, which is what keeps `$ODU_ROOT_TOKEN` out of reach of
-  // a `builtins.getEnv` in somebody's `flake.nix`.
   return resolvePushWith(checkout, grants, (dir) =>
-    readFlakeNixConfig(dir, nixEvalFlakeConfig(process.env)),
+    readFlakeNixConfig(dir, nixEvalFlakeConfig(env)),
   );
 }
+
+/** How many `nixConfig` substituters a resolution will look at. A flake that
+ *  reads from more caches than this is not a flake; it is an argument for
+ *  spending the daemon's event loop. */
+const RESOLVE_SUBSTITUTER_MAX = 16;
 
 /** The resolution, with its one reading of the world injected — the seam a
  *  suite states a flake through. */
@@ -180,8 +186,14 @@ export async function resolvePushWith(
   if (config.config.substituters.length === 0) {
     return { kind: "skipped", reason: "flake.nix nixConfig names no substituters" };
   }
+  // AS MANY AS A REAL FLAKE HAS, AND NO MORE. The list is a repository's, the
+  // loop below runs on the daemon's single event loop during `run.start`, and
+  // the eval's 64 KiB stdout cap is the only other bound on its length — so a
+  // branch declaring ten thousand substituters would be a repeatable way to
+  // spend the daemon's time on a question whose answer is in the first few.
+  const substituters = config.config.substituters.slice(0, RESOLVE_SUBSTITUTER_MAX);
   const grantable: PushTarget[] = [];
-  for (const substituter of config.config.substituters) {
+  for (const substituter of substituters) {
     const bucket = grants.bucketAt(substituter);
     if (bucket === null) continue;
     grantable.push({
@@ -206,7 +218,7 @@ export async function resolvePushWith(
       kind: "skipped",
       reason:
         "no substituter in flake.nix nixConfig is a cache this odu serves " +
-        `(${config.config.substituters.join(", ")})`,
+        `(${substituters.join(", ")})`,
     };
   }
   if (grantable.length > 1) {
@@ -240,7 +252,13 @@ export function configured(value: string | undefined): string | null {
  * Nothing is read from the environment here: every fact the ports need arrives
  * from the host, which is the one place that reads one.
  */
-export function webPorts(grants: CacheGrants): WebPorts {
+export function webPorts(
+  grants: CacheGrants,
+  /** The daemon's environment, for the ONE thing below that needs one: the
+   *  parent environment a `flake.nix` evaluation is given a minimal slice of.
+   *  A parameter, so the sentence above stays true of this module. */
+  env: NodeJS.ProcessEnv,
+): WebPorts {
   const launcher = packagedLauncher();
   // ONE forge for this service's life, and the SAME implementation the
   // coordinator constructs for its statuses. Two constructions of `gh` in one
@@ -248,7 +266,7 @@ export function webPorts(grants: CacheGrants): WebPorts {
   // through, which is exactly what the port exists to stop.
   const forge = ghForge();
   const push: PushPort = {
-    resolve: (checkout) => resolvePush(checkout, grants),
+    resolve: (checkout) => resolvePush(checkout, grants, env),
     grant: ({ bucket, runId, expiresAt }) => {
       const minted = grants.mint({ bucket, label: `run ${runId}`, expiresAt });
       return minted === null ? null : { tokenId: minted.id, token: minted.token };

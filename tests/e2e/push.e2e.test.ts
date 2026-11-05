@@ -183,35 +183,37 @@ build:
 }
 
 /**
- * The same fixture, but with the build recipe in a MODULE — `mod ci 'ci/mod.just'`
- * — which is where a `result` link stops being in the workspace root.
+ * The same fixture with the build recipe in a MODULE, and deliberately in the
+ * two shapes a name-equals-directory fixture cannot falsify:
  *
- * `just` chdirs into the module's directory for a module recipe, so the glob
- * that finds what to push has to follow it. This is not an exotic layout: it
- * is the one `[metadata("ci")]` and odu's own `ci/mod.just` encourage, and
- * getting it wrong pushes NOTHING while every surface stays green — the one
- * silent failure mode in the design.
+ *   - the module is NAMED `ci` and LIVES in `tooling/`, because `just`'s dump
+ *     reports `module_path` as the module's NAMEPATH — so a derivation built
+ *     on that field answers `ci` for a module in `tooling/`;
+ *   - and the recipe is in a module NESTED inside it, where `module_path` is
+ *     `ci::deep` — a string that is never a path in any layout, the
+ *     conventional one included.
+ *
+ * Both globbed a directory that does not exist, found nothing, and left a
+ * green run that pushed nothing with no line anywhere: the one silent failure
+ * mode in the design. The directory comes from the dump's `source` instead.
  */
 function moduleFixture(substituter: string, publicKey: string): string {
   const dir = fixture(substituter, publicKey);
-  mkdirSync(join(dir, "ci"), { recursive: true });
+  mkdirSync(join(dir, "tooling", "nested"), { recursive: true });
+  writeFileSync(join(dir, "tooling", "mod.just"), "mod deep 'nested/mod.just'\n");
   writeFileSync(
-    join(dir, "ci", "mod.just"),
+    join(dir, "tooling", "nested", "mod.just"),
     `[metadata("ci")]
 build:
     #!/usr/bin/env bash
     set -euo pipefail
     bash=$(readlink -f "$(command -v bash)")
     export ODU_E2E_BASH=\${bash%/bin/bash}
-    nix build --impure --file ../build.nix --out-link result
+    nix build --impure --file ../../build.nix --out-link result
     readlink -f result
 `,
   );
-  writeFileSync(
-    join(dir, "justfile"),
-    `mod ci 'ci/mod.just'
-`,
-  );
+  writeFileSync(join(dir, "justfile"), "mod ci 'tooling/mod.just'\n");
   const git = (...args: string[]): void => {
     execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
   };
@@ -421,9 +423,11 @@ describe("a run whose repository reads from somebody else's odu cache", () => {
 
 describe("a run whose build recipe lives in a just MODULE", () => {
   it("pushes the link the recipe left in the module's own directory", async () => {
-    // The whole point: `just` ran the recipe in `ci/`, so `./result` is
-    // `ci/result` and a glob of the workspace root alone finds nothing —
-    // silently, since a run with no `result*` anywhere is a legitimate run.
+    // The whole point: `just` ran the recipe in `tooling/nested/`, so
+    // `./result` is `tooling/nested/result` and a glob of the workspace root
+    // alone finds nothing — silently, since a run with no `result*` anywhere
+    // is a legitimate run. Neither the module's NAME (`ci`) nor its namepath
+    // (`ci::deep`) is that directory, which is all `module_path` ever said.
     const warm = bucket(home, ROOT, "warm-module");
     const dir = moduleFixture(warm.url, warm.publicKey);
 

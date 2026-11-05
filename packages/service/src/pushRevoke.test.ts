@@ -168,6 +168,44 @@ describe("a run's write token at the end of the run", () => {
     }
   });
 
+  it("is revoked when a LINGERING coordinator was killed after finalizing", async () => {
+    // THE COMBINATION THE LINGER FIX OPENED, and the reason the skip asks for
+    // liveness rather than for an address: a `--linger` coordinator that
+    // wrote `finalized` and then died hard never runs `releaseOwnership`, so
+    // its endpoint stands in the owner file for good. A terminal line also
+    // beats liveness in the state machine, so the row is `settled` — not
+    // `owner_lost` — and a skip keyed on `endpoint !== null && settled` would
+    // leave that run's write token live until its 24 h expiry, on a daemon
+    // one call away from knowing the process is gone.
+    world = makeWorld();
+    const run = registerFixtureRun(world, {
+      repoRoot: "/code/app",
+      sha: SHA,
+      push: PUSH,
+      now: Date.now() - 600_000,
+    });
+    appendEvent(run.handle, run.token, { kind: "finalized", outcome: "passed" });
+    writeVerdict(run.handle, run.token, {
+      runId: run.runId,
+      outcome: "passed",
+      startedAt: 1_000,
+      finishedAt: 2_000,
+      failed: [],
+      errored: [],
+      cancelled: [],
+      unposted: [],
+    });
+    crashOwner(run.handle, { heartbeatAt: Date.now() - 600_000 });
+
+    const ports = recordingPorts();
+    const { close } = project(world, ports);
+    try {
+      expect(ports.pushRevokes).toEqual(["tok-live"]);
+    } finally {
+      await close();
+    }
+  });
+
   it("revokes a token once, however many times the run is re-projected", async () => {
     world = makeWorld();
     const run = registerFixtureRun(world, {

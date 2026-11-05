@@ -420,6 +420,15 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         // which is what makes "unresolved" mean the LATEST attempt rather than
         // any attempt that ever went red.
         latest.set(e.node, state);
+        // AND WHATEVER THE PREVIOUS ATTEMPT WARMED IS NO LONGER THIS NODE'S
+        // (PLAN 4.1). A rerun's push may find nothing new — every path it
+        // builds is already on the bucket — and the old counts would then
+        // stand for good over an attempt that pushed nothing. The retraction
+        // is THIS line rather than an event of its own: a new attempt is
+        // exactly the moment the claim stops being about the node a reader
+        // is looking at, and a rerun that does push writes a fresh `pushed`
+        // after it.
+        pushed.delete(e.node);
         break;
       }
       case "node_status": {

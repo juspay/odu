@@ -176,12 +176,17 @@ export interface RunHistory {
   ) => void;
   /** A node's outputs landed in the cache (PLAN 4.1). Written when a recipe
    *  exits 0 and its `result*` closure was pushed, so a finished run can say
-   *  what it warmed without the bucket having to be asked. */
+   *  what it warmed without the bucket having to be asked. `durationMs` is
+   *  the PUSH's own time, which the node's `durationMs` deliberately does not
+   *  include — leaving it out here would make the number right on a live
+   *  coordinator's cell and zero the moment the run finalized, which is the
+   *  reading every catalog consumer gets. */
   pushed: (fact: {
     node: string;
     bucket: string;
     paths: number;
     bytes: number;
+    durationMs: number;
   }) => void;
   /**
    * Record that a retry carrying `requestId` was ACCEPTED against this run,
@@ -653,8 +658,8 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         });
       }
     },
-    pushed: ({ node, bucket, paths, bytes }) =>
-      emit({ kind: "pushed", node, bucket, paths, bytes }),
+    pushed: ({ node, bucket, paths, bytes, durationMs }) =>
+      emit({ kind: "pushed", node, bucket, paths, bytes, durationMs }),
     currentAttempt: (node) => highest.get(node) ?? 0,
     retryAccepted: ({ requestId, inputDigest, roots, resetDependants }) => {
       if (fenced) return false;

@@ -1858,11 +1858,26 @@ async function orchestrate(
     verdicts.boundIfOnlyLogsOutstanding();
   };
 
-  const updateNode = (id: string, patch: Partial<NodeState>): void => {
+  /**
+   * Mirror a lane node onto the public one.
+   *
+   * `drop` RETRACTS keys, which a spread cannot do: `pushed` is the only
+   * optional fact a node can stop having, and a rerun is where it stops —
+   * `{ pushed: undefined }` would spread the key back in and read as present
+   * to anything that asks. The lane's own `setNode` takes the same argument
+   * for the same reason; a mirror that could only ADD left a reran node
+   * painting the push it had not yet redone, on the board and in `run_read`.
+   */
+  const updateNode = (
+    id: string,
+    patch: Partial<NodeState>,
+    drop: readonly (keyof NodeState)[] = [],
+  ): void => {
     const cur = store.get();
     const prev = cur.nodes[id];
     if (prev === undefined) return;
     const next = { ...prev, ...patch };
+    for (const key of drop) delete next[key];
     // Shallow equality over the keys the PATCH names, not over three chosen
     // ones. The signature says `Partial<NodeState>` and the spread above
     // applies all of it, so a three-field guard silently discarded any patch
@@ -1871,7 +1886,12 @@ async function orchestrate(
     // transition side effect below stays gated on `next.status !== prev.status`
     // exactly as before, so nothing fires for a non-status change.
     const keys = Object.keys(patch) as (keyof NodeState)[];
-    if (keys.every((k) => next[k] === prev[k])) return;
+    if (
+      keys.every((k) => next[k] === prev[k]) &&
+      drop.every((k) => prev[k] === undefined)
+    ) {
+      return;
+    }
     runtime.ctx.cells.nodes.set({
       ...cur,
       nodes: { ...cur.nodes, [id]: next },
@@ -1937,6 +1957,21 @@ async function orchestrate(
     if (pushJournalled.get(id) === stamp) return;
     pushJournalled.set(id, stamp);
     history.pushed({ node: id, bucket: pushing.bucket, ...pushed });
+  };
+
+  /**
+   * A lane node no longer claims a push (PLAN 4.1): it was reset for a rerun,
+   * and what the previous attempt warmed is not what this one did.
+   *
+   * The public node drops the key, and the STAMP goes with it — a rerun that
+   * pushes the same paths again would otherwise match the stamp of the push
+   * just retracted, write no journal line, and leave the retraction standing
+   * over a node that did push. The journal's own retraction is the
+   * `attempt_started` line the rerun already wrote; the fold reads it.
+   */
+  const dropPushed = (id: string): void => {
+    updateNode(id, {}, ["pushed"]);
+    pushJournalled.delete(id);
   };
 
   const installShardNodes = (platform: string, plan: ShardPlan): void => {
@@ -2727,7 +2762,10 @@ async function orchestrate(
             startedAt: laneNode.startedAt,
             durationMs: laneNode.durationMs,
           });
-          if (laneNode.pushed !== undefined) notePushed(id, laneNode.pushed);
+          // AND THE RETRACTION. A lane node that was reset for a rerun drops
+          // its `pushed`, and the mirror must follow it down as well as up.
+          if (laneNode.pushed === undefined) dropPushed(id);
+          else notePushed(id, laneNode.pushed);
           const plan = planFor(platform, laneId);
           if (plan !== undefined) {
             refreshShardAggregate(platform, plan);
@@ -3258,7 +3296,8 @@ async function orchestrate(
               // the whole burst lane settles.
               if (laneId === SETUP) updateNode(publicId, patch);
               else verdicts.offer(publicId, patch);
-              if (laneNode.pushed !== undefined) notePushed(publicId, laneNode.pushed);
+              if (laneNode.pushed === undefined) dropPushed(publicId);
+              else notePushed(publicId, laneNode.pushed);
               if (laneId === plan.rootId) {
                 refreshShardAggregate(platform, plan);
               }

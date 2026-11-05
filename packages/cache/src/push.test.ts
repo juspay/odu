@@ -88,6 +88,9 @@ interface Server {
    *  means every call does. */
   missingCalls: number;
   missingOnlyFor: number | undefined;
+  /** Refuse the missing-paths query with this status — what a bucket answers
+   *  a request that carries no credential it accepts. */
+  missingStatus: number | undefined;
   /** Answer a narinfo PUT that carries no preceding NAR with a 400 saying the
    *  bytes are gone — what a restarted server says. */
   narinfoOnlyRefusal: boolean;
@@ -129,6 +132,7 @@ function startServer(): Server {
     completeFailures: 0,
     missingCalls: 0,
     missingOnlyFor: undefined,
+    missingStatus: undefined,
     narinfoOnlyRefusal: false,
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
@@ -206,6 +210,9 @@ function startServer(): Server {
       }
       if (url.pathname.endsWith("/missing")) {
         state.missingCalls += 1;
+        if (state.missingStatus !== undefined) {
+          return new Response("a write token is required", { status: state.missingStatus });
+        }
         const substituter =
           state.substituter === null ? {} : { substituter: state.substituter };
         if (state.missingOnlyFor !== undefined && state.missingCalls > state.missingOnlyFor) {
@@ -853,6 +860,29 @@ describe("token precedence", () => {
     expect(await resolveToken({ HOME: scratch }, "http://127.0.0.1:2", undefined)).toBeNull();
   });
 
+  it("keeps an origin-agnostic credential away from an origin a REPOSITORY named", async () => {
+    // `--token-file` and `$ODU_CACHE_TOKEN` are credentials for wherever this
+    // push ends up, which is right when the OPERATOR typed the address
+    // (naming a cache is trusting it) and wrong when a `flake.nix` did: one
+    // `extra-substituters` line in a contributor's branch would otherwise
+    // collect a workflow secret, on the spelling that is now the recommended
+    // one. Only a credential SAVED for that origin — a machine that logged in
+    // to it — is in scope.
+    const env = envOf({ ODU_CACHE_TOKEN: "from-env" });
+    const file = join(scratch, "token");
+    writeFileSync(file, "from-file\n");
+    await saveCredential(env, "https://known.example", "from-credentials");
+
+    expect(await resolveToken(env, "https://evil.example", file, "repository")).toBeNull();
+    expect(
+      await resolveToken(env, "https://evil.example", undefined, "repository"),
+    ).toBeNull();
+    // And a SAVED one still is: this narrows the sources, not the feature.
+    expect(await resolveToken(env, "https://known.example", file, "repository")).toBe(
+      "from-credentials",
+    );
+  });
+
   it("sends the token it resolved, and refuses to push without one", async () => {
     const server = startServer();
     try {
@@ -871,6 +901,36 @@ describe("token precedence", () => {
           platform: PLATFORM,
         }),
       ).rejects.toThrow(/no token/);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("pushes ANONYMOUSLY for a repository-named origin, and says so on the 401", async () => {
+    // The alternative was sending the operator's credential to an address a
+    // flake chose. So the request goes out with no `Authorization` at all,
+    // and the bucket's own refusal is what the operator reads — with the one
+    // thing to do about it, since a bare 401 does not say that the URL came
+    // out of the repository rather than off the command line.
+    const server = startServer();
+    try {
+      server.missingStatus = 401;
+      const refusal = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "secret-token" }),
+        originNamedBy: "repository",
+        platform: PLATFORM,
+      }).catch((err: unknown) => err);
+
+      const asked = server.seen.filter((seen) => seen.path.endsWith("/missing"));
+      expect(asked).toHaveLength(1);
+      expect(asked[0]?.authorization).toBeNull();
+      expect((refusal as Error).message).toContain("401");
+      expect((refusal as Error).message).toContain("odu cache login");
+      expect((refusal as Error).message).toContain("./flake.nix");
+      // AND THE SECRET WENT NOWHERE NEAR IT.
+      expect(JSON.stringify(server.seen)).not.toContain("secret-token");
     } finally {
       server.stop();
     }

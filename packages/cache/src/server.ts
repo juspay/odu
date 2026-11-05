@@ -360,6 +360,22 @@ export function probeStoreEndpoints(input: {
   return found;
 }
 
+
+/**
+ * A URL path with its trailing slashes gone, trimmed by a LOOP.
+ *
+ * `/\/+$/` on this input is a denial of service: against `"/"×N + "a"` the
+ * engine retries the whole run at every start position, which is quadratic,
+ * and the string being trimmed is one `extra-substituters` entry out of a
+ * contributor's `flake.nix` — on the daemon's single event loop, during
+ * `run.start`. A loop reads once.
+ */
+function withoutTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path.charCodeAt(end - 1) === 47) end -= 1;
+  return path.slice(0, end);
+}
+
 export function cacheServer(opts: CacheServerOptions): CacheServer {
   const { cache } = opts;
   /** What was last published, per bucket name, so a republish is a DIFF. */
@@ -427,7 +443,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
   /** WHERE A PUSH ADDRESSES IT. Always the path form: the push API needs the
    *  bucket's name, and a domain host answers `/cache/<name>` too. */
   const pushUrlOf = (name: string): string => `${opts.publicOrigin}${opts.mount}/${name}`;
-
   /**
    * WHICH BUCKET A SUBSTITUTER URL NAMES — the whole of PLAN 4.1's write
    * grant, and the one question a repository cannot lie its way through.
@@ -460,7 +475,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
       return null;
     }
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    const path = url.pathname.replace(/\/+$/, "");
+    const path = withoutTrailingSlashes(url.pathname);
     const origin = `${url.protocol}//${url.host}`;
     const segments = path.split("/").filter((part) => part !== "");
     const last = segments[segments.length - 1];
@@ -479,20 +494,29 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     };
     // CONFIRMED AGAINST WHAT THIS ROW PUBLISHES, not against the parse: the
     // steps above find a CANDIDATE, and only a URL the row would itself hand
-    // a reader is a grant.
-    const advertised = new Set(
-      [urlOf(facts), pushUrlOf(row.name), ...(row.domain === null ? [] : [`${scheme}//${row.domain}`])].map(
-        (one) => one.replace(/\/+$/, ""),
-      ),
+    // a reader is a grant. The confirmed SPELLING is kept, because that — and
+    // not the repository's string — is what every surface then publishes.
+    const advertised = new Map(
+      [
+        urlOf(facts),
+        pushUrlOf(row.name),
+        ...(row.domain === null ? [] : [`${scheme}//${row.domain}`]),
+      ].map((one) => [withoutTrailingSlashes(one), one]),
     );
-    if (!advertised.has(`${origin}${path}`)) return null;
+    const confirmed = advertised.get(`${origin}${path}`);
+    if (confirmed === undefined) return null;
     return {
       name: row.name,
       publicKey: row.publicKey,
       // WHERE A PUSH GOES — this daemon's own push origin, never a store's
       // read domain, which takes no write at all.
       origin: opts.publicOrigin,
-      substituter,
+      // AND THE ADDRESS THIS ROW ADVERTISES, not the one that was asked
+      // about. `https://evil.example@cache.ours/cache/main` resolves to this
+      // bucket — userinfo is no part of the match, and the push was always
+      // going to `origin` — but it must not be the string the setup log, the
+      // manifest, `run_read` and the board then print.
+      substituter: confirmed,
     };
   };
 

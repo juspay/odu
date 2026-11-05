@@ -44,6 +44,7 @@ import { CACHE_MOUNT } from "./paths";
 import {
   describeCache,
   discoveryToken,
+  type OriginNamedBy,
   normalizeOrigin,
   oduCachesOf,
   pushToCache,
@@ -395,6 +396,9 @@ async function pushCommand(rest: string[]): Promise<number> {
   const asked = values.cache;
   let bucket: string;
   let origin = values.origin;
+  /** WHO NAMED THE ORIGIN — the operator, until the inference below answers
+   *  with one a `flake.nix` chose. The push's credential scope turns on it. */
+  let originNamedBy: OriginNamedBy = "operator";
   let paths: string[];
   if (asked !== undefined) {
     if (values.origin !== undefined) {
@@ -494,6 +498,12 @@ async function pushCommand(rest: string[]): Promise<number> {
       }
       bucket = inferred.bucket;
       origin = inferred.origin;
+      // THE REPOSITORY CHOSE THIS ADDRESS. `$ODU_CACHE_TOKEN` and
+      // `--token-file` are credentials for wherever this push ends up, which
+      // is right when the operator typed the address and wrong when a
+      // contributor's `extra-substituters` line did — on the spelling this
+      // change made the recommended one.
+      originNamedBy = "repository";
       paths = positionals;
     }
   }
@@ -506,6 +516,7 @@ async function pushCommand(rest: string[]): Promise<number> {
       // in to one cache must still be able to push to a second. With `--cache`
       // it is the origin the cache named.
       ...(origin === undefined ? {} : { origin }),
+      originNamedBy,
       ...(values["token-file"] === undefined ? {} : { tokenFile: values["token-file"] }),
       ...(values.concurrency === undefined
         ? {}

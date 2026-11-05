@@ -21,7 +21,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   implementSurface,
   inMemoryStore,
@@ -639,6 +639,25 @@ export function createLaneRunner(
       // module's own directory, so a module DAG — the shape odu itself ships
       // — leaves `ci/result`, which a glob of the workspace root never sees.
       // `workdir` is the ingest's answer; absent means the workspace root.
+      //
+      // An ABSOLUTE answer means `set working-directory` took the recipe out
+      // of the workspace. Nothing is globbed there: a directory outside the
+      // run's own tree can hold a `result` link a different run — or a
+      // different user, on a shared lane host — left behind, and pushing that
+      // would store bytes this run never built. SAID on the node, because
+      // "nothing was pushed" is otherwise indistinguishable from "there was
+      // nothing to push".
+      if (task?.workdir !== undefined && isAbsolute(task.workdir)) {
+        if (current()) {
+          tail.append(
+            node.id,
+            `\n[odu] not pushing: this recipe runs in ${task.workdir} ` +
+              "(set working-directory), outside the run's workspace\n",
+          );
+        }
+        stamp(status, exitCode, null, durationMs);
+        return;
+      }
       const workdir = task?.workdir === undefined ? workspace : join(workspace, task.workdir);
       pushing = true;
       void pusher

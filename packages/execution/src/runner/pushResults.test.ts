@@ -125,8 +125,22 @@ describe("what a lane finds to push", () => {
     }
   });
 
-  it("answers nothing for a workspace that is not there", () => {
-    expect(resultPathsIn("/nonexistent-workspace")).toEqual([]);
+  it("THROWS for a directory that is not there, and the lane says so on the node", async () => {
+    // The silent half of the module-workdir bug. Where a recipe ran is
+    // DERIVED from `just`'s dump, so it can be derived wrongly — and an empty
+    // list made a wrong answer indistinguishable from a recipe that built
+    // nothing: a green run that pushed nothing, with no line anywhere saying
+    // which directory was looked in.
+    expect(() => resultPathsIn("/nonexistent-workspace")).toThrow();
+
+    const lines: string[] = [];
+    const lane = laneWith("/nix/store", async () => {
+      throw new Error("the push client must never be reached");
+    });
+    expect(
+      await lane.push("/nonexistent-workspace", CONFIG, (line) => lines.push(line)),
+    ).toBeNull();
+    expect(lines.join("\n")).toContain("not pushing: /nonexistent-workspace");
   });
 
   it("reads the push configuration off a task's environment, and only a whole one", () => {
