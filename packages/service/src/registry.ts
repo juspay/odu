@@ -45,14 +45,25 @@
  * grace has passed — and a changed answer re-projects the run like a moved file
  * would.
  *
- * "While it can matter" is a row that is not `settled` or `expired`. The
- * attention fold decides both of those BEFORE it consults the fence, so for
- * them the answer cannot change the row — and asking anyway was not free:
- * `releaseOwnership` keeps `owner.json` with a heartbeat that goes stale, so
- * every finished run on this host reached `kill(pid, 0)` four times a second,
- * and a reused pid re-parsed a journal whose run could not change. A settled
- * run that resumes appends to its journal, and an expiry writes a file, so
- * either moves the fingerprint and brings the run back into the question.
+ * "While it can matter" is a row that is not `settled`/`expired`, PLUS a
+ * settled row that still holds an endpoint. The attention fold decides
+ * settlement and expiry BEFORE it consults the fence, so for a finished run
+ * that has let its endpoint go the answer cannot change the row — and asking
+ * anyway was not free: `releaseOwnership` keeps `owner.json` with a heartbeat
+ * that goes stale, so every finished run on this host reached
+ * `kill(pid, 0)` four times a second, and a reused pid re-parsed a journal
+ * whose run could not change.
+ *
+ * A settled row that still NAMES an endpoint is the exception, and it is not
+ * cosmetic: `--linger` leaves exactly that shape, the run's write token is
+ * held for as long as something is serving the run (PLAN 4.1), and a
+ * coordinator killed -9 after `finalized` never releases the endpoint. Skip
+ * it on the strength of `settled` alone and the liveness is computed once,
+ * while it is still true, and never asked again.
+ *
+ * A settled run that resumes appends to its journal, and an expiry writes a
+ * file, so either moves the fingerprint and brings the run back into the
+ * question regardless.
  *
  * **No partial or time-budgeted refresh, on purpose.** A warm tick over ten
  * thousand runs is forty thousand `stat`s — tens of milliseconds. Chunking the
@@ -416,23 +427,20 @@ function project(
     // cursor: that one advances only through events actually delivered, and
     // this read delivered none.
     cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
-    // WHERE THIS RUN PUSHES (PLAN 4.1), copied off the manifest MINUS the
-    // token id: the service revokes by that, and a board row is read by every
-    // client that can list runs. A record written before the field simply has
-    // no key, which is what lets a board show nothing rather than claim the
-    // run pushed nowhere.
-    ...(manifest.push === undefined
+    // WHERE THIS RUN PUSHES (PLAN 4.1) — the projection `attentionFor` just
+    // made, not a second one off the same manifest. It is already the public
+    // shape (the token id stripped: the service revokes by that, and a board
+    // row is read by every client that can list runs), and a second
+    // derivation is the place where two readers of one record can disagree.
+    // A record written before the field simply has no key, which is what lets
+    // a board show nothing rather than claim the run pushed nowhere.
+    ...(attention.push === undefined
       ? {}
       : {
           push: {
-            target:
-              manifest.push.target === null
-                ? null
-                : {
-                    substituter: manifest.push.target.substituter,
-                    bucket: manifest.push.target.bucket,
-                  },
-            note: manifest.push.note,
+            target: attention.push.target,
+            skipped: attention.push.skipped,
+            keyWarning: attention.push.keyWarning,
           },
         }),
   };
@@ -449,7 +457,9 @@ function project(
   };
 }
 
-/** A row the fence's answer can no longer change — see the module header. */
+/** A row whose STATE the fence's answer can no longer change — see the module
+ *  header, and note that the liveness behind a settled row's endpoint can
+ *  still change even though its state cannot. */
 function terminal(row: RunRow): boolean {
   return row.state === "settled" || row.state === "expired";
 }
@@ -591,10 +601,24 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       const stamp = fingerprint(handle.dir);
       const held = slots.get(runId);
       if (held?.kind === "torn" && held.stamp === stamp) continue;
+      // THE SKIP: nothing on disk moved, AND nothing this projection computes
+      // from the clock did either.
+      //
+      // A terminal row is normally immune to the fence's answer — its state
+      // is already `settled`, and re-reading a journal to learn that again
+      // would be the whole catalog's work on every tick. But a settled row
+      // STILL SERVING carries a live endpoint, and whether a process is
+      // behind that endpoint is exactly what the clock changes: a `--linger`
+      // coordinator projected alive and then killed -9 would never be asked
+      // again, and its run's write token would live to its 24 h expiry on a
+      // daemon one `kill(0)` away from knowing. So a terminal row is only
+      // immune once it has RELEASED its endpoint; while it holds one,
+      // liveness is re-asked like any other row's.
       if (
         held?.kind === "run" &&
         held.entry.fingerprint === stamp &&
-        (terminal(held.entry.row) || ownerAlive(held.entry.owner, now) === held.entry.alive)
+        ((terminal(held.entry.row) && held.entry.row.endpoint === null) ||
+          ownerAlive(held.entry.owner, now) === held.entry.alive)
       ) {
         continue;
       }

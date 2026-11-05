@@ -211,14 +211,28 @@ export function workdirOf(
   // A `..` THAT CLIMBS PAST THE ROOT is the absolute case in relative
   // clothing — `ci/mod.just` with `set working-directory := '../..'` — so it
   // is answered the same way rather than being joined onto a workspace it is
-  // not inside.
-  if (resolved.startsWith("..")) {
+  // not inside. The test is the first SEGMENT, not a prefix: a directory
+  // honestly named `..config` starts with `..` and is inside the workspace.
+  if (resolved === ".." || resolved.startsWith("../")) {
     return rootSource === undefined
       ? null
       : posix.normalize(posix.join(posix.dirname(rootSource), resolved));
   }
   const relative = withoutEdgeSlashes(resolved);
   return relative === "" || relative === "." ? null : relative;
+}
+
+/**
+ * DID `just` RUN THIS RECIPE OUTSIDE THE WORKSPACE? — asked of the module
+ * that owns `just`'s cwd rules, rather than re-derived by reading its answer.
+ *
+ * {@link workdirOf} says so by answering an ABSOLUTE path, because that is
+ * what the recipe's directory literally is; a consumer that tested
+ * `isAbsolute` itself would be a second place holding that encoding, on the
+ * fastest-revving external contract in this design.
+ */
+export function runsOutsideWorkspace(workdir: string | undefined): boolean {
+  return workdir !== undefined && posix.isAbsolute(workdir);
 }
 
 /** `./a/b/` → `a/b`, trimmed by LOOP rather than by `/\/+$/`: the input is a

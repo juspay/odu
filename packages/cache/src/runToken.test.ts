@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Cache, createCache } from "./cache";
+import { type Cache, createCache, RUN_TOKEN_LIFETIME_MS } from "./cache";
 import type { BucketRow } from "./db";
 import { asRoot, localStores } from "./testlib";
 
@@ -65,8 +65,7 @@ describe("a run's write token", () => {
     const cache = await served("main");
     const granted = cache.grantRunToken({
       bucket: "main",
-      label: "run 0000000b-0002",
-      expiresAt: NOW + 90_000,
+      runId: "r-1",
     });
     expect(granted).not.toBeNull();
     if (granted === null) return;
@@ -84,10 +83,12 @@ describe("a run's write token", () => {
       bucketGlob: "main",
       // What the bucket page's Tokens list shows, so an operator meeting a
       // credential they did not issue can see whose it is.
-      label: "run 0000000b-0002",
-      // SUB-DAY, which the administrative mint cannot express: its input is a
-      // whole number of DAYS, and a run is minutes.
-      expires: NOW + 90_000,
+      label: "run r-1",
+      // A WALL-CLOCK INSTANT, which the administrative mint cannot express:
+      // its input is a whole number of DAYS, so a run finishing at 23:59
+      // would get a token good for a minute. The lifetime is this row's own
+      // — the asker sends a run id and nothing else.
+      expires: NOW + RUN_TOKEN_LIFETIME_MS,
     });
     await cache.close();
   });
@@ -96,8 +97,7 @@ describe("a run's write token", () => {
     const cache = await served("main");
     const granted = cache.grantRunToken({
       bucket: "main",
-      label: "run x",
-      expiresAt: NOW + 60_000,
+      runId: "r-1",
     });
     if (granted === null) throw new Error("no grant");
     expect(
@@ -118,8 +118,7 @@ describe("a run's write token", () => {
     const cache = await served("main", "other");
     const granted = cache.grantRunToken({
       bucket: "main",
-      label: "run x",
-      expiresAt: NOW + 60_000,
+      runId: "r-1",
     });
     if (granted === null) throw new Error("no grant");
     expect(
@@ -131,7 +130,7 @@ describe("a run's write token", () => {
   it("answers null for a bucket this daemon does not serve", async () => {
     const cache = await served("main");
     expect(
-      cache.grantRunToken({ bucket: "nope", label: "run x", expiresAt: NOW }),
+      cache.grantRunToken({ bucket: "nope", runId: "r-1" }),
     ).toBeNull();
     await cache.close();
   });

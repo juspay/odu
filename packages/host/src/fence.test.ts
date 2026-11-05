@@ -135,10 +135,11 @@ const declaration = {
       "packages/ci/src/row.ts": 3,
       // THE ENGINE, carrying the same fact to the lane: the coordinator reads
       // the run's target off its argv and the runner pushes `result*` with
-      // the same client. The word is `ODU_CACHE_TOKEN` and the substituter
-      // the repo named — never the cache row.
-      "packages/execution/src/coordinator/run.ts": 4,
-      "packages/execution/src/runner/pushResults.ts": 4,
+      // the same client. The word is the `ODU_CACHE_*` task variables — named
+      // once, in the module that both writes and parses them — never the
+      // cache row.
+      "packages/execution/src/coordinator/run.ts": 1,
+      "packages/execution/src/runner/pushResults.ts": 3,
       // The service's own sentence for a run that pushes nowhere.
       "packages/service/src/start.ts": 1,
       // THE RUNS' OWN WORDS ABOUT WHERE A RUN PUSHES (PLAN 4.1): one line of

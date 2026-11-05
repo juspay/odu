@@ -58,6 +58,12 @@ export const TaskSpecSchema = Schema.Struct({
    * where a recipe's `result*` links landed, which for a module recipe is not
    * the workspace root. Derived once at ingest, because the `just --dump` is
    * the only thing that knows.
+   *
+   * ABSOLUTE when `set working-directory` took the recipe out of the
+   * workspace entirely — a directory this run does not own, whose `result`
+   * links belong to whoever left them there. `runsOutsideWorkspace` in
+   * `../just/ingest` is the one reader of that encoding, because the module
+   * that chose it is the one to ask about it.
    */
   workdir: Schema.optionalKey(Schema.String),
 });

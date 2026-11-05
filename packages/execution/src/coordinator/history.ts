@@ -113,10 +113,11 @@ export interface RunHistoryInit {
 
   /** Where this run pushed what it built, and what it said about doing so
    *  (PLAN 4.1). Absent means this build recorded nothing either way; a run
-   *  that resolved to nothing records `{ target: null, note: <why> }`. */
+   *  that resolved to nothing records a `skipped` reason and no target. */
   push?: {
     target: { substituter: string; bucket: string; tokenId: string } | null;
-    note: string | null;
+    skipped: string | null;
+    keyWarning: string | null;
   };
   /** Injected for tests; production reads the real catalog root. */
   catalogRoot?: string;

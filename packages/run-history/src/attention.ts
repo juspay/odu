@@ -190,14 +190,18 @@ export interface Attention {
   /**
    * WHERE THIS RUN PUSHED WHAT IT BUILT (PLAN 4.1), and how much landed.
    *
-   * Absent for a run recorded before the field, which is NOT the same as a run
-   * that pushed nothing — that one has `target: null` and a `note` saying why.
-   * The counts are summed over the journal's `pushed` events, so a run read a
-   * week later still answers without the bucket being asked.
+   * Absent for a run recorded before the field, which is NOT the same as a
+   * run that pushed nothing — that one has `target: null` and a `skipped`
+   * reason. The counts are summed over the journal's `pushed` events, so a
+   * run read a week later still answers without the bucket being asked.
    */
   push?: {
     target: { substituter: string; bucket: string } | null;
-    note: string | null;
+    /** WHY nothing was pushed; null when something was. */
+    skipped: string | null;
+    /** What is wrong while something WAS pushed — the bucket's key missing
+     *  from `trusted-public-keys`. Null when there is nothing to say. */
+    keyWarning: string | null;
     paths: number;
     bytes: number;
   };
@@ -624,7 +628,8 @@ export function attentionFor(
                     substituter: manifest.push.target.substituter,
                     bucket: manifest.push.target.bucket,
                   },
-            note: manifest.push.note,
+            skipped: manifest.push.skipped,
+            keyWarning: manifest.push.keyWarning,
             paths: [...fold.pushed.values()].reduce((sum, one) => sum + one.paths, 0),
             bytes: [...fold.pushed.values()].reduce((sum, one) => sum + one.bytes, 0),
           },

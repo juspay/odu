@@ -30,7 +30,6 @@ const KEY = "main-1:qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqs=";
 function serving(at: Record<string, string> = { [`${OURS}/cache/main`]: "main" }): CacheGrants {
   const grants = grantsBroker();
   const grantor: CacheGrantor = {
-    origin: () => OURS,
     bucketAt: (substituter): GrantedBucket | null => {
       const name = at[substituter.replace(/\/+$/, "")];
       return name === undefined
@@ -186,7 +185,6 @@ describe("resolving where a checkout pushes", () => {
     const asked: string[] = [];
     const grants = grantsBroker();
     grants.register({
-      origin: () => OURS,
       bucketAt: (substituter) => {
         asked.push(substituter);
         return null;

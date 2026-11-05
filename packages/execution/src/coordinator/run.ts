@@ -78,7 +78,7 @@ import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { asHostSlot, fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { takePushToken } from "./launcher";
-import type { PushedFact } from "../runner/pushResults";
+import { type PushedFact, pushEnvFor } from "../runner/pushResults";
 import {
   ExecutionRoster,
   type ExecutionLane,
@@ -197,7 +197,8 @@ export interface RunArgs {
   push?: { substituter: string; origin: string; bucket: string; tokenId: string };
   /** The ONE line the setup node's log says about pushing — a skip reason, or
    *  the `trusted-public-keys` warning. Absent when there is nothing to say. */
-  pushNote?: string;
+  pushSkipped?: string;
+  pushKeyWarning?: string;
 }
 
 /**
@@ -648,18 +649,14 @@ async function orchestrate(
   const pushToken = args.push === undefined ? null : takePushToken(args.runId);
   const pushing = args.push !== undefined && pushToken !== null ? args.push : null;
   /** The variables a lane's recipe node carries so the runner can push what it
-   *  built: the RESOLVED origin and bucket, and the run's token. The lane asks
-   *  no server what the substituter is — the daemon already knew, and a body
-   *  that answered otherwise is exactly the thing that must not be believed.
-   *  Empty for a run that pushes nothing, so no task gains a key. */
-  const pushEnv: Record<string, string> =
+   *  built: the RESOLVED origin and bucket, and the run's token. Composed by
+   *  the module that PARSES them, so the two halves of that wire cannot drift
+   *  apart. Empty for a run that pushes nothing, so no task gains a key. */
+  const pushEnv = pushEnvFor(
     pushing === null || pushToken === null
-      ? {}
-      : {
-          ODU_CACHE_ORIGIN: pushing.origin,
-          ODU_CACHE_BUCKET: pushing.bucket,
-          ODU_CACHE_TOKEN: pushToken,
-        };
+      ? null
+      : { origin: pushing.origin, bucket: pushing.bucket, token: pushToken },
+  );
   /** Every task, with the push environment on it. Applied HERE, once, where a
    *  lane's task list is first built — so a shard lane, an extend and a
    *  resurrection all carry it without a second place remembering to. */
@@ -835,12 +832,15 @@ async function orchestrate(
     ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
     // WHERE THIS RUN PUSHES, as a durable fact about the run (PLAN 4.1). The
     // token id so a finalize can revoke it; never the token.
-    ...(args.push === undefined && args.pushNote === undefined
+    ...(args.push === undefined &&
+    args.pushSkipped === undefined &&
+    args.pushKeyWarning === undefined
       ? {}
       : {
           push: {
             target: args.push ?? null,
-            note: args.pushNote ?? null,
+            skipped: args.pushSkipped ?? null,
+            keyWarning: args.pushKeyWarning ?? null,
           },
         }),
   });
@@ -2049,16 +2049,18 @@ async function orchestrate(
         id,
         `[odu] pushing results to ${pushing.substituter} (bucket ${pushing.bucket})\n`,
       );
-      if (args.pushNote !== undefined) appendLocal(id, `[odu] ${args.pushNote}\n`);
+      if (args.pushKeyWarning !== undefined) {
+        appendLocal(id, `[odu] ${args.pushKeyWarning}\n`);
+      }
     } else {
-      // THE REASON THAT ACTUALLY APPLIES. `pushNote` is the RESOLUTION's one
-      // line, and when a target WAS resolved it is the trusted-key warning —
-      // which read as "not pushing: … is pushed to …" on the one path where a
-      // target exists and its token did not arrive.
+      // THE REASON, read off the field that holds exactly it. A resolved
+      // target whose token never arrived has no skip reason of its own —
+      // nothing refused it, the handover did — so that case says so here and
+      // the resolution's sentence stays the resolution's.
       const why =
         args.push !== undefined
           ? "the run's write token was not handed over"
-          : (args.pushNote ?? "this run was launched with no cache target");
+          : (args.pushSkipped ?? "this run was launched with no cache target");
       appendLocal(id, `[odu] not pushing: ${why}\n`);
     }
   };

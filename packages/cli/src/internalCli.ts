@@ -82,7 +82,8 @@ async function runCoordinator(rest: string[]): Promise<number> {
       "push-origin": { type: "string" },
       "push-bucket": { type: "string" },
       "push-token-id": { type: "string" },
-      "push-note": { type: "string" },
+      "push-skipped": { type: "string" },
+      "push-key-warning": { type: "string" },
     },
   });
   if (values.progress !== undefined && values.progress !== "json") {
@@ -130,9 +131,12 @@ async function runCoordinator(rest: string[]): Promise<number> {
               tokenId: values["push-token-id"],
             },
           }),
-      ...(values["push-note"] === undefined
+      ...(values["push-skipped"] === undefined
         ? {}
-        : { pushNote: values["push-note"] }),
+        : { pushSkipped: values["push-skipped"] }),
+      ...(values["push-key-warning"] === undefined
+        ? {}
+        : { pushKeyWarning: values["push-key-warning"] }),
     },
     {
       face: cliRunFace({

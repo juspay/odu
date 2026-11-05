@@ -238,7 +238,8 @@ const hashOf = (storePath: string): string =>
 interface ReadRun {
   push?: {
     target: { substituter: string; bucket: string } | null;
-    note: string | null;
+    skipped: string | null;
+    keyWarning: string | null;
     paths: number;
     bytes: number;
   };
@@ -320,7 +321,8 @@ describe("a run whose repository reads from this daemon's cache", () => {
     const read = surface(home, ["run_read"], { runId }) as ReadRun;
     expect(read.passed).toBe(true);
     expect(read.push?.target).toEqual({ substituter: warm.url, bucket: "warm" });
-    expect(read.push?.note).toBeNull();
+    expect(read.push?.skipped).toBeNull();
+    expect(read.push?.keyWarning).toBeNull();
     expect(read.push?.paths).toBeGreaterThan(0);
     expect(read.push?.bytes).toBeGreaterThan(0);
 
@@ -395,8 +397,8 @@ describe("a run whose repository reads from somebody else's odu cache", () => {
     // because a substituter this daemon does not serve is indistinguishable
     // here from `cache.nixos.org`.
     expect(read.push?.target).toBeNull();
-    expect(read.push?.note).toContain("is a cache this odu serves");
-    expect(read.push?.note).toContain(theirs.url);
+    expect(read.push?.skipped).toContain("is a cache this odu serves");
+    expect(read.push?.skipped).toContain(theirs.url);
 
     // SAID IN THE SETUP LOG, which is the node every face opens first. The
     // key is minted by the surface's own encoder rather than spelled here:

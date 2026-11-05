@@ -119,7 +119,7 @@ export const ODU_SERVICE_MCP_INSTRUCTIONS = [
   "odu cache the repository's `flake.nix` `nixConfig` already reads from, when",
   "this daemon serves it — no step in any recipe and no token in the tree.",
   "`run_read` answers `push`: the bucket and how much landed, or `target: null`",
-  "and a `note` saying why nothing was pushed. A push that fails makes that node",
+  "and a `skipped` reason saying why nothing was. A push that fails makes that node",
   "RED, so green means the cache is warm.",
   "",
   "Retrying is not your choice to make: `run_retry` resets nodes on a live",

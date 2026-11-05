@@ -62,6 +62,29 @@ export const PUSH_ORIGIN_ENV = "ODU_CACHE_ORIGIN";
 export const PUSH_BUCKET_ENV = "ODU_CACHE_BUCKET";
 export const PUSH_TOKEN_ENV = "ODU_CACHE_TOKEN";
 
+/**
+ * The task environment that carries a push to a lane — the WRITING half of
+ * {@link pushConfigOf}, here beside it.
+ *
+ * Both halves of a wire belong to one module. The coordinator spelled these
+ * three names itself, which made the strip that keeps the token out of a
+ * recipe's own environment (`PUSH_TOKEN_ENV`, in the runner) correct only
+ * while two files agreed about a literal — and a rename that moved one and
+ * not the other would leak a live credential into every recipe's log in
+ * silence. 4.2 adds a pin name to this same wire.
+ */
+export function pushEnvFor(
+  config: PushConfig | null,
+): Readonly<Record<string, string>> {
+  return config === null
+    ? {}
+    : {
+        [PUSH_ORIGIN_ENV]: config.origin,
+        [PUSH_BUCKET_ENV]: config.bucket,
+        [PUSH_TOKEN_ENV]: config.token,
+      };
+}
+
 /** The push configuration a task's environment states, or `null` when it
  *  states none — which is every task of a run with no cache target. */
 export function pushConfigOf(
@@ -206,10 +229,13 @@ export function createLanePusher(
         bucket: config.bucket,
         origin: config.origin,
         paths: fresh,
-        // THE TOKEN, AND ONLY THE TOKEN. The push client reads an environment
-        // slice rather than `process.env`, so the lane hands it exactly the one
-        // variable it is entitled to and nothing else this process holds.
-        env: { ODU_CACHE_TOKEN: config.token },
+        // THE TOKEN, AS A TOKEN. Not through the client's discovery
+        // environment: that describes a MACHINE (its `HOME`, its saved
+        // logins), and a lane passing a one-key object would also be
+        // asserting it has neither. This lane holds the credential outright
+        // and says so.
+        credential: config.token,
+        env: {},
         onLine: (line) => say(`[odu] ${line}`),
       });
       // RECORDED BEFORE THE REFUSAL IS RAISED: a path the bucket serves is one

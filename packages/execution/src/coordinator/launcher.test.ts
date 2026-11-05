@@ -61,7 +61,8 @@ function request(over: Partial<LaunchRequest> = {}): LaunchRequest {
     supersede: false,
     linger: false,
     push: null,
-    pushNote: null,
+    pushSkipped: null,
+    pushKeyWarning: null,
     ...over,
   };
 }

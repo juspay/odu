@@ -128,13 +128,13 @@ const wentWrong = (node: RunNode): boolean =>
   node.status === "failed" || node.status === "errored";
 
 /**
- * A PUSH NOTE AS A TRAILING CLAUSE, or nothing (PLAN 4.1).
+ * A PUSH SENTENCE AS A TRAILING CLAUSE, or nothing (PLAN 4.1).
  *
- * One sentence arrives from the service — the reason nothing is being pushed,
- * or the `trusted-public-keys` warning when something is — and both read the
- * same way after the target: "pushes to kolu — its key is missing from…". A
- * reason with no note is the launch that was simply given no target, which the
- * surrounding words already say.
+ * Two different sentences read the same way in this position — "not pushing —
+ * no flake.nix", "pushes to kolu — its key is missing from…" — so the
+ * RENDERING is shared and the CHOICE is not: each call passes the field that
+ * applies to the branch it stands in. An absent one is a run that was simply
+ * given no target, which the surrounding words already say.
  */
 function noteSuffix(note: string | null): string {
   return note === null || note === "" ? "" : ` — ${note}`;
@@ -892,7 +892,7 @@ export function Detail(props: {
                 <span class="detail-push">
                   <Show
                     when={push().target}
-                    fallback={<>{`not pushing${noteSuffix(push().note)}`}</>}
+                    fallback={<>{`not pushing${noteSuffix(push().skipped)}`}</>}
                   >
                     {(target) => (
                       <>
@@ -900,7 +900,7 @@ export function Detail(props: {
                         <a class="link" href={props.bucketHref(target().bucket)}>
                           {target().bucket}
                         </a>
-                        {noteSuffix(push().note)}
+                        {noteSuffix(push().keyWarning)}
                       </>
                     )}
                   </Show>

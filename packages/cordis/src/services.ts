@@ -344,26 +344,27 @@ export function purgeBroker(): CachePurge {
  * needing the root token; this is not one of them.
  */
 export interface CacheGrants {
-  /** Is a cache registered at all, and at which origin? `null` when none is —
-   *  the early exit that keeps a daemon serving no cache from evaluating every
-   *  repository's flake for a grant that can never happen. */
-  origin(): string | null;
+  /** IS A CACHE REGISTERED AT ALL — the early exit that keeps a daemon serving
+   *  none from evaluating every repository's flake for a grant that can never
+   *  happen. Not "at which origin": where a push goes is a property of the
+   *  BUCKET, answered by {@link GrantedBucket}, and a second address here
+   *  would be one nobody reads. */
+  serves(): boolean;
   /** The bucket this daemon serves AT THAT SUBSTITUTER URL, or `null`. See
    *  {@link GrantedBucket} for why the URL and never a probe. */
   bucketAt(substituter: string): GrantedBucket | null;
   /**
-   * A WRITE TOKEN FOR ONE RUN AND ONE BUCKET. `expiresAt` is wall-clock
-   * milliseconds — a run is shorter than the day the administrative mint
-   * rounds to. `label` is what the bucket page's Tokens list shows, so an
-   * operator reading it sees `run <id>` rather than an anonymous credential.
+   * A WRITE TOKEN FOR ONE RUN AND ONE BUCKET.
+   *
+   * The RUN's id, not a lifetime and not a label. How long a run's credential
+   * may outlive its run, and what the bucket page's Tokens list calls it, are
+   * the cache's own decisions — it is the row that writes `expires` and the
+   * row whose page shows the word, and an asker that supplied either would be
+   * one of two askers who could supply different ones.
    *
    * `null` when no cache is registered or the bucket is gone.
    */
-  mint(request: {
-    bucket: string;
-    label: string;
-    expiresAt: number;
-  }): { id: string; token: string } | null;
+  mint(request: { bucket: string; runId: string }): { id: string; token: string } | null;
   /** Let a minted token go, by id. Idempotent: an unknown id is not an error,
    *  because the caller revoking at finalize cannot know whether a restart
    *  already did. */
@@ -396,16 +397,12 @@ export interface GrantedBucket {
   readonly substituter: string;
 }
 
-/** What the cache row registers — the four questions, less the broker's own
- *  absent-answerer defaults. */
+/** What the cache row registers — the three questions, less the broker's own
+ *  absent-answerer defaults. A registered grantor is itself the answer to
+ *  `serves`. */
 export interface CacheGrantor {
-  origin(): string;
   bucketAt(substituter: string): GrantedBucket | null;
-  mint(request: {
-    bucket: string;
-    label: string;
-    expiresAt: number;
-  }): { id: string; token: string } | null;
+  mint(request: { bucket: string; runId: string }): { id: string; token: string } | null;
   revoke(id: string): void;
 }
 
@@ -427,7 +424,7 @@ export const CacheGrants = serviceTag<CacheGrants>("odu:cacheGrants");
 export function grantsBroker(): CacheGrants {
   let installed: { readonly grantor: CacheGrantor } | null = null;
   return {
-    origin: () => installed?.grantor.origin() ?? null,
+    serves: () => installed !== null,
     bucketAt: (substituter) => installed?.grantor.bucketAt(substituter) ?? null,
     mint: (request) => installed?.grantor.mint(request) ?? null,
     revoke: (id) => installed?.grantor.revoke(id),

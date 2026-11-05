@@ -29,7 +29,7 @@ import {
 } from "./fixture.testlib";
 import type { PushResolution } from "./ports";
 import { requestStore } from "./requests";
-import { RUN_TOKEN_LIFETIME_MS, startRun } from "./start";
+import { startRun } from "./start";
 
 let world: World | null = null;
 const open = (): World => {
@@ -102,21 +102,21 @@ describe("a start that resolves a cache", () => {
       tokenId: "tok-1",
       token: "odu_stub_1",
     });
-    // THE GRANT IS SCOPED TO THE RUN AND TO THE DAY — the bucket it resolved,
-    // the run id the receipt already names, and an expiry that is a backstop
-    // for a daemon that dies before it can revoke.
+    // THE GRANT IS SCOPED TO THE RUN: the bucket it resolved and the run id
+    // the receipt already names. No lifetime — how long a push credential may
+    // outlive its run is the cache row's decision, made where `expires` is
+    // written rather than by whichever caller happens to be minting.
     expect(ports.pushGrants[0]).toEqual({
       bucket: "kolu-r2",
       runId: launched?.runId ?? "",
-      expiresAt: 1_700_000_000_000 + RUN_TOKEN_LIFETIME_MS,
     });
-    // NOTHING TO SAY: the key is trusted, so the setup log gets the target
-    // line and no warning.
-    expect(launched?.pushNote).toBeNull();
+    // NOTHING TO SAY, either way: the key is trusted and a target stands.
+    expect(launched?.pushSkipped).toBeNull();
+    expect(launched?.pushKeyWarning).toBeNull();
     expect(ports.pushRevokes).toEqual([]);
   });
 
-  it("carries the trusted-key warning as the run's one note, and still pushes", async () => {
+  it("carries the trusted-key warning on its OWN field, and still pushes", async () => {
     const w = open();
     const ports = recordingPorts({
       push: () => ({
@@ -126,9 +126,13 @@ describe("a start that resolves a cache", () => {
     });
     await start(w, ports);
     expect(ports.launches[0]?.push).not.toBeNull();
-    expect(ports.launches[0]?.pushNote).toBe(
+    expect(ports.launches[0]?.pushKeyWarning).toBe(
       "its key is missing from trusted-public-keys",
     );
+    // AND NOT AS A SKIP. The two sentences read the same way in a log and
+    // mean opposite things, and one field holding both is what made every
+    // reader consult `push` to learn which it had.
+    expect(ports.launches[0]?.pushSkipped).toBeNull();
   });
 
   it("launches with no push, and the reason, when nothing resolved", async () => {
@@ -138,7 +142,8 @@ describe("a start that resolves a cache", () => {
     });
     await start(w, ports);
     expect(ports.launches[0]?.push).toBeNull();
-    expect(ports.launches[0]?.pushNote).toBe("no flake.nix");
+    expect(ports.launches[0]?.pushSkipped).toBe("no flake.nix");
+    expect(ports.launches[0]?.pushKeyWarning).toBeNull();
     // A run that pushes nothing mints nothing: there is no credential to
     // revoke and none to leak.
     expect(ports.pushGrants).toEqual([]);

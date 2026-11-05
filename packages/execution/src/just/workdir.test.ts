@@ -122,6 +122,18 @@ describe("a recipe's working directory", () => {
         ROOT,
       ),
     ).toBe("/");
+    // AND A DIRECTORY HONESTLY NAMED `..config` is inside the workspace: the
+    // escape test is the first SEGMENT, not a string prefix.
+    expect(
+      workdirOf(
+        module({
+          source: "/w/ci/mod.just",
+          settings: { working_directory: "../..config" },
+        }),
+        recipe(),
+        ROOT,
+      ),
+    ).toBe("..config");
   });
 
   it("is cancelled by `[no-cd]` on the recipe and by `set no-cd` on the module", () => {

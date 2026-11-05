@@ -51,7 +51,8 @@ import {
 import { Effect } from "effect";
 import { callerOf } from "./caller";
 import type { Principal } from "@odu/cordis/principal";
-import type { CheckoutProbe, LaunchPush, PushPort, RunLauncher } from "./ports";
+import type { CheckoutProbe, PushPort, RunLauncher } from "./ports";
+import { preparePush } from "./pushGrant";
 import {
   claimReceipt,
   completeReceipt,
@@ -72,18 +73,6 @@ export interface StartDeps {
   host: string;
   now: () => number;
 }
-
-/**
- * HOW LONG A RUN'S WRITE TOKEN MAY LIVE (PLAN 4.1) — a BACKSTOP, not the
- * lifetime.
- *
- * The ordinary end of one of these is the revoke at finalize, which happens
- * whatever the outcome and usually within minutes of the run stopping. This
- * bounds the case a revoke cannot cover: a daemon that dies with runs in
- * flight. Long enough that it never expires under a slow run, short enough
- * that a forgotten credential is not a permanent one.
- */
-export const RUN_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 /** The scope a start asks for, in the catalog's own vocabulary. Built once so
  *  the receipt, the launch request and the answer all describe one selection. */
@@ -429,53 +418,24 @@ async function start(
   // ── WHERE THIS RUN PUSHES (PLAN 4.1) ──
   //
   // After the receipt and after the checkout, because it is the most expensive
-  // question asked here — a `nix eval` and one HTTP request per substituter —
-  // and every cheaper refusal above it must answer first. Its result is NOT in
-  // the digest: see the module header.
-  const resolved = await deps.push.resolve(input.checkout);
-  if (resolved.kind === "ambiguous") {
+  // question asked here — it evaluates somebody else's `flake.nix` — and every
+  // cheaper refusal above it must answer first. Its result is NOT part of the
+  // request digest: see the module header.
+  const prepared = await preparePush(deps.push, input.checkout, runId);
+  if (prepared.kind === "ambiguous") {
+    // A START IS REFUSED, where a replay is not: this caller is being asked to
+    // begin work for a repository that declares two caches, and choosing one
+    // would be the service inventing a policy nobody wrote down.
     return refuseAndRecord(
       deps,
       input.requestId,
       "checkout_refused",
       `odu: ${input.checkout} reads from two odu caches — ` +
-        `${resolved.substituters.join(" and ")}. A repository builds for one ` +
+        `${prepared.substituters.join(" and ")}. A repository builds for one ` +
         "cache; name a single one in flake.nix nixConfig.",
     );
   }
-  const target = resolved.kind === "target" ? resolved.target : null;
-  // THE TOKEN, minted only once there is somewhere to push to and only for
-  // this run. `expiresAt` is the backstop for a daemon that dies before it can
-  // revoke; the ordinary end is the revoke at finalize.
-  const grant =
-    target === null
-      ? null
-      : deps.push.grant({
-          bucket: target.bucket,
-          runId,
-          expiresAt: deps.now() + RUN_TOKEN_LIFETIME_MS,
-        });
-  const push: LaunchPush | null =
-    target === null || grant === null
-      ? null
-      : {
-          substituter: target.substituter,
-          origin: target.origin,
-          bucket: target.bucket,
-          tokenId: grant.tokenId,
-          token: grant.token,
-        };
-  // ONE LINE FOR THE SETUP LOG: why nothing is pushed, or what is wrong with
-  // the repo's trust settings while something is. Never both, because there is
-  // only one of them to say at a time. A BARE sentence — how a setup log is
-  // prefixed belongs to the coordinator, and two owners of that prefix is one
-  // too many.
-  const pushNote =
-    resolved.kind === "skipped"
-      ? resolved.reason
-      : target !== null && grant === null
-        ? `the bucket "${target.bucket}" is no longer served here`
-        : (target?.keyWarning ?? null);
+  const push = prepared.push;
 
   // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, because from
   // here on "my reply went missing" and "nothing happened" stop being the same
@@ -503,18 +463,18 @@ async function start(
     // cancel-then-confirm; this only has to not lose the word.
     supersede: input.supersede ?? false,
     linger: input.linger ?? false,
-    // WHERE THIS RUN PUSHES, and the one line its setup log says about it.
+    // WHERE THIS RUN PUSHES, and what its setup log owes about it. Two
+    // fields, because "nothing is pushed, here is why" and "something is, and
+    // here is what is wrong with your trust settings" are opposite facts.
     push,
-    pushNote,
+    pushSkipped: prepared.skipped,
+    pushKeyWarning: prepared.keyWarning,
   });
   if (!launched.ok) {
-    // THE TOKEN GOES BACK, and the FILE goes with it. Nothing ever reached a
-    // lane, so a credential left live for a day would be a grant with no run
-    // behind it — and its plaintext would sit in the catalog until retention.
-    if (push !== null) {
-      deps.push.revoke(push.tokenId);
-      deps.push.dropToken(runId, catalog);
-    }
+    // THE TOKEN GOES BACK. Nothing ever reached a lane, so a credential left
+    // live for a day would be a grant with no run behind it. The FILE the
+    // launcher wrote is the launcher's to remove, and it does.
+    if (push !== null) deps.push.revoke(push.tokenId);
     return refuseAndRecord(
       deps,
       input.requestId,

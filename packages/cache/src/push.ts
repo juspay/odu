@@ -173,6 +173,13 @@ export interface DescribedCache {
  *  short lines; the bound exists because the URL can come from a repository. */
 const CACHE_INFO_MAX_BYTES = 8 * 1024;
 
+/** How much of a REFUSAL is worth reading. Every message built from one of
+ *  these becomes a line in a node's log and, through a failed push, a run's
+ *  red verdict — and the server that wrote it is whatever address the push
+ *  went to, which for an inferred target a repository chose. A sentence is a
+ *  few hundred bytes; the rest is somebody filling this process's memory. */
+const ERROR_BODY_MAX_BYTES = 4 * 1024;
+
 /**
  * The first `limit` bytes of a response, READ AS THEY ARRIVE and then stopped.
  *
@@ -669,40 +676,43 @@ export async function oduCachesOf(
  * The token, in the order the docs promise: `--token-file`, then
  * `$ODU_CACHE_TOKEN`, then the credentials entry for the bucket's origin.
  *
- * WHO NAMED THE ORIGIN decides whether the first two are consulted at all.
- * `--token-file` and `$ODU_CACHE_TOKEN` are ORIGIN-AGNOSTIC: they are a
- * credential for whatever address this push ends up at, which is exactly
- * right when the OPERATOR typed that address (`odu cache push <bucket>`,
- * `--cache <url>`, `--origin <url>` — naming a cache is trusting it) and
- * exactly wrong when a REPOSITORY did. One `extra-substituters` line in a
- * contributor's `flake.nix` would otherwise collect `$ODU_CACHE_TOKEN` — a
- * workflow secret, on the spelling this change made the recommended one.
- *
- * For a repository-named origin only the credentials FILE is consulted, and
- * an entry there is keyed by origin: a machine that has logged in to that
- * address has already decided to trust it.
+ * The first two are ORIGIN-AGNOSTIC — a credential for whatever address this
+ * push ends up at — so this is the order for an address the OPERATOR typed,
+ * which is the only caller that reaches it by default. A caller whose address
+ * came from somewhere else resolves its own and passes `credential`; see
+ * {@link savedCredentialFor}.
  */
 export async function resolveToken(
   env: PushEnv,
   origin: string,
   tokenFile: string | undefined,
-  namedBy: OriginNamedBy = "operator",
 ): Promise<string | null> {
-  if (namedBy === "operator") {
-    if (tokenFile !== undefined) {
-      return (await readFile(tokenFile, "utf8")).trim();
-    }
-    const fromEnv = env.ODU_CACHE_TOKEN?.trim();
-    if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
+  if (tokenFile !== undefined) {
+    return (await readFile(tokenFile, "utf8")).trim();
   }
+  const fromEnv = env.ODU_CACHE_TOKEN?.trim();
+  if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
+  return savedCredentialFor(env, origin);
+}
+
+/**
+ * ONLY WHAT THIS MACHINE SAVED FOR THAT ORIGIN — `odu cache login`'s entry,
+ * and nothing origin-agnostic.
+ *
+ * The credentials file is keyed by origin, so an entry in it is a decision
+ * somebody made about that address. `--token-file` and `$ODU_CACHE_TOKEN` are
+ * decisions about no address at all, which is exactly wrong when the address
+ * came out of a repository: one `extra-substituters` line in a contributor's
+ * `flake.nix` would otherwise collect `$ODU_CACHE_TOKEN` — a workflow secret,
+ * on the spelling that is now the recommended one.
+ */
+export async function savedCredentialFor(
+  env: PushEnv,
+  origin: string,
+): Promise<string | null> {
   const entries = await readCredentials(env);
   return entries[normalizeOrigin(origin)] ?? null;
 }
-
-/** WHO CHOSE THE ADDRESS THIS PUSH GOES TO — the operator, by typing a bucket,
- *  a `--cache` or an `--origin`, or the repository, through its `flake.nix`.
- *  See {@link resolveToken}: it decides which credentials are in scope. */
-export type OriginNamedBy = "operator" | "repository";
 
 /** The closure this client uploads. Named for what the caller means; the shape
  *  is the store's, and the parser behind it is the store's too — one answer to
@@ -778,10 +788,19 @@ export interface PushOptions {
   env: PushEnv;
   /** `--origin`, which beats a stored credential. */
   origin?: string;
-  /** WHO NAMED that origin. `"repository"` — the inferred push, where the
-   *  address came out of somebody's `flake.nix` — narrows the credentials in
-   *  scope to the ones saved for it; see {@link resolveToken}. */
-  originNamedBy?: OriginNamedBy;
+  /**
+   * THE CREDENTIAL THIS PUSH IS AUTHORISED TO SEND, when the caller already
+   * holds one — a lane with the run's write token, or a CLI that resolved
+   * its own. Supplying it skips {@link resolveToken} entirely, which is why
+   * a caller holding a token does not have to describe a machine it is not
+   * on.
+   *
+   * `null` is EXPLICIT: push anonymously, and let the bucket's own refusal be
+   * the answer. The CLI uses it for an inferred target with nothing saved for
+   * that origin, where the alternative was sending the operator's
+   * origin-agnostic secret to an address a `flake.nix` chose.
+   */
+  credential?: string | null;
   tokenFile?: string;
   /** Uploads in flight WITHIN one dependency depth. */
   concurrency?: number;
@@ -825,31 +844,21 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const say = options.onLine ?? (() => {});
   const resolved = await resolveBucket(options.env, options.bucket, options.origin);
   if ("error" in resolved) throw new Error(resolved.error);
-  const namedBy = options.originNamedBy ?? "operator";
-  const token = await resolveToken(
-    options.env,
-    resolved.origin,
-    options.tokenFile,
-    namedBy,
-  );
-  if (token === null && namedBy === "operator") {
+  // THE CALLER'S OWN CREDENTIAL WHEN IT HAS ONE, and the discovery order
+  // otherwise. A lane holds the run's write token; a CLI that inferred its
+  // target has already decided which credentials are in scope for an address
+  // a repository chose. Neither should have to express that through an
+  // environment it does not have.
+  const token =
+    options.credential === undefined
+      ? await resolveToken(options.env, resolved.origin, options.tokenFile)
+      : options.credential;
+  if (token === null && options.credential === undefined) {
     throw new Error(
       `no token for ${resolved.origin} — pass --token-file, set $ODU_CACHE_TOKEN, ` +
         `or run \`odu cache login ${resolved.origin}\``,
     );
   }
-  /** WHAT TO SAY WHEN THE BUCKET REFUSES AN ANONYMOUS PUSH — null when there
-   *  is a credential, so the bucket's own sentence stands alone. An inferred
-   *  push with nothing saved for that origin goes out with no `Authorization`
-   *  at all rather than with a credential meant for somewhere else, and the
-   *  401 is then the honest answer plus the one thing to do about it. */
-  const anonymousHint =
-    token === null
-      ? `the substituter came from ./flake.nix and nothing is saved for ` +
-        `${resolved.origin}, so this push was anonymous — run ` +
-        `\`odu cache login ${resolved.origin}\`, or name the cache yourself ` +
-        "with `odu cache push <bucket> --origin <url>`"
-      : null;
   const base = `${resolved.origin}${CACHE_MOUNT}/${resolved.name}`;
   const headers: Record<string, string> =
     token === null ? {} : { authorization: `Bearer ${token}` };
@@ -876,14 +885,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
           skippedUpstream: [] as readonly string[],
           substituter: null,
         }
-      : await askMissing(resolved, headers, closure).catch((err: unknown) => {
-          // THE FIRST AUTHENTICATED CALL, so an anonymous push's 401 lands
-          // here. The bucket's own sentence first, then what to do.
-          const said = err instanceof Error ? err.message : String(err);
-          throw anonymousHint === null
-            ? err
-            : new Error(`${said} — ${anonymousHint}`);
-        });
+      : await askMissing(resolved, headers, closure);
   const present = closure.size - answer.missing.length;
   const alreadyPresent = present - answer.skippedUpstream.length;
   // ONE PREAMBLE, then a line per path: what the closure is, what the bucket
@@ -1040,7 +1042,8 @@ async function askMissing(
   );
   if (!response.ok) {
     throw new Error(
-      `the bucket refused the missing-paths query: ${response.status} ${await response.text()}`,
+      `the bucket refused the missing-paths query: ${response.status} ` +
+        `${await boundedText(response, ERROR_BODY_MAX_BYTES)}`,
     );
   }
   const body: unknown = await response.json();
@@ -1087,7 +1090,8 @@ async function pinClosure(
   });
   if (!response.ok) {
     throw new Error(
-      `the bucket refused the pin "${name}": ${response.status} ${await response.text()}`,
+      `the bucket refused the pin "${name}": ${response.status} ` +
+        `${await boundedText(response, ERROR_BODY_MAX_BYTES)}`,
     );
   }
   // WHAT THE BUCKET SAYS IT HOLDS, never what this client sent: the closure
@@ -1214,7 +1218,7 @@ async function putPart(
       continue;
     }
     if (response.ok) return { ok: true };
-    lastMessage = `part ${index + 1} answered ${response.status}: ${(await response.text()).trim()}`;
+    lastMessage = `part ${index + 1} answered ${response.status}: ${(await boundedText(response, ERROR_BODY_MAX_BYTES)).trim()}`;
     if (!worthRetrying(response.status)) break;
   }
   return { ok: false, message: lastMessage };
@@ -1256,7 +1260,7 @@ async function beginUpload(
   }
   if (!response.ok) {
     return {
-      error: `beginning the upload answered ${response.status}: ${(await response.text()).trim()}`,
+      error: `beginning the upload answered ${response.status}: ${(await boundedText(response, ERROR_BODY_MAX_BYTES)).trim()}`,
       retry: worthRetrying(response.status),
     };
   }
@@ -1285,7 +1289,7 @@ async function putToStore(
   if (!response.ok) {
     return {
       ok: false,
-      message: `the store answered ${response.status} to a presigned PUT: ${(await response.text()).trim()}`,
+      message: `the store answered ${response.status} to a presigned PUT: ${(await boundedText(response, ERROR_BODY_MAX_BYTES)).trim()}`,
     };
   }
   await response.body?.cancel().catch(() => {});
@@ -1338,7 +1342,7 @@ async function uploadDirect(
         await parts.return(undefined as never);
         return {
           ok: false,
-          message: `signing part ${index + 1} answered ${signed.status}: ${(await signed.text()).trim()}`,
+          message: `signing part ${index + 1} answered ${signed.status}: ${(await boundedText(signed, ERROR_BODY_MAX_BYTES)).trim()}`,
           // THIS IS ODU ANSWERING, not the store, so the shared rule decides
           // — plus the one status whose meaning odu defines here: a `404` is
           // an upload this daemon no longer holds, and beginning again is
@@ -1385,7 +1389,7 @@ async function uploadDirect(
     // attempt budget bounds it.
     return {
       ok: false,
-      message: `finishing the upload answered ${joined.status}: ${(await joined.text()).trim()}`,
+      message: `finishing the upload answered ${joined.status}: ${(await boundedText(joined, ERROR_BODY_MAX_BYTES)).trim()}`,
       retry: true,
     };
   }
@@ -1469,7 +1473,7 @@ async function uploadStaged(
   if (!joined.ok) {
     return {
       ok: false,
-      message: `joining ${index} parts answered ${joined.status}: ${(await joined.text()).trim()}`,
+      message: `joining ${index} parts answered ${joined.status}: ${(await boundedText(joined, ERROR_BODY_MAX_BYTES)).trim()}`,
       retry: worthRetrying(joined.status),
     };
   }
@@ -1539,7 +1543,7 @@ async function uploadOne(
     // a success code this pusher does not know included — is a refusal like any
     // other, said with the server's own words and not repeated.
     if (infoResponse.status === 200) return { ok: true, mode: plan.mode };
-    const said = await infoResponse.text();
+    const said = await boundedText(infoResponse, ERROR_BODY_MAX_BYTES);
     lastMessage = `narinfo upload answered ${infoResponse.status}: ${said}`;
     if (infoResponse.ok || !worthRetrying(infoResponse.status)) break;
   }

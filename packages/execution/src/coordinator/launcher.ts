@@ -138,10 +138,12 @@ export interface LaunchRequest {
    * all places it is deliberately absent from.
    */
   readonly push: LaunchPush | null;
-  /** The one line the run's `_ci-setup` log says about pushing: why nothing is
-   *  being pushed, or the `trusted-public-keys` warning when something is.
-   *  Null when there is nothing to say. */
-  readonly pushNote: string | null;
+  /** Why this run pushes nothing, for its `_ci-setup` log. Null when it
+   *  does push. */
+  readonly pushSkipped: string | null;
+  /** What is wrong while it does: the bucket's key is missing from the
+   *  repository's `trusted-public-keys`. Null when there is nothing to say. */
+  readonly pushKeyWarning: string | null;
 }
 
 export interface LaunchReceipt {
@@ -220,12 +222,15 @@ export function launchArgv(request: LaunchRequest): string[] {
     args.push("--push-bucket", request.push.bucket);
     args.push("--push-token-id", request.push.tokenId);
   }
-  if (request.pushNote !== null) {
-    // TRUNCATED HERE TOO. The note is built from a repository's own `nix`
-    // output; an argv has a per-argument ceiling (`MAX_ARG_STRLEN`), and a
-    // launch that failed because somebody wrote a long error message would
-    // look like a bug in odu.
-    args.push("--push-note", request.pushNote.slice(0, PUSH_NOTE_MAX));
+  // TRUNCATED, BOTH. A skip reason is built from a repository's own `nix`
+  // output; an argv has a per-argument ceiling (`MAX_ARG_STRLEN`), and a
+  // launch that failed because somebody wrote a long error message would look
+  // like a bug in odu.
+  if (request.pushSkipped !== null) {
+    args.push("--push-skipped", request.pushSkipped.slice(0, PUSH_NOTE_MAX));
+  }
+  if (request.pushKeyWarning !== null) {
+    args.push("--push-key-warning", request.pushKeyWarning.slice(0, PUSH_NOTE_MAX));
   }
   return args;
 }
@@ -434,27 +439,42 @@ export function coordinatorEnv(
 
 export function packagedLauncher(): RunLauncher {
   return async (request) => {
-    const endpoint = runSocketPath(request.checkout);
-    const base = coordinatorEnv(request, process.env);
-    const first = await attemptLaunch(request, endpoint, base, lifetimeOf);
-    if (!first.managerRefused) return first.receipt;
-    // The opt-out the plan already honours, set for this one retry — so the
-    // fallback re-uses the decision rather than adding a second way to spell it.
-    const refusal = first.receipt.error ?? "the user manager refused the unit";
-    const second = await attemptLaunch(
-      request,
-      endpoint,
-      { ...base, ODU_NO_SYSTEMD_RUN: "1" },
-      (plan) =>
-        `the coordinator is a detached process group — systemd-run refused ` +
-        `the unit, so odu started it directly (${plan.reason}). It shares this ` +
-        `process's cgroup: a restart of the enclosing unit will kill the run.`,
-    );
-    if (second.receipt.ok) return second.receipt;
-    return {
-      ...second.receipt,
-      error: `${refusal}\nodu then started it directly, and that failed too: ${second.receipt.error}`,
-    };
+    const receipt = await launchOnce(request);
+    // THE WRITER CLEANS UP. `attemptLaunch` wrote `runs/<id>/push.token` for a
+    // coordinator that never started, so nothing will ever read it or unlink
+    // it and a plaintext credential would sit in the catalog until retention.
+    // Done HERE rather than asked of the service beside its `revoke`: the
+    // service does not own that file, and a two-step protocol split across
+    // two layers is one every caller can half-remember.
+    if (!receipt.ok && request.push !== null) {
+      dropPushToken(request.runId, request.catalog ?? {});
+    }
+    return receipt;
+  };
+}
+
+/** One launch, with a user manager's refusal retried directly. */
+async function launchOnce(request: LaunchRequest): Promise<LaunchReceipt> {
+  const endpoint = runSocketPath(request.checkout);
+  const base = coordinatorEnv(request, process.env);
+  const first = await attemptLaunch(request, endpoint, base, lifetimeOf);
+  if (!first.managerRefused) return first.receipt;
+  // The opt-out the plan already honours, set for this one retry — so the
+  // fallback re-uses the decision rather than adding a second way to spell it.
+  const refusal = first.receipt.error ?? "the user manager refused the unit";
+  const second = await attemptLaunch(
+    request,
+    endpoint,
+    { ...base, ODU_NO_SYSTEMD_RUN: "1" },
+    (plan) =>
+      `the coordinator is a detached process group — systemd-run refused ` +
+      `the unit, so odu started it directly (${plan.reason}). It shares this ` +
+      `process's cgroup: a restart of the enclosing unit will kill the run.`,
+  );
+  if (second.receipt.ok) return second.receipt;
+  return {
+    ...second.receipt,
+    error: `${refusal}\nodu then started it directly, and that failed too: ${second.receipt.error}`,
   };
 }
 

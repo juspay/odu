@@ -186,8 +186,12 @@ describe("a lane that pushes", () => {
       // a URL is, because a server a repository named is exactly the thing
       // that must not decide where a write token goes.
       expect(sent[0]).toMatchObject({ bucket: CONFIG.bucket, origin: CONFIG.origin });
-      // AND THE TOKEN, AND ONLY THE TOKEN.
-      expect(sent[0]?.env).toEqual({ ODU_CACHE_TOKEN: CONFIG.token });
+      // AND THE TOKEN AS A TOKEN. Not through the client's discovery
+      // environment, which describes a MACHINE — its `HOME`, its saved logins
+      // — and which a lane handing over a one-key object would also be
+      // claiming to have none of.
+      expect(sent[0]?.credential).toBe(CONFIG.token);
+      expect(sent[0]?.env).toEqual({});
 
       // THE SECOND NODE leaves the same link. Nothing new, so nothing is sent
       // and nothing is claimed.

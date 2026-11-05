@@ -621,6 +621,33 @@ export const RunOutcomeSchema = Schema.Literals([
 ]);
 
 /**
+ * WHERE A RUN PUSHED, as every reader of a run is told it (PLAN 4.1) — the
+ * target, and the two sentences a setup log owed about it.
+ *
+ * ONE declaration for the board row and for `run_read`'s answer, because they
+ * are one fact about one run and a second spelling is where two readers of the
+ * same record learn to disagree. The answer adds counts; the shape they agree
+ * on is this.
+ *
+ * The token's ID is deliberately ABSENT from both. It is on the MANIFEST,
+ * because the service revokes by it; it is a revocation handle, and a board
+ * row is read by every client that can list runs.
+ */
+const PushedToSchema = Schema.Struct({
+  target: Schema.NullOr(
+    Schema.Struct({ substituter: Schema.String, bucket: Schema.String }),
+  ),
+  /** WHY nothing was pushed — null when something was. */
+  skipped: Schema.NullOr(Schema.String),
+  /** What is wrong while something WAS: the bucket's key is missing from the
+   *  repository's `trusted-public-keys`, so what this run warmed will not be
+   *  substituted from. Null when there is nothing to say. Two fields rather
+   *  than one sentence, because a run that pushed and a run that did not are
+   *  opposite states and a reader must not have to guess which it holds. */
+  keyWarning: Schema.NullOr(Schema.String),
+});
+
+/**
  * One run, as a board row — everything needed to CHOOSE a run without opening
  * it, and nothing that would need the run's journal to produce.
  *
@@ -692,14 +719,7 @@ export const RunRowSchema = Schema.Struct({
    * service revokes by it; it is a revocation handle, and a board row is read
    * by every client that can list runs.
    */
-  push: Schema.optionalKey(
-    Schema.Struct({
-      target: Schema.NullOr(
-        Schema.Struct({ substituter: Schema.String, bucket: Schema.String }),
-      ),
-      note: Schema.NullOr(Schema.String),
-    }),
-  ),
+  push: Schema.optionalKey(PushedToSchema),
 });
 export type RunRow = typeof RunRowSchema.Type;
 
@@ -1292,10 +1312,7 @@ const AttentionAnswerSchema = Schema.Struct({
    */
   push: Schema.optionalKey(
     Schema.Struct({
-      target: Schema.NullOr(
-        Schema.Struct({ substituter: Schema.String, bucket: Schema.String }),
-      ),
-      note: Schema.NullOr(Schema.String),
+      ...PushedToSchema.fields,
       /** Store paths this run put in the bucket, summed over its nodes, and
        *  the NAR bytes they cost. */
       paths: Schema.Int,

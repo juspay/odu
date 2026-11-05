@@ -21,7 +21,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import {
   implementSurface,
   inMemoryStore,
@@ -54,6 +54,7 @@ import { transitiveDependents } from "../common/nodeId";
 import { createGroupReaper } from "./reap";
 import { hasSnapshot, narrateSnapshot, prepareWorkspace } from "./workspace";
 import { createSnapshotUploads } from "./snapshotUpload";
+import { runsOutsideWorkspace } from "../just/ingest";
 import {
   createLanePusher,
   type LanePusher,
@@ -647,11 +648,11 @@ export function createLaneRunner(
       // would store bytes this run never built. SAID on the node, because
       // "nothing was pushed" is otherwise indistinguishable from "there was
       // nothing to push".
-      if (task?.workdir !== undefined && isAbsolute(task.workdir)) {
+      if (runsOutsideWorkspace(task?.workdir)) {
         if (current()) {
           tail.append(
             node.id,
-            `\n[odu] not pushing: this recipe runs in ${task.workdir} ` +
+            `\n[odu] not pushing: this recipe runs in ${task?.workdir ?? ""} ` +
               "(set working-directory), outside the run's workspace\n",
           );
         }

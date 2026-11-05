@@ -99,10 +99,14 @@ export interface LaunchRequest {
    * world and the digest is a fact about what the caller sent.
    */
   readonly push: LaunchPush | null;
-  /** The ONE line the run's setup log says about pushing: why nothing is being
-   *  pushed, or the `trusted-public-keys` warning when something is. Null when
-   *  there is nothing to say. */
-  readonly pushNote: string | null;
+  /** WHY THIS RUN PUSHES NOTHING, for its setup log — null when it does. */
+  readonly pushSkipped: string | null;
+  /** WHAT IS WRONG WHILE IT DOES: the bucket's key is missing from the
+   *  repository's `trusted-public-keys`. Null when there is nothing to say.
+   *  A separate field from the one above, not a second meaning of it: a run
+   *  that is pushing and a run that is not are opposite states, and a reader
+   *  holding one sentence had to consult `push` to learn which it held. */
+  readonly pushKeyWarning: string | null;
 }
 
 export interface LaunchReceipt {
@@ -166,19 +170,15 @@ export interface PushPort {
    *  {@link CheckoutProbe}. */
   resolve: (checkout: string) => Promise<PushResolution>;
   /** Mint the run's write token for a resolved bucket. `null` when the bucket
-   *  has gone between resolution and launch. */
-  grant: (request: {
-    bucket: string;
-    runId: string;
-    expiresAt: number;
-  }) => PushGrant | null;
+   *  has gone between resolution and launch.
+   *
+   *  No lifetime and no label: how long a run's credential may outlive its
+   *  run, and what word the bucket page's Tokens list shows for it, are the
+   *  CACHE's decisions. A caller that passed either would be two callers that
+   *  could pass different ones. */
+  grant: (request: { bucket: string; runId: string }) => PushGrant | null;
   /** Let a run's token go. Idempotent. */
   revoke: (tokenId: string) => void;
-  /** Remove the token FILE a launch left for a coordinator that never
-   *  started. Beside the revoke rather than folded into it: one is the
-   *  credential, the other is a byte on disk, and only this layer knows the
-   *  launch failed. */
-  dropToken: (runId: string, catalog?: CatalogOptions) => void;
 }
 
 // ── retrying a recorded run ─────────────────────────────────────────────────

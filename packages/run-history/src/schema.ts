@@ -269,7 +269,17 @@ export const RunManifestSchema = Schema.Struct({
           tokenId: Schema.String,
         }),
       ),
-      note: Schema.NullOr(Schema.String),
+      /** WHY NOTHING IS PUSHED — no flake, an eval that failed, a substituter
+       *  this daemon does not serve, two it does. Null when a target stands.
+       *  Separate from the warning below because they are opposite facts: one
+       *  is the absence of the feature, the other is the feature working with
+       *  a caveat, and one field holding both made every reader guess which
+       *  it had from a second value. */
+      skipped: Schema.NullOr(Schema.String),
+      /** WHAT IS WRONG WHILE SOMETHING IS PUSHED: the bucket's key is missing
+       *  from the repository's `trusted-public-keys`, so what this run warms
+       *  will not be substituted from. Null when there is nothing to say. */
+      keyWarning: Schema.NullOr(Schema.String),
     }),
   ),
 });
@@ -432,7 +442,9 @@ export const RunEventSchema = Schema.Union([
    * reader of a finished run can say what that run put in the bucket without
    * the bucket having to be asked. `paths` counts what the bucket SERVES as a
    * result (stored plus already-present), which is the same list the push
-   * client verifies; `bytes` is what crossed the wire.
+   * client verifies; `bytes` is the UNCOMPRESSED NAR size of what was
+   * uploaded, which is what a closure states and what `nix path-info -S`
+   * answers — not what zstd made of it on the way.
    *
    * A push that FAILED is not one of these: it makes the node red, with the
    * client's own sentence in that node's log, like any other failure.

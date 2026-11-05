@@ -44,7 +44,7 @@ import { CACHE_MOUNT } from "./paths";
 import {
   describeCache,
   discoveryToken,
-  type OriginNamedBy,
+  savedCredentialFor,
   normalizeOrigin,
   oduCachesOf,
   pushToCache,
@@ -396,9 +396,10 @@ async function pushCommand(rest: string[]): Promise<number> {
   const asked = values.cache;
   let bucket: string;
   let origin = values.origin;
-  /** WHO NAMED THE ORIGIN — the operator, until the inference below answers
-   *  with one a `flake.nix` chose. The push's credential scope turns on it. */
-  let originNamedBy: OriginNamedBy = "operator";
+  /** THE ADDRESS CAME OUT OF A REPOSITORY, which the inference below is the
+   *  only way of reaching. It is what decides the credential this push is
+   *  allowed to send. */
+  let addressFromRepository = false;
   let paths: string[];
   if (asked !== undefined) {
     if (values.origin !== undefined) {
@@ -498,15 +499,19 @@ async function pushCommand(rest: string[]): Promise<number> {
       }
       bucket = inferred.bucket;
       origin = inferred.origin;
-      // THE REPOSITORY CHOSE THIS ADDRESS. `$ODU_CACHE_TOKEN` and
-      // `--token-file` are credentials for wherever this push ends up, which
-      // is right when the operator typed the address and wrong when a
-      // contributor's `extra-substituters` line did — on the spelling this
-      // change made the recommended one.
-      originNamedBy = "repository";
+      addressFromRepository = true;
       paths = positionals;
     }
   }
+  // THE CREDENTIAL, when a REPOSITORY named the address. `--token-file` and
+  // `$ODU_CACHE_TOKEN` are credentials for wherever a push ends up — right
+  // when the operator typed the address, wrong when a contributor's
+  // `extra-substituters` line did, on the spelling that is now the
+  // recommended one. Only what this machine SAVED for that origin is in
+  // scope, and `null` means push anonymously and let the bucket answer.
+  const credential = addressFromRepository
+    ? await savedCredentialFor(process.env, origin ?? "")
+    : undefined;
   try {
     const summary = await pushToCache({
       bucket,
@@ -516,7 +521,13 @@ async function pushCommand(rest: string[]): Promise<number> {
       // in to one cache must still be able to push to a second. With `--cache`
       // it is the origin the cache named.
       ...(origin === undefined ? {} : { origin }),
-      originNamedBy,
+      // THE CREDENTIAL, when a REPOSITORY named the address. `--token-file`
+      // and `$ODU_CACHE_TOKEN` are credentials for wherever a push ends up —
+      // right when the operator typed the address, wrong when a contributor's
+      // `extra-substituters` line did, on the spelling that is now the
+      // recommended one. Only what this machine SAVED for that origin is in
+      // scope, and `null` means push anonymously and let the bucket answer.
+      ...(credential === undefined ? {} : { credential }),
       ...(values["token-file"] === undefined ? {} : { tokenFile: values["token-file"] }),
       ...(values.concurrency === undefined
         ? {}
@@ -553,7 +564,18 @@ async function pushCommand(rest: string[]): Promise<number> {
     }
     return summary.failed === 0 ? 0 : 1;
   } catch (err) {
-    process.stderr.write(`odu: ${err instanceof Error ? err.message : String(err)}\n`);
+    const said = err instanceof Error ? err.message : String(err);
+    // AND WHY IT WENT OUT ANONYMOUSLY, if it did. A bare 401 does not say
+    // that the address came from `./flake.nix` rather than off this command
+    // line, which is the whole of what to do about it.
+    const hint =
+      credential === null
+        ? ` — the substituter came from ./flake.nix and nothing is saved for ` +
+          `${origin ?? "it"}, so this push was anonymous. Run \`odu cache ` +
+          `login ${origin ?? "<url>"}\`, or name the cache yourself with ` +
+          "`odu cache push <bucket> --origin <url>`"
+        : "";
+    process.stderr.write(`odu: ${said}${hint}\n`);
     return 1;
   }
 }

@@ -658,13 +658,11 @@ export interface Cache {
    *
    * `null` when no such bucket is served here.
    */
-  grantRunToken(request: {
-    bucket: string;
-    /** What the bucket page's Tokens list shows — `run <id>`. */
-    label: string;
-    /** Wall-clock milliseconds. */
-    expiresAt: number;
-  }): { id: string; token: string } | null;
+  /** A RUN'S WRITE TOKEN for one bucket (PLAN 4.1). The run's id and nothing
+   *  else: this row writes `expires`, so {@link RUN_TOKEN_LIFETIME_MS} is its
+   *  own, and this row's bucket page shows the Tokens list, so `run <id>` is
+   *  its wording too. */
+  grantRunToken(request: { bucket: string; runId: string }): { id: string; token: string } | null;
   /** Let a token go, by id. Idempotent — an unknown id is not an error,
    *  because a finalize cannot know whether a restart already revoked. */
   revokeToken(id: string): void;
@@ -775,6 +773,23 @@ export interface CacheOptions {
  *  that arrives thousands of times a minute, and a hit count that moved a second
  *  ago is as true for a reader as one that moved a millisecond ago. */
 export const HITS_REFRESH_MS = 1000;
+
+/**
+ * HOW LONG A RUN'S WRITE TOKEN MAY LIVE (PLAN 4.1) — a BACKSTOP, not the
+ * lifetime.
+ *
+ * The ordinary end of one of these is the revoke the service's projection
+ * performs once nothing is serving the run, usually within seconds of it
+ * stopping. This bounds the case a revoke cannot cover: a daemon that dies
+ * with runs in flight. Long enough that it never expires under a slow run,
+ * short enough that a forgotten credential is not a permanent one.
+ *
+ * HERE, beside the only code that writes a token's `expires`, rather than
+ * beside either caller that asks for one: it is a credential policy, and it
+ * revs when somebody decides a push credential may outlive its run by less —
+ * never when `run.start` changes.
+ */
+export const RUN_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 /**
  * HOW LONG A REDIRECTED NAR URL LIVES — {@link PRESIGN_SECONDS}, spelled in
@@ -2493,7 +2508,7 @@ export function createCache(options: CacheOptions): Cache {
     // invented rather than one held. The bucket must exist HERE: a grant for a
     // name this daemon does not serve is the whole of what "served elsewhere"
     // means on the resolver's side.
-    grantRunToken: ({ bucket, label, expiresAt }) => {
+    grantRunToken: ({ bucket, runId }) => {
       const row = repo.bucket(bucket);
       if (row === null) return null;
       const token = mintToken();
@@ -2506,8 +2521,14 @@ export function createCache(options: CacheOptions): Cache {
         // that pushes to the bucket it reads from can reach nothing else.
         bucketGlob: row.name,
         scope: "write",
-        expires: expiresAt,
-        label,
+        // THE BACKSTOP, in wall-clock milliseconds — the administrative mint
+        // rounds to whole days, and a run is shorter than one.
+        expires: now() + RUN_TOKEN_LIFETIME_MS,
+        // WHAT THE BUCKET PAGE'S TOKENS LIST SHOWS. Composed here because
+        // this row owns that page's words: an asker that sent the sentence
+        // would be an asker whose next feature (a filter, a "revoke every run
+        // token" control) needs the id parsed back out of it.
+        label: `run ${runId}`,
         lastUsed: null,
         revoked: false,
         created: now(),

@@ -56,7 +56,8 @@ describe("the manifest's push record", () => {
         bucket: "kolu-r2",
         tokenId: "0123456789abcdef",
       },
-      note: null,
+      skipped: null,
+      keyWarning: null,
     };
     const decoded = Schema.decodeUnknownSync(RunManifestSchema)({ ...MANIFEST, push });
     expect(decoded.push).toEqual(push);
@@ -67,7 +68,11 @@ describe("the manifest's push record", () => {
   });
 
   it("round-trips a run that pushed NOWHERE, with the reason it carried", () => {
-    const push = { target: null, note: "no substituter in flake.nix nixConfig is an odu cache" };
+    const push = {
+      target: null,
+      skipped: "no substituter in flake.nix nixConfig is a cache this odu serves",
+      keyWarning: null,
+    };
     expect(Schema.decodeUnknownSync(RunManifestSchema)({ ...MANIFEST, push }).push).toEqual(push);
   });
 
@@ -80,7 +85,7 @@ describe("the manifest's push record", () => {
   });
 
   it("refuses a push record with no target key at all", () => {
-    expect(decodes(RunManifestSchema, { ...MANIFEST, push: { note: "x" } })).toBe(false);
+    expect(decodes(RunManifestSchema, { ...MANIFEST, push: { skipped: "x" } })).toBe(false);
   });
 });
 

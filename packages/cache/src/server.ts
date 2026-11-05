@@ -1171,11 +1171,6 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // has gone away mints nothing. Built AFTER the server because `bucketAt`
     // is the server's URL knowledge — which is the whole grant.
     const withdrawGrants = grants.register({
-      // THE SAME STRING EVERY BUCKET'S `nix-cache-info` STATES as `Odu-Origin`
-      // — the proxy's origin when one stands in front, the bound one
-      // otherwise. Asked only so a daemon serving no cache can skip the flake
-      // evaluation entirely.
-      origin: () => publicOrigin ?? boundOrigin,
       bucketAt: (substituter) => server.bucketAt(substituter),
       mint: (request) => cache.grantRunToken(request),
       revoke: (id) => cache.revokeToken(id),

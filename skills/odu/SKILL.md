@@ -142,7 +142,7 @@ consumer keeps in order to READ from a bucket — is the whole declaration;
 one odu cache the serving daemon has. There is no request field, no flag, no
 recipe step and no token in the tree: do NOT add `odu cache push` to a justfile
 to get this. `run_read` answers `push` — the bucket and how much landed, or
-`target: null` and a `note` saying why nothing was pushed (no flake, no odu
+`target: null` and a `skipped` reason saying why nothing was pushed (no flake, no odu
 cache named there, or one this daemon does not serve). A push that fails makes
 that node RED, so a green run means the cache is warm. Two odu caches this
 daemon serves is a `checkout_refused` at start naming both: a repository builds

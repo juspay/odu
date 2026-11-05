@@ -846,7 +846,8 @@ async function relaunch(
     // supplies resolves it again, exactly as `run.start` does; this package
     // has no way to ask a cache anything.
     push: null,
-    pushNote: null,
+    pushSkipped: null,
+    pushKeyWarning: null,
   };
   // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, for the same
   // reason the live path marks before its rerun call: from here on, a lost

@@ -36,7 +36,7 @@ import { spawnSync } from "node:child_process";
 import { dialRun } from "@odu/run-client/dial";
 import { errorMessage, firstFrame, runUnary } from "@odu/execution/common/effectEdge";
 import { ghForge } from "@odu/execution/common/forge";
-import { dropPushToken, packagedLauncher } from "@odu/execution/coordinator/launcher";
+import { packagedLauncher } from "@odu/execution/coordinator/launcher";
 import {
   isSameRun,
   retryRun as retryRecordedRun,
@@ -49,7 +49,6 @@ import { protectBranch } from "./protectPort";
 import type { FlakeNixConfigOutcome } from "@odu/cache/push";
 import { nixEvalFlakeConfig, readFlakeNixConfig } from "@odu/cache/push";
 import type { CacheGrants } from "@odu/cordis/services";
-import { RUN_TOKEN_LIFETIME_MS } from "@odu/service/start";
 import type {
   CancelOutcome,
   CancelRequest,
@@ -59,6 +58,7 @@ import type {
   PushTarget,
   ServicePorts,
 } from "@odu/service/ports";
+import { preparePush } from "@odu/service/pushGrant";
 
 /**
  * What the service can learn about a checkout without running anything.
@@ -178,7 +178,7 @@ export async function resolvePushWith(
   // BEFORE THE FLAKE IS READ AT ALL. A daemon serving no cache can grant
   // nothing, and evaluating every repository's Nix to find that out would be
   // a cost — and an exposure — paid for an answer that is already known.
-  if (grants.origin() === null) {
+  if (!grants.serves()) {
     return { kind: "skipped", reason: "this daemon serves no cache" };
   }
   const config = await readConfig(checkout);
@@ -267,12 +267,11 @@ export function webPorts(
   const forge = ghForge();
   const push: PushPort = {
     resolve: (checkout) => resolvePush(checkout, grants, env),
-    grant: ({ bucket, runId, expiresAt }) => {
-      const minted = grants.mint({ bucket, label: `run ${runId}`, expiresAt });
+    grant: ({ bucket, runId }) => {
+      const minted = grants.mint({ bucket, runId });
       return minted === null ? null : { tokenId: minted.id, token: minted.token };
     },
     revoke: (tokenId) => grants.revoke(tokenId),
-    dropToken: (runId, catalog) => dropPushToken(runId, catalog ?? {}),
   };
   /**
    * The launcher a REPLAY goes through — the same one, with the push target
@@ -285,45 +284,32 @@ export function webPorts(
    * is not even possible: that one was revoked when the parent settled.
    */
   const replayLauncher: typeof launcher = async (request) => {
-    const resolved = await push.resolve(request.checkout);
-    if (resolved.kind !== "target") {
-      return launcher({
-        ...request,
-        push: null,
-        pushNote:
-          resolved.kind === "skipped"
-            ? resolved.reason
-            : `this checkout reads from two odu caches (${resolved.substituters.join(", ")})`,
-      });
-    }
-    const granted = push.grant({
-      bucket: resolved.target.bucket,
-      runId: request.runId,
-      expiresAt: Date.now() + RUN_TOKEN_LIFETIME_MS,
-    });
-    const launched = await launcher({
-      ...request,
-      push:
-        granted === null
-          ? null
-          : {
-              substituter: resolved.target.substituter,
-              origin: resolved.target.origin,
-              bucket: resolved.target.bucket,
-              tokenId: granted.tokenId,
-              token: granted.token,
-            },
-      pushNote: resolved.target.keyWarning,
-    });
+    const prepared = await preparePush(push, request.checkout, request.runId);
+    // AMBIGUITY IS NOT A REFUSAL HERE, where a `run.start` refuses it: a
+    // replay of a recorded run must not be turned away by a fact about the
+    // world that changed after the run it replays. It runs, and says so.
+    const launched =
+      prepared.kind === "ambiguous"
+        ? await launcher({
+            ...request,
+            push: null,
+            pushSkipped:
+              "this checkout reads from two odu caches " +
+              `(${prepared.substituters.join(", ")})`,
+            pushKeyWarning: null,
+          })
+        : await launcher({
+            ...request,
+            push: prepared.push,
+            pushSkipped: prepared.skipped,
+            pushKeyWarning: prepared.keyWarning,
+          });
     // THE TOKEN GOES BACK when nothing was started, exactly as `run.start`
     // does on its own failed launch: a credential with no run behind it is
-    // one that only its expiry would ever take away — and the FILE the
-    // launcher wrote for a coordinator that never read it goes with it,
-    // rather than sitting in the catalog as plaintext until retention.
-    if (!launched.ok && granted !== null) {
-      push.revoke(granted.tokenId);
-      push.dropToken(request.runId, request.catalog);
-    }
+    // one that only its expiry would ever take away. The FILE the launcher
+    // wrote is the launcher's own to remove, and it does.
+    const minted = prepared.kind === "prepared" ? prepared.push : null;
+    if (!launched.ok && minted !== null) push.revoke(minted.tokenId);
     return launched;
   };
   const ports: ServicePorts = {

@@ -21,6 +21,8 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { CI_CONTRACT_VERSION } from "@odu/service-client/surface";
 import { CI_ROW } from "@odu/service-client/surface";
 import { appendEvent, writeVerdict } from "@odu/run-history/store";
@@ -48,11 +50,17 @@ const PUSH = {
     bucket: "kolu-r2",
     tokenId: "tok-live",
   },
-  note: null,
+  skipped: null,
+  keyWarning: null,
 };
 
-/** A service over this world, refreshed once so every run is projected. */
-function project(w: World, ports: RecordingPorts): { close: () => Promise<void> } {
+/** A service over this world, refreshed once so every run is projected — and
+ *  REFRESHABLE again, because the thing one projection cannot show is a fact
+ *  that changes between two of them. */
+function project(
+  w: World,
+  ports: RecordingPorts,
+): { refresh: () => void; close: () => Promise<void> } {
   const built = createOduService({
     ports,
     origin: "http://127.0.0.1:0",
@@ -64,7 +72,7 @@ function project(w: World, ports: RecordingPorts): { close: () => Promise<void> 
     onDrain: () => {},
   });
   built.refresh();
-  return { close: () => built.close() };
+  return { refresh: () => built.refresh(), close: () => built.close() };
 }
 
 describe("a run's write token at the end of the run", () => {
@@ -206,6 +214,63 @@ describe("a run's write token at the end of the run", () => {
     }
   });
 
+  it("revokes when a lingering coordinator dies BETWEEN two refreshes", async () => {
+    // THE SAME HOLE ONE LAYER DOWN, and the one a single projection cannot
+    // show. The gate is right, but a refresh SKIPS a row whose files have not
+    // moved — and a settled row was skipped on the strength of being settled,
+    // because the fence's answer cannot change `settled` into anything else.
+    //
+    // A dying coordinator moves no file. That is the premise of the whole
+    // registry: it stops writing, and its heartbeat ages where it lies. So
+    // this case must not write one either — a rewritten `owner.json` moves
+    // the fingerprint and brings the row back into the question for the
+    // wrong reason. Instead the owner record names a REAL process with an
+    // already stale heartbeat (alive by `kill(pid, 0)`, which is the second
+    // half of the fence), and that process is killed between the refreshes.
+    world = makeWorld();
+    const run = registerFixtureRun(world, {
+      repoRoot: "/code/app",
+      sha: SHA,
+      push: PUSH,
+      now: Date.now() - 600_000,
+    });
+    appendEvent(run.handle, run.token, { kind: "finalized", outcome: "passed" });
+    writeVerdict(run.handle, run.token, {
+      runId: run.runId,
+      outcome: "passed",
+      startedAt: 1_000,
+      finishedAt: 2_000,
+      failed: [],
+      errored: [],
+      cancelled: [],
+      unposted: [],
+    });
+    const coordinator = spawn("sleep", ["120"], { stdio: "ignore" });
+    crashOwner(run.handle, {
+      heartbeatAt: Date.now() - 600_000,
+      pid: coordinator.pid ?? 1,
+    });
+
+    const ports = recordingPorts();
+    const { refresh, close } = project(world, ports);
+    try {
+      // FIRST PROJECTION: settled, still served, and its coordinator is
+      // there. The token stays, which is what `--linger` is for.
+      expect(ports.pushRevokes).toEqual([]);
+
+      coordinator.kill("SIGKILL");
+      await once(coordinator, "exit");
+      refresh();
+
+      // NOTHING ON DISK MOVED. The only thing that changed is the answer to
+      // `kill(pid, 0)` — and the token goes back.
+      expect(ports.pushRevokes).toEqual(["tok-live"]);
+    } finally {
+      coordinator.kill("SIGKILL");
+      await close();
+    }
+  });
+
   it("revokes a token once, however many times the run is re-projected", async () => {
     world = makeWorld();
     const run = registerFixtureRun(world, {
@@ -254,7 +319,7 @@ describe("a run's write token at the end of the run", () => {
     const run = registerFixtureRun(world, {
       repoRoot: "/code/app",
       sha: SHA,
-      push: { target: null, note: "no flake.nix" },
+      push: { target: null, skipped: "no flake.nix", keyWarning: null },
     });
     appendEvent(run.handle, run.token, { kind: "finalized", outcome: "passed" });
     releaseOwnership(run.token);
