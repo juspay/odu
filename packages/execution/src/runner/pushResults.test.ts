@@ -36,6 +36,8 @@ import {
   createLanePusher,
   type LanePusher,
   pushConfigOf,
+  PUSH_FAILED_PREFIX,
+  pushFailureSentenceIn,
   resultPathsIn,
 } from "./pushResults";
 
@@ -322,5 +324,52 @@ describe("a lane that pushes", () => {
     } finally {
       w.dispose();
     }
+  });
+});
+
+describe("the sentence a failed push leaves on the log", () => {
+  // The marker is shared vocabulary between the lane that WRITES this line
+  // and the coordinator that reads it back off its log tap to put the
+  // client's own words in the journal's `push_failed` — rather than a
+  // pointer at a log the reader of that record may not have. Two modules
+  // agreeing about a literal is one wording change away from a reader that
+  // silently never matches again, which is why both ends are here.
+  it("recovers the client's own words from the line the lane writes", () => {
+    expect(
+      pushFailureSentenceIn(
+        `\n${PUSH_FAILED_PREFIX}odu: 1 path could not be pushed to main — 413 too large\n`,
+      ),
+    ).toBe("odu: 1 path could not be pushed to main — 413 too large");
+  });
+
+  it("says NOTHING about a chunk that carries no failure", () => {
+    // The ordinary case, and by far the commonest: every byte of every push
+    // log passes this reader, and all it may do with a successful one is
+    // decline to answer.
+    expect(pushFailureSentenceIn("[odu] 3 paths in the closure: 1 to push\n")).toBeNull();
+    expect(pushFailureSentenceIn("")).toBeNull();
+    // A marker with nothing after it is not a sentence: an empty message in
+    // the journal states less than the pointer it would replace.
+    expect(pushFailureSentenceIn(`${PUSH_FAILED_PREFIX}\n`)).toBeNull();
+  });
+
+  it("takes the LAST failure in a chunk, and only its first line", () => {
+    // A chunk can be a whole re-sent buffer — a lane's opening `snapshot`
+    // replays everything it holds — and the newest line is the one that
+    // describes the attempt a reader is looking at.
+    expect(
+      pushFailureSentenceIn(
+        `${PUSH_FAILED_PREFIX}the first one\nmore output\n${PUSH_FAILED_PREFIX}the second one\n`,
+      ),
+    ).toBe("the second one");
+    // ONE LINE of it. A client's message can run to several (a nix error with
+    // a trace under it) and what this feeds is a journal field read as a
+    // sentence beside a node id; the whole of it stays in the log.
+    expect(
+      pushFailureSentenceIn(`${PUSH_FAILED_PREFIX}refused by the bucket\n  at frobnicate\n`),
+    ).toBe("refused by the bucket");
+    // A chunk that ends mid-line still answers: a frame boundary is not a
+    // fact about the sentence.
+    expect(pushFailureSentenceIn(`${PUSH_FAILED_PREFIX}refused`)).toBe("refused");
   });
 });

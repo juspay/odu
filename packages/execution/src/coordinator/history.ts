@@ -208,8 +208,19 @@ export interface RunHistory {
    * `pushing` that never reached a line here would be invisible to a reader
    * the moment the coordinator's socket went away, and an upload that takes a
    * minute would appear, finished, out of nothing.
+   *
+   * `durationMs` is the RECIPE's time, not the push's, and it rides this line
+   * because this line is the only one the journal gets while the upload runs:
+   * the node stays `running` until the push lands, so no `node_status` is
+   * written, and a fold with no duration for the recipe draws its bar to the
+   * end of the track and leaves the push step nowhere to go. `undefined` for
+   * a caller that has none — the fold then keeps waiting for the status.
    */
-  pushing: (fact: { node: string; bucket: string }) => void;
+  pushing: (fact: {
+    node: string;
+    bucket: string;
+    durationMs?: number | undefined;
+  }) => void;
   /** A node's outputs landed in the cache (PLAN 4.1). Written when a recipe
    *  exits 0 and its `result*` closure was pushed, so a finished run can say
    *  what it warmed without the bucket having to be asked. `durationMs` is
@@ -717,7 +728,16 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         });
       }
     },
-    pushing: ({ node, bucket }) => emit({ kind: "pushing", node, bucket }),
+    pushing: ({ node, bucket, durationMs }) =>
+      emit({
+        kind: "pushing",
+        node,
+        bucket,
+        // ABSENT rather than `undefined`: the key is `optionalKey` on the
+        // wire, and a reader must be able to tell a line written before this
+        // field from one whose writer had no duration to give.
+        ...(durationMs === undefined ? {} : { durationMs }),
+      }),
     pushed: ({ node, bucket, paths, bytes, durationMs }) =>
       emit({ kind: "pushed", node, bucket, paths, bytes, durationMs }),
     pushFailed: ({ node, bucket, message, durationMs }) =>

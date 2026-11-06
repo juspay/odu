@@ -22,7 +22,7 @@ import {
   signalFromExit,
 } from "./attention";
 import { formatCursor, parseCursor } from "./ids";
-import type { JournalEntry, Placement, RunVerdict } from "./schema";
+import type { JournalEntry, Placement, RunManifest, RunVerdict } from "./schema";
 
 const RUN = "lz4k9x0m-7t2ab019";
 const LINUX: Placement = { platform: "x86_64-linux", host: "builder-1" };
@@ -652,5 +652,92 @@ describe("the failure row", () => {
   it("reports unreadable journal lines rather than swallowing them", () => {
     const answer = attentionFor(sources({ journal: journal({ kind: "phase", phase: "lanes" }), unreadableEvents: 3 }));
     expect(answer.unreadable_events).toBe(3);
+  });
+});
+
+describe("the run's push answer", () => {
+  const UNIT = "ci::unit@x86_64-linux";
+  const BUILD = "ci::build@x86_64-linux";
+  const E2E = "ci::e2e@aarch64-darwin";
+
+  /** A run that pushes somewhere — the answer's `push` is absent without one,
+   *  because a manifest written before the field says nothing either way. */
+  const manifest: RunManifest = {
+    version: 1,
+    runId: RUN,
+    repo: "juspay/odu",
+    sha: "a".repeat(40),
+    seq: 3,
+    pipeline: "ci",
+    repoRoot: "/checkouts/odu",
+    createdAt: 1_000,
+    scope: { selectors: [], platforms: [], noDeps: false },
+    snapshot: { mode: "strict", expectedSha: "a".repeat(40), dirty: false, retryable: true },
+    build: { oduVersion: "0.1.0", self: null, runnerFlake: null },
+    registeredBy: {
+      epoch: 1,
+      pid: 1,
+      host: "box",
+      claimedAt: 1,
+      heartbeatAt: 1,
+      endpoint: "/tmp/odu.sock",
+    },
+    parentRunId: null,
+    requestId: null,
+    push: {
+      target: {
+        substituter: "https://cache.kolu.dev/kolu-r2",
+        bucket: "kolu-r2",
+        tokenId: "0123456789abcdef",
+      },
+      skipped: null,
+      keyWarning: null,
+    },
+  };
+
+  const pushFailed = (node: string): JournalEntry["event"] => ({
+    kind: "push_failed",
+    node,
+    bucket: "kolu-r2",
+    message: "413 too large",
+    durationMs: 900,
+  });
+
+  it("names the failed pushes in ROSTER order, not the order they failed in", () => {
+    // The fold is a Map, so its order is the order the journal first mentioned
+    // each node — here, the reverse of the roster, which is what a slow lane
+    // finishing first produces. Both the wire and this payload promise roster
+    // order, and a reader painting a run paints its nodes in that one: a
+    // header listing the same three nodes in another order is a list the
+    // reader has to match up by hand.
+    const answer = attentionFor(
+      sources({
+        manifest,
+        journal: journal(
+          { kind: "roster", order: [UNIT, BUILD, E2E] },
+          pushFailed(E2E),
+          pushFailed(UNIT),
+        ),
+      }),
+    );
+    expect(answer.push?.failedOn).toEqual([UNIT, E2E]);
+  });
+
+  it("puts a node the roster never listed after the ones it did", () => {
+    // A roster that does not name a node is a torn or partial journal, not a
+    // licence to drop the node or to hoist it: it keeps the order it had,
+    // behind everything the roster can speak for.
+    const answer = attentionFor(
+      sources({
+        manifest,
+        journal: journal(
+          { kind: "roster", order: [UNIT, BUILD] },
+          pushFailed(E2E),
+          pushFailed("ci::docs@x86_64-linux"),
+          pushFailed(BUILD),
+        ),
+      }),
+    );
+    expect(answer.push?.failedOn).toEqual([BUILD, E2E, "ci::docs@x86_64-linux"]);
   });
 });

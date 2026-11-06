@@ -60,6 +60,7 @@ import {
   createLanePusher,
   type LanePusher,
   pushConfigOf,
+  PUSH_FAILED_PREFIX,
   PUSH_TOKEN_ENV,
 } from "./pushResults";
 
@@ -719,9 +720,21 @@ export function createLaneRunner(
           // `pushing` from this and nothing else: a push that only appeared in
           // its finished form would make a minute-long upload look like a node
           // that sat idle and then claimed some bytes.
+          //
+          // AND THE RECIPE'S DURATION GOES WITH IT, in the same cell write.
+          // It is already a fact — the child exited and `durationMs` above
+          // measured it — and withholding it until `stamp` would mean that
+          // for the whole minute an upload takes the node reads as a recipe
+          // STILL RUNNING. A reader cannot draw a push beside a recipe whose
+          // bar has no end: the recipe fills the track and the push step is
+          // left with nothing to occupy. Publishing it here changes nothing
+          // about what `durationMs` MEANS — it is the recipe's own time here
+          // and at `stamp`, and the push's time stays on the push.
           begin: () => {
             pushStartedAt = Date.now();
-            if (current()) setNode(node.id, { push: { state: "pushing" } });
+            if (current()) {
+              setNode(node.id, { push: { state: "pushing" }, durationMs });
+            }
           },
           say: (line) => {
             if (current()) tail.append(logStreamKey(node.id, "push"), `${line}\n`);
@@ -748,10 +761,16 @@ export function createLaneRunner(
           // reach the bucket, so the node is red with the client's own
           // sentence in its PUSH log — the recipe's log keeps the recipe's
           // output, and the step that failed is the one that says why.
+          //
+          // The PREFIX is shared vocabulary, not a literal: the coordinator
+          // reads this line back off its log tap to put this very sentence
+          // in the journal's `push_failed`, and a wording change here that
+          // did not reach that reader would silently turn the record back
+          // into a pointer.
           if (current()) {
             tail.append(
               logStreamKey(node.id, "push"),
-              `\n[odu] push failed: ${message}\n`,
+              `\n${PUSH_FAILED_PREFIX}${message}\n`,
             );
           }
           stamp(

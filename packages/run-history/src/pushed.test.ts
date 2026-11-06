@@ -181,6 +181,78 @@ describe("the journal's three push events", () => {
     ]);
   });
 
+  it("carries the RECIPE's duration on the line that opens the push", () => {
+    // THE ONE LINE THE JOURNAL GETS WHILE AN UPLOAD RUNS. A node stays
+    // `running` until its push lands, so the coordinator writes no
+    // `node_status` (it journals a status CHANGE, and nothing changed) — and
+    // a page folding this journal would have no end for the recipe's bar for
+    // the whole minute a push takes, which is what left the `pushing`
+    // segment of the timeline with no room to draw.
+    const placement = { platform: "x86_64-linux", host: "box" };
+    const fold = foldJournal([
+      { seq: 1, at: 1, event: { kind: "attempt_started", node, attempt: 1, placement } },
+      {
+        seq: 2,
+        at: 2,
+        event: {
+          kind: "node_status",
+          node,
+          attempt: 1,
+          status: "running",
+          exitCode: null,
+          durationMs: null,
+          placement,
+        },
+      },
+      { seq: 3, at: 3, event: { ...began, durationMs: 90_000 } },
+    ]);
+    expect(fold.latest.get(node)?.durationMs).toBe(90_000);
+    // …and the node is STILL RUNNING while it says so, which is the point:
+    // green means warmed, and nothing here has warmed anything yet.
+    expect(fold.latest.get(node)?.status).toBe("running");
+    expect([...fold.push.entries()]).toEqual([[node, { state: "pushing", bucket: "kolu-r2" }]]);
+  });
+
+  it("never lets a `pushing` line overwrite a duration a STATUS measured", () => {
+    // A status line is the later and better-measured evidence — the lane
+    // took it at the child's exit and the push line only repeats what it
+    // knew at the time. A re-sent `pushing` landing after a terminal status
+    // must not move the number a reader already has.
+    const placement = { platform: "x86_64-linux", host: "box" };
+    const fold = foldJournal([
+      { seq: 1, at: 1, event: { kind: "attempt_started", node, attempt: 1, placement } },
+      {
+        seq: 2,
+        at: 2,
+        event: {
+          kind: "node_status",
+          node,
+          attempt: 1,
+          status: "ok",
+          exitCode: 0,
+          durationMs: 1_234,
+          placement,
+        },
+      },
+      { seq: 3, at: 3, event: { ...began, durationMs: 90_000 } },
+    ]);
+    expect(fold.latest.get(node)?.durationMs).toBe(1_234);
+  });
+
+  it("still decodes a `pushing` line written before it carried a duration", () => {
+    // `optionalKey`: the journal is append-only and a reader meets lines
+    // older than itself. An absent duration is "ask the status", not zero —
+    // a zero would draw a recipe that took no time.
+    expect(decodes(RunEventSchema, began)).toBe(true);
+    expect(decodes(RunEventSchema, { ...began, durationMs: 90_000 })).toBe(true);
+    const placement = { platform: "x86_64-linux", host: "box" };
+    const fold = foldJournal([
+      { seq: 1, at: 1, event: { kind: "attempt_started", node, attempt: 1, placement } },
+      { seq: 2, at: 2, event: began },
+    ]);
+    expect(fold.latest.get(node)?.durationMs).toBeNull();
+  });
+
   it("carries a push that FAILED, with the client's sentence", () => {
     // A red node alone cannot say WHICH half failed: without this line a
     // reader of a finished run would see a red recipe where the recipe in

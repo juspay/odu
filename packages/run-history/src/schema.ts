@@ -469,6 +469,25 @@ export const RunEventSchema = Schema.Union([
     kind: Schema.Literal("pushing"),
     node: Schema.String,
     bucket: Schema.String,
+    /** THE RECIPE'S OWN DURATION, as it was known the instant the push began.
+     *
+     *  Here, on the line that OPENS the push, because this is the last line
+     *  the journal gets until the upload ends: the node stays `running` while
+     *  it sends, so the coordinator writes no `node_status` (it journals a
+     *  status CHANGE, and nothing changed), and a page folding this journal
+     *  would have no end for the recipe's bar for the whole minute an upload
+     *  takes. That is not a cosmetic gap — a recipe with no duration reads as
+     *  "still running", its bar fills the track, and the push step is left
+     *  with no room to draw at all.
+     *
+     *  It is a FACT at exit 0 and not an estimate: the lane measures it when
+     *  the child exits, before handing the closure over, and the `node_status`
+     *  that eventually lands carries the same number. The fold therefore
+     *  applies this only where it has none — a status line is the later and
+     *  better-measured evidence, and this one must never overwrite it.
+     *
+     *  `optionalKey`, so a line written before this field still decodes. */
+    durationMs: Schema.optionalKey(Schema.Int),
   }),
   /**
    * A NODE'S OUTPUTS LANDED IN THE CACHE (PLAN 4.1) — the durable half of

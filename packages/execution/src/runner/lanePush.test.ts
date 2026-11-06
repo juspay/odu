@@ -13,7 +13,9 @@
  *     of it breaks that promise for every reader that greps one;
  *   - the step's states are observable in order: a recipe that exits 0 opens
  *     `pushing`, and the node stays `running` until the push lands, because a
- *     green node that had warmed nothing is the lie 4.1 exists to prevent;
+ *     green node that had warmed nothing is the lie 4.1 exists to prevent —
+ *     and the RECIPE's own duration is published with that `pushing`, because
+ *     a reader whose recipe has no end cannot place the push beside it;
  *   - a push that FAILS makes the node RED, with the client's own sentence in
  *     the PUSH log, and a `failed` push step beside the recipe that passed;
  *   - a rerun RETRACTS the step and re-opens both logs — a node about to run
@@ -42,7 +44,12 @@ import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import { type LaneClient, laneClientOver, laneSurface } from "../common/laneSurface";
 import type { TaskSpec } from "../common/spec";
 import { createLaneRunner } from "./runner";
-import type { LanePusher, PushConfig, PushedFact } from "./pushResults";
+import {
+  type LanePusher,
+  type PushConfig,
+  type PushedFact,
+  pushFailureSentenceIn,
+} from "./pushResults";
 
 const PUSH_ENV = {
   ODU_CACHE_ORIGIN: "https://odu.example.org",
@@ -254,6 +261,17 @@ describe("a lane node that pushes what it built", () => {
     // A step that is only starting has no counts to give, and the wire says
     // so by carrying none.
     expect(last(l).nodes.build?.push).toEqual({ state: "pushing" });
+    // AND THE RECIPE'S OWN DURATION IS ALREADY PUBLISHED. It is a fact the
+    // moment the child exits 0, and withholding it until the push ends left
+    // every reader with a recipe that reads as STILL RUNNING for the whole
+    // minute an upload takes — a bar with no end, and so a push step with no
+    // room on the timeline to draw into (the `pushing` segment never
+    // rendered at all). The number is the RECIPE's: this test's recipe is
+    // `echo built`, which can finish inside a millisecond, so what is
+    // asserted is that there IS one.
+    const recipeMs = last(l).nodes.build?.durationMs;
+    expect(recipeMs).not.toBeNull();
+    expect(recipeMs).toBeGreaterThanOrEqual(0);
 
     landed.resolve();
     await until(() => last(l).nodes.build?.status === "ok");
@@ -262,6 +280,11 @@ describe("a lane node that pushes what it built", () => {
       paths: 1,
       bytes: 10,
     });
+    // AND IT DID NOT MOVE. The gate above held the upload open for however
+    // long this test took; a `durationMs` that absorbed it would silently
+    // change what every timing surface in the tree reports. The push's own
+    // time lives on the push.
+    expect(last(l).nodes.build?.durationMs).toBe(recipeMs ?? -1);
   });
 
   it("goes RED when the push failed, with the push's own sentence in the PUSH log", async () => {
@@ -288,6 +311,15 @@ describe("a lane node that pushes what it built", () => {
     // saying exactly that.
     expect(await l.logOf("build", "push")).toContain("413 too large");
     expect(await l.logOf("build")).not.toContain("413 too large");
+    // AND IT IS THE SENTENCE A READER GETS BACK. The coordinator does not
+    // keep this log — it reads the client's words off the frames crossing
+    // its tap and puts them in the journal's `push_failed`, so what reaches
+    // a catalog a week later is the reason and not a pointer at a log that
+    // reader may not have. This is the wire between the two ends, over the
+    // real lane: the marker the runner writes and the reader that owns it.
+    expect(pushFailureSentenceIn(await l.logOf("build", "push"))).toBe(
+      "odu: 1 path could not be pushed to main — 413 too large",
+    );
   });
 
   it("RETRACTS the push on a rerun that finds nothing fresh", async () => {

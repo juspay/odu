@@ -145,6 +145,63 @@ try {
       await context.close();
     }
   }
+
+  // ── AND ONE OF A PUSH THAT IS STILL GOING ──
+  //
+  // The state the step was added to make visible is the one a settled run
+  // cannot show: every shot above is of a push that had already landed, so
+  // the `pushing` word, its amber, and the hatched segment that runs to the
+  // clock's edge were unphotographed. This pass arranges a SECOND run whose
+  // pushed path is big enough to still be going when a browser reaches it,
+  // and shoots the moment the step says so.
+  //
+  // One theme and one width, deliberately: it is evidence of a STATE, and the
+  // layout at three widths is already established above by shots that do not
+  // race a running upload.
+  for (const theme of THEMES) {
+    process.stdout.write(`push-shots: arranging a slow push (${theme})…\n`);
+    const live = await arrangePushingRun(service, {
+      bucket: `warming-${theme}`,
+      requestId: `push-shots-live-${theme}`,
+      // Incompressible, and large enough that the upload outlives the browser
+      // being pointed at the page. Not larger: this is a local disk talking to
+      // a local daemon, and the window only has to be wide enough to catch.
+      payloadBytes: 512 * 1024 * 1024,
+      settle: false,
+    });
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+      colorScheme: theme,
+      deviceScaleFactor: 2,
+      reducedMotion: "reduce",
+    });
+    await context.addInitScript(
+      ([key, value]) => {
+        try {
+          window.localStorage.setItem(key, value);
+        } catch {
+          // See above.
+        }
+      },
+      ["odu.web.theme", theme] as const,
+    );
+    const page = await context.newPage();
+    await page.goto(new URL(`#/run/${live.runId}`, service.origin).href, {
+      waitUntil: "domcontentloaded",
+    });
+    // WAIT FOR THE STATE, not for a duration. The step says `pushing` for as
+    // long as the upload takes and not one tick longer, so the shutter is
+    // bound to the word rather than to a sleep that is a flake on one machine
+    // and a settled run on another.
+    await page
+      .locator("li.node .node-push-step", { hasText: "pushing" })
+      .first()
+      .waitFor({ timeout: 300_000 });
+    const shot = join(outDir, `${label}-run-pushing-${theme}-1440.png`);
+    await page.screenshot({ path: shot, fullPage: true });
+    process.stdout.write(`  ${shot}  (overflow ${await overflow(page)}px)\n`);
+    await context.close();
+  }
   process.stdout.write(`push-shots: wrote ${label} shots to ${outDir}\n`);
 } finally {
   await browser?.close();

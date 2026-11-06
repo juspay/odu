@@ -492,9 +492,24 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           attempts: e.attempts,
         });
         break;
-      case "pushing":
+      case "pushing": {
         push.set(e.node, { state: "pushing", bucket: e.bucket });
+        // THE RECIPE'S OWN DURATION, carried on the line that opens the push
+        // because nothing else carries it in time: the node stays `running`
+        // until the upload lands, so no `node_status` is journalled, and a
+        // page reading this fold would have no end for the recipe's bar —
+        // which is what left the `pushing` segment with no room to draw.
+        // NEVER over a duration a `node_status` already wrote: a `pushing`
+        // line is older evidence than the status that follows it, and the
+        // status is the one measured at the child's exit.
+        if (e.durationMs !== undefined) {
+          const state = latest.get(e.node);
+          if (state !== undefined && state.durationMs === null) {
+            state.durationMs = e.durationMs;
+          }
+        }
         break;
+      }
       case "pushed":
         push.set(e.node, {
           state: "pushed",
@@ -534,6 +549,36 @@ export function foldJournal(journal: readonly JournalEntry[]): {
     hostsSource,
     push,
   };
+}
+
+/**
+ * THE ROSTER'S ORDER, imposed on a set of node ids.
+ *
+ * `pushTotals` folds a `Map` whose order is the order the journal first
+ * MENTIONED each node — the order pushes happened to be opened in, which is a
+ * fact about scheduling and about nothing a reader cares about. Both the wire
+ * and this payload promise `failedOn` in ROSTER order, because every face that
+ * paints a run paints its nodes in the roster's order: a header that names the
+ * failed pushes in a different one makes a reader scan the list twice to match
+ * two spellings of the same three nodes.
+ *
+ * A node the roster does not list keeps its current position relative to the
+ * other unlisted ones, AFTER everything the roster names: an empty roster (a
+ * journal read before its first line, or a torn one) must not silently reorder
+ * what it cannot speak for. `sort` is stable in every runtime odu runs on, and
+ * this relies on it.
+ */
+function inRosterOrder(
+  nodes: readonly string[],
+  roster: readonly string[],
+): readonly string[] {
+  if (nodes.length < 2 || roster.length === 0) return nodes;
+  const rank = new Map(roster.map((node, i) => [node, i]));
+  return [...nodes].sort(
+    (a, b) =>
+      (rank.get(a) ?? Number.MAX_SAFE_INTEGER) -
+      (rank.get(b) ?? Number.MAX_SAFE_INTEGER),
+  );
 }
 
 const RED = new Set(["failed", "errored"]);
@@ -660,7 +705,7 @@ export function attentionFor(
             keyWarning: manifest.push.keyWarning,
             paths: pushTotal.paths,
             bytes: pushTotal.bytes,
-            failedOn: pushTotal.failedOn,
+            failedOn: inRosterOrder(pushTotal.failedOn, fold.roster),
           },
         }),
   };

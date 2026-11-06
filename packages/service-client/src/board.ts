@@ -258,10 +258,19 @@ export function laneSpan(
  * so a record whose duration outran its run paints to the edge rather than
  * past it.
  *
- * `null` in three cases, all of them facts: a node with no push step at all
+ * `null` in four cases, all of them facts: a node with no push step at all
  * (most of them — a recipe that built no `result`, or a run with no target),
- * and the two {@link laneSpan} already answers `null` for, where there is no
- * recipe segment to hang this one off.
+ * the two {@link laneSpan} already answers `null` for, where there is no
+ * recipe segment to hang this one off, and a recipe that has NOT YET
+ * published its own duration — a bar still running fills the track to the
+ * clock, so there is no room after it and no segment to draw. The last one
+ * is a race the wire closes rather than the geometry: the recipe's duration
+ * is a fact the moment the child exits 0, and the lane publishes it with the
+ * `pushing` state (and on the `pushing` journal line, which is what a page
+ * folds) precisely so this arm is not the one a live push takes. Answering
+ * `null` is what keeps the remaining window honest: a zero-width segment at
+ * `left: 1` is not a smaller truth about an upload, it is a bar claiming the
+ * push both began at the end of the run and took no time.
  */
 export function pushSpan(
   node: Pick<RunNode, "status" | "startedAt" | "durationMs" | "push">,
@@ -278,6 +287,12 @@ export function pushSpan(
   // is clamped into, computed once so "to the end" and "its own duration"
   // cannot disagree about where the end is.
   const room = scale - startedAfterMs;
+  // NO ROOM IS NO SEGMENT. The recipe reaches the end of the track — it is
+  // still running, or its host's clock put its end past the run's own — and
+  // whatever this push did, there is nowhere on this track to say it. The
+  // alternative is a zero-width bar at the far edge, which every arm below
+  // would then have to be read through.
+  if (room <= 0) return null;
   const tookMs =
     push.state === "pushing" ? room : clampMs(push.durationMs, room);
   return {
