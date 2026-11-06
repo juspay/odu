@@ -8,9 +8,9 @@
  *   - it is REFUSED without `--sha`, because `expectedSha` is the only thing
  *     standing between "run that commit" and "run whatever is checked out
  *     there now";
- *   - it is REFUSED with no service named, because a loopback daemon shares
- *     this shell's filesystem and a path sent to it means something a `cd`
- *     already said;
+ *   - it is REFUSED when no service is NAMED, because the default one is the
+ *     daemon for the directory you are already standing in. The check is
+ *     naming, not distance: an explicit `127.0.0.1` origin is accepted;
  *   - and when it is accepted, BOTH values travel verbatim. This side cannot
  *     see the path and must not resolve, normalise or re-read anything about
  *     it.
@@ -62,9 +62,9 @@ describe("odu ci run --checkout", () => {
     );
   });
 
-  it("refuses when no service is named, because a loopback daemon has your cwd", () => {
+  it("refuses when NO service is named, because the default one is where you stand", () => {
     expect(() => runTarget({ checkout: POD, sha: SHA }, NOWHERE)).toThrow(
-      /loopback daemon already has your working directory/,
+      /so say which service/,
     );
   });
 
@@ -76,12 +76,21 @@ describe("odu ci run --checkout", () => {
     expect(at).toEqual({ checkout: POD, sha: SHA });
   });
 
-  it("does not take an EMPTY $ODU_WEB_ORIGIN as one", () => {
+  it("accepts a loopback origin that was NAMED — the check is naming, not distance", () => {
+    // A developer with two daemons on one machine means the one they named,
+    // and the e2e drives exactly this shape. Refusing `127.0.0.1` would be a
+    // rule about addresses that odu has no reason to hold.
+    expect(
+      runTarget({ checkout: POD, sha: SHA, origin: "http://127.0.0.1:18440" }, NOWHERE),
+    ).toEqual({ checkout: POD, sha: SHA });
+  });
+
+  it("does not take an EMPTY $ODU_WEB_ORIGIN as a naming", () => {
     // `export ODU_WEB_ORIGIN=` is a variable that is set and says nothing;
-    // `serviceOrigin` reads it as the default loopback, and so must this.
+    // `serviceOrigin` reads it as the default, and so must this.
     expect(() =>
       runTarget({ checkout: POD, sha: SHA }, { ODU_WEB_ORIGIN: "  " }),
-    ).toThrow(/loopback daemon/);
+    ).toThrow(/so say which service/);
   });
 
   it("refuses a --sha with no --checkout rather than ignoring it", () => {
@@ -103,18 +112,19 @@ describe("what the start asks for", () => {
     expect(input.expectedSha).toBe(SHA);
   });
 
-  it("sends NO hostsFile for a checkout on the service's machine", () => {
-    // An absolute `$ODU_HOSTS` from this laptop names a file that does not
-    // exist over there. Absent is the reading that says "use your own".
-    const input = startInputOf(
+  it("sends this shell's $ODU_HOSTS for EVERY run, --checkout included", () => {
+    // A face does not get to decide that a person's fleet stops applying to
+    // their own run. `--checkout` does not even imply another machine — a
+    // named `http://127.0.0.1:…` is this one — and a path the service has not
+    // got is skipped by `loadHosts`, which falls through to its own chain.
+    const remote = startInputOf(
       { checkout: POD, sha: SHA },
       opts({ checkout: POD, sha: SHA, origin: ORIGIN }),
     );
-    expect("hostsFile" in input).toBe(false);
-  });
-
-  it("still sends this shell's hostsFile for a run in THIS checkout", () => {
-    const input = startInputOf({ checkout: "/code/app", sha: SHA }, opts());
-    expect("hostsFile" in input).toBe(true);
+    const local = startInputOf({ checkout: "/code/app", sha: SHA }, opts());
+    expect(remote.hostsFile).toBe(local.hostsFile);
+    // Always a string, including `""` — the reading that says "my shell has
+    // none", which is different from saying nothing at all.
+    expect(typeof remote.hostsFile).toBe("string");
   });
 });

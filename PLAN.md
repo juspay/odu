@@ -697,11 +697,11 @@ Commits and PR bodies use the earlier names.
     needed, and the earlier plan for a `metrics`-style one is withdrawn. What
     was missing was the CHECKOUT: `odu ci run` computed the laptop's toplevel
     and HEAD, so a shell could not name a path on the pod. `--checkout <abs>`
-    with a required `--sha` sends both verbatim (refused without a remote
-    `--origin`/`ODU_WEB_ORIGIN`, since a loopback daemon has your cwd), and a
-    run now records `actor` — the principal's login, or `local` — so "who
-    started this" is answerable after the fact. The host-side list above stays
-    until 5.1 moves the inventory into org venues.
+    with a required `--sha` sends both verbatim (refused unless a service is
+    named — `--origin`/`ODU_WEB_ORIGIN` — since the default is the daemon for
+    where you stand), and a run now records `actor` — the principal's login,
+    or `local` — so "who started this" is answerable after the fact. The
+    host-side list above stays until 5.1 moves the inventory into org venues.
 
 [^repos]: `run.start` accepts a repository plus a SHA as well as an absolute
     checkout. The in-house VM pool is one org's inventory, and `hosts.json`

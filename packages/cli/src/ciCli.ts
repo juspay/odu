@@ -73,10 +73,13 @@ run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH
                               # start a run in THIS checkout and watch it.
                               # Ctrl-C stops watching; the run keeps going.
                               # --checkout names a path on the SERVICE's
-                              # machine instead (a remote --origin or
-                              # $ODU_WEB_ORIGIN, never a loopback daemon) and
-                              # REQUIRES --sha: the commit you believe is
-                              # there, which the service refuses if it moved.
+                              # machine instead. It needs a service NAMED
+                              # (--origin or $ODU_WEB_ORIGIN; the default is
+                              # the daemon for where you stand) and REQUIRES
+                              # --sha: the commit you believe is there, which
+                              # the service refuses if it moved. Your
+                              # $ODU_HOSTS is still sent; a path the service
+                              # has not got falls through to its own chain.
                               # Every recipe's result* closure is pushed to
                               # the odu cache this repository's flake.nix
                               # nixConfig already reads from, when this daemon

@@ -1071,10 +1071,10 @@ const CheckoutPath = Schema.String;
 const StartInputSchema = Schema.Struct({
   /** ABSOLUTE path of the checkout to run in, ON THE SERVICE'S MACHINE.
    *  Explicit, never the caller's cwd: an MCP host's cwd is not a fact about
-   *  what the user meant, and against a remote daemon it is not even a path
-   *  that exists. From a shell this is `odu ci run --checkout <path> --sha
-   *  <sha>`; without those flags the CLI resolves the checkout it is standing
-   *  in, which only means anything on a loopback daemon. */
+   *  what the user meant, and against a daemon on another machine it is not
+   *  even a path that exists. From a shell this is `odu ci run --checkout
+   *  <path> --sha <sha>`; without those flags the CLI resolves the checkout
+   *  it is standing in, which is a claim about the caller's own filesystem. */
   checkout: Schema.String.check(Schema.isMinLength(1)),
   /** The commit the caller believes that checkout is on. Validated before
    *  acceptance — a checkout that has moved on is a REFUSAL, never a quiet

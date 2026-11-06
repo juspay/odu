@@ -531,31 +531,35 @@ since boot.
 A server may have a **door**: GitHub sign-in, roles, and personal tokens. You are
 told because four things change for an agent.
 
-- **A remote server needs a token.** Set `ODU_TOKEN` to a personal access token
-  (its holder mints one signed in — `odu surface auth token_create --input
-  '{"name":"laptop"}'` — or on the server's profile page) and pass `--origin`
-  (or export `ODU_WEB_ORIGIN`). Every `odu` command and the MCP bridge send it
-  as `Authorization: Bearer` on the connection they open. Without one, the
-  daemon answers only `auth_user_whoami`, `auth_user_grant` and its own
-  identity — every other verb is refused.
-- **A remote run names a remote checkout.** Your cwd is a fact about your
-  machine, so `odu ci run --checkout <abs path on the server> --sha <sha>`
-  sends both verbatim. `--sha` is REQUIRED with `--checkout` (it is the strict
-  gate: a checkout that moved on is refused, not quietly run), and
-  `--checkout` without a named service is refused because a loopback daemon
-  already has your working directory. The run resolves hosts from the
-  SERVER's `$ODU_HOSTS`.
+- **A remote server needs a token.** The FIRST one is minted in a browser, on
+  the server's profile page — `auth_token_create` needs a signed-in session,
+  so a tokenless shell cannot mint it (and on loopback the principal is
+  `local`, which is not signed in either). Store it with `odu auth login
+  <origin> --token odu_…`, or set `ODU_TOKEN`, and pass `--origin` (or export
+  `ODU_WEB_ORIGIN`). Every `odu` command and the MCP bridge send it as
+  `Authorization: Bearer` on the connection they open. Without one, the daemon
+  answers only `auth_user_whoami`, `auth_user_grant` and its own identity —
+  every other verb is refused.
+- **A run on another service names that service's checkout.** Your cwd is a
+  fact about your machine, so `odu ci run --checkout <abs path on the server>
+  --sha <sha>` sends both verbatim. `--sha` is REQUIRED with `--checkout` (the
+  strict gate: a checkout that moved on is refused, not quietly run), and
+  `--checkout` is refused unless a service is NAMED — the check is naming, not
+  distance, so an explicit `http://127.0.0.1:…` is fine; what is refused is
+  the default, the daemon for where you stand. Your `$ODU_HOSTS` is sent as
+  always; a path the server has not got falls through to its own chain.
 
   ```sh
-  odu surface auth token_create --input '{"name":"laptop"}' --json   # signed in; shown once
+  # mint on the server's profile page (a browser), then:
   export ODU_TOKEN=odu_… ODU_WEB_ORIGIN=https://odu.example.com
   odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
   ```
 
 - **A run records who started it.** `run_read` answers `actor` — the token's
   login, or `local` on a loopback daemon — and the board and `odu ci history
-  list` show `started by <login>`. Provenance, not authority: revoking a token
-  stops the next call, not a run already launched.
+  list --all` show `started by <login>` (`--all`, because such a run's
+  checkout is a path on the server, not yours). Provenance, not authority:
+  revoking a token stops the next call, not a run already launched.
 - **Your role bounds what you may do.** `member` starts, retries and cancels
   runs; `admin` also administers cache buckets; `owner` grants roles. On a
   daemon with a door the ROOT TOKEN is not an administrator — it bootstraps the
@@ -584,10 +588,10 @@ MCP resources: `surface://cells/service`, `surface://collections/runs`,
 
 `odu ci run` is the human's one-shot spelling of the same thing: it calls
 `run_start` for the checkout you are standing in and then observes. Its options
-are `run_start`'s inputs plus six of its own — `--checkout` with `--sha` (name
-a checkout on a REMOTE service instead of this one; see "Signing in"),
-`--no-wait` (start and return without observing), `--request-id`, `--origin`
-and `-o json`. Ctrl-C stops observing; the run keeps going.
+are `run_start`'s inputs plus six of its own — `--checkout` with `--sha` (a
+checkout on a service you NAME instead of the one you stand in; see "Signing
+in"), `--no-wait` (start and return without observing), `--request-id`,
+`--origin` and `-o json`. Ctrl-C stops observing; the run keeps going.
 
 ## Refusals, and what to do about them
 
@@ -759,11 +763,12 @@ declares.
   laptop no longer has to be standing in the repository the run is about.
   `--sha` is required with `--checkout` (the strict gate compares what the
   caller believes, never a value the service supplied itself), and
-  `--checkout` is refused without a named remote service, because a loopback
-  daemon already has your cwd. The run then resolves hosts from the SERVER's
-  `$ODU_HOSTS`. Every run also records `actor` — the connection's principal,
-  a login or `local` — answered by `run_read` and shown as `started by
-  <login>` on the board and in `odu ci history list`. It is provenance, not
+  `--checkout` is refused unless a service is NAMED (`--origin` or
+  `$ODU_WEB_ORIGIN`; the check is naming, not distance — the default is the
+  daemon for where you stand). Your `$ODU_HOSTS` is still sent. Every run
+  also records `actor` — the connection's principal, a login or `local` —
+  answered by `run_read` and shown as `started by <login>` on the board and
+  in `odu ci history list --all`. It is provenance, not
   authority: a revoked token stops the next call, not a launched run.
 - **Each row versions its own surface.** The host is at 2.5, `ci` at 2.6, `cache` at 4.6,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the

@@ -350,10 +350,12 @@ export function checkoutHere(cwd: string = process.cwd()): string {
  *     one would have to borrow this laptop's HEAD (a different repository's
  *     commit) or let the service fill in its own — which is the gate comparing
  *     a value against itself and passing for ever.
- *   - **`--checkout` needs a remote service.** A loopback daemon shares this
- *     shell's filesystem, so naming a path there is at best what `cd` already
- *     does and at worst a run in a directory the caller has not looked at.
- *     Pointing somewhere is `--origin`, or `$ODU_WEB_ORIGIN` for a whole shell.
+ *   - **`--checkout` needs a service NAMED.** The check is naming, not
+ *     distance: an explicit `--origin http://127.0.0.1:18440` is accepted, and
+ *     so it should be — a developer with two daemons on one machine means the
+ *     one they named. What is refused is the DEFAULT, where naming a path the
+ *     caller is not standing in is at best what `cd` already does. Name it
+ *     with `--origin`, or `$ODU_WEB_ORIGIN` for a whole shell.
  */
 export function runTarget(
   opts: { checkout?: string; sha?: string; origin?: string; cwd?: string },
@@ -383,9 +385,10 @@ export function runTarget(
       : env[SERVICE_ORIGIN_ENV]);
   if (named === undefined) {
     throw new Error(
-      "odu: --checkout names a path on the SERVICE's machine, and no service " +
-        "was named — a loopback daemon already has your working directory. " +
-        `Pass --origin https://…, or export $${SERVICE_ORIGIN_ENV}.`,
+      "odu: --checkout names a path on the SERVICE's machine, so say which " +
+        "service — this command was given none, and the default one is the " +
+        "daemon for the directory you are already standing in. " +
+        `Pass --origin <url>, or export $${SERVICE_ORIGIN_ENV}.`,
     );
   }
   // VERBATIM, both. The path is resolved where it exists and the commit is

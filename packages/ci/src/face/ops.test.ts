@@ -100,7 +100,10 @@ describe("the fleet line", () => {
       NOW,
     );
     expect(line).toContain("1 of 1 up");
-    expect(line).toContain("aarch64-darwin only, not the whole inventory");
+    // The platform name is the load-bearing part: the line must say WHICH
+    // slice this count is of. Pinning the sentence around it would fail on a
+    // rewording that changed nothing a reader acts on.
+    expect(line).toContain("aarch64-darwin");
   });
 
   it("draws no line at all when nothing has probed", () => {

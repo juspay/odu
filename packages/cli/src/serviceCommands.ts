@@ -127,8 +127,8 @@ export interface RunOpts {
  *
  * Pure and exported so the two claims it carries can be stated rather than
  * inferred from a live service: the target travels VERBATIM (whatever
- * `runTarget` resolved, this does not touch), and `$ODU_HOSTS` travels only
- * when this shell is the run's world.
+ * `runTarget` resolved, this does not touch), and `$ODU_HOSTS` travels for
+ * EVERY run, `--checkout` included.
  */
 export function startInputOf(at: Here, opts: RunOpts) {
   return {
@@ -151,15 +151,17 @@ export function startInputOf(at: Here, opts: RunOpts) {
     // way, and saying nothing would mean "use the service's own" — right
     // for an agent, wrong for the person who just unset the variable.
     //
-    // EXCEPT for `--checkout`, which is the one case where this shell is
-    // not the run's world at all: the path is on the service's machine,
-    // and an absolute `$ODU_HOSTS` from a laptop names a file that does
-    // not exist there. Absent is the reading that says "I have no shell
-    // in this world" — the service's own inventory stands, which is the
-    // fleet the named checkout's runs have always used.
-    ...(opts.checkout === undefined
-      ? { hostsFile: hostsFileHere(opts.cwd) }
-      : {}),
+    // `--checkout` IS NOT AN EXCEPTION, and an earlier revision of this
+    // function made it one. Dropping the variable there was a face deciding,
+    // silently, that a person's fleet did not apply to their own run — and
+    // the flag does not even imply a different machine: a service named as
+    // `http://127.0.0.1:18440` is this one. It is also unnecessary. A path
+    // that does not exist on the service is SKIPPED by `loadHosts`
+    // (`existsSync` → next candidate), so a laptop's `$ODU_HOSTS` naming a
+    // file the pod has not got falls through to the service's own
+    // `~/.config/odu/hosts.json` — the same answer dropping it would have
+    // produced, reached by the rule that was already written down.
+    hostsFile: hostsFileHere(opts.cwd),
     ...(opts.root === undefined ? {} : { root: opts.root }),
     noDeps: opts.noDeps,
     noStrict: opts.noStrict,

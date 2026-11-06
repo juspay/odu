@@ -188,14 +188,15 @@ MCP, `odu surface`, and the browser use the same local service. The agent loop i
 
 The listener stays on loopback. An SSH forward, a Tailscale name or a proxy that keeps the Host header works with no configuration: the service answers to whatever name it is reached by. In the loopback shape anyone who can reach that name can control CI; configure a GitHub App — [server mode](https://odu.kolu.dev/docs/#server-mode) — and they meet a sign-in page, with roles deciding what they may do. Only a proxy that rewrites Host needs its browser origin admitted with `ODU_WEB_ALLOWED_ORIGINS`. See the [access guide](https://odu.kolu.dev/docs/#access-through-tailscale-or-a-proxy).
 
-**Drive a remote server from your shell.** Sign in once, mint a personal token (`odu surface auth token_create --input '{"name":"laptop"}'`), and point a shell at it. `--checkout` names a path on the SERVER and `--sha` the commit you believe is there; a checkout that moved on is refused, never quietly run.
+**Drive a remote server from your shell.** The first token is minted on the server's **profile page** in a browser (your name at the foot of the rail). Then name the service — `--checkout` is refused unless one is, because the default is the daemon for where you are standing — and name the commit: `--sha` is what the service refuses a moved-on checkout against.
 
 ```sh
+# mint on the server's profile page (a browser), then:
 export ODU_TOKEN=odu_… ODU_WEB_ORIGIN=https://odu.example
 odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
 ```
 
-Every run records **who started it** — the token's person, or `local` on a loopback daemon — shown as `started by <login>` on the run's header and in `odu ci history list`, and answered by `run_read`.
+Every run records **who started it** — the token's person, or `local` on a loopback daemon — shown as `started by <login>` on the run's header and in `odu ci history list --all`, and answered by `run_read`. (`--all`, because a run started this way has the SERVER's path as its checkout, not yours.)
 
 ## Develop
 
