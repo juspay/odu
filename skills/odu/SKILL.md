@@ -141,14 +141,17 @@ consumer keeps in order to READ from a bucket — is the whole declaration;
 `run_start` resolves it, and every recipe's `result*` closure is pushed to the
 one odu cache the serving daemon has. There is no request field, no flag, no
 recipe step and no token in the tree: do NOT add `odu cache push` to a justfile
-to get this. `run_read` answers `push` — the bucket and how much landed, or
-`target: null` and a `skipped` reason saying why nothing was pushed (no flake, no odu
+to get this. `run_read` answers `push` — the bucket, `paths` and `present`
+(what the bucket already served, so `paths - present` is what this run actually
+sent), `bytes`, and `failedOn`, the nodes whose push failed — or `target: null`
+and a `skipped` reason saying why nothing was pushed (no flake, no odu
 cache named there, or one this daemon does not serve). A push that fails makes
 that node RED, so a green run means the cache is warm — and the push is its own
 STEP, with its own state (`pushing`, `pushed`, `push failed`), its own segment
-on the run page's timeline and its own log (`log_read`'s `stream: "push"`).
-Two odu caches this daemon serves is a `checkout_refused` at start naming both:
-a repository builds for one cache.
+on the run page's timeline and its own log (`log_read`'s `stream: "push"`),
+where the client's whole failure — the address it dialled and every cause
+under it — is written. Two odu caches this daemon serves is a
+`checkout_refused` at start naming both: a repository builds for one cache.
 
 **Lost replies are why `requestId` exists.** Mint one id per *intent*, never per
 attempt. If a reply is lost — a timeout, a killed tool call, a restarted harness

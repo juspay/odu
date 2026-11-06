@@ -33,9 +33,12 @@ const LEDGER: ContractLedger = {
   // venue state, so the kept reading can be republished while a probe is
   // still dialling. PLAN 4.1's second half made the push a STEP: a node's
   // `pushed` counts are gone, replaced by `push` — a state (`pushing` |
-  // `pushed` | `failed`) carrying its counts only when there are counts to
-  // carry, so a node mid-push and a node that failed to push are sayable at
-  // all; `log_read` gained `stream`, absent meaning the recipe's log, so one
+  // `pushed` | `failed`) that carries `stored` (what this node put on the
+  // bucket) and `present` (what the bucket already served) APART, where one
+  // `paths` used to report their sum and so read as traffic that never
+  // happened — and only when there are counts to carry, so a node mid-push
+  // and a node that failed to push are sayable at all;
+  // `log_read` gained `stream`, absent meaning the recipe's log, so one
   // key addresses both of an attempt's outputs; and the wait/read answer's
   // `push` gained `failedOn` and `present`, both optional because that struct
   // shipped in 2.5 and a required field there would make every answer about a
@@ -53,7 +56,7 @@ const LEDGER: ContractLedger = {
   // describes is the one being written. The rule the message states — never
   // rewrite a historical line — is about a number somebody could already be
   // running.
-  "2.6": "PENDING",
+  "2.6": "e2f201e5520f3c25",
 };
 
 describe("the ci row's contract", () => {

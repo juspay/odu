@@ -53,14 +53,14 @@ Then("the run header totals what the run pushed", async function (this: OduWorld
   await this.saysThat(
     this.page.locator(".detail-push-total"),
     "the run header's push total",
-    "pushed 1 path",
+    "1 pushed",
   );
 });
 
 Then("the node {string} shows its push step", async function (this: OduWorld, id: string) {
   const step = this.nodeRow(id).first().locator(".node-push-step");
   await this.saysThat(step, `the push step of ${id}`, `pushed → ${arranged(this).bucket}`);
-  await this.saysThat(step, `the push step of ${id}`, "1 path");
+  await this.saysThat(step, `the push step of ${id}`, "1 pushed");
 });
 
 Then("the node {string} shows no push step", async function (this: OduWorld, id: string) {
@@ -82,3 +82,50 @@ When("I read the push log", async function (this: OduWorld) {
     .getByRole("button", { name: "Push", exact: true })
     .click();
 });
+
+/**
+ * The two halves of the pod's second defect, which no assertion could have
+ * caught before: the Push tab showed the RECIPE's log under the push's name,
+ * and the number beside that name was the recipe's `9.0 KiB`.
+ *
+ * The size is NOTED on the recipe tab and compared on the push tab rather
+ * than matched against a literal, because the figure is whatever this
+ * machine's `seq 1 400` came to — and a literal would be the kind of
+ * incidental-wording assertion that pins a fixture's arithmetic instead of
+ * the behaviour. What is behavioural is that the two tabs do not report ONE
+ * number: the fixture's recipe prints four hundred lines so that "the push
+ * tab is reading the other file" and "the push tab is reading its own file"
+ * cannot round to the same answer.
+ */
+Then("I note the log panel's size", async function (this: OduWorld) {
+  const meta = this.page.locator(".log-meta").first();
+  await this.waitUntil(
+    async () => (await meta.innerText()).trim() !== "",
+    "the log panel to report the recipe's size",
+  );
+  this.rowState.set("ci.push.recipeMeta", (await meta.innerText()).trim());
+});
+
+Then(
+  "the log panel names the push log at a size of its own",
+  async function (this: OduWorld) {
+    const noted = this.rowState.get("ci.push.recipeMeta");
+    assert.ok(typeof noted === "string", "the recipe tab's size was never noted");
+    const meta = this.page.locator(".log-meta").first();
+    // The push stream's size arrives with the follow's first page, not with a
+    // paging click — which is the half of this defect a reader would never
+    // think to press a button for.
+    await this.saysThat(meta, "the log panel on the Push tab", "push log · ");
+    const said = (await meta.innerText()).trim();
+    assert.notStrictEqual(
+      said,
+      noted,
+      `the Push tab reports the recipe's own readout (${JSON.stringify(said)})`,
+    );
+    assert.ok(
+      !said.includes(noted),
+      `the Push tab's size is the recipe's: it read ${JSON.stringify(said)} ` +
+        `and the recipe tab read ${JSON.stringify(noted)}`,
+    );
+  },
+);

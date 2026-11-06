@@ -22,6 +22,8 @@ Feature: A node's cache push is its own step
     And the node "_ci-setup@" shows no push step
     When I open the output of "warm@"
     Then the output does not hold "[odu] pushing"
+    And I note the log panel's size
     When I read the push log
     Then the output holds "[odu] pushing 1 result path"
+    And the log panel names the push log at a size of its own
     And there should be no page errors
