@@ -77,6 +77,8 @@ import type { TaskSpec } from "../common/spec";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { asHostSlot, fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
+import { takePushToken } from "./launcher";
+import { type PushedFact, pushEnvFor } from "../runner/pushResults";
 import {
   ExecutionRoster,
   type ExecutionLane,
@@ -178,6 +180,25 @@ export interface RunArgs {
   /** The launcher's idempotency key, recorded on the manifest so a receipt and
    *  a run can be matched up after the fact. */
   requestId?: string;
+  /**
+   * WHERE THIS RUN PUSHES WHAT IT BUILDS (PLAN 4.1) — the substituter the
+   * checkout's `flake.nix` reads from, the ORIGIN and bucket the daemon
+   * resolved it to, and the id the run's write token is revoked by.
+   *
+   * `origin` and `bucket` come from the daemon's own record of what it
+   * serves, never from a `nix-cache-info` body: the lane pushes to them
+   * directly and asks no server what it is.
+   *
+   * The TOKEN is not here: the launcher left it in `runs/<id>/push.token` and
+   * this process reads and unlinks it at startup. Absent for a run that pushes
+   * nothing, which is every run whose checkout names no cache the daemon that
+   * launched it serves.
+   */
+  push?: { substituter: string; origin: string; bucket: string; tokenId: string };
+  /** The ONE line the setup node's log says about pushing — a skip reason, or
+   *  the `trusted-public-keys` warning. Absent when there is nothing to say. */
+  pushSkipped?: string;
+  pushKeyWarning?: string;
 }
 
 /**
@@ -617,10 +638,36 @@ async function orchestrate(
     }
   }
 
+  // ── WHERE THIS RUN PUSHES (PLAN 4.1) ──
+  //
+  // The token the launcher left beside this run's own log, read ONCE and
+  // unlinked: from here it exists in this process's memory and in the
+  // `run.configure` payload each lane is sent, and nowhere a second reader
+  // could find it. A missing file with `--push` set is a launch that was never
+  // given one, so the run proceeds without pushing rather than refusing — the
+  // same answer as a checkout that names no cache.
+  const pushToken = args.push === undefined ? null : takePushToken(args.runId);
+  const pushing = args.push !== undefined && pushToken !== null ? args.push : null;
+  /** The variables a lane's recipe node carries so the runner can push what it
+   *  built: the RESOLVED origin and bucket, and the run's token. Composed by
+   *  the module that PARSES them, so the two halves of that wire cannot drift
+   *  apart. Empty for a run that pushes nothing, so no task gains a key. */
+  const pushEnv = pushEnvFor(
+    pushing === null || pushToken === null
+      ? null
+      : { origin: pushing.origin, bucket: pushing.bucket, token: pushToken },
+  );
+  /** Every task, with the push environment on it. Applied HERE, once, where a
+   *  lane's task list is first built — so a shard lane, an extend and a
+   *  resurrection all carry it without a second place remembering to. */
+  const withPushEnv = (tasks: readonly TaskSpec[]): TaskSpec[] =>
+    Object.keys(pushEnv).length === 0
+      ? [...tasks]
+      : tasks.map((task) => ({ ...task, env: { ...(task.env ?? {}), ...pushEnv } }));
   const platforms = Object.keys(poolsByPlatform).sort();
   const tasksByPlatform = new Map<string, TaskSpec[]>();
   for (const platform of platforms) {
-    const tasks = laneTasks(spec, platform, selectors, args.noDeps);
+    const tasks = withPushEnv(laneTasks(spec, platform, selectors, args.noDeps));
     if (tasks.length > 0) {
       const sharded = tasks.filter((task) => task.shards !== undefined);
       if (args.linger && sharded.length > 0) {
@@ -783,6 +830,19 @@ async function orchestrate(
     ...(args.runId === undefined ? {} : { runId: args.runId }),
     ...(args.parentRunId === undefined ? {} : { parentRunId: args.parentRunId }),
     ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
+    // WHERE THIS RUN PUSHES, as a durable fact about the run (PLAN 4.1). The
+    // token id so a finalize can revoke it; never the token.
+    ...(args.push === undefined &&
+    args.pushSkipped === undefined &&
+    args.pushKeyWarning === undefined
+      ? {}
+      : {
+          push: {
+            target: args.push ?? null,
+            skipped: args.pushSkipped ?? null,
+            keyWarning: args.pushKeyWarning ?? null,
+          },
+        }),
   });
   // On stderr (every face's `info` writes there), so the NDJSON stdout contract
   // `--progress json` promises is untouched. This one line is how an operator
@@ -1798,11 +1858,26 @@ async function orchestrate(
     verdicts.boundIfOnlyLogsOutstanding();
   };
 
-  const updateNode = (id: string, patch: Partial<NodeState>): void => {
+  /**
+   * Mirror a lane node onto the public one.
+   *
+   * `drop` RETRACTS keys, which a spread cannot do: `pushed` is the only
+   * optional fact a node can stop having, and a rerun is where it stops —
+   * `{ pushed: undefined }` would spread the key back in and read as present
+   * to anything that asks. The lane's own `setNode` takes the same argument
+   * for the same reason; a mirror that could only ADD left a reran node
+   * painting the push it had not yet redone, on the board and in `run_read`.
+   */
+  const updateNode = (
+    id: string,
+    patch: Partial<NodeState>,
+    drop: readonly (keyof NodeState)[] = [],
+  ): void => {
     const cur = store.get();
     const prev = cur.nodes[id];
     if (prev === undefined) return;
     const next = { ...prev, ...patch };
+    for (const key of drop) delete next[key];
     // Shallow equality over the keys the PATCH names, not over three chosen
     // ones. The signature says `Partial<NodeState>` and the spread above
     // applies all of it, so a three-field guard silently discarded any patch
@@ -1811,7 +1886,12 @@ async function orchestrate(
     // transition side effect below stays gated on `next.status !== prev.status`
     // exactly as before, so nothing fires for a non-status change.
     const keys = Object.keys(patch) as (keyof NodeState)[];
-    if (keys.every((k) => next[k] === prev[k])) return;
+    if (
+      keys.every((k) => next[k] === prev[k]) &&
+      drop.every((k) => prev[k] === undefined)
+    ) {
+      return;
+    }
     runtime.ctx.cells.nodes.set({
       ...cur,
       nodes: { ...cur.nodes, [id]: next },
@@ -1856,6 +1936,42 @@ async function orchestrate(
       if (payload !== null) poster.post(payload);
       checkSettled();
     }
+  };
+
+  /** What each node's push has already been journalled AS. A lane republishes
+   *  its whole state on every frame, so a bare "seen" set would write one
+   *  push once per subsequent node — and keying it by node ALONE meant a
+   *  re-run's push was never written at all, leaving the journal (and so
+   *  `run_read`, once the coordinator is gone) on the first attempt's counts
+   *  while the live board showed the new ones. The VALUE is the key. */
+  const pushJournalled = new Map<string, string>();
+  /**
+   * A lane node says it pushed (PLAN 4.1): put the counts on the public node
+   * so the board can paint them, and the fact in the journal so a run read a
+   * week later still says what it warmed.
+   */
+  const notePushed = (id: string, pushed: PushedFact): void => {
+    updateNode(id, { pushed });
+    if (pushing === null) return;
+    const stamp = `${pushed.paths}:${pushed.bytes}:${pushed.durationMs}`;
+    if (pushJournalled.get(id) === stamp) return;
+    pushJournalled.set(id, stamp);
+    history.pushed({ node: id, bucket: pushing.bucket, ...pushed });
+  };
+
+  /**
+   * A lane node no longer claims a push (PLAN 4.1): it was reset for a rerun,
+   * and what the previous attempt warmed is not what this one did.
+   *
+   * The public node drops the key, and the STAMP goes with it — a rerun that
+   * pushes the same paths again would otherwise match the stamp of the push
+   * just retracted, write no journal line, and leave the retraction standing
+   * over a node that did push. The journal's own retraction is the
+   * `attempt_started` line the rerun already wrote; the fold reads it.
+   */
+  const dropPushed = (id: string): void => {
+    updateNode(id, {}, ["pushed"]);
+    pushJournalled.delete(id);
   };
 
   const installShardNodes = (platform: string, plan: ShardPlan): void => {
@@ -1923,6 +2039,30 @@ async function orchestrate(
     const id = fanId(SETUP, platform);
     if (store.get().nodes[id]?.status !== "pending") return;
     updateNode(id, { status: "running", startedAt: Date.now() });
+    // THE ONE LINE THIS RUN OWES ABOUT PUSHING (PLAN 4.1) — where it is
+    // pushing, or why it is not. Written here because `_ci-setup` is the node
+    // every face already opens first, and because a run must be able to say
+    // "nothing went to a cache" without an operator having to deduce it from
+    // an absence.
+    if (pushing !== null) {
+      appendLocal(
+        id,
+        `[odu] pushing results to ${pushing.substituter} (bucket ${pushing.bucket})\n`,
+      );
+      if (args.pushKeyWarning !== undefined) {
+        appendLocal(id, `[odu] ${args.pushKeyWarning}\n`);
+      }
+    } else {
+      // THE REASON, read off the field that holds exactly it. A resolved
+      // target whose token never arrived has no skip reason of its own —
+      // nothing refused it, the handover did — so that case says so here and
+      // the resolution's sentence stays the resolution's.
+      const why =
+        args.push !== undefined
+          ? "the run's write token was not handed over"
+          : (args.pushSkipped ?? "this run was launched with no cache target");
+      appendLocal(id, `[odu] not pushing: ${why}\n`);
+    }
   };
 
   /** Provisioning can emit thousands of lines in one transport callback. The
@@ -2624,6 +2764,10 @@ async function orchestrate(
             startedAt: laneNode.startedAt,
             durationMs: laneNode.durationMs,
           });
+          // AND THE RETRACTION. A lane node that was reset for a rerun drops
+          // its `pushed`, and the mirror must follow it down as well as up.
+          if (laneNode.pushed === undefined) dropPushed(id);
+          else notePushed(id, laneNode.pushed);
           const plan = planFor(platform, laneId);
           if (plan !== undefined) {
             refreshShardAggregate(platform, plan);
@@ -3154,6 +3298,8 @@ async function orchestrate(
               // the whole burst lane settles.
               if (laneId === SETUP) updateNode(publicId, patch);
               else verdicts.offer(publicId, patch);
+              if (laneNode.pushed === undefined) dropPushed(publicId);
+              else notePushed(publicId, laneNode.pushed);
               if (laneId === plan.rootId) {
                 refreshShardAggregate(platform, plan);
               }

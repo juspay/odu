@@ -27,7 +27,11 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   credentialsPath as sharedCredentialsPath,
   normalizeOrigin,
@@ -165,6 +169,59 @@ export interface DescribedCache {
   bucket: string;
 }
 
+/** How much of a `nix-cache-info` is worth reading. The real file is five
+ *  short lines; the bound exists because the URL can come from a repository. */
+const CACHE_INFO_MAX_BYTES = 8 * 1024;
+
+/** How much of a REFUSAL is worth reading. Every message built from one of
+ *  these becomes a line in a node's log and, through a failed push, a run's
+ *  red verdict — and the server that wrote it is whatever address the push
+ *  went to, which for an inferred target a repository chose. A sentence is a
+ *  few hundred bytes; the rest is somebody filling this process's memory. */
+const ERROR_BODY_MAX_BYTES = 4 * 1024;
+
+/**
+ * The first `limit` bytes of a response, READ AS THEY ARRIVE and then stopped.
+ *
+ * `(await response.text()).slice(limit)` is not a bound: it buffers whatever
+ * the server sends and truncates afterwards, so a URL out of somebody's
+ * `flake.nix` answering a gigabyte costs a gigabyte of this process's memory
+ * before a single byte is discarded. Reading the stream lets the cancel
+ * happen at the limit, which also closes the connection.
+ *
+ * Decoded as UTF-8 with no regard for a character split across the cut: this
+ * reads `Key: value` ASCII lines, and the only cost of a mangled final rune
+ * is a field that does not parse — on a body already eight kilobytes past
+ * where a real `nix-cache-info` ended.
+ */
+async function boundedText(response: Response, limit: number): Promise<string> {
+  const body = response.body;
+  if (body === null) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let held = 0;
+  try {
+    while (held < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const take = value.subarray(0, limit - held);
+      chunks.push(take);
+      held += take.length;
+    }
+  } finally {
+    // CANCEL, not just release: a server still streaming must be hung up on
+    // rather than left to fill a buffer nobody reads.
+    await reader.cancel().catch(() => {});
+  }
+  const joined = new Uint8Array(held);
+  let at = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, at);
+    at += chunk.length;
+  }
+  return new TextDecoder().decode(joined);
+}
+
 export async function describeCache(
   substituter: string,
   send: typeof fetch = fetch,
@@ -199,7 +256,7 @@ export async function describeCache(
           "may read this bucket";
     throw new Error(`${url} answered ${response.status} ${why}`);
   }
-  const text = await response.text();
+  const text = await boundedText(response, CACHE_INFO_MAX_BYTES);
   const origin = infoField(text, ODU_ORIGIN_FIELD);
   const bucket = infoField(text, ODU_BUCKET_FIELD);
   if (origin === null || bucket === null) {
@@ -256,8 +313,375 @@ function infoField(text: string, field: string): string | null {
   return null;
 }
 
-/** The token, in the order the docs promise: `--token-file`, then
- *  `$ODU_CACHE_TOKEN`, then the credentials entry for the bucket's origin. */
+// ── what a repository already says about its cache ──────────────────────────
+
+/**
+ * THE ONE DECLARATION A REPOSITORY ALREADY HAS — `flake.nix`'s `nixConfig`
+ * (PLAN 4.1).
+ *
+ * A repo that reads from an odu cache names it exactly once, in the
+ * `extra-substituters` line a consumer pastes out of `odu cache use`. Nothing
+ * else needs to be true for a run to push there: no recipe step, no token in
+ * the tree, no `.odu` key, no second place a bucket name can go stale.
+ *
+ * **`-f flake.nix`, not `nix flake metadata`.** `nixConfig` is a plain attrset
+ * at the top of the file, so evaluating the FILE answers it without fetching a
+ * single input — which on a cold checkout is the difference between a
+ * millisecond and a download of nixpkgs. The cost is that a `nixConfig` built
+ * by a `let` over an input would not evaluate; no repository writes one, and a
+ * failure is reported rather than guessed at.
+ *
+ * **A value is a string or a list.** Nix accepts both spellings for every
+ * multi-valued setting, and a repository that writes
+ * `extra-substituters = "a b"` means the same two caches as one that writes a
+ * list of two.
+ */
+export interface FlakeNixConfig {
+  /** `substituters` ∪ `extra-substituters`, in declaration order. */
+  substituters: readonly string[];
+  /** `trusted-public-keys` ∪ `extra-trusted-public-keys`. */
+  trustedPublicKeys: readonly string[];
+}
+
+export type FlakeNixConfigOutcome =
+  | { ok: true; config: FlakeNixConfig }
+  /** No `flake.nix`, or one `nix eval` would not read. `reason` is a sentence
+   *  naming which — it is what a run's setup log prints, so it has to say why
+   *  nothing was pushed rather than merely that nothing was. */
+  | { ok: false; reason: string };
+
+/** How a `nix eval` is run. ASYNC, because this is reached from `run.start`
+ *  on a daemon that is one event loop: a synchronous evaluation of somebody
+ *  else's `flake.nix` froze the board, every projection and another run's
+ *  in-flight upload for as long as `nix` took, and `nixConfig = let f = x: f
+ *  x; in f 1` is how long that is. Injected so the resolver's arms — no
+ *  flake, an eval error, a `nixConfig` of the wrong shape — are stated
+ *  without a Nix. */
+export type NixEval = (
+  dir: string,
+) => Promise<{ ok: true; json: string } | { ok: false; stderr: string }>;
+
+/** One multi-valued `nixConfig` setting as a list of words, from either
+ *  spelling. Anything else (a number, a bool, a nested attrset) contributes
+ *  nothing: the settings this reads are lists of strings and a repository that
+ *  wrote something else did not name a substituter. */
+function settingWords(value: unknown): string[] {
+  if (typeof value === "string") {
+    return value.split(/\s+/).filter((word) => word !== "");
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => (typeof item === "string" ? settingWords(item) : []));
+  }
+  return [];
+}
+
+/** Both spellings of one setting, in declaration order and without repeats. */
+function unioned(config: Record<string, unknown>, plain: string): string[] {
+  const out: string[] = [];
+  for (const key of [plain, `extra-${plain}`]) {
+    for (const word of settingWords(config[key])) {
+      if (!out.includes(word)) out.push(word);
+    }
+  }
+  return out;
+}
+
+/** How long a `nixConfig` evaluation may take. It fetches nothing and parses
+ *  one file, so this is a backstop against a hostile or hung `nix`, not a
+ *  budget — and it is enforced by killing the process GROUP, because `nix`
+ *  forks. */
+export const FLAKE_EVAL_TIMEOUT_MS = 20_000;
+
+/** How much of a `nix eval` answer is worth reading. A `nixConfig` is a few
+ *  hundred bytes; anything past this is a repository trying to make a parser
+ *  the expensive part of a run. */
+const FLAKE_EVAL_MAX_STDOUT = 64 * 1024;
+
+/** How much of `nix`'s complaint survives into the run's record. The reason
+ *  becomes an argv (`--push-note`), a durable manifest field and a line in a
+ *  log, and a repository controls every byte of it. */
+export const FLAKE_EVAL_MAX_STDERR = 512;
+
+/**
+ * `nixConfig`, EVALUATED UNDER RESTRAINT.
+ *
+ * `flake.nix` is the least trusted input odu has: on `odu ci run` over a
+ * contributor's branch it is attacker-controlled, and this is the one place a
+ * repository's own expressions execute ON THE SERVICE. Four things bound it,
+ * and each closes a specific hole rather than being belt and braces:
+ *
+ *   - **an explicit, minimal environment.** The daemon's own environment is
+ *     where `$ODU_ROOT_TOKEN` lives, and `builtins.getEnv` would have read it
+ *     into a published skip reason. Nothing of this process's environment is
+ *     inherited; `HOME` and `TMPDIR` are a scratch directory, `NIX_PATH` is
+ *     empty, and the only variables forwarded are the ones that LOCATE a Nix
+ *     store.
+ *   - **`restrict-eval`**, with the checkout as the single search path. This
+ *     is what stops `builtins.readFile /etc/shadow`, `builtins.fetchurl` and
+ *     every other reach outside the repository — and, as a side effect Nix
+ *     documents, makes `getEnv` answer `""` whatever the environment holds.
+ *   - **`allow-import-from-derivation false`**, so an evaluation cannot
+ *     become a BUILD on the service host.
+ *   - **a process-group kill on the deadline**, because `nix` forks and
+ *     killing the direct child alone leaves the evaluation running.
+ *
+ * `pure-eval` is explicitly OFF: it is incompatible with reading a file by
+ * path at all, which is the whole operation. `restrict-eval` is what carries
+ * the containment, and `--extra-experimental-features nix-command` is passed
+ * because the synthetic `HOME` means a single-user install's own `nix.conf`
+ * is not read.
+ */
+export function nixEvalFlakeConfig(parentEnv: NodeJS.ProcessEnv): NixEval {
+  return async (dir) => {
+    const scratch = mkdtempSync(join(tmpdir(), "odu-nixconfig-"));
+    try {
+      return await runNixEval(dir, scratch, parentEnv);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  };
+}
+
+async function runNixEval(
+  dir: string,
+  scratch: string,
+  parentEnv: NodeJS.ProcessEnv,
+): Promise<{ ok: true; json: string } | { ok: false; stderr: string }> {
+  const child = spawn(
+    "nix",
+    [
+      "eval",
+      "--json",
+      "--extra-experimental-features",
+      "nix-command",
+      "--option",
+      "restrict-eval",
+      "true",
+      "--option",
+      "pure-eval",
+      "false",
+      "--option",
+      "allow-import-from-derivation",
+      "false",
+      "-I",
+      `src=${dir}`,
+      "--expr",
+      "(import <src/flake.nix>).nixConfig",
+    ],
+    {
+      cwd: scratch,
+      // DETACHED so the deadline can take the whole group: `nix` forks, and a
+      // kill aimed at the direct child leaves the evaluation burning a core.
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: minimalNixEnv(scratch, parentEnv),
+    },
+  );
+  const { promise, resolve } = Promise.withResolvers<
+    { ok: true; json: string } | { ok: false; stderr: string }
+  >();
+  let out = "";
+  let err = "";
+  let timedOut = false;
+  child.stdout?.setEncoding("utf-8");
+  child.stderr?.setEncoding("utf-8");
+  child.stdout?.on("data", (chunk: string) => {
+    if (out.length < FLAKE_EVAL_MAX_STDOUT) out += chunk;
+  });
+  child.stderr?.on("data", (chunk: string) => {
+    // Twice the published bound, so the LAST line is still whole when the
+    // trace above it is long.
+    if (err.length < FLAKE_EVAL_MAX_STDERR * 2) err += chunk;
+  });
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    killGroup(child.pid);
+  }, FLAKE_EVAL_TIMEOUT_MS);
+  deadline.unref?.();
+  const finish = (outcome: { ok: true; json: string } | { ok: false; stderr: string }): void => {
+    clearTimeout(deadline);
+    resolve(outcome);
+  };
+  child.on("error", (error) =>
+    finish({ ok: false, stderr: error instanceof Error ? error.message : String(error) }),
+  );
+  child.on("close", (code) => {
+    if (timedOut) {
+      finish({ ok: false, stderr: `nix eval did not finish within ${FLAKE_EVAL_TIMEOUT_MS}ms` });
+      return;
+    }
+    if (code === 0) {
+      finish({ ok: true, json: out });
+      return;
+    }
+    finish({ ok: false, stderr: lastLine(err) });
+  });
+  return promise;
+}
+
+/** The whole environment a `nixConfig` evaluation gets, out of the one the
+ *  composition root handed in. Nothing else of the daemon's: see
+ *  {@link nixEvalFlakeConfig}. The three `NIX_*` names forwarded LOCATE a
+ *  store (a daemon socket, a chroot store) and carry no credential. */
+function minimalNixEnv(scratch: string, parentEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    PATH: parentEnv.PATH ?? "/usr/bin:/bin",
+    HOME: scratch,
+    TMPDIR: scratch,
+    NIX_PATH: "",
+  };
+  for (const key of ["NIX_REMOTE", "NIX_STORE_DIR", "NIX_STATE_DIR"]) {
+    const value = parentEnv[key];
+    if (value !== undefined && value !== "") env[key] = value;
+  }
+  return env;
+}
+
+/** Kill a detached child's whole process group, best effort. */
+function killGroup(pid: number | undefined): void {
+  if (pid === undefined) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // Already gone, or never a group leader. Either way there is nothing to
+    // stop and nothing a caller could do about it.
+  }
+}
+
+/** THE LAST LINE of a `nix` complaint, which is where the fault is; the ones
+ *  above it are the trace. Truncated, because every byte of it is the
+ *  repository's and it becomes an argv and a durable field. */
+export function lastLine(text: string): string {
+  const lines = text.trim().split("\n").filter((line) => line.trim() !== "");
+  const said = lines[lines.length - 1]?.trim() ?? "nix eval failed";
+  return said.length <= FLAKE_EVAL_MAX_STDERR
+    ? said
+    : `${said.slice(0, FLAKE_EVAL_MAX_STDERR)}… (truncated)`;
+}
+
+/** What a checkout's `flake.nix` declares about the caches it reads from.
+ *  The evaluation is an ARGUMENT: which `nix` runs, and in what environment
+ *  it runs, is the composition root's fact — see {@link nixEvalFlakeConfig}. */
+export async function readFlakeNixConfig(
+  dir: string,
+  evaluate: NixEval,
+): Promise<FlakeNixConfigOutcome> {
+  if (!existsSync(join(dir, "flake.nix"))) {
+    return { ok: false, reason: "no flake.nix" };
+  }
+  const evaluated = await evaluate(dir);
+  if (!evaluated.ok) {
+    // "COULD NOT READ", not "your flake is wrong". A hung `nix`, a store that
+    // is not there and an actual syntax error all land here, and only the
+    // repository's own `nix` line can tell them apart — so the sentence says
+    // what odu knows and quotes what nix said.
+    return { ok: false, reason: `could not read nixConfig: ${evaluated.stderr}` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(evaluated.json);
+  } catch {
+    return { ok: false, reason: "flake.nix nixConfig did not evaluate to JSON" };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, reason: "flake.nix has no nixConfig attrset" };
+  }
+  const config = parsed as Record<string, unknown>;
+  return {
+    ok: true,
+    config: {
+      substituters: unioned(config, "substituters"),
+      trustedPublicKeys: unioned(config, "trusted-public-keys"),
+    },
+  };
+}
+
+/** A substituter that answered as an odu cache — the URL asked, and the two
+ *  lines it said about itself. */
+export interface OduSubstituter extends DescribedCache {
+  substituter: string;
+}
+
+/** How long one `nix-cache-info` probe may take. Bounded because a
+ *  substituter that accepts a connection and never answers must cost a
+ *  timeout rather than the command. */
+export const CACHE_PROBE_TIMEOUT_MS = 5_000;
+
+/** How many substituters are worth asking about. A repository that names more
+ *  than this is not describing its cache. */
+export const CACHE_PROBE_MAX = 8;
+
+/**
+ * WHICH OF THESE SUBSTITUTERS ARE ODU CACHES — asked of each one, in parallel,
+ * with a bounded wait.
+ *
+ * A substituter that does not answer, or answers without `Odu-Origin` and
+ * `Odu-Bucket`, is IGNORED rather than refused: `cache.nixos.org` is in a great
+ * many `nixConfig`s and is nobody's push target.
+ *
+ * **The URL list comes from a repository, so the dial is bounded on every
+ * axis.** `http`/`https` only — Bun's `fetch` serves `file:` URLs, and a
+ * repository naming one would be reading the pusher's disk. Redirects are not
+ * followed, because a 302 is a second URL nobody vetted. The list is capped
+ * and so is the body: a `nix-cache-info` is under a kilobyte.
+ *
+ * This no longer runs on the SERVICE. A run's push target is decided from the
+ * URL against what the daemon advertises (`CacheGrants.bucketAt`), which can
+ * be neither lied to nor pointed at a machine of the attacker's choosing;
+ * this is the CLIENT's discovery, where the person at the terminal is the one
+ * whose machine dials.
+ */
+export async function oduCachesOf(
+  substituters: readonly string[],
+  options: {
+    send?: typeof fetch;
+    /** The credential a PRIVATE bucket's `nix-cache-info` needs. Omitted for
+     *  an INFERRED substituter: the repository chose that URL, so a token the
+     *  operator holds must not be sent to it. */
+    token?: string | null;
+    timeoutMs?: number;
+  } = {},
+): Promise<OduSubstituter[]> {
+  const send = options.send ?? fetch;
+  const timeoutMs = options.timeoutMs ?? CACHE_PROBE_TIMEOUT_MS;
+  // `typeof fetch` carries Bun's `preconnect` property, which a plain lambda
+  // cannot have and `describeCache` never calls. The cast names that gap
+  // rather than widening the parameter every other caller depends on.
+  const bounded = ((input: string, init?: RequestInit) =>
+    send(input, {
+      ...(init ?? {}),
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    })) as typeof fetch;
+  const dialable = substituters
+    .filter((substituter) => /^https?:\/\//i.test(substituter.trim()))
+    .slice(0, CACHE_PROBE_MAX);
+  const described = await Promise.all(
+    dialable.map(async (substituter) => {
+      try {
+        const facts = await describeCache(substituter, bounded, options.token ?? null);
+        return { substituter, ...facts };
+      } catch {
+        // NOT AN ODU CACHE, or not reachable. Either way this is not the
+        // repository's push target and saying so would be noise on every run
+        // of every repo that substitutes from nixos.org.
+        return null;
+      }
+    }),
+  );
+  return described.filter((one): one is OduSubstituter => one !== null);
+}
+
+/**
+ * The token, in the order the docs promise: `--token-file`, then
+ * `$ODU_CACHE_TOKEN`, then the credentials entry for the bucket's origin.
+ *
+ * The first two are ORIGIN-AGNOSTIC — a credential for whatever address this
+ * push ends up at — so this is the order for an address the OPERATOR typed,
+ * which is the only caller that reaches it by default. A caller whose address
+ * came from somewhere else resolves its own and passes `credential`; see
+ * {@link savedCredentialFor}.
+ */
 export async function resolveToken(
   env: PushEnv,
   origin: string,
@@ -268,6 +692,24 @@ export async function resolveToken(
   }
   const fromEnv = env.ODU_CACHE_TOKEN?.trim();
   if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
+  return savedCredentialFor(env, origin);
+}
+
+/**
+ * ONLY WHAT THIS MACHINE SAVED FOR THAT ORIGIN — `odu cache login`'s entry,
+ * and nothing origin-agnostic.
+ *
+ * The credentials file is keyed by origin, so an entry in it is a decision
+ * somebody made about that address. `--token-file` and `$ODU_CACHE_TOKEN` are
+ * decisions about no address at all, which is exactly wrong when the address
+ * came out of a repository: one `extra-substituters` line in a contributor's
+ * `flake.nix` would otherwise collect `$ODU_CACHE_TOKEN` — a workflow secret,
+ * on the spelling that is now the recommended one.
+ */
+export async function savedCredentialFor(
+  env: PushEnv,
+  origin: string,
+): Promise<string | null> {
   const entries = await readCredentials(env);
   return entries[normalizeOrigin(origin)] ?? null;
 }
@@ -279,6 +721,15 @@ export type ClosureEntry = PathInfo;
 
 export interface PushSummary {
   pushed: number;
+  /**
+   * HOW MUCH THIS PUSH STORED — the NAR size of every path it uploaded, summed.
+   *
+   * The UNCOMPRESSED size, which is what the closure states and what a reader
+   * comparing it with `nix path-info -S` expects; what crossed the wire is
+   * whatever zstd made of it. Zero when nothing was uploaded, a closure the
+   * bucket already held included.
+   */
+  bytes: number;
   /** Paths the bucket already has, or would not take because an upstream key
    *  signed them. The server says which is which. */
   skippedUpstream: number;
@@ -337,6 +788,19 @@ export interface PushOptions {
   env: PushEnv;
   /** `--origin`, which beats a stored credential. */
   origin?: string;
+  /**
+   * THE CREDENTIAL THIS PUSH IS AUTHORISED TO SEND, when the caller already
+   * holds one — a lane with the run's write token, or a CLI that resolved
+   * its own. Supplying it skips {@link resolveToken} entirely, which is why
+   * a caller holding a token does not have to describe a machine it is not
+   * on.
+   *
+   * `null` is EXPLICIT: push anonymously, and let the bucket's own refusal be
+   * the answer. The CLI uses it for an inferred target with nothing saved for
+   * that origin, where the alternative was sending the operator's
+   * origin-agnostic secret to an address a `flake.nix` chose.
+   */
+  credential?: string | null;
   tokenFile?: string;
   /** Uploads in flight WITHIN one dependency depth. */
   concurrency?: number;
@@ -380,15 +844,24 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const say = options.onLine ?? (() => {});
   const resolved = await resolveBucket(options.env, options.bucket, options.origin);
   if ("error" in resolved) throw new Error(resolved.error);
-  const token = await resolveToken(options.env, resolved.origin, options.tokenFile);
-  if (token === null) {
+  // THE CALLER'S OWN CREDENTIAL WHEN IT HAS ONE, and the discovery order
+  // otherwise. A lane holds the run's write token; a CLI that inferred its
+  // target has already decided which credentials are in scope for an address
+  // a repository chose. Neither should have to express that through an
+  // environment it does not have.
+  const token =
+    options.credential === undefined
+      ? await resolveToken(options.env, resolved.origin, options.tokenFile)
+      : options.credential;
+  if (token === null && options.credential === undefined) {
     throw new Error(
       `no token for ${resolved.origin} — pass --token-file, set $ODU_CACHE_TOKEN, ` +
         `or run \`odu cache login ${resolved.origin}\``,
     );
   }
   const base = `${resolved.origin}${CACHE_MOUNT}/${resolved.name}`;
-  const headers = { authorization: `Bearer ${token}` };
+  const headers: Record<string, string> =
+    token === null ? {} : { authorization: `Bearer ${token}` };
 
   const platform: PushPlatform = options.platform ?? {
     closure: (paths) => nixClosure(paths, null),
@@ -432,6 +905,8 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     );
   }
   let pushed = 0;
+  /** NAR bytes this push stored, summed as each upload lands. */
+  let bytes = 0;
   /** What the bucket answered the negotiation with — one store, one mode. */
   let mode: UploadMode | null = null;
 
@@ -449,6 +924,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         });
         if (outcome.ok) {
           pushed += 1;
+          bytes += entry.narSize;
           mode = outcome.mode;
           say(`✅ ${storePath} stored`);
           continue;
@@ -486,6 +962,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
       : await pinClosure(resolved, headers, options.pin, served, say);
   return {
     pushed,
+    bytes,
     mode,
     skippedUpstream: answer.skippedUpstream.length,
     skippedDerivation,
@@ -565,7 +1042,8 @@ async function askMissing(
   );
   if (!response.ok) {
     throw new Error(
-      `the bucket refused the missing-paths query: ${response.status} ${await response.text()}`,
+      `the bucket refused the missing-paths query: ${response.status} ` +
+        `${await boundedText(response, ERROR_BODY_MAX_BYTES)}`,
     );
   }
   const body: unknown = await response.json();
@@ -612,7 +1090,8 @@ async function pinClosure(
   });
   if (!response.ok) {
     throw new Error(
-      `the bucket refused the pin "${name}": ${response.status} ${await response.text()}`,
+      `the bucket refused the pin "${name}": ${response.status} ` +
+        `${await boundedText(response, ERROR_BODY_MAX_BYTES)}`,
     );
   }
   // WHAT THE BUCKET SAYS IT HOLDS, never what this client sent: the closure
@@ -739,7 +1218,7 @@ async function putPart(
       continue;
     }
     if (response.ok) return { ok: true };
-    lastMessage = `part ${index + 1} answered ${response.status}: ${(await response.text()).trim()}`;
+    lastMessage = `part ${index + 1} answered ${response.status}: ${(await boundedText(response, ERROR_BODY_MAX_BYTES)).trim()}`;
     if (!worthRetrying(response.status)) break;
   }
   return { ok: false, message: lastMessage };
@@ -781,7 +1260,7 @@ async function beginUpload(
   }
   if (!response.ok) {
     return {
-      error: `beginning the upload answered ${response.status}: ${(await response.text()).trim()}`,
+      error: `beginning the upload answered ${response.status}: ${(await boundedText(response, ERROR_BODY_MAX_BYTES)).trim()}`,
       retry: worthRetrying(response.status),
     };
   }
@@ -810,7 +1289,7 @@ async function putToStore(
   if (!response.ok) {
     return {
       ok: false,
-      message: `the store answered ${response.status} to a presigned PUT: ${(await response.text()).trim()}`,
+      message: `the store answered ${response.status} to a presigned PUT: ${(await boundedText(response, ERROR_BODY_MAX_BYTES)).trim()}`,
     };
   }
   await response.body?.cancel().catch(() => {});
@@ -863,7 +1342,7 @@ async function uploadDirect(
         await parts.return(undefined as never);
         return {
           ok: false,
-          message: `signing part ${index + 1} answered ${signed.status}: ${(await signed.text()).trim()}`,
+          message: `signing part ${index + 1} answered ${signed.status}: ${(await boundedText(signed, ERROR_BODY_MAX_BYTES)).trim()}`,
           // THIS IS ODU ANSWERING, not the store, so the shared rule decides
           // — plus the one status whose meaning odu defines here: a `404` is
           // an upload this daemon no longer holds, and beginning again is
@@ -910,7 +1389,7 @@ async function uploadDirect(
     // attempt budget bounds it.
     return {
       ok: false,
-      message: `finishing the upload answered ${joined.status}: ${(await joined.text()).trim()}`,
+      message: `finishing the upload answered ${joined.status}: ${(await boundedText(joined, ERROR_BODY_MAX_BYTES)).trim()}`,
       retry: true,
     };
   }
@@ -994,7 +1473,7 @@ async function uploadStaged(
   if (!joined.ok) {
     return {
       ok: false,
-      message: `joining ${index} parts answered ${joined.status}: ${(await joined.text()).trim()}`,
+      message: `joining ${index} parts answered ${joined.status}: ${(await boundedText(joined, ERROR_BODY_MAX_BYTES)).trim()}`,
       retry: worthRetrying(joined.status),
     };
   }
@@ -1064,7 +1543,7 @@ async function uploadOne(
     // a success code this pusher does not know included — is a refusal like any
     // other, said with the server's own words and not repeated.
     if (infoResponse.status === 200) return { ok: true, mode: plan.mode };
-    const said = await infoResponse.text();
+    const said = await boundedText(infoResponse, ERROR_BODY_MAX_BYTES);
     lastMessage = `narinfo upload answered ${infoResponse.status}: ${said}`;
     if (infoResponse.ok || !worthRetrying(infoResponse.status)) break;
   }

@@ -27,6 +27,7 @@ import {
   pushToCache,
   resolveBucket,
   resolveToken,
+  savedCredentialFor,
   saveCredential,
   type PushEnv,
   type PushPlatform,
@@ -88,6 +89,9 @@ interface Server {
    *  means every call does. */
   missingCalls: number;
   missingOnlyFor: number | undefined;
+  /** Refuse the missing-paths query with this status — what a bucket answers
+   *  a request that carries no credential it accepts. */
+  missingStatus: number | undefined;
   /** Answer a narinfo PUT that carries no preceding NAR with a 400 saying the
    *  bytes are gone — what a restarted server says. */
   narinfoOnlyRefusal: boolean;
@@ -129,6 +133,7 @@ function startServer(): Server {
     completeFailures: 0,
     missingCalls: 0,
     missingOnlyFor: undefined,
+    missingStatus: undefined,
     narinfoOnlyRefusal: false,
     missing: [LIBC, GLIBC, HELLO],
     skipped: [],
@@ -206,6 +211,9 @@ function startServer(): Server {
       }
       if (url.pathname.endsWith("/missing")) {
         state.missingCalls += 1;
+        if (state.missingStatus !== undefined) {
+          return new Response("a write token is required", { status: state.missingStatus });
+        }
         const substituter =
           state.substituter === null ? {} : { substituter: state.substituter };
         if (state.missingOnlyFor !== undefined && state.missingCalls > state.missingOnlyFor) {
@@ -853,6 +861,27 @@ describe("token precedence", () => {
     expect(await resolveToken({ HOME: scratch }, "http://127.0.0.1:2", undefined)).toBeNull();
   });
 
+  it("answers ONLY what was saved for an origin, for an address a repo named", async () => {
+    // `--token-file` and `$ODU_CACHE_TOKEN` are credentials for wherever a
+    // push ends up, which is right when the OPERATOR typed the address
+    // (naming a cache is trusting it) and wrong when a `flake.nix` did: one
+    // `extra-substituters` line in a contributor's branch would otherwise
+    // collect a workflow secret, on the spelling that is now the recommended
+    // one. This is what an inferred push is allowed to send — a credentials
+    // entry, which is a decision somebody made about that address.
+    const env = envOf({ ODU_CACHE_TOKEN: "from-env" });
+    const file = join(scratch, "token");
+    writeFileSync(file, "from-file\n");
+    await saveCredential(env, "https://known.example", "from-credentials");
+
+    expect(await savedCredentialFor(env, "https://evil.example")).toBeNull();
+    expect(await savedCredentialFor(env, "https://evil.example")).toBeNull();
+    // And a SAVED one still is: this narrows the sources, not the feature.
+    expect(await savedCredentialFor(env, "https://known.example")).toBe(
+      "from-credentials",
+    );
+  });
+
   it("sends the token it resolved, and refuses to push without one", async () => {
     const server = startServer();
     try {
@@ -871,6 +900,39 @@ describe("token precedence", () => {
           platform: PLATFORM,
         }),
       ).rejects.toThrow(/no token/);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("pushes ANONYMOUSLY when the caller says it has no credential", async () => {
+    // `credential: null` is explicit, and it is what the CLI passes for an
+    // inferred target with nothing saved for that origin — the alternative
+    // was sending the operator's credential to an address a flake chose. The
+    // request goes out with no `Authorization` at all and the bucket's own
+    // refusal is the answer; the sentence about where the URL came from
+    // belongs to the CLI that inferred it, which is the only thing that
+    // knows.
+    const server = startServer();
+    try {
+      server.missingStatus = 401;
+      const refusal = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "secret-token" }),
+        // WHAT THE CLI PASSES for an inferred target with nothing saved for
+        // that origin: push anonymously rather than sending a credential
+        // meant for wherever a push ends up.
+        credential: null,
+        platform: PLATFORM,
+      }).catch((err: unknown) => err);
+
+      const asked = server.seen.filter((seen) => seen.path.endsWith("/missing"));
+      expect(asked).toHaveLength(1);
+      expect(asked[0]?.authorization).toBeNull();
+      expect((refusal as Error).message).toContain("401");
+      // AND THE SECRET WENT NOWHERE NEAR IT.
+      expect(JSON.stringify(server.seen)).not.toContain("secret-token");
     } finally {
       server.stop();
     }

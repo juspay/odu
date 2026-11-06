@@ -38,6 +38,10 @@ const LEDGER: ContractLedger = {
   // BY THE ROW, counted over the whole of it rather than over whichever page
   // a reader happens to hold. Additive.
   "4.5": "37e28294bbd765b7",
+  // 4.6 — PLAN 4.1: `label` on a token, so the bucket page's Tokens list can
+  // say `run <id>` for a credential odu minted for a run rather than leaving
+  // an operator to wonder who issued it. An optional output field; additive.
+  "4.6": "fe3f87418079d1b7",
 };
 
 describe("the cache row's contract", () => {

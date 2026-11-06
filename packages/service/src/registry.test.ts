@@ -9,6 +9,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
+import { releaseOwnership } from "@odu/run-history/owner";
 import { appendEvent, expireRun } from "@odu/run-history/store";
 import { createRegistry, projectRun } from "./registry";
 import { REFRESH_MS } from "./service";
@@ -592,16 +593,29 @@ describe("the registry over a large catalog", () => {
     );
   }, 120_000);
 
-  it("stops asking a SETTLED run's fence, and still follows it if it resumes", () => {
+  it("stops asking a RELEASED settled run's fence, and still follows it if it resumes", () => {
     // `releaseOwnership` keeps owner.json, so every finished run's heartbeat
     // goes stale and the fence's answer flips once the grace passes. For a
-    // settled row that answer cannot change the row — the fold decides
-    // `settled` first — so re-projecting on it was pure cost: a journal
-    // re-parse per finished run, and a `kill(pid, 0)` per tick for ever after.
+    // settled row that has let its ENDPOINT go, that answer cannot change
+    // anything a reader sees — the fold decides `settled` first and nothing
+    // is serving the run — so re-projecting on it was pure cost: a journal
+    // re-parse per finished run, and a `kill(pid, 0)` per tick for ever
+    // after.
+    //
+    // A settled row that still NAMES an endpoint is the exception, and it is
+    // asserted where it matters (`pushRevoke.test.ts`): `--linger` leaves
+    // exactly that shape, the run's write token is held while something is
+    // serving the run, and a coordinator killed after `finalized` never
+    // releases the endpoint. Skipping it on `settled` alone computed that
+    // liveness once, while it was still true, and never asked again.
     const w = open();
     const at = Date.now();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "5e".repeat(20), now: at });
     finalizeRun(run.handle, run.token, "passed", [], at);
+    // RELEASED, then gone: the endpoint is nulled by the clean exit, and the
+    // process behind it is not there any more. Together they are the shape a
+    // drained run leaves on disk.
+    releaseOwnership(run.token);
     crashOwner(run.handle, { heartbeatAt: at });
     const registry = createRegistry({ root: w.catalogRoot });
     registry.refresh(at);

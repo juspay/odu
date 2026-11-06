@@ -2163,6 +2163,13 @@ function BucketTokens(props: TokenProps): JSX.Element {
                         <Show when={token.bucketGlob !== props.name}>
                           <Tag>{token.bucketGlob}</Tag>
                         </Show>
+                        {/* WHO MINTED IT, when anything said so (PLAN 4.1): a
+                            run's own write token reads `run <id>`, which is
+                            what tells an operator a credential they did not
+                            issue is odu's and expires with its run. */}
+                        <Show when={token.label}>
+                          {(label) => <Tag>{label()}</Tag>}
+                        </Show>
                       </span>
                       <span class="hint">{tokenLife(token, props.now)}</span>
                     </span>

@@ -28,7 +28,17 @@ const MANIFEST = JSON.parse(
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
 /** Pinned as a literal set: every entry is a wall this package leans on. */
-const EXPECTED_DEPENDENCIES = ["@odu/run-client", "@odu/run-history", "effect"];
+const EXPECTED_DEPENDENCIES = [
+  // THE ONE CROSS-ROW EDGE (PLAN 4.1), and it is narrow: the lane runner
+  // reaches `@odu/cache/push` — the HTTP client door, not the cache row's
+  // server, its database or its face — because a run pushes what it built and
+  // the bytes have to leave from the machine holding them. The fence permits
+  // ci→cache; what it forbids is either row reaching `@odu/auth`.
+  "@odu/cache",
+  "@odu/run-client",
+  "@odu/run-history",
+  "effect",
+];
 
 /** The `@kolu/*` sources hydrated from a Nix pin rather than installed — a
  *  manifest cannot name them (see the root bunfig.toml), so the set is pinned
@@ -172,6 +182,34 @@ describe("@odu/execution's import closure", () => {
       }
     }
     expect(offenders, offenders.join(", ")).toEqual([]);
+  });
+
+  it("reaches the cache row through its PUSH DOOR and nothing else", () => {
+    // The manifest says `@odu/cache`, and a manifest cannot say which door.
+    // What makes the edge defensible is that it is the HTTP client — the one
+    // module `@odu/cache` publishes for a machine with no daemon — and not
+    // the row's server, its SQLite, its routes or its Solid face. `packageOf`
+    // cannot see that, so this compares the whole specifier: an
+    // `import { createCache } from "@odu/cache/cache"` would otherwise pass
+    // the manifest check unremarked and drag `@odu/objects` and a database
+    // into the lane runner.
+    // ONE DOOR, listed literally; it grows only when somebody argues for a
+    // second one.
+    const allowed: Record<string, true> = { "@odu/cache/push": true };
+    const offenders: string[] = [];
+    for (const { rel, specifiers } of sources) {
+      for (const spec of specifiers) {
+        if (packageOf(spec) !== "@odu/cache") continue;
+        if (allowed[spec] === true) continue;
+        offenders.push(`${rel}: ${spec}`);
+      }
+    }
+    expect(
+      offenders,
+      `${offenders.join(", ")} reaches into @odu/cache past its \`./push\` ` +
+        "door. The engine is a CLIENT of a cache's HTTP API; it is not a " +
+        "consumer of the cache row.",
+    ).toEqual([]);
   });
 
 

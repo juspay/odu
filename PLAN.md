@@ -54,8 +54,9 @@ object storage plus a lane pool. Hosting comes later, at a monthly price.
 
 - **Own data plane**, in TypeScript/Bun in this monorepo. Odu does not wrap
   Attic, celler or niks3.
-- **Pushes come from a post-build hook** on lane hosts. Explicit push is the
-  fallback.
+- **Pushes come from the RUN**, to the cache the repository already reads from
+  (4.1). Explicit push stays for a machine with no run behind it; the host
+  hook is deferred (4.3).
 - **Identity is a GitHub App.** Personal tokens cover non-humans; OIDC
   (Google) comes later for internal teams.[^identity]
 - **CI is triggered by forge webhooks**, and the CI-tagged justfile stays the
@@ -112,9 +113,9 @@ object storage plus a lane pool. Hosting comes later, at a monthly price.
   row supplies it. Sessions are leases, so revoking one cuts its sockets. Roles
   are each row's own rule.[^server]
 - **Push paths, in order of preference:**
-  1. the hook (Phase 4.1);
+  1. the run pushes, to the cache the repo already reads from (Phase 4.1);
   2. `odu cache push` or the GitHub Action, from anywhere (landed);
-  3. run-scoped push (Phase 4.2).
+  3. the host hook, for everything a lane builds (Phase 4.3).
 - **Deployment shapes:**
 
   | Shape | What it is |
@@ -292,12 +293,26 @@ What each step delivers:
 
 ### Phase 4: CI pushes for you
 
-- **4.1 The hook.** Every build on a configured lane lands in the bucket, with
-  no step in any recipe. A cache outage only queues paths. The host owner
-  installs the hook, so lanes still hold no credentials.[^hook]
-- **4.2 Run-scoped push and provenance.** `odu run --push` pushes with a token
-  that lives as long as the run. A cached path links back to the run and
-  commit that built it, and a recipe can pin its closure.[^runpush]
+- **4.1 The run pushes.** A repo that reads from an odu cache builds for it:
+  the `extra-substituters` line already in `flake.nix` `nixConfig` is the only
+  declaration, and `odu ci run` pushes every recipe's outputs there. Nothing in
+  any recipe, no token in the repo, no second place to name the bucket.
+  Readers of a cache they can't write to build as before and are told once.[^runpush]
+- **4.2 Provenance and pins.** A path on the bucket page links to the run and
+  commit that built it. `[metadata("odu:pin")]` on a recipe keeps its closure
+  out of GC under `<repo>@<ref>/<system>`, the same pin the Action makes.[^pins]
+- **4.3 The hook.** For hosts whose every build should land in one org bucket:
+  the host owner installs it, lanes still hold no repo credentials, and a cache
+  outage only queues paths. Deferred until a lane's own store stops being
+  enough.[^hook]
+- **4.4 The pod runs CI.** The "Ours" shape for real: the service that serves
+  the cache is the one that runs the lanes, so 4.1 pushes without a second
+  odu. The dogfood of 4.1 stood this up by hand on one lane; this item makes
+  it configuration: the pod's lane inventory names `ci@pureintent`,
+  `ci@croissant` and `ci@naiveintent`, the pod has one ssh identity authorised
+  on every lane's `ci` user, lane hosts trust the pod's substituter, and an
+  operator can start a run from a shell, not only from a signed-in
+  browser.[^podci]
 
 ### Phase 5: hosted CI
 
@@ -332,7 +347,7 @@ What each step delivers:
 | The first database in the tree | A small repository layer, so Postgres (6.1) is a swap |
 | Server mode touches every verb | Loopback mode's unchanged tests are the regression guard |
 | One box serving many developers | Reads leave odu in 2.8 |
-| Run-scoped push relaxes "lanes hold no credentials" | Scoped, write-only, run-lifetime tokens; the hook stays recommended |
+| Run-scoped push relaxes "lanes hold no credentials" | Scoped, write-only, run-lifetime tokens, revoked when nothing serves the run |
 | No chunking | Deliberate[^chutney]; revisit only if storage cost dominates |
 | Bun streaming backpressure | Measured, not assumed[^bun]; 2.8 takes odu off the read path anyway |
 
@@ -346,8 +361,8 @@ Each fact was checked in the source when it was written.
 | F2 | Without `auth`, whoever reaches the listener is the owner | Loopback mode is the regression guard |
 | F3 | The cache's SQLite is the only database; runs live in per-user files | Postgres is the cache's swap alone |
 | F4 | Every public command is a client of the service (`authority.test.ts`) | `odu cache push` is admissible: it is an HTTP client of the cache |
-| F5 | `post-build-hook` is a Nix daemon setting; lane provisioning never edits `nix.conf` | The hook is host configuration (4.1) |
-| F6 | Lane hosts never see credentials; GitHub posting happens on the coordinator | 4.2 relaxes this, bounded |
+| F5 | `post-build-hook` is a Nix daemon setting; lane provisioning never edits `nix.conf` | The hook is host configuration (4.3); 4.1 needs no daemon setting |
+| F6 | Lane hosts never see credentials; GitHub posting happens on the coordinator | 4.1 relaxes this, bounded to one run and one bucket |
 | F7 | A run needs an absolute checkout on the service's machine | Hosted CI needs managed clones (5.1) |
 | F8 | Hosts are per user (`hosts.json`) | Org-scoped venues (5.1) |
 | F9 | The flake exports odu, the runner, the web UI and `services.odu`; its `nixConfig` names `https://cache.kolu.dev/kolu-r2` | Odu is its own cache's first consumer |
@@ -366,12 +381,13 @@ Commits and PR bodies use the earlier names.
 | PR 1 | 1.2 | | PR 3d | 2.8 |
 | PR 1.5 | 1.3 | | PR 3g | 2.9 |
 | PR 2 (+hotfix) | 1.4 | | PR 4 | 3.1 |
-| PR 2.5 | 1.5 | | PR 5, 6 | 4.1, 4.2 |
-| PR 3e | 1.6 | | PR 7, 8 | 5.1, 5.2 |
-| PR 3a | 2.1 | | PR 9, 10 | 5.3, 5.4 |
-| PR 3b (+fix) | 2.2 | | PR 11 | folded into 2.4–2.9 |
-| PR 3f | 2.3 | | PR 12 | 6.1 |
-| PR 3c | 2.4 | | PR 13, 14 | 6.2, 6.3 |
+| PR 2.5 | 1.5 | | PR 5, 6 | 4.1, 4.2 (4.3 deferred) |
+| PR 3e | 1.6 | | PR 6.5 | 4.4 (nixos-config + odu) |
+| PR 3a | 2.1 | | PR 7, 8 | 5.1, 5.2 |
+| PR 3b (+fix) | 2.2 | | PR 9, 10 | 5.3, 5.4 |
+| PR 3f | 2.3 | | PR 11 | folded into 2.4–2.9 |
+| PR 3c | 2.4 | | PR 12 | 6.1 |
+| | | | PR 13, 14 | 6.2, 6.3 |
 
 [^chutney]: chutney's Attic: 669 GB on S3 and 46 GB of Postgres, growing
     without bound with GC off. Its chunking cost more than it saved on S3.
@@ -627,12 +643,56 @@ Commits and PR bodies use the earlier names.
 [^hook]: `odu cache hook` appends `OUT_PATHS` to a crash-safe queue and returns.
     `odu cache hookd` drains it with batching, missing-path queries and
     retries. `services.odu.lane` installs both with the host's own write token,
-    and non-NixOS hosts get documentation.
+    and non-NixOS hosts get documentation. The daemon runs the hook, so it
+    cannot know which repo asked: one bucket per host, chosen by the host.
 
-[^runpush]: `LaunchRequest` gains `push`. The service mints a write-only,
-    single-bucket token for the run. The runner pushes each recipe's `result*`
-    closure, and the catalog records it. `[metadata("odu:pin")]` pins a
-    recipe's closure.
+[^runpush]: Target resolution at `run.start`, on the service. `nix eval` of
+    the checkout's `nixConfig` — a plain attrset, no inputs fetched — then
+    **the URL rule: a substituter is a target when it is one this daemon
+    ADVERTISES for a bucket it serves** (the path form under its public
+    origin, a bucket's own domain, or a public bucket's store URL), confirmed
+    against what the cache row publishes. Nothing in a `nix-cache-info` body
+    decides anything: the probe shape let a flake naming an attacker's host
+    claim to be any bucket here, collect a write token for it, and have that
+    token posted to the attacker's server. The URL rule also resolves a
+    PRIVATE bucket, which an anonymous probe never could. The evaluation runs
+    under `restrict-eval`, with `allow-import-from-derivation false`, in an
+    explicit minimal environment and on a process-group deadline, because
+    `flake.nix` is the least trusted input odu has. None means no push; two is
+    refused with both URLs, because a repo builds for one cache — no override
+    key until someone hits this. The published key must appear in
+    `trusted-public-keys`, else a warning. **The interim bound, until orgs
+    land in 3.1, is the OPERATOR's:** any checkout this daemon runs may push
+    to any bucket it serves, because no row yet says which repository owns
+    which bucket — which is why `run.start` only reaches here for a checkout
+    the operator already handed it. `LaunchRequest` gains `push`; the service
+    mints a write-only, single-bucket token that expires with the run and
+    carries the RESOLVED origin and bucket to the lane, so the runner dials
+    nothing it was not told to; it pushes each recipe's `result*` closure —
+    globbed where the recipe actually ran — through 2.9's direct upload, and a
+    push that fails reddens its node. The token is minted by the cache row for
+    the ci row through a `@odu/cordis` broker (no principal, no root token),
+    kept out of the recipe's own environment, and revoked when the projection
+    sees nothing serving the run any more — not at first settle, which would
+    meet a `--linger` rerun with a dead credential. The GitHub Action gains the
+    same inference, so its `cache:` input becomes optional.
+
+[^pins]: The catalog records path ↔ run ↔ commit at push time; the bucket
+    page's grouped Paths table shows it per group. `odu:pin` pins through the
+    run's token, re-pointing the pin of the same name.
+
+[^podci]: Two repositories. nixos-config: `ODU_HOSTS` on the Deployment names
+    the lanes; `hostNetwork: true` so the pod dials tailnet names through the
+    node's tailscaled (one line, versus one Tailscale egress Service per lane);
+    the pod's ed25519 identity as a Secret from 1Password, its public key in
+    each lane's `users.users.ci.openssh.authorizedKeys.keys`, `known_hosts`
+    pinned by keyscan; `nix.settings.trusted-users = [ "ci" ]` on every lane,
+    else Nix ignores the substituter and keys the coordinator hands it; the
+    checkout under `/data/checkouts/<repo>` until 5.1 manages clones. odu: a
+    `metrics`-style operator token that opens `run_start`/`run_read` from a
+    shell — today every verb but identity reads refuses a connection without a
+    session, so the dogfood run had to be clicked. Both stay until 5.1 moves
+    the inventory into org venues and 3.1 gives operators a principal.
 
 [^repos]: `run.start` accepts a repository plus a SHA as well as an absolute
     checkout. The in-house VM pool is one org's inventory, and `hosts.json`

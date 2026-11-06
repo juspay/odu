@@ -33,12 +33,14 @@ import { closeHost, definePlugin, mountPlugin, openHost, provide, rowReport, set
 import {
   BoundOrigin,
   Bundle,
+  CacheGrants,
   CachePurge,
   type HttpRoutes,
   Log,
   Metrics,
   NixStore,
   PublicOrigin,
+  grantsBroker,
   purgeBroker,
   RootToken,
   type ClaimedRoutes,
@@ -194,6 +196,7 @@ describe("the cache row's teardown", () => {
     // here, so a collection announces into a daemon with no CDN — which is
     // most of them.
     await run(provide(host, CachePurge, () => purgeBroker()));
+    await run(provide(host, CacheGrants, () => grantsBroker()));
     await run(provide(host, Routes, () => routesStub));
     await run(provide(host, Metrics, () => metricsBroker()));
     await run(
@@ -243,6 +246,7 @@ describe("the cache row's teardown", () => {
     // here, so a collection announces into a daemon with no CDN — which is
     // most of them.
     await run(provide(host, CachePurge, () => purgeBroker()));
+    await run(provide(host, CacheGrants, () => grantsBroker()));
     await run(provide(host, Routes, () => routesStub));
     await run(provide(host, Metrics, () => metricsBroker()));
     await run(provide(host, Bundle, () => ({}) as unknown as RootedSurfacesRuntime<never>));
@@ -278,6 +282,7 @@ describe("the cache row's teardown", () => {
     // here, so a collection announces into a daemon with no CDN — which is
     // most of them.
     await run(provide(host, CachePurge, () => purgeBroker()));
+    await run(provide(host, CacheGrants, () => grantsBroker()));
       await run(provide(host, Routes, () => routesStub));
       await run(provide(host, Metrics, () => metricsBroker()));
       // THE BUNDLE, as far as this row uses it: it mounts, and it hands back the

@@ -110,6 +110,15 @@ export interface RunHistoryInit {
   /** The id this run must publish under, when a launcher pre-minted one.
    *  Absent means mint — see `./launcher` on why a launcher does not. */
   runId?: string;
+
+  /** Where this run pushed what it built, and what it said about doing so
+   *  (PLAN 4.1). Absent means this build recorded nothing either way; a run
+   *  that resolved to nothing records a `skipped` reason and no target. */
+  push?: {
+    target: { substituter: string; bucket: string; tokenId: string } | null;
+    skipped: string | null;
+    keyWarning: string | null;
+  };
   /** Injected for tests; production reads the real catalog root. */
   catalogRoot?: string;
   now?: () => number;
@@ -166,6 +175,20 @@ export interface RunHistory {
   postingDebt: (
     rows: readonly { context: string; lastError: string; attempts: number }[],
   ) => void;
+  /** A node's outputs landed in the cache (PLAN 4.1). Written when a recipe
+   *  exits 0 and its `result*` closure was pushed, so a finished run can say
+   *  what it warmed without the bucket having to be asked. `durationMs` is
+   *  the PUSH's own time, which the node's `durationMs` deliberately does not
+   *  include — leaving it out here would make the number right on a live
+   *  coordinator's cell and zero the moment the run finalized, which is the
+   *  reading every catalog consumer gets. */
+  pushed: (fact: {
+    node: string;
+    bucket: string;
+    paths: number;
+    bytes: number;
+    durationMs: number;
+  }) => void;
   /**
    * Record that a retry carrying `requestId` was ACCEPTED against this run,
    * before the reset it asked for is performed.
@@ -242,6 +265,7 @@ export const NO_HISTORY: RunHistory = {
   replaceLog: () => {},
   resetNode: () => {},
   postingDebt: () => {},
+  pushed: () => {},
   // `false`, not `true`: no history means no durable record, and a caller must
   // be able to tell its reply "the acceptance was not written down" rather
   // than promise a line that will never exist.
@@ -321,6 +345,10 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         },
         parentRunId: init.parentRunId ?? null,
         requestId: init.requestId ?? null,
+        // WHERE THIS RUN PUSHES (PLAN 4.1). `optionalKey`, so a build that
+        // resolved nothing at all omits it rather than claiming the checkout
+        // reads from no cache.
+        ...(init.push === undefined ? {} : { push: init.push }),
       },
       { ...opts, endpoint: init.endpoint, now: now() },
     );
@@ -631,6 +659,8 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         });
       }
     },
+    pushed: ({ node, bucket, paths, bytes, durationMs }) =>
+      emit({ kind: "pushed", node, bucket, paths, bytes, durationMs }),
     currentAttempt: (node) => highest.get(node) ?? 0,
     retryAccepted: ({ requestId, inputDigest, roots, resetDependants }) => {
       if (fenced) return false;

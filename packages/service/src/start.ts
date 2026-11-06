@@ -1,7 +1,7 @@
 /**
  * `run.start` — accept a run, or say exactly why not.
  *
- * Four things happen here and the ORDER is the design:
+ * Five things happen here and the ORDER is the design:
  *
  *   1. **Is this a request at all?** A request id outside the grammar is
  *      refused before anything is claimed, because a claim has to be filed
@@ -21,7 +21,15 @@
  *      even an error: it is almost certainly the run the caller wanted, so the
  *      answer is that run, addressed, with `accepted: false` — and
  *      `supersede: true` is how a caller says it really did mean to take it.
- *   4. **Launch through the port.** How a coordinator comes to exist is not
+ *   4. **Resolve where this run PUSHES** (PLAN 4.1). The cache the checkout's
+ *      `flake.nix` already reads from, if this daemon serves it, plus a write
+ *      token minted for this run. Deliberately AFTER the receipt and
+ *      deliberately NOT in the digest: the digest is what the caller sent, and
+ *      where a checkout pushes is a fact about the world — so a replayed
+ *      request re-resolves rather than replaying yesterday's bucket. The one
+ *      arm that is a REFUSAL is two odu caches, because a repository builds
+ *      for one.
+ *   5. **Launch through the port.** How a coordinator comes to exist is not
  *      this package's business — see `./ports`.
  *
  * What this does NOT do is decide anything about the run. Selectors, platforms,
@@ -43,7 +51,8 @@ import {
 import { Effect } from "effect";
 import { callerOf } from "./caller";
 import type { Principal } from "@odu/cordis/principal";
-import type { CheckoutProbe, RunLauncher } from "./ports";
+import type { CheckoutProbe, PushPort, RunLauncher } from "./ports";
+import { preparePush } from "./pushGrant";
 import {
   claimReceipt,
   completeReceipt,
@@ -58,6 +67,7 @@ import {
 export interface StartDeps {
   launch: RunLauncher;
   probeCheckout: CheckoutProbe;
+  push: PushPort;
   requests: ReceiptStore;
   catalog?: CatalogOptions;
   host: string;
@@ -111,6 +121,11 @@ export function digestOfRequest(input: StartInput, scope: RunScope): string {
     // requests that differ only in it are two requests, and repeating one under
     // the other's id is a conflict rather than a replay.
     input.supersede ?? false,
+    // WHERE THE RUN PUSHES IS DELIBERATELY ABSENT (PLAN 4.1). It is not
+    // something the caller sent — it is read out of the checkout's `flake.nix`
+    // and off a substituter — so putting it here would make the digest a
+    // function of the world again, which is the exact fault `expectedSha`
+    // replaced a HEAD read to avoid. A replayed `requestId` re-resolves.
   ]);
 }
 
@@ -400,6 +415,28 @@ async function start(
   }
 
   const runId = claim.receipt.plannedRunId;
+  // ── WHERE THIS RUN PUSHES (PLAN 4.1) ──
+  //
+  // After the receipt and after the checkout, because it is the most expensive
+  // question asked here — it evaluates somebody else's `flake.nix` — and every
+  // cheaper refusal above it must answer first. Its result is NOT part of the
+  // request digest: see the module header.
+  const prepared = await preparePush(deps.push, input.checkout, runId);
+  if (prepared.kind === "ambiguous") {
+    // A START IS REFUSED, where a replay is not: this caller is being asked to
+    // begin work for a repository that declares two caches, and choosing one
+    // would be the service inventing a policy nobody wrote down.
+    return refuseAndRecord(
+      deps,
+      input.requestId,
+      "checkout_refused",
+      `odu: ${input.checkout} reads from two odu caches — ` +
+        `${prepared.substituters.join(" and ")}. A repository builds for one ` +
+        "cache; name a single one in flake.nix nixConfig.",
+    );
+  }
+  const push = prepared.push;
+
   // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, because from
   // here on "my reply went missing" and "nothing happened" stop being the same
   // thing — a launcher that is still running has not published a manifest yet,
@@ -426,8 +463,18 @@ async function start(
     // cancel-then-confirm; this only has to not lose the word.
     supersede: input.supersede ?? false,
     linger: input.linger ?? false,
+    // WHERE THIS RUN PUSHES, and what its setup log owes about it. Two
+    // fields, because "nothing is pushed, here is why" and "something is, and
+    // here is what is wrong with your trust settings" are opposite facts.
+    push,
+    pushSkipped: prepared.skipped,
+    pushKeyWarning: prepared.keyWarning,
   });
   if (!launched.ok) {
+    // THE TOKEN GOES BACK. Nothing ever reached a lane, so a credential left
+    // live for a day would be a grant with no run behind it. The FILE the
+    // launcher wrote is the launcher's to remove, and it does.
+    if (push !== null) deps.push.revoke(push.tokenId);
     return refuseAndRecord(
       deps,
       input.requestId,

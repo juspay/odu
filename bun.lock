@@ -85,6 +85,7 @@
       "name": "@odu/ci",
       "version": "0.1.0",
       "dependencies": {
+        "@odu/cache": "workspace:*",
         "@odu/cordis": "workspace:*",
         "@odu/execution": "workspace:*",
         "@odu/face": "workspace:*",
@@ -150,6 +151,7 @@
       "name": "@odu/execution",
       "version": "0.1.0",
       "dependencies": {
+        "@odu/cache": "workspace:*",
         "@odu/run-client": "workspace:*",
         "@odu/run-history": "workspace:*",
         "effect": "4.0.0",

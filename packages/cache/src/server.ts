@@ -53,6 +53,8 @@ import {
   Bundle,
   BucketDomains,
   type BucketDomains as BucketDomainsFacts,
+  CacheGrants,
+  type GrantedBucket,
   CachePurge,
   Log,
   Metrics,
@@ -154,6 +156,9 @@ export interface CacheServer {
   /** The substituter URL for one bucket, as the cache row publishes it — the
    *  same string the board's row carries, for a route that takes no root token. */
   readonly substituterUrl: (name: string) => string;
+  /** WHICH BUCKET A SUBSTITUTER URL NAMES (PLAN 4.1), decided from the URL
+   *  against what this row advertises and never from a response body. */
+  readonly bucketAt: (substituter: string) => GrantedBucket | null;
   /** ANNOUNCE WHAT CHANGED OR WENT (PLAN 2.8): a finished store-to-store
    *  move, or a re-push that rewrote a text object. The CACHE names what it
    *  touched — it is the only thing that knows — and the ROW turns that into
@@ -355,6 +360,22 @@ export function probeStoreEndpoints(input: {
   return found;
 }
 
+
+/**
+ * A URL path with its trailing slashes gone, trimmed by a LOOP.
+ *
+ * `/\/+$/` on this input is a denial of service: against `"/"×N + "a"` the
+ * engine retries the whole run at every start position, which is quadratic,
+ * and the string being trimmed is one `extra-substituters` entry out of a
+ * contributor's `flake.nix` — on the daemon's single event loop, during
+ * `run.start`. A loop reads once.
+ */
+function withoutTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path.charCodeAt(end - 1) === 47) end -= 1;
+  return path.slice(0, end);
+}
+
 export function cacheServer(opts: CacheServerOptions): CacheServer {
   const { cache } = opts;
   /** What was last published, per bucket name, so a republish is a DIFF. */
@@ -422,6 +443,82 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
   /** WHERE A PUSH ADDRESSES IT. Always the path form: the push API needs the
    *  bucket's name, and a domain host answers `/cache/<name>` too. */
   const pushUrlOf = (name: string): string => `${opts.publicOrigin}${opts.mount}/${name}`;
+  /**
+   * WHICH BUCKET A SUBSTITUTER URL NAMES — the whole of PLAN 4.1's write
+   * grant, and the one question a repository cannot lie its way through.
+   *
+   * A run's target used to be decided by asking the URL for its
+   * `nix-cache-info` and believing the `Odu-Origin` / `Odu-Bucket` lines in
+   * the BODY. That made the grant a function of a server the repository
+   * chose: `extra-substituters = [ "https://evil.example/c" ]` plus a forged
+   * two-line answer claimed to be any bucket here, and collected a write
+   * token for it. Nothing in a body is evidence.
+   *
+   * So the URL is parsed against the three forms this row ADVERTISES, in the
+   * order a reader could have got them, and each is confirmed back through
+   * `urlOf`/`pushUrlOf` so a near-miss cannot pass:
+   *
+   *   - the path form under this daemon's public origin, which every bucket
+   *     answers at whatever else it has;
+   *   - a bucket's own domain, at the root of that name;
+   *   - a public bucket fronted by a store that publishes a URL.
+   *
+   * It dials nothing, so it costs no SSRF and no timeout, and it works for a
+   * PRIVATE bucket — whose `nix-cache-info` is a 404 to an anonymous reader,
+   * which is what made the probe unable to resolve one at all.
+   */
+  const bucketAt = (substituter: string): GrantedBucket | null => {
+    let url: URL;
+    try {
+      url = new URL(substituter.trim());
+    } catch {
+      return null;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    const path = withoutTrailingSlashes(url.pathname);
+    const origin = `${url.protocol}//${url.host}`;
+    const segments = path.split("/").filter((part) => part !== "");
+    const last = segments[segments.length - 1];
+    const row =
+      segments.length === 0
+        ? cache.bucketByDomain(url.host)
+        : last === undefined
+          ? null
+          : cache.bucket(last);
+    if (row === null) return null;
+    const facts = {
+      name: row.name,
+      public: row.isPublic,
+      domain: row.domain,
+      store: row.store,
+    };
+    // CONFIRMED AGAINST WHAT THIS ROW PUBLISHES, not against the parse: the
+    // steps above find a CANDIDATE, and only a URL the row would itself hand
+    // a reader is a grant. The confirmed SPELLING is kept, because that — and
+    // not the repository's string — is what every surface then publishes.
+    const advertised = new Map(
+      [
+        urlOf(facts),
+        pushUrlOf(row.name),
+        ...(row.domain === null ? [] : [`${scheme}//${row.domain}`]),
+      ].map((one) => [withoutTrailingSlashes(one), one]),
+    );
+    const confirmed = advertised.get(`${origin}${path}`);
+    if (confirmed === undefined) return null;
+    return {
+      name: row.name,
+      publicKey: row.publicKey,
+      // WHERE A PUSH GOES — this daemon's own push origin, never a store's
+      // read domain, which takes no write at all.
+      origin: opts.publicOrigin,
+      // AND THE ADDRESS THIS ROW ADVERTISES, not the one that was asked
+      // about. `https://evil.example@cache.ours/cache/main` resolves to this
+      // bucket — userinfo is no part of the match, and the push was always
+      // going to `origin` — but it must not be the string the setup log, the
+      // manifest, `run_read` and the board then print.
+      substituter: confirmed,
+    };
+  };
 
   const rowOf = (facts: BucketFacts): CacheBucket => ({
     ...facts,
@@ -899,6 +996,7 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
         store: bucket?.store ?? LOCAL_STORE,
       });
     },
+    bucketAt,
     announceMoved,
   };
 }
@@ -933,6 +1031,7 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     BoundOrigin,
     PublicOrigin,
     CachePurge,
+    CacheGrants,
     Log,
     Metrics,
   ],
@@ -948,6 +1047,11 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // every daemon has it; whether a CDN row registered on it is not this
     // row's business, and with none registered an announcement is a no-op.
     const purges = yield* CachePurge;
+    // WHERE A RUN ASKS FOR ITS WRITE TOKEN (PLAN 4.1). Same shape and same
+    // reason as the purge broker above, with the arrow reversed: the runs' row
+    // asks, this one answers, and the runs' row is mounted FIRST (it offers
+    // `Bundle`), so a `needs` edge from there to here would be a deadlock.
+    const grants = yield* CacheGrants;
     const log = yield* Log;
     // WHERE THIS ROW'S NUMBERS GO. The host made one registry for the tenure
     // and serves `/metrics` from it; the row registers a contributor below and
@@ -1060,6 +1164,18 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     });
     announceMoved = server.announceMoved;
 
+    // AND THE GRANT A RUN ASKS FOR (PLAN 4.1): which bucket a substituter URL
+    // names here, and a write token scoped to it that expires with the run.
+    // Registered rather than offered, for the mount-order reason the `needs`
+    // list gives; withdrawn in the finalizer below, so a tenure whose cache
+    // has gone away mints nothing. Built AFTER the server because `bucketAt`
+    // is the server's URL knowledge — which is the whole grant.
+    const withdrawGrants = grants.register({
+      bucketAt: (substituter) => server.bucketAt(substituter),
+      mint: (request) => cache.grantRunToken(request),
+      revoke: (id) => cache.revokeToken(id),
+    });
+
     // THE MOUNT, in the activation. The framework walks the arriving surface,
     // proves the whole route set disjoint across root and siblings, and hands
     // back the `ctx` this row publishes through.
@@ -1168,6 +1284,10 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     // error from the surface an operator consults when things are already
     // going wrong.
     yield* Effect.addFinalizer(() => Effect.sync(withdrawMetrics));
+    // AND THE GRANT, for the same reason and in the same place: a mint that
+    // reached a closed database would be a run told it may push to a bucket
+    // that is no longer being served.
+    yield* Effect.addFinalizer(() => Effect.sync(withdrawGrants));
     // THE SCHEDULE, ROW-OWNED LIKE THE MIGRATION AND IN THE SAME IDIOM: a
     // cache nobody administers must still stop growing, so the row collects
     // itself daily and the operator's button is that collection asked for

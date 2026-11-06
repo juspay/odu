@@ -161,8 +161,11 @@ export const HOST_CONTRACT_VERSION = "2.5";
  * host's version, not this one.
  *
  * 2.4: where the composed wire stood when each row took a version of its own.
+ * 2.5: a run's `push` — where it pushes and what it warmed — on a board row
+ *      and on `run_read`/`run_wait`, and `pushed` on a node (PLAN 4.1). Three
+ *      optional output fields; additive.
  */
-export const CI_CONTRACT_VERSION = "2.4";
+export const CI_CONTRACT_VERSION = "2.5";
 
 /** THE RUNS' ROW NAME — the word the identity cell's `rows` publishes them
  *  under, a face's needs name them by, and the plugin's own name (what the
@@ -618,6 +621,33 @@ export const RunOutcomeSchema = Schema.Literals([
 ]);
 
 /**
+ * WHERE A RUN PUSHED, as every reader of a run is told it (PLAN 4.1) — the
+ * target, and the two sentences a setup log owed about it.
+ *
+ * ONE declaration for the board row and for `run_read`'s answer, because they
+ * are one fact about one run and a second spelling is where two readers of the
+ * same record learn to disagree. The answer adds counts; the shape they agree
+ * on is this.
+ *
+ * The token's ID is deliberately ABSENT from both. It is on the MANIFEST,
+ * because the service revokes by it; it is a revocation handle, and a board
+ * row is read by every client that can list runs.
+ */
+const PushedToSchema = Schema.Struct({
+  target: Schema.NullOr(
+    Schema.Struct({ substituter: Schema.String, bucket: Schema.String }),
+  ),
+  /** WHY nothing was pushed — null when something was. */
+  skipped: Schema.NullOr(Schema.String),
+  /** What is wrong while something WAS: the bucket's key is missing from the
+   *  repository's `trusted-public-keys`, so what this run warmed will not be
+   *  substituted from. Null when there is nothing to say. Two fields rather
+   *  than one sentence, because a run that pushed and a run that did not are
+   *  opposite states and a reader must not have to guess which it holds. */
+  keyWarning: Schema.NullOr(Schema.String),
+});
+
+/**
  * One run, as a board row — everything needed to CHOOSE a run without opening
  * it, and nothing that would need the run's journal to produce.
  *
@@ -676,6 +706,20 @@ export const RunRowSchema = Schema.Struct({
   /** A cursor positioned at the row's own reading of the journal, so a caller
    *  that starts watching from the board resumes rather than replaying. */
   cursor: Schema.String,
+  /**
+   * WHERE THIS RUN PUSHES WHAT IT BUILDS (PLAN 4.1) — the cache its
+   * `flake.nix` already reads from, when this daemon serves it.
+   *
+   * `target` is null for a run that pushes nothing and `note` says why;
+   * with a target, `note` carries the `trusted-public-keys` warning when there
+   * is one. `optionalKey`, so a run recorded before this is a row without it
+   * rather than a row claiming it pushed nowhere.
+   *
+   * The token's ID is deliberately ABSENT. It is on the MANIFEST, because the
+   * service revokes by it; it is a revocation handle, and a board row is read
+   * by every client that can list runs.
+   */
+  push: Schema.optionalKey(PushedToSchema),
 });
 export type RunRow = typeof RunRowSchema.Type;
 
@@ -714,6 +758,19 @@ export const RunNodeSchema = Schema.Struct({
   /** How to ask for this attempt's output — derived once, here, so no face
    *  reassembles the three fields a log is addressed by. */
   logKey: Schema.String,
+  /** WHAT THIS NODE PUT IN THE CACHE (PLAN 4.1), read off the journal's
+   *  `pushed` event. Absent for a node that pushed nothing — a run with no
+   *  target, a recipe that built no `result`, or one whose links an earlier
+   *  node had already sent. */
+  pushed: Schema.optionalKey(
+    Schema.Struct({
+      paths: Schema.Int,
+      bytes: Schema.Int,
+      /** How long the push took, SEPARATE from the node's own `durationMs`,
+       *  which stays the recipe's time. */
+      durationMs: Schema.Int,
+    }),
+  ),
 });
 export type RunNode = typeof RunNodeSchema.Type;
 
@@ -1245,6 +1302,23 @@ const AttentionAnswerSchema = Schema.Struct({
     }),
   ),
   endpoint: Schema.NullOr(Schema.String),
+  /**
+   * WHERE THIS RUN PUSHED WHAT IT BUILT (PLAN 4.1) — the bucket a green run
+   * warmed, or the sentence saying why it warmed nothing.
+   *
+   * On the ANSWER, not only on the board row, because an agent that reads a
+   * run through `run_read` and nothing else must be able to tell "green, and
+   * the cache has it" from "green, and the next machine will build it again".
+   */
+  push: Schema.optionalKey(
+    Schema.Struct({
+      ...PushedToSchema.fields,
+      /** Store paths this run put in the bucket, summed over its nodes, and
+       *  the NAR bytes they cost. */
+      paths: Schema.Int,
+      bytes: Schema.Int,
+    }),
+  ),
 });
 export type AttentionAnswer = typeof AttentionAnswerSchema.Type;
 

@@ -118,12 +118,36 @@ const declaration = {
       // The bucket-domain gate: the page rewrite's `/cache/` and its own
       // 404 sentence. The path GRAMMAR moved to the row's `bucketOf` fact.
       "packages/host/src/bucketDomain.ts": 2,
-      // The same header on the shared door reader's one request — and the
-      // PURGE PORT: the broker's tag, the interface a CDN row registers on,
-      // and the sentence saying what an announcement means. The word is in
-      // the shared vocabulary, which is where a port belongs; `@odu/cordis`
+      // The same header on the shared door reader's one request — and TWO
+      // PORTS: the purge broker a CDN row registers on, and the GRANT broker
+      // the runs' row asks for a run's write token through (PLAN 4.1). Both
+      // are shared vocabulary, which is where a port belongs; `@odu/cordis`
       // still names no row's package.
-      "packages/cordis/src/services.ts": 11,
+      "packages/cordis/src/services.ts": 20,
+      // THE RUNS' ROW, ASKING WHERE A RUN PUSHES (PLAN 4.1). `webPorts`
+      // resolves the cache a checkout's `flake.nix` already reads from — it
+      // is an HTTP client of a cache (`@odu/cache/push`, the one door that is
+      // not this row's server) plus the grant broker above, and it reaches no
+      // database, no verb and no face. The row's own plugin names the broker
+      // tag. `detail.tsx` is NOT here: the run page's bucket link is a prop
+      // the shell fills, so the face spells no row's route at all.
+      "packages/ci/src/webPorts.ts": 6,
+      "packages/ci/src/row.ts": 3,
+      // THE ENGINE, carrying the same fact to the lane: the coordinator reads
+      // the run's target off its argv and the runner pushes `result*` with
+      // the same client. The word is the `ODU_CACHE_*` task variables — named
+      // once, in the module that both writes and parses them — never the
+      // cache row.
+      "packages/execution/src/coordinator/run.ts": 1,
+      "packages/execution/src/runner/pushResults.ts": 3,
+      // The service's own sentence for a run that pushes nowhere.
+      "packages/service/src/start.ts": 1,
+      // THE RUNS' OWN WORDS ABOUT WHERE A RUN PUSHES (PLAN 4.1): one line of
+      // `odu ci run`'s usage, and the paragraph an agent is taught at
+      // `initialize`. Prose, in the row that does the pushing — neither names
+      // the cache row's package, its verbs or its database.
+      "packages/cli/src/ciCli.ts": 1,
+      "packages/service-client/src/verbs.ts": 2,
       "packages/launch/src/webDaemonLaunch.ts": 1,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,

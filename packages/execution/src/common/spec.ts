@@ -46,6 +46,26 @@ export const TaskSpecSchema = Schema.Struct({
   /** Coordinator-injected task environment. Kept generic on the wire; shard
    *  lanes currently use it for ODU_SHARD_INDEX / ODU_SHARD_TOTAL. */
   env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  /**
+   * WHERE THE RECIPE ACTUALLY RUNS, relative to the workspace root — absent
+   * when that IS the workspace root, which is every recipe of a single-file
+   * justfile.
+   *
+   * `just` runs a MODULE's recipe in the module's own directory, which `set
+   * working-directory` moves and `[no-cd]` cancels. The runner does not
+   * choose the cwd (the command is `just --no-deps <namepath>` from the
+   * workspace, and `just` does the chdir itself) — it needs this to know
+   * where a recipe's `result*` links landed, which for a module recipe is not
+   * the workspace root. Derived once at ingest, because the `just --dump` is
+   * the only thing that knows.
+   *
+   * ABSOLUTE when `set working-directory` took the recipe out of the
+   * workspace entirely — a directory this run does not own, whose `result`
+   * links belong to whoever left them there. `runsOutsideWorkspace` in
+   * `../just/ingest` is the one reader of that encoding, because the module
+   * that chose it is the one to ask about it.
+   */
+  workdir: Schema.optionalKey(Schema.String),
 });
 export type TaskSpec = typeof TaskSpecSchema.Type;
 

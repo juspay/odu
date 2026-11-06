@@ -21,6 +21,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   implementSurface,
   inMemoryStore,
@@ -53,6 +54,14 @@ import { transitiveDependents } from "../common/nodeId";
 import { createGroupReaper } from "./reap";
 import { hasSnapshot, narrateSnapshot, prepareWorkspace } from "./workspace";
 import { createSnapshotUploads } from "./snapshotUpload";
+import { runsOutsideWorkspace } from "../just/ingest";
+import {
+  createLanePusher,
+  type LanePusher,
+  type PushedFact,
+  pushConfigOf,
+  PUSH_TOKEN_ENV,
+} from "./pushResults";
 
 /** Lane-local setup node id — same namepath as fan-in `_ci-setup@plat`. */
 export const SETUP_NODE_ID = SETUP_NAMEPATH;
@@ -71,8 +80,40 @@ export interface LaneRunner {
   dispose(): void;
 }
 
-export function createLaneRunner(): LaneRunner {
+/**
+ * A TASK'S ENVIRONMENT, AS THE RECIPE SEES IT — everything the coordinator
+ * injected except the run's write token (PLAN 4.1).
+ *
+ * The runner IS the node's process, so "the token reaches the lane as process
+ * environment" is satisfied without the recipe's own shell inheriting it. The
+ * pusher reads the task map directly; nothing else has a use for it, and a
+ * recipe that prints its environment — `env`, a crash dump, a `set -x` over
+ * an assignment — would otherwise write a live credential into the node's
+ * attempt log, which is persisted in the catalog and served by `log_read`.
+ */
+function recipeEnv(
+  env: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  if (env === undefined) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (key === PUSH_TOKEN_ENV) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+export function createLaneRunner(
+  deps: {
+    /** WHERE THIS LANE'S OUTPUTS GO (PLAN 4.1), and what it has already sent.
+     *  One per runner process, because both are facts about the LANE rather
+     *  than about any node: a path node A pushed is on the bucket for node B
+     *  too. Injected so a suite can state a bucket that refuses without one. */
+    pusher?: LanePusher;
+  } = {},
+): LaneRunner {
   const uploads = createSnapshotUploads();
+  const pusher = deps.pusher ?? createLanePusher();
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
 
@@ -253,13 +294,23 @@ export function createLaneRunner(): LaneRunner {
   const getState = (): PipelineState => stateStore.get();
   const statusOf = (id: string): NodeStatus | undefined =>
     getState().nodes[id]?.status;
-  const setNode = (id: string, patch: Partial<NodeState>): void => {
+  /** Merge a patch onto one node. `drop` removes keys outright — a
+   *  `Partial<NodeState>` cannot, because the wire's `optionalKey` fields
+   *  reject a present-but-`undefined` spelling, and a reset node that KEPT
+   *  its `pushed` counts would paint "pushed N paths" while pending. */
+  const setNode = (
+    id: string,
+    patch: Partial<NodeState>,
+    drop: readonly (keyof NodeState)[] = [],
+  ): void => {
     const cur = getState();
     const prev = cur.nodes[id];
     if (prev === undefined) return;
+    const next: NodeState = { ...prev, ...patch };
+    for (const key of drop) delete next[key];
     ctx.cells.nodes.set({
       ...cur,
-      nodes: { ...cur.nodes, [id]: { ...prev, ...patch } },
+      nodes: { ...cur.nodes, [id]: next },
     });
   };
 
@@ -487,6 +538,7 @@ export function createLaneRunner(): LaneRunner {
     // the shell, and only `cat` writes to the socketpair. pipefail keeps the
     // recipe's exit code; the newline before `}` terminates the group even if
     // the command ends in a comment.
+    const task = config?.tasks.find((one) => one.id === node.id);
     const child = spawn(
       "bash",
       ["-o", "pipefail", "-c", `{ ${node.command}\n} 2>&1 | cat`],
@@ -496,7 +548,14 @@ export function createLaneRunner(): LaneRunner {
         detached: true,
         env: {
           ...process.env,
-          ...(config?.tasks.find((task) => task.id === node.id)?.env ?? {}),
+          // THE TASK'S ENVIRONMENT, LESS THE RUN'S WRITE TOKEN. Nothing in
+          // the recipe needs it — the pusher below is its only consumer, and
+          // it reads the task map directly. A recipe that runs `env`, a tool
+          // that dumps its environment on a crash or a `set -x` over an
+          // assignment would otherwise write a live credential into the
+          // node's attempt log, which is persisted in the catalog and served
+          // by `log_read`: the one place the design says it must never be.
+          ...recipeEnv(task?.env),
         },
       },
     );
@@ -510,6 +569,40 @@ export function createLaneRunner(): LaneRunner {
     };
     child.stdout?.on("data", onOutput);
     child.stderr?.on("data", onOutput);
+    const taskEnv = task?.env;
+    /** `close` arrived while a push was still running. The log terminal is a
+     *  promise that nothing more is coming, and the push client's lines are
+     *  still coming — so the frame waits for it. */
+    let closeSeen = false;
+    let pushing = false;
+    const endLog = (): void => {
+      if (inv.phase === "closed") return;
+      inv.phase = "closed";
+      tail.end(node.id);
+    };
+    /** Stamp the terminal status, after whatever post-exit work this node
+     *  owed. Split out of `finish` because a push runs between the two, and a
+     *  node that read `ok` before its push landed would be a green that had
+     *  warmed nothing. */
+    const stamp = (
+      status: NodeStatus,
+      exitCode: number | null,
+      pushed: PushedFact | null,
+      /** The RECIPE's own duration, measured when the child exited. A push
+       *  runs after that and must not be charged to it: every existing timing
+       *  surface reads `durationMs` as how long the work took. */
+      durationMs: number,
+    ): void => {
+      if (!current()) return;
+      setNode(node.id, {
+        status,
+        exitCode,
+        durationMs,
+        ...(pushed === null ? {} : { pushed }),
+      });
+      if (closeSeen) endLog();
+      tick();
+    };
     const finish = (status: NodeStatus, exitCode: number | null): void => {
       // `exit` and `error` can BOTH fire for one invocation (a child that fails
       // to spawn emits no exit; one that spawns and dies emits no error), so the
@@ -523,20 +616,68 @@ export function createLaneRunner(): LaneRunner {
       // log left unterminated here would cost a 15s drain and then a truncation
       // notice stamped on a node that finished, which is the class of lie the
       // notice exists to prevent.
-      if (child.pid === undefined) {
-        inv.phase = "closed";
-        tail.end(node.id);
-      }
+      if (child.pid === undefined) endLog();
       // The direct child is gone, but a stray it backgrounded (with its stdio
       // redirected, so `cat` still saw EOF) may survive in the group — reap it
       // rather than leaving the group unowned forever.
       if (child.pid !== undefined) reaper.reap(child.pid);
-      setNode(node.id, {
-        status,
-        exitCode,
-        durationMs: Date.now() - startedAt,
-      });
-      tick();
+      // ── WHAT THIS RECIPE BUILT GOES TO THE CACHE (PLAN 4.1) ──
+      //
+      // Only a GREEN node: a failed recipe's `result` is the previous run's
+      // link, and pushing it would store bytes this run never produced. Only a
+      // CONFIGURED one: a run with no cache target carries no token on any
+      // task and takes this branch never.
+      //
+      // The RECIPE's duration is taken here, before the push, so a node's
+      // `durationMs` stays what it has always meant.
+      const durationMs = Date.now() - startedAt;
+      const pushConfig = status === "ok" ? pushConfigOf(taskEnv) : null;
+      if (pushConfig === null || workspace === undefined) {
+        stamp(status, exitCode, null, durationMs);
+        return;
+      }
+      // WHERE THE RECIPE ACTUALLY RAN. `just` runs a module's recipe in the
+      // module's own directory, so a module DAG — the shape odu itself ships
+      // — leaves `ci/result`, which a glob of the workspace root never sees.
+      // `workdir` is the ingest's answer; absent means the workspace root.
+      //
+      // An ABSOLUTE answer means `set working-directory` took the recipe out
+      // of the workspace. Nothing is globbed there: a directory outside the
+      // run's own tree can hold a `result` link a different run — or a
+      // different user, on a shared lane host — left behind, and pushing that
+      // would store bytes this run never built. SAID on the node, because
+      // "nothing was pushed" is otherwise indistinguishable from "there was
+      // nothing to push".
+      if (runsOutsideWorkspace(task?.workdir)) {
+        if (current()) {
+          tail.append(
+            node.id,
+            `\n[odu] not pushing: this recipe runs in ${task?.workdir ?? ""} ` +
+              "(set working-directory), outside the run's workspace\n",
+          );
+        }
+        stamp(status, exitCode, null, durationMs);
+        return;
+      }
+      const workdir = task?.workdir === undefined ? workspace : join(workspace, task.workdir);
+      pushing = true;
+      void pusher
+        .push(workdir, pushConfig, (line) => {
+          if (current()) tail.append(node.id, `${line}\n`);
+        })
+        .then((pushed) => {
+          pushing = false;
+          stamp("ok", exitCode, pushed, durationMs);
+        })
+        .catch((err: unknown) => {
+          pushing = false;
+          const message = err instanceof Error ? err.message : String(err);
+          // GREEN MEANS WARMED. The recipe passed and its outputs did not
+          // reach the bucket, so the node is red with the client's own
+          // sentence in its log — the same shape as any other failure.
+          if (current()) tail.append(node.id, `\n[odu] push failed: ${message}\n`);
+          stamp("failed", exitCode, null, durationMs);
+        });
     };
     child.on("error", (err) => {
       if (current()) {
@@ -552,8 +693,12 @@ export function createLaneRunner(): LaneRunner {
     // coordinator can wait on instead of a race it loses (juspay/odu#87).
     child.on("close", () => {
       if (!current() || inv.phase === "closed") return;
-      inv.phase = "closed";
-      tail.end(node.id);
+      closeSeen = true;
+      // A push still owes this log its lines; `stamp` ends the frame when it
+      // is done. Without this the coordinator would be told the node's output
+      // was complete and then be sent more of it.
+      if (pushing) return;
+      endLog();
     });
   };
 
@@ -584,12 +729,19 @@ export function createLaneRunner(): LaneRunner {
       // fire — so none of them can write into the log this rerun just opened.
       supersede(rid);
       tail.reset(rid, "");
-      setNode(rid, {
-        status: "pending",
-        exitCode: null,
-        startedAt: null,
-        durationMs: null,
-      });
+      setNode(
+        rid,
+        {
+          status: "pending",
+          exitCode: null,
+          startedAt: null,
+          durationMs: null,
+        },
+        // WHAT IT WARMED IS NOT TRUE ANY MORE. A node about to run again has
+        // pushed nothing yet, and if its re-run finds nothing new (the dedupe
+        // set) the old claim would otherwise stand for good.
+        ["pushed"],
+      );
     }
     tick();
     return true;

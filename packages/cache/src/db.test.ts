@@ -46,6 +46,7 @@ const token: TokenRow = {
   bucketGlob: "main",
   scope: "write",
   expires: null,
+  label: null,
   lastUsed: null,
   revoked: false,
   created: NOW,

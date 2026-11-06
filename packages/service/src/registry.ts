@@ -45,14 +45,25 @@
  * grace has passed — and a changed answer re-projects the run like a moved file
  * would.
  *
- * "While it can matter" is a row that is not `settled` or `expired`. The
- * attention fold decides both of those BEFORE it consults the fence, so for
- * them the answer cannot change the row — and asking anyway was not free:
- * `releaseOwnership` keeps `owner.json` with a heartbeat that goes stale, so
- * every finished run on this host reached `kill(pid, 0)` four times a second,
- * and a reused pid re-parsed a journal whose run could not change. A settled
- * run that resumes appends to its journal, and an expiry writes a file, so
- * either moves the fingerprint and brings the run back into the question.
+ * "While it can matter" is a row that is not `settled`/`expired`, PLUS a
+ * settled row that still holds an endpoint. The attention fold decides
+ * settlement and expiry BEFORE it consults the fence, so for a finished run
+ * that has let its endpoint go the answer cannot change the row — and asking
+ * anyway was not free: `releaseOwnership` keeps `owner.json` with a heartbeat
+ * that goes stale, so every finished run on this host reached
+ * `kill(pid, 0)` four times a second, and a reused pid re-parsed a journal
+ * whose run could not change.
+ *
+ * A settled row that still NAMES an endpoint is the exception, and it is not
+ * cosmetic: `--linger` leaves exactly that shape, the run's write token is
+ * held for as long as something is serving the run (PLAN 4.1), and a
+ * coordinator killed -9 after `finalized` never releases the endpoint. Skip
+ * it on the strength of `settled` alone and the liveness is computed once,
+ * while it is still true, and never asked again.
+ *
+ * A settled run that resumes appends to its journal, and an expiry writes a
+ * file, so either moves the fingerprint and brings the run back into the
+ * question regardless.
  *
  * **No partial or time-budgeted refresh, on purpose.** A warm tick over ten
  * thousand runs is forty thousand `stat`s — tens of milliseconds. Chunking the
@@ -151,6 +162,10 @@ interface Entry {
    *  readings of one journal, and a caller that got them from two reads could
    *  hold a lane that has landed beside a node that has not started. */
   env: RunEnv;
+  /** THE RUN'S PUSH TOKEN ID (PLAN 4.1), off the manifest and deliberately
+   *  NOT on the row: a revocation handle is this process's business, not every
+   *  browser's. Read through {@link RunRegistry.pushTokenOf}. */
+  pushTokenId: string | null;
 }
 
 /**
@@ -188,6 +203,7 @@ function nodesOf(
   runId: string,
   roster: readonly string[],
   latest: ReadonlyMap<string, AttemptState>,
+  pushed: ReadonlyMap<string, { paths: number; bytes: number; durationMs: number }>,
 ): RunNode[] {
   // The ROSTER's order, because that is the schedule a dashboard paints. A node
   // the fold saw but the roster does not list is appended: a run whose roster
@@ -214,6 +230,7 @@ function nodesOf(
       });
       continue;
     }
+    const warmed = pushed.get(id);
     out.push({
       id,
       // A started attempt with no status line yet IS running: the journal's
@@ -227,6 +244,19 @@ function nodesOf(
       durationMs: attempt.durationMs,
       host: attempt.placement.host,
       logKey: formatLogKey({ runId, node: id, attempt: attempt.attempt }),
+      // WHAT THIS NODE WARMED (PLAN 4.1). Absent rather than zeroed, for the
+      // reason the schema gives: a node that pushed nothing and a run that
+      // never had a cache are the same absence to a reader. The two counts
+      // only — the bucket is the RUN's, and it is on the row.
+      ...(warmed === undefined
+        ? {}
+        : {
+            pushed: {
+              paths: warmed.paths,
+              bytes: warmed.bytes,
+              durationMs: warmed.durationMs,
+            },
+          }),
     });
   }
   return out;
@@ -397,20 +427,39 @@ function project(
     // cursor: that one advances only through events actually delivered, and
     // this read delivered none.
     cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
+    // WHERE THIS RUN PUSHES (PLAN 4.1) — the projection `attentionFor` just
+    // made, not a second one off the same manifest. It is already the public
+    // shape (the token id stripped: the service revokes by that, and a board
+    // row is read by every client that can list runs), and a second
+    // derivation is the place where two readers of one record can disagree.
+    // A record written before the field simply has no key, which is what lets
+    // a board show nothing rather than claim the run pushed nowhere.
+    ...(attention.push === undefined
+      ? {}
+      : {
+          push: {
+            target: attention.push.target,
+            skipped: attention.push.skipped,
+            keyWarning: attention.push.keyWarning,
+          },
+        }),
   };
   return {
     fingerprint: stamp,
     owner,
     alive,
     row,
-    nodes: nodesOf(handle.runId, fold.roster, fold.latest),
+    nodes: nodesOf(handle.runId, fold.roster, fold.latest, fold.pushed),
     // The ROW just built, so the elapsed time on this frame and the one every
     // later read recomputes come from one pair.
     env: envOf(fold, row, now),
+    pushTokenId: manifest.push?.target?.tokenId ?? null,
   };
 }
 
-/** A row the fence's answer can no longer change — see the module header. */
+/** A row whose STATE the fence's answer can no longer change — see the module
+ *  header, and note that the liveness behind a settled row's endpoint can
+ *  still change even though its state cannot. */
 function terminal(row: RunRow): boolean {
   return row.state === "settled" || row.state === "expired";
 }
@@ -445,6 +494,15 @@ export interface RunRegistry {
   row: (runId: string) => RunRow | undefined;
   /** One run's node list, or undefined for a run this registry has not seen. */
   nodes: (runId: string) => RunNode[] | undefined;
+  /** THE RUN'S PUSH TOKEN ID, or `null` (PLAN 4.1). Separate from `row`
+   *  because the row is the WIRE and a revocation handle is not published:
+   *  only this process, which minted it, has a use for it. */
+  pushTokenOf: (runId: string) => string | null;
+  /** IS THE PROCESS THAT OWNS THIS RUN STILL THERE — the liveness this
+   *  projection already computed for the row, published because `endpoint` on
+   *  the wire is the RECORDED one and cannot tell a lingering coordinator
+   *  from a killed one. A run this registry has not seen is not alive. */
+  ownerAliveOf: (runId: string) => boolean;
   /**
    * Where one run's work is placed, or undefined for a run this registry has
    * not seen. `undefined` rather than `UNKNOWN_ENV`, so a caller can tell "no
@@ -543,10 +601,24 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       const stamp = fingerprint(handle.dir);
       const held = slots.get(runId);
       if (held?.kind === "torn" && held.stamp === stamp) continue;
+      // THE SKIP: nothing on disk moved, AND nothing this projection computes
+      // from the clock did either.
+      //
+      // A terminal row is normally immune to the fence's answer — its state
+      // is already `settled`, and re-reading a journal to learn that again
+      // would be the whole catalog's work on every tick. But a settled row
+      // STILL SERVING carries a live endpoint, and whether a process is
+      // behind that endpoint is exactly what the clock changes: a `--linger`
+      // coordinator projected alive and then killed -9 would never be asked
+      // again, and its run's write token would live to its 24 h expiry on a
+      // daemon one `kill(0)` away from knowing. So a terminal row is only
+      // immune once it has RELEASED its endpoint; while it holds one,
+      // liveness is re-asked like any other row's.
       if (
         held?.kind === "run" &&
         held.entry.fingerprint === stamp &&
-        (terminal(held.entry.row) || ownerAlive(held.entry.owner, now) === held.entry.alive)
+        ((terminal(held.entry.row) && held.entry.row.endpoint === null) ||
+          ownerAlive(held.entry.owner, now) === held.entry.alive)
       ) {
         continue;
       }
@@ -603,6 +675,8 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
         .filter((row): row is RunRow => row !== undefined),
     row: (runId) => entryOf(runId)?.row,
     nodes: (runId) => entryOf(runId)?.nodes,
+    pushTokenOf: (runId) => entryOf(runId)?.pushTokenId ?? null,
+    ownerAliveOf: (runId) => entryOf(runId)?.alive ?? false,
     env: (runId, now = Date.now()) => {
       const held = entryOf(runId);
       if (held === undefined) return undefined;

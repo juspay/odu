@@ -57,6 +57,7 @@ function deps(w: World, ports = recordingPorts()) {
           startRun(input(over), {
             launch: ports.launch,
             probeCheckout: ports.probeCheckout,
+            push: ports.push,
             requests: requestStore({ root: w.requestsRoot }),
             catalog: { root: w.catalogRoot },
             host: "test-host",
@@ -285,6 +286,7 @@ describe("run.start", () => {
         startRun(input(), {
           launch: ports.launch,
           probeCheckout: ports.probeCheckout,
+          push: ports.push,
           requests: store,
           catalog: { root: w.catalogRoot },
           host: "test-host",
@@ -530,6 +532,7 @@ describe("crash reconciliation", () => {
         startRun(input(), {
           launch: d.ports.launch,
           probeCheckout: d.ports.probeCheckout,
+          push: d.ports.push,
           requests: store,
           catalog: { root: w.catalogRoot },
           host: "test-host",

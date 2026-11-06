@@ -188,6 +188,10 @@ export const CacheTokenSchema = Schema.Struct({
   bucketGlob: Schema.String,
   scope: CacheScopeSchema,
   expires: Schema.NullOr(Schema.Number),
+  /** WHAT MINTED IT — `run <id>` for a run's own write token (PLAN 4.1), null
+   *  for an administrator's. `optionalKey` so a daemon older than this field
+   *  still decodes here. */
+  label: Schema.optionalKey(Schema.NullOr(Schema.String)),
   lastUsed: Schema.NullOr(Schema.Number),
   revoked: Schema.Boolean,
   created: Schema.Number,
@@ -1067,8 +1071,16 @@ export const CACHE_KEY = "cache";
  * `gc.plan` takes an optional `retentionDays` to plan WITH — the buckets'
  * own rows are untouched, and `gc.run` does not take the field, which is why
  * the two verbs stopped sharing an input schema.
+ *
+ * 4.5: A BUCKET GROUPED AND ORDERED BY THE ROW. Additive: `bucket.paths`
+ * takes `group`, `name`, `sort` and `descending`, and answers `groups` beside
+ * `paths` — counted over the whole bucket rather than over one page.
+ *
+ * 4.6: WHO MINTED A TOKEN (PLAN 4.1). Additive: `label` on a token's public
+ * half, so the bucket page's Tokens list says `run <id>` for a credential odu
+ * minted for a run rather than leaving an operator to wonder who issued it.
  */
-export const CACHE_CONTRACT_VERSION = "4.5";
+export const CACHE_CONTRACT_VERSION = "4.6";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

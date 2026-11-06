@@ -186,6 +186,25 @@ export interface Attention {
   reporting_debt: { context: string; last_error: string; attempts: number }[];
   /** The live endpoint serving this run, or null when nothing is. */
   endpoint: string | null;
+
+  /**
+   * WHERE THIS RUN PUSHED WHAT IT BUILT (PLAN 4.1), and how much landed.
+   *
+   * Absent for a run recorded before the field, which is NOT the same as a
+   * run that pushed nothing — that one has `target: null` and a `skipped`
+   * reason. The counts are summed over the journal's `pushed` events, so a
+   * run read a week later still answers without the bucket being asked.
+   */
+  push?: {
+    target: { substituter: string; bucket: string } | null;
+    /** WHY nothing was pushed; null when something was. */
+    skipped: string | null;
+    /** What is wrong while something WAS pushed — the bucket's key missing
+     *  from `trusted-public-keys`. Null when there is nothing to say. */
+    keyWarning: string | null;
+    paths: number;
+    bytes: number;
+  };
 }
 
 /** One attempt's log, as the excerpt builder sees it. */
@@ -330,6 +349,11 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   /** The hosts file the lanes were declared in, from the newest lane line that
    *  carried one. Null for a run written before the field existed. */
   hostsSource: string | null;
+  /** WHAT EACH NODE PUT IN THE CACHE (PLAN 4.1), last write wins. Per NODE
+   *  rather than per attempt: a re-run that pushes again replaces what the
+   *  previous one claimed, and a reader asking "what did this node warm"
+   *  means the attempt that stands. */
+  pushed: Map<string, { bucket: string; paths: number; bytes: number; durationMs: number }>;
 } {
   let roster: string[] = [];
   let scope: RunScope | null = null;
@@ -345,6 +369,10 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   const debt = new Map<
     string,
     { context: string; lastError: string; attempts: number }
+  >();
+  const pushed = new Map<
+    string,
+    { bucket: string; paths: number; bytes: number; durationMs: number }
   >();
   const key = (node: string, attempt: number): string => `${node}#${attempt}`;
   const byAttempt = new Map<string, AttemptState>();
@@ -396,6 +424,15 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         // which is what makes "unresolved" mean the LATEST attempt rather than
         // any attempt that ever went red.
         latest.set(e.node, state);
+        // AND WHATEVER THE PREVIOUS ATTEMPT WARMED IS NO LONGER THIS NODE'S
+        // (PLAN 4.1). A rerun's push may find nothing new — every path it
+        // builds is already on the bucket — and the old counts would then
+        // stand for good over an attempt that pushed nothing. The retraction
+        // is THIS line rather than an event of its own: a new attempt is
+        // exactly the moment the claim stops being about the node a reader
+        // is looking at, and a rerun that does push writes a fresh `pushed`
+        // after it.
+        pushed.delete(e.node);
         break;
       }
       case "node_status": {
@@ -444,6 +481,14 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           attempts: e.attempts,
         });
         break;
+      case "pushed":
+        pushed.set(e.node, {
+          bucket: e.bucket,
+          paths: e.paths,
+          bytes: e.bytes,
+          durationMs: e.durationMs ?? 0,
+        });
+        break;
       case "finalized":
         finalized = e.outcome;
         // A run that resumed and then finalized AGAIN is settled once more —
@@ -454,7 +499,18 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         break;
     }
   }
-  return { roster, latest, finalized, resumed, debt, scope, phase, lanes, hostsSource };
+  return {
+    roster,
+    latest,
+    finalized,
+    resumed,
+    debt,
+    scope,
+    phase,
+    lanes,
+    hostsSource,
+    pushed,
+  };
 }
 
 const RED = new Set(["failed", "errored"]);
@@ -558,6 +614,26 @@ export function attentionFor(
     actionable,
     unreadable_events: sources.unreadableEvents,
     endpoint: sources.endpoint,
+    // WHERE THIS RUN PUSHED, and how much it landed (PLAN 4.1): the target
+    // off the manifest, the counts summed over the journal's own events. Both
+    // survive the coordinator, which is the point of recording them.
+    ...(manifest?.push === undefined
+      ? {}
+      : {
+          push: {
+            target:
+              manifest.push.target === null
+                ? null
+                : {
+                    substituter: manifest.push.target.substituter,
+                    bucket: manifest.push.target.bucket,
+                  },
+            skipped: manifest.push.skipped,
+            keyWarning: manifest.push.keyWarning,
+            paths: [...fold.pushed.values()].reduce((sum, one) => sum + one.paths, 0),
+            bytes: [...fold.pushed.values()].reduce((sum, one) => sum + one.bytes, 0),
+          },
+        }),
   };
 
   const build = (

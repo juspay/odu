@@ -101,6 +101,23 @@ export const RUN_FILES = {
    *  account of a run that failed on the strict gate, or died before its
    *  per-node logs said anything. */
   coordinatorLog: "coordinator.log",
+  /**
+   * THE RUN'S WRITE TOKEN, in flight (PLAN 4.1) — written by the launcher
+   * with mode 0600, read ONCE by the coordinator it just started, and unlinked
+   * there.
+   *
+   * A file rather than an argv or a unit's environment, because both of those
+   * are readable by anyone on the machine: `ps` shows one and `systemctl show`
+   * the other. A file in the run's own directory, under a per-user state root
+   * that is already the owner's alone, is the narrowest handoff available
+   * between two processes this daemon owns.
+   *
+   * It is EVIDENCE for expiry's purposes — a leftover from a coordinator that
+   * died before reading it must not survive the run — but never present on a
+   * run anybody can read, because the coordinator removes it within a second
+   * of being started.
+   */
+  pushToken: "push.token",
 } as const;
 
 /**
@@ -123,6 +140,9 @@ export const RUN_EVIDENCE = [
   RUN_FILES.events,
   RUN_FILES.receipts,
   RUN_FILES.coordinatorLog,
+  // A leftover from a coordinator that died before it could read and unlink
+  // its own token. Expiry must take it; it is never there on a live run.
+  RUN_FILES.pushToken,
 ] as const;
 
 export const RUN_IDENTITY = [

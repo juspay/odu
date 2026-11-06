@@ -57,6 +57,15 @@ first.)
 The leaf recipes are pure shell — the fixture's own "CI" is trivial on purpose,
 so the test exercises *odu's* machinery, not a real toolchain.
 
+**One exception: the push fixture has a flake.** `push.e2e.test.ts` is about a
+run resolving its cache out of `flake.nix` `nixConfig`, so its fixture must
+carry one — a bare `{ nixConfig = { extra-substituters = [ … ]; }; }` attrset
+with no `outputs` and no inputs, which is all the resolution ever evaluates,
+and the runner still comes from the baked source like every other fixture's.
+Its build recipe is a real `nix build` of a derivation depending on nothing
+but the harness's own bash, because a push with no store paths in it proves
+nothing.
+
 ## The cross-face gate
 
 `web.e2e.test.ts` is the one suite that can check the property the web release

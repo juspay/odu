@@ -41,7 +41,17 @@ import type { SurfaceDispatch } from "@kolu/surface/link";
 import { Effect } from "effect";
 import { existsSync } from "node:fs";
 import { CACHE_MOUNT } from "./paths";
-import { describeCache, discoveryToken, normalizeOrigin, pushToCache, saveCredential } from "./push";
+import {
+  describeCache,
+  discoveryToken,
+  savedCredentialFor,
+  normalizeOrigin,
+  oduCachesOf,
+  pushToCache,
+  nixEvalFlakeConfig,
+  readFlakeNixConfig,
+  saveCredential,
+} from "./push";
 import {
   CACHE_KEY,
   CacheRefused,
@@ -88,6 +98,11 @@ login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
 push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [-o json]
 push --cache <substituter> <path>…
+push <path>…                  with neither, the substituter is read from
+                              ./flake.nix's nixConfig — the one declaration a
+                              repository that READS from an odu cache already
+                              has. Two odu caches named there is a refusal,
+                              because a repository builds for one
                               upload only the paths the bucket is missing.
                               Talks to the cache directly, from HERE. Where a
                               NAR's bytes go is the BUCKET's answer: on an S3
@@ -103,7 +118,8 @@ push --cache <substituter> <path>…
                               already has: the cache names its own push origin
                               and bucket in nix-cache-info, so a workflow keeps
                               one fact instead of three. Exclusive with
-                              <bucket> --origin
+                              <bucket> --origin, and unnecessary when
+                              ./flake.nix names exactly one odu cache
                               --pin re-points that named pin at the closure
                               this push landed, so garbage collection keeps it.
                               The write token is the authority; nothing is
@@ -380,6 +396,10 @@ async function pushCommand(rest: string[]): Promise<number> {
   const asked = values.cache;
   let bucket: string;
   let origin = values.origin;
+  /** THE ADDRESS CAME OUT OF A REPOSITORY, which the inference below is the
+   *  only way of reaching. It is what decides the credential this push is
+   *  allowed to send. */
+  let addressFromRepository = false;
   let paths: string[];
   if (asked !== undefined) {
     if (values.origin !== undefined) {
@@ -431,13 +451,67 @@ async function pushCommand(rest: string[]): Promise<number> {
     paths = positionals;
   } else {
     const [named, ...rest] = positionals;
-    if (named === undefined || rest.length === 0) {
-      process.stderr.write(`odu: cache push needs a bucket and at least one path\n${CACHE_USAGE}`);
-      return 1;
+    // A BARE WORD IS A BUCKET, and everything else is a path: that is the same
+    // test `--cache` applies in the other direction, and it is what lets the
+    // inferred form share this grammar without a flag to tell them apart. An
+    // absolute path, a flake installable and something on this disk are paths;
+    // a bare word is a bucket name.
+    const looksLikeBucket =
+      named !== undefined &&
+      !(named.startsWith("/") || named.includes("#") || existsSync(named));
+    if (looksLikeBucket) {
+      if (rest.length === 0) {
+        process.stderr.write(
+          `odu: cache push needs a bucket and at least one path\n${CACHE_USAGE}`,
+        );
+        return 1;
+      }
+      bucket = named;
+      paths = rest;
+    } else {
+      // ── NEITHER SPELLING: THE REPOSITORY ALREADY SAID IT (PLAN 4.1) ──
+      //
+      // `flake.nix`'s `nixConfig` is the one declaration a repo that READS
+      // from an odu cache keeps, so a push from inside that repo needs no
+      // second copy of the bucket name. The client has no notion of "served
+      // here" — that is the service's grant, not a pusher's — so ANY odu cache
+      // in the config qualifies, and two is a refusal naming both.
+      if (positionals.length === 0) {
+        process.stderr.write(`odu: cache push needs at least one path\n${CACHE_USAGE}`);
+        return 1;
+      }
+      // `--origin` NAMES THE SAME THING THE FLAKE DOES, and the inference is
+      // about to overwrite it. Refused out loud, exactly as `--cache
+      // --origin` is: a flag that is silently ignored is worse than one that
+      // conflicts.
+      if (values.origin !== undefined) {
+        process.stderr.write(
+          "odu: --origin needs a bucket to go with it — `odu cache push <bucket> " +
+            "--origin <url>`. With neither, the substituter is read from " +
+            "./flake.nix and names its own origin.\n",
+        );
+        return 1;
+      }
+      const inferred = await inferredCache(json);
+      if ("error" in inferred) {
+        process.stderr.write(`odu: ${inferred.error}\n`);
+        return 1;
+      }
+      bucket = inferred.bucket;
+      origin = inferred.origin;
+      addressFromRepository = true;
+      paths = positionals;
     }
-    bucket = named;
-    paths = rest;
   }
+  // THE CREDENTIAL, when a REPOSITORY named the address. `--token-file` and
+  // `$ODU_CACHE_TOKEN` are credentials for wherever a push ends up — right
+  // when the operator typed the address, wrong when a contributor's
+  // `extra-substituters` line did, on the spelling that is now the
+  // recommended one. Only what this machine SAVED for that origin is in
+  // scope, and `null` means push anonymously and let the bucket answer.
+  const credential = addressFromRepository
+    ? await savedCredentialFor(process.env, origin ?? "")
+    : undefined;
   try {
     const summary = await pushToCache({
       bucket,
@@ -447,6 +521,13 @@ async function pushCommand(rest: string[]): Promise<number> {
       // in to one cache must still be able to push to a second. With `--cache`
       // it is the origin the cache named.
       ...(origin === undefined ? {} : { origin }),
+      // THE CREDENTIAL, when a REPOSITORY named the address. `--token-file`
+      // and `$ODU_CACHE_TOKEN` are credentials for wherever a push ends up —
+      // right when the operator typed the address, wrong when a contributor's
+      // `extra-substituters` line did, on the spelling that is now the
+      // recommended one. Only what this machine SAVED for that origin is in
+      // scope, and `null` means push anonymously and let the bucket answer.
+      ...(credential === undefined ? {} : { credential }),
       ...(values["token-file"] === undefined ? {} : { tokenFile: values["token-file"] }),
       ...(values.concurrency === undefined
         ? {}
@@ -483,8 +564,79 @@ async function pushCommand(rest: string[]): Promise<number> {
     }
     return summary.failed === 0 ? 0 : 1;
   } catch (err) {
-    process.stderr.write(`odu: ${err instanceof Error ? err.message : String(err)}\n`);
+    const said = err instanceof Error ? err.message : String(err);
+    // AND WHY IT WENT OUT ANONYMOUSLY, if it did. A bare 401 does not say
+    // that the address came from `./flake.nix` rather than off this command
+    // line, which is the whole of what to do about it.
+    const hint =
+      credential === null
+        ? ` — the substituter came from ./flake.nix and nothing is saved for ` +
+          `${origin ?? "it"}, so this push was anonymous. Run \`odu cache ` +
+          `login ${origin ?? "<url>"}\`, or name the cache yourself with ` +
+          "`odu cache push <bucket> --origin <url>`"
+        : "";
+    process.stderr.write(`odu: ${said}${hint}\n`);
     return 1;
   }
+}
+
+/**
+ * THE CACHE `./flake.nix` ALREADY NAMES (PLAN 4.1) — `odu cache push` with no
+ * `--cache` and no bucket.
+ *
+ * The same reading the service makes at `run.start`, less the grant: this is
+ * a CLIENT, with no daemon and no bucket of its own, so "is it an odu cache"
+ * is the whole of the test. Two of them is a refusal naming both, for the
+ * reason the run's resolver refuses: a repository builds for one cache, and
+ * choosing would be this command inventing a policy.
+ *
+ * **The probe is ANONYMOUS, and that is the whole difference from `--cache`.**
+ * With `--cache` the OPERATOR typed the URL — naming a cache is trusting it —
+ * and the push's own token rides one request early so a private bucket is
+ * discoverable. Here the REPOSITORY names the URL, so sending `$ODU_CACHE_TOKEN`
+ * or a `--token-file` would hand the operator's credential to whatever a flake
+ * points at, including `cache.nixos.org`, which most of them do. The cost is
+ * that a PRIVATE bucket cannot be inferred — its `nix-cache-info` is a 404 to
+ * an anonymous reader — and the refusal says to pass `--cache`.
+ */
+async function inferredCache(
+  json: boolean,
+): Promise<{ bucket: string; origin: string } | { error: string }> {
+  const config = await readFlakeNixConfig(
+    process.cwd(),
+    nixEvalFlakeConfig(process.env),
+  );
+  if (!config.ok) {
+    return {
+      error:
+        `${config.reason} — name the cache with \`--cache <substituter>\`, or the ` +
+        "bucket with `<bucket> --origin <url>`",
+    };
+  }
+  const found = await oduCachesOf(config.config.substituters);
+  const one = found[0];
+  if (one === undefined) {
+    return {
+      error:
+        "no substituter in ./flake.nix nixConfig answered as an odu cache — a " +
+        "PRIVATE bucket answers its nix-cache-info to nobody, so name it with " +
+        "`--cache <substituter>`",
+    };
+  }
+  if (found.length > 1) {
+    return {
+      error:
+        `./flake.nix nixConfig names ${found.length} odu caches ` +
+        `(${found.map((cache) => cache.substituter).join(", ")}) — a repository pushes ` +
+        "to one, so name it with `--cache <substituter>`",
+    };
+  }
+  if (!json) {
+    process.stderr.write(
+      `./flake.nix reads from ${one.substituter}, which is bucket "${one.bucket}" ` +
+        `on ${one.origin}\n`,
+    );
+  }
+  return { bucket: one.bucket, origin: one.origin };
 }
 

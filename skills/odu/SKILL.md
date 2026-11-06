@@ -135,6 +135,19 @@ The receipt carries `runId`, `requestId`, `sha`, `scope`, a usually-null
 positioned at the run's beginning — pass that cursor straight into your first
 `run_wait` so you resume rather than replay.
 
+**A run pushes what it builds, and nothing in the repository says so twice.**
+The `extra-substituters` line already in `flake.nix` `nixConfig` — the line a
+consumer keeps in order to READ from a bucket — is the whole declaration;
+`run_start` resolves it, and every recipe's `result*` closure is pushed to the
+one odu cache the serving daemon has. There is no request field, no flag, no
+recipe step and no token in the tree: do NOT add `odu cache push` to a justfile
+to get this. `run_read` answers `push` — the bucket and how much landed, or
+`target: null` and a `skipped` reason saying why nothing was pushed (no flake, no odu
+cache named there, or one this daemon does not serve). A push that fails makes
+that node RED, so a green run means the cache is warm. Two odu caches this
+daemon serves is a `checkout_refused` at start naming both: a repository builds
+for one cache.
+
 **Lost replies are why `requestId` exists.** Mint one id per *intent*, never per
 attempt. If a reply is lost — a timeout, a killed tool call, a restarted harness
 — repeat the call with **the same id and the same input**: you get the recorded
@@ -379,7 +392,7 @@ docs, "Set up an R2 bucket"):
   "auto"; credentialsFile; publicUrl?; }` — `publicUrl` being the custom domain
   bound to that bucket, an origin with no path, which public buckets on the
   store are then advertised at.
-The cache row is at contract 4.5 (3.0 removed `held` and `--wait`; 3.1 added
+The cache row is at contract 4.6 (3.0 removed `held` and `--wait`; 3.1 added
 `store` and the `stores` resource; 4.0 moved retention onto `lastWanted` — the
 old last-access field is gone from a path and from `stats_read` — and added
 `bucket_retention`, `pin_list`, `pin_delete`, `gc_plan` and `orphans`; 4.1 added
@@ -388,7 +401,9 @@ old last-access field is gone from a path and from `stats_read` — and added
 upload negotiation; 4.3 added `bucket_delete`; 4.4 added `gc_plan`'s
 `retentionDays`, the dry run's own retention, which `gc_run` does not take; 4.5
 added `bucket_paths`' `group`, `name`, `sort` and `descending` — a bucket
-counted and ordered by the row rather than by whoever holds one page).
+counted and ordered by the row rather than by whoever holds one page; 4.6 added
+`label` on a token's public half, so the Tokens list says `run <id>` for a
+credential odu minted for a run).
 
 - **WRITES LEAVE ODU TOO, on an S3 store.** `odu cache push` asks the bucket
   where a NAR's bytes go before it sends any. A bucket whose store takes its
@@ -678,6 +693,23 @@ declares.
 
 ## What changed (state it honestly if asked)
 
+- **A RUN PUSHES WHAT IT BUILDS** (`ci` 2.5, PLAN 4.1): every recipe's
+  `result*` closure goes to the odu cache the repository's `flake.nix`
+  `nixConfig` already reads from, when THIS daemon is the one serving it. The
+  target is decided from the URL against what the daemon advertises — the
+  bucket's path under its public origin, or a domain bound to that bucket —
+  and never from anything a server says about itself, so a flake cannot aim a
+  run's credential at a host somebody else runs. No recipe step, no token in
+  the tree, no request field, no flag. The run's write token is minted for
+  that run, scoped to that one bucket, expires in 24 hours as a backstop and
+  is revoked as soon as nothing is serving the run — a `--linger` coordinator
+  keeps it, because a rerun still pushes (it reads `run <id>` in the bucket
+  page's Tokens list, cache 4.6); the recipe's own environment never has it; a
+  push that fails reddens its node. A repository naming TWO caches this daemon
+  serves is refused at start, except on a replay, which runs without pushing.
+  `run_read` answers `push`, and a node answers `pushed`. The interim bound is
+  the operator's: with no org row saying which repository owns which bucket,
+  any checkout this daemon runs may push to any bucket it serves.
 - **The daemon can be scraped** (`metrics` 1.0, PLAN 6.2): `GET /metrics` is a
   Prometheus exposition of the cache row's hit rates and storage, the runs'
   durations and lane use. It needs the root token or a `metrics` token
@@ -701,7 +733,7 @@ declares.
   with a domain bound (clear the domain first) and one with a move in flight. Admin only,
   and on the board it is the bucket page's **Delete this bucket**, which makes you type
   the bucket's name first.
-- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.4, `cache` at 4.5,
+- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.5, `cache` at 4.6,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
   major of a row **it reads** differs. The refusal names that row
   (`serves the cache row at 4.0; this build reads cache 3.1`): run `odu web --upgrade`.
@@ -714,12 +746,24 @@ declares.
   refuses by design.
 - The repository ships a GitHub Actions push step
   (`juspay/odu/.github/actions/push@<sha>`), which verifies its own push. Its
-  only address input is `cache:` — the substituter URL.
+  `cache:` input is the substituter URL and is now OPTIONAL: omitted, the push
+  reads it out of `./flake.nix`'s `nixConfig`, the one declaration a repository
+  that reads from the cache already keeps.
 - `odu cache push --cache <substituter>` is the same discovery in a shell: it
   GETs `<substituter>/nix-cache-info`, requires `Odu-Origin` and `Odu-Bucket`,
   and pushes to them. It is exclusive with `<bucket> --origin <url>`, which
   stays for a person who has both in hand. A cache that states neither — or
-  does not answer — is refused with a sentence naming the URL.
+  does not answer — is refused with a sentence naming the URL. With NEITHER a
+  `--cache` nor a bucket, `odu cache push <path>…` reads the substituter out of
+  `./flake.nix`'s `nixConfig` and pushes to the one odu cache named there; two
+  is a refusal listing both. That inference probes ANONYMOUSLY, and the push
+  that follows uses ONLY a credential saved for that origin
+  (`odu cache login`): the URL came out of a repository, so `--token-file` and
+  `$ODU_CACHE_TOKEN` — which are credentials for wherever a push ends up — are
+  out of scope, and a flake pointing at somebody else's host collects nothing.
+  With none saved the push goes out anonymously and the bucket's 401 says so.
+  A PRIVATE bucket therefore cannot be inferred and must be named with
+  `--cache` or `<bucket> --origin`.
 - `odu cache push --pin NAME` re-points a pin at the closure the push landed
   (nothing is pinned if a path was refused). The push action takes `pin: true`
   instead of a name and derives `<owner>/<repo>@<ref>/<system>`; when to pin is

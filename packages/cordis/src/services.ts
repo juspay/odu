@@ -325,6 +325,120 @@ export function purgeBroker(): CachePurge {
   };
 }
 
+/**
+ * MAY THIS RUN PUSH TO THAT BUCKET, AND WITH WHAT — the port the `ci` row mints
+ * a run's write token through, and the `cache` row answers on.
+ *
+ * It is a BROKER for the same reason {@link CachePurge} is, and the direction is
+ * the mirror image: the runs' row asks, the cache row answers — and the runs'
+ * row is mounted FIRST (it offers `Bundle`, which the cache is held pending on).
+ * A row that had to `yield*` its answerer's service would be a deadlock, not a
+ * dependency. The host makes one broker per tenure, both rows name it, and with
+ * nobody registered every question answers "no such bucket here": a daemon
+ * serving no cache runs exactly as it did before, and nothing is refused.
+ *
+ * **No principal crosses it.** The grant is not a surface verb and has no
+ * caller to authorise: the ci row is in the same process as the cache row, the
+ * run it mints for is one this daemon just accepted, and the token it gets back
+ * is write-scoped to one bucket and expires. Administrative cache verbs keep
+ * needing the root token; this is not one of them.
+ */
+export interface CacheGrants {
+  /** IS A CACHE REGISTERED AT ALL — the early exit that keeps a daemon serving
+   *  none from evaluating every repository's flake for a grant that can never
+   *  happen. Not "at which origin": where a push goes is a property of the
+   *  BUCKET, answered by {@link GrantedBucket}, and a second address here
+   *  would be one nobody reads. */
+  serves(): boolean;
+  /** The bucket this daemon serves AT THAT SUBSTITUTER URL, or `null`. See
+   *  {@link GrantedBucket} for why the URL and never a probe. */
+  bucketAt(substituter: string): GrantedBucket | null;
+  /**
+   * A WRITE TOKEN FOR ONE RUN AND ONE BUCKET.
+   *
+   * The RUN's id, not a lifetime and not a label. How long a run's credential
+   * may outlive its run, and what the bucket page's Tokens list calls it, are
+   * the cache's own decisions — it is the row that writes `expires` and the
+   * row whose page shows the word, and an asker that supplied either would be
+   * one of two askers who could supply different ones.
+   *
+   * `null` when no cache is registered or the bucket is gone.
+   */
+  mint(request: { bucket: string; runId: string }): { id: string; token: string } | null;
+  /** Let a minted token go, by id. Idempotent: an unknown id is not an error,
+   *  because the caller revoking at finalize cannot know whether a restart
+   *  already did. */
+  revoke(id: string): void;
+  /** Install the answerer. Returns its withdrawal; throws
+   *  {@link GrantClaimRefused} when one is already installed. */
+  register(grantor: CacheGrantor): () => void;
+}
+
+/**
+ * ONE BUCKET THIS DAEMON SERVES, as a URL in somebody's `nix.conf` names it.
+ *
+ * **The answer is decided by the URL, never by a response body.** The first
+ * shape of this asked each substituter for its `nix-cache-info` and believed
+ * the `Odu-Origin` / `Odu-Bucket` lines it found there — which made the grant
+ * a function of a server the REPOSITORY chose, so one line of `flake.nix`
+ * pointing at an attacker's host could claim to be any bucket here and collect
+ * a write token for it. The daemon already knows every URL it advertises for
+ * every bucket it serves; matching against that set is the whole test. It
+ * cannot be lied to, it works for a PRIVATE bucket (no anonymous read is
+ * involved), and it dials nothing at all.
+ */
+export interface GrantedBucket {
+  readonly name: string;
+  /** The key a consumer needs in `trusted-public-keys` to USE what is pushed. */
+  readonly publicKey: string;
+  /** `Odu-Origin`: where a push to this bucket is aimed. */
+  readonly origin: string;
+  /** The advertised substituter URL that matched. */
+  readonly substituter: string;
+}
+
+/** What the cache row registers — the three questions, less the broker's own
+ *  absent-answerer defaults. A registered grantor is itself the answer to
+ *  `serves`. */
+export interface CacheGrantor {
+  bucketAt(substituter: string): GrantedBucket | null;
+  mint(request: { bucket: string; runId: string }): { id: string; token: string } | null;
+  revoke(id: string): void;
+}
+
+/** A second grantor claimed the broker. A distinct class so a row's `apply` can
+ *  fail with a sentence rather than a message match. */
+export class GrantClaimRefused extends Error {
+  readonly _tag = "GrantClaimRefused";
+  constructor() {
+    super(
+      "odu: a cache grantor is already installed on this daemon — exactly one " +
+        "row may mint a run's write token",
+    );
+  }
+}
+
+export const CacheGrants = serviceTag<CacheGrants>("odu:cacheGrants");
+
+/** A broker with no grantor. ONE per daemon, made by whoever owns the tenure. */
+export function grantsBroker(): CacheGrants {
+  let installed: { readonly grantor: CacheGrantor } | null = null;
+  return {
+    serves: () => installed !== null,
+    bucketAt: (substituter) => installed?.grantor.bucketAt(substituter) ?? null,
+    mint: (request) => installed?.grantor.mint(request) ?? null,
+    revoke: (id) => installed?.grantor.revoke(id),
+    register(grantor) {
+      if (installed !== null) throw new GrantClaimRefused();
+      const claim = { grantor };
+      installed = claim;
+      return () => {
+        if (installed === claim) installed = null;
+      };
+    },
+  };
+}
+
 // ── what a row publishes ────────────────────────────────────────────────────
 
 /** ONE BUCKET'S OWN NAME, as the cache row publishes it. */

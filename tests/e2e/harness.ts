@@ -154,6 +154,12 @@ export const PORT_SLOT = {
   /** `packages/host/e2e/cli/metrics.e2e.test.ts` — a daemon scraped at
    *  `/metrics`, with a cache bucket pushed to behind it. */
   metrics: 20,
+  /** `push.e2e.test.ts` — a daemon that serves the bucket a fixture's
+   *  `flake.nix` reads from, so its runs push to it. */
+  runPush: 21,
+  /** `push.e2e.test.ts` — a SECOND daemon, serving a bucket the first one
+   *  does not: the "served elsewhere" arm needs a real foreign `Odu-Origin`. */
+  runPushForeign: 22,
 } as const;
 
 /** The port for one named slot in THIS suite's block. */

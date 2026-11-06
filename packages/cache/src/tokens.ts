@@ -123,6 +123,9 @@ export interface TokenFacts {
   bucketGlob: string;
   scope: Scope;
   expires: number | null;
+  /** What minted it, when something said so — `run <id>` for a run's own
+   *  write token (PLAN 4.1). Null for an administrator's mint. */
+  label: string | null;
   lastUsed: number | null;
   revoked: boolean;
   created: number;
@@ -134,6 +137,7 @@ export function tokenFacts(row: TokenRow): TokenFacts {
     bucketGlob: row.bucketGlob,
     scope: row.scope,
     expires: row.expires,
+    label: row.label,
     lastUsed: row.lastUsed,
     revoked: row.revoked,
     created: row.created,

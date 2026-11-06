@@ -322,6 +322,7 @@ export function createOduService(opts: ServiceOptions): OduService {
                   {
                     launch: opts.ports.launch,
                     probeCheckout: opts.ports.probeCheckout,
+                    push: opts.ports.push,
                     requests,
                     catalog,
                     host: hostname(),
@@ -720,9 +721,70 @@ export function createOduService(opts: ServiceOptions): OduService {
       ),
   );
 
+  /**
+   * THE RUN TOKENS THIS PROCESS HAS ALREADY LET GO (PLAN 4.1).
+   *
+   * The revoke itself is idempotent, so this is not for correctness — it is so
+   * that a board holding a thousand settled runs does not issue a thousand
+   * SQLite updates on the tick that first projects the catalog.
+   */
+  const revokedPushTokens = new Set<string>();
+  /**
+   * A RUN NOBODY IS SERVING ANY MORE GIVES ITS WRITE TOKEN BACK.
+   *
+   * Driven off the PROJECTION rather than off the coordinator, and that is the
+   * design: the coordinator writes `finalized` and then dies, and it holds no
+   * authority over a cache in any case. The service minted the token, the
+   * service can see the run stop — `owner_lost` included, where nobody wrote
+   * `finalized` at all — and the service revokes it.
+   *
+   * **Settled is not the test; still being SERVED is.** `--linger` exists so a
+   * node can be rerun after the run drains, and a lingering coordinator is a
+   * settled row with a live endpoint. Revoking at first settle met that rerun
+   * with a dead credential and reddened the node for a reason that had nothing
+   * to do with the recipe — on the retry path linger was added for.
+   *
+   * **And serving is LIVENESS, not a recorded address.** `row.endpoint` is
+   * whatever the owner file says; a coordinator killed -9 after writing
+   * `finalized` never runs `releaseOwnership`, so its row stays settled with
+   * that endpoint standing for good — and a skip keyed on the address alone
+   * would leave that run's write token live until its expiry, on a daemon
+   * that can see the process is gone. So the skip asks the projection's own
+   * liveness, the same answer an `owner_lost` state is built from. A run that
+   * released its endpoint, lost its owner, or kept an endpoint nothing is
+   * behind is one nothing can push from again.
+   *
+   * Crash-safe for free: the first refresh after a restart upserts every run
+   * in the catalog, so a token whose daemon died mid-run is revoked the moment
+   * its successor projects that run. A daemon that never comes back is covered
+   * by the token's own expiry.
+   */
+  const revokeFinishedPushTokens = (rows: readonly RunRow[]): void => {
+    for (const row of rows) {
+      if (row.state === "provisioning" || row.state === "running") continue;
+      // STILL SERVING: a LIVE lingering coordinator, whose reruns still push.
+      // A recorded endpoint with no process behind it is a dead coordinator.
+      if (
+        row.endpoint !== null &&
+        row.state === "settled" &&
+        registry.ownerAliveOf(row.runId)
+      ) {
+        continue;
+      }
+      // The id is deliberately NOT on the wire row — a revocation handle is
+      // not something every browser that can list runs needs — so it is read
+      // from the projection that holds the manifest.
+      const tokenId = registry.pushTokenOf(row.runId);
+      if (tokenId === null || revokedPushTokens.has(tokenId)) continue;
+      revokedPushTokens.add(tokenId);
+      opts.ports.push.revoke(tokenId);
+    }
+  };
+
   /** Re-project the catalog and publish what moved. */
   const refresh = (): void => {
     const delta = registry.refresh(now());
+    revokeFinishedPushTokens(delta.upserted);
     for (const row of delta.upserted) runtime.ctx.collections.runs.upsert(row.runId, row);
     for (const runId of delta.removed) runtime.ctx.collections.runs.remove(runId);
     for (const key of watched) {
