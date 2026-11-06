@@ -452,6 +452,44 @@ export const RunEventSchema = Schema.Union([
     applied: Schema.Boolean,
   }),
   /**
+   * A NODE BEGAN PUSHING (PLAN 4.1) — the moment its recipe exited 0 and the
+   * lane started sending the closure.
+   *
+   * Journalled rather than kept in the coordinator's memory, because the run
+   * page reads a FOLD OF THIS JOURNAL, live run included: a flag that never
+   * reached a line here would never reach a reader. It is what makes the push
+   * step say `pushing` for the minute an upload takes instead of appearing,
+   * finished, out of nothing.
+   *
+   * Superseded by the `pushed` or `push_failed` line that follows it; a
+   * `pushing` left as a node's last push line means the lane died mid-upload,
+   * which is exactly what a reader should be shown.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("pushing"),
+    node: Schema.String,
+    bucket: Schema.String,
+    /** THE RECIPE'S OWN DURATION, as it was known the instant the push began.
+     *
+     *  Here, on the line that OPENS the push, because this is the last line
+     *  the journal gets until the upload ends: the node stays `running` while
+     *  it sends, so the coordinator writes no `node_status` (it journals a
+     *  status CHANGE, and nothing changed), and a page folding this journal
+     *  would have no end for the recipe's bar for the whole minute an upload
+     *  takes. That is not a cosmetic gap — a recipe with no duration reads as
+     *  "still running", its bar fills the track, and the push step is left
+     *  with no room to draw at all.
+     *
+     *  It is a FACT at exit 0 and not an estimate: the lane measures it when
+     *  the child exits, before handing the closure over, and the `node_status`
+     *  that eventually lands carries the same number. The fold therefore
+     *  applies this only where it has none — a status line is the later and
+     *  better-measured evidence, and this one must never overwrite it.
+     *
+     *  `optionalKey`, so a line written before this field still decodes. */
+    durationMs: Schema.optionalKey(Schema.Int),
+  }),
+  /**
    * A NODE'S OUTPUTS LANDED IN THE CACHE (PLAN 4.1) — the durable half of
    * "green means warmed".
    *
@@ -463,19 +501,49 @@ export const RunEventSchema = Schema.Union([
    * uploaded, which is what a closure states and what `nix path-info -S`
    * answers — not what zstd made of it on the way.
    *
-   * A push that FAILED is not one of these: it makes the node red, with the
-   * client's own sentence in that node's log, like any other failure.
+   * `present` SPLITS that served total without moving it. Readers want the
+   * two apart — what this run sent versus what the bucket already had — and
+   * the obvious shape would have been to replace `paths` with `stored`. It is
+   * not done, because this is the DURABLE record: lines written by every
+   * release before this one are still on disk and still read, and a renamed
+   * field would make all of them decode as a run that pushed nothing. So
+   * `paths` keeps its meaning exactly, `present` is `optionalKey`, and the
+   * fold subtracts. A line without `present` folds to "all of it went up",
+   * which is not a guess: those runs recorded no already-present count
+   * because the client's split was never carried, and the served total is the
+   * only number they ever stated.
    */
   Schema.Struct({
     kind: Schema.Literal("pushed"),
     node: Schema.String,
     bucket: Schema.String,
     paths: Schema.Int,
+    /** Of `paths`, how many the bucket ALREADY served before this node — so
+     *  `paths - present` is what this node uploaded. `optionalKey`, so a line
+     *  written before this field still decodes. */
+    present: Schema.optionalKey(Schema.Int),
     bytes: Schema.Int,
     /** HOW LONG THE PUSH TOOK, on its own. A node's `durationMs` is the
      *  RECIPE's time and stays that: a run whose timings silently absorbed
      *  upload seconds would change what every existing timing surface means.
      *  `optionalKey`, so a line written before this field still decodes. */
+    durationMs: Schema.optionalKey(Schema.Int),
+  }),
+  /**
+   * A NODE'S PUSH FAILED — the recipe passed and its outputs did not reach the
+   * bucket, which makes the node red (the rule 4.1 set).
+   *
+   * Its own line rather than silence, because the node's red status alone
+   * cannot say WHICH half failed: a reader of a finished run would see a red
+   * recipe where the recipe in fact passed. The push step reads red from this
+   * and the recipe step stays green, which is what happened.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("push_failed"),
+    node: Schema.String,
+    bucket: Schema.String,
+    /** The push client's own sentence, as it went into the node's push log. */
+    message: Schema.String,
     durationMs: Schema.optionalKey(Schema.Int),
   }),
   /** The run reached a terminal outcome. Sequence-wise the last line any
@@ -523,6 +591,36 @@ export const JournalEntrySchema = Schema.Struct({
   event: RunEventSchema,
 });
 export type JournalEntry = typeof JournalEntrySchema.Type;
+
+/**
+ * WHAT ONE NODE'S PUSH IS DOING, folded out of the three `push*` lines above.
+ *
+ * A union rather than a record with nullable counts, because the three states
+ * answer different questions and only one of them has counts to give: a reader
+ * holding `{ state: "pushing" }` cannot accidentally render `0 stored` as a
+ * fact about the bucket.
+ *
+ * THE COUNTS ARE SPLIT HERE, not on the line: the journal records the served
+ * total and an optional already-present count, and the fold turns that pair
+ * into the two numbers every reader actually wants.
+ *
+ * `bucket` and `message` are here but NOT on the node wire: the bucket is a
+ * property of the run (one target, on the header) and the message is already
+ * in the node's push log, which is the place to read it.
+ */
+export type NodePush =
+  | { state: "pushing"; bucket: string }
+  | {
+      state: "pushed";
+      bucket: string;
+      /** Paths this node uploaded. */
+      stored: number;
+      /** Paths of this node's closure the bucket already served. */
+      present: number;
+      bytes: number;
+      durationMs: number;
+    }
+  | { state: "failed"; bucket: string; message: string; durationMs: number };
 
 // ── attempts ────────────────────────────────────────────────────────────────
 

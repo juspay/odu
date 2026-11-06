@@ -84,7 +84,11 @@ import { attentionFor, type AttemptState, foldJournal } from "@odu/run-history/a
 import { formatCursor } from "@odu/run-history/ids";
 import { currentOwner, ownerAlive } from "@odu/run-history/owner";
 import { RUN_FILES, runDir } from "@odu/run-history/paths";
-import type { Owner, RunManifest } from "@odu/run-history/schema";
+import type {
+  NodePush as FoldNodePush,
+  Owner,
+  RunManifest,
+} from "@odu/run-history/schema";
 import {
   type CatalogOptions,
   catalogPath,
@@ -99,6 +103,7 @@ import {
 import { newestFirst, runElapsedMs } from "@odu/service-client/board";
 import { formatLogKey } from "@odu/service-client/logKey";
 import type {
+  NodePush,
   RunBoardState,
   RunEnv,
   RunLane,
@@ -106,6 +111,37 @@ import type {
   RunPhase,
   RunRow,
 } from "@odu/service-client/surface";
+
+/**
+ * The fold's push, as the WIRE says it.
+ *
+ * TWO TYPES OF THE SAME NAME, on purpose. The fold's (`@odu/run-history`) is
+ * what the journal recorded, keyed by the bucket a node pushed to; the wire's
+ * (`@odu/run-client/surface`) is what a node row needs to PAINT. Narrowing
+ * happens here, once, rather than in each reader — and it is a narrowing
+ * rather than a rename, which is why the two types are not shared.
+ *
+ * What the narrowing drops is the BUCKET: it is a property of the run, named
+ * once on the header, and repeating it on every node would be a per-node
+ * claim nobody made. A failure's message is the wire's own field — the lane
+ * stamps it on the cell — so it crosses unchanged.
+ */
+function wirePush(push: FoldNodePush): NodePush {
+  switch (push.state) {
+    case "pushing":
+      return { state: "pushing" };
+    case "pushed":
+      return {
+        state: "pushed",
+        stored: push.stored,
+        present: push.present,
+        bytes: push.bytes,
+        durationMs: push.durationMs,
+      };
+    case "failed":
+      return { state: "failed", message: push.message, durationMs: push.durationMs };
+  }
+}
 
 /** The files whose mtime+size decide whether a row is still current. Nothing
  *  else in a run directory can change a row: attempt logs grow, but a row says
@@ -203,7 +239,7 @@ function nodesOf(
   runId: string,
   roster: readonly string[],
   latest: ReadonlyMap<string, AttemptState>,
-  pushed: ReadonlyMap<string, { paths: number; bytes: number; durationMs: number }>,
+  push: ReadonlyMap<string, FoldNodePush>,
 ): RunNode[] {
   // The ROSTER's order, because that is the schedule a dashboard paints. A node
   // the fold saw but the roster does not list is appended: a run whose roster
@@ -230,7 +266,7 @@ function nodesOf(
       });
       continue;
     }
-    const warmed = pushed.get(id);
+    const pushed = push.get(id);
     out.push({
       id,
       // A started attempt with no status line yet IS running: the journal's
@@ -244,19 +280,19 @@ function nodesOf(
       durationMs: attempt.durationMs,
       host: attempt.placement.host,
       logKey: formatLogKey({ runId, node: id, attempt: attempt.attempt }),
-      // WHAT THIS NODE WARMED (PLAN 4.1). Absent rather than zeroed, for the
-      // reason the schema gives: a node that pushed nothing and a run that
-      // never had a cache are the same absence to a reader. The two counts
-      // only — the bucket is the RUN's, and it is on the row.
-      ...(warmed === undefined
-        ? {}
-        : {
-            pushed: {
-              paths: warmed.paths,
-              bytes: warmed.bytes,
-              durationMs: warmed.durationMs,
-            },
-          }),
+      // WHAT THIS NODE'S PUSH IS DOING — its own state, beside the recipe's.
+      // Absent rather than a zeroed `pushed`, for the reason the schema gives:
+      // a node whose outputs were never pushed and a run with nowhere to push
+      // them are the same absence to a reader, and an absence is cheaper to
+      // read than a sentinel.
+      //
+      // THE FOLD KNOWS MORE THAN THE NODE SAYS, deliberately. Its `bucket` is
+      // the RUN's — the row carries it once rather than once per node — and
+      // its `message` is the first line of a push log a reader can open at the
+      // same address. Repeating either here would be a second place the same
+      // fact could be stale, and a failure message truncated into a node row
+      // is the worst of both.
+      ...(pushed === undefined ? {} : { push: wirePush(pushed) }),
     });
   }
   return out;
@@ -452,7 +488,7 @@ function project(
     owner,
     alive,
     row,
-    nodes: nodesOf(handle.runId, fold.roster, fold.latest, fold.pushed),
+    nodes: nodesOf(handle.runId, fold.roster, fold.latest, fold.push),
     // The ROW just built, so the elapsed time on this frame and the one every
     // later read recomputes come from one pair.
     env: envOf(fold, row, now),

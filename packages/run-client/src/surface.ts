@@ -30,7 +30,7 @@ import { defineSurface, type SurfaceTypes } from "@kolu/surface/define";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import type { SurfaceClientOf } from "@kolu/surface/project";
 import { Schema } from "effect";
-import { NodeIdSchema } from "./nodeId";
+import { LogStreamSchema, NodeIdSchema } from "./nodeId";
 
 /** The zod→Effect Schema mapping is LAW on this surface (kolu PLAN #17), and
  *  every field below is wire-bearing:
@@ -147,6 +147,102 @@ export const STATUS_META: Record<
   },
 };
 
+/**
+ * A NODE'S PUSH, AS ITS OWN STEP (PLAN 4.1).
+ *
+ * Three states, because a push is work with a beginning: the recipe exits 0,
+ * the lane starts sending the closure, and a minute later it has landed or it
+ * has not. The run page draws this as a second segment under the node's bar —
+ * so `pushing` has to be observable while it is happening, not inferred
+ * afterwards from a record that appeared out of nothing.
+ *
+ * A UNION rather than one struct with nullable counts: only `pushed` has
+ * counts to give, and `stored: 0` on a push still running would be a claim
+ * about the bucket that nobody made.
+ *
+ * The node's own `status` is unaffected by the first two states and reads the
+ * RECIPE's verdict throughout; a failed push is what turns it red, which is
+ * the rule 4.1 set and this does not change.
+ */
+export const NodePushSchema = Schema.Union([
+  /** The recipe exited 0 and the closure is on its way. */
+  Schema.Struct({ state: Schema.Literal("pushing") }),
+  Schema.Struct({
+    state: Schema.Literal("pushed"),
+    /** Store paths this node UPLOADED — what the bucket did not have and now
+     *  has because of this node. */
+    stored: Schema.Int,
+    /** Store paths of this node's closure the bucket ALREADY served. Told
+     *  apart from `stored` because the two answer different questions: one is
+     *  work this run did, the other is work it was spared. A single total of
+     *  the two reads as "69 paths went up the wire" and almost never was. */
+    present: Schema.Int,
+    /** NAR bytes this node's uploads sent — the size of `stored`, not of the
+     *  closure the bucket serves. */
+    bytes: Schema.Int,
+    /** How long the push took, SEPARATE from the node's own `durationMs`,
+     *  which stays the recipe's time. */
+    durationMs: Schema.Int,
+  }),
+  /** The closure did not land, and WHY — the push client's own sentence, as
+   *  the lane had it when it stamped the cell. The whole of the client's
+   *  output stays in the node's push log; this is the one line a reader who
+   *  no longer has that log (a catalog a week later) needs. */
+  Schema.Struct({
+    state: Schema.Literal("failed"),
+    message: Schema.String,
+    durationMs: Schema.Int,
+  }),
+]);
+export type NodePush = typeof NodePushSchema.Type;
+
+/** WHAT A RUN PUT ON ITS BUCKET, over every node — the one fold of this
+ *  union, living with the union it folds.
+ *
+ *  THREE SUMS, SEPARATELY. `stored` and `present` are added apart all the way
+ *  up because a header that collapses them ("pushed 69 paths") says this run
+ *  sent sixty-nine closures when it sent three and found sixty-six already
+ *  there — a claim about both the network and the bucket that is wrong in
+ *  both directions. `bytes` belongs to `stored` alone: it is what went over
+ *  the wire.
+ *
+ *  Only pushes that LANDED count toward any of the three; the ones that
+ *  failed are named instead, because "green means warmed" is a claim a failed
+ *  push withdraws. `landed` is the count of pushes that completed, which is
+ *  NOT `stored > 0` — a node whose closure the bucket already had stores
+ *  nothing and is still a push that happened.
+ *
+ *  ENTRIES rather than a `ReadonlyMap`, because the two callers hold
+ *  different maps: the durable journal's fold carries `bucket` and keeps
+ *  insertion order, the browser's row carries the wire shape. Both are
+ *  iterable of `[node, push]`, and that is all this reads. */
+export function pushTotals(
+  push: Iterable<readonly [string, NodePush]>,
+): {
+  stored: number;
+  present: number;
+  bytes: number;
+  landed: number;
+  failedOn: readonly string[];
+} {
+  let stored = 0;
+  let present = 0;
+  let bytes = 0;
+  let landed = 0;
+  const failedOn: string[] = [];
+  for (const [node, one] of push) {
+    if (one.state === "pushed") {
+      stored += one.stored;
+      present += one.present;
+      bytes += one.bytes;
+      landed += 1;
+    } else if (one.state === "failed") {
+      failedOn.push(node);
+    }
+  }
+  return { stored, present, bytes, landed, failedOn };
+}
+
 export const NodeStateSchema = Schema.Struct({
   id: NodeIdSchema,
   name: Schema.String,
@@ -161,26 +257,16 @@ export const NodeStateSchema = Schema.Struct({
   /** Wall-clock run time in ms once terminal; `null` otherwise. */
   durationMs: Schema.NullOr(Schema.Number),
   /**
-   * WHAT THIS NODE PUT IN THE CACHE (PLAN 4.1) — set by the lane runner when a
-   * recipe exits 0 and its `result*` closure was pushed.
+   * WHAT THIS NODE'S PUSH IS DOING (PLAN 4.1) — set by the lane runner the
+   * moment a recipe exits 0, and replaced when the push ends.
    *
    * `optionalKey` and absent by default, because absent is the ordinary
    * answer: a run with no push target, a recipe that built no `result`, and a
-   * node that only re-pushed paths an earlier node in this run already sent all
-   * mean "nothing new went to the bucket", and `0` would be a claim this field
-   * is not entitled to make about a run that never pushed at all.
+   * node that only re-pushed paths an earlier node in this run already sent
+   * all mean "this node has no push step", and a zeroed record would be a
+   * claim this field is not entitled to make about a run that never pushed.
    */
-  pushed: Schema.optionalKey(
-    Schema.Struct({
-      /** Store paths the bucket serves as a result of this node. */
-      paths: Schema.Int,
-      /** NAR bytes this node's uploads sent. */
-      bytes: Schema.Int,
-      /** How long the push took, SEPARATE from the node's own `durationMs`,
-       *  which stays the recipe's time. */
-      durationMs: Schema.Int,
-    }),
-  ),
+  push: Schema.optionalKey(NodePushSchema),
 });
 export type NodeState = typeof NodeStateSchema.Type;
 
@@ -444,7 +530,12 @@ export const nodePrimitives = {
   },
   streams: {
     nodeLog: {
-      inputSchema: Schema.Struct({ id: NodeIdSchema }),
+      /** WHICH node, and WHICH of its two logs. `stream` absent is the
+       *  recipe's — the subscription every existing reader opens, unchanged. */
+      inputSchema: Schema.Struct({
+        id: NodeIdSchema,
+        stream: Schema.optionalKey(LogStreamSchema),
+      }),
       outputSchema: NodeLogMessageSchema,
     },
   },

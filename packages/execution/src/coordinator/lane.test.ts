@@ -74,7 +74,7 @@ describe("runLaneDeath", () => {
 });
 
 describe("reportLogStreamDeath", () => {
-  it("dies first when the transport is down, then appends", () => {
+  it("dies first when the transport is down, then appends — on the stream that died", () => {
     const order: string[] = [];
     reportLogStreamDeath({
       silenced: false,
@@ -82,15 +82,18 @@ describe("reportLogStreamDeath", () => {
       die: (error) => {
         order.push(`die:${error}`);
       },
-      onLogFrame: (nodeId, frame) => {
-        order.push(`append:${nodeId}:${frame.kind}`);
+      onLogFrame: (nodeId, frame, stream) => {
+        order.push(`append:${nodeId}:${stream}:${frame.kind}`);
       },
       nodeId: "fast",
+      // A PUSH tap that lost its feed. The note belongs on the push log: the
+      // recipe's log holds the recipe's bytes, and a reader greps it for them.
+      stream: "push",
       error: new Error("EPIPE"),
     });
     expect(order).toEqual([
       "die:log stream died (fast): EPIPE",
-      "append:fast:append",
+      "append:fast:push:append",
     ]);
   });
 
@@ -107,6 +110,7 @@ describe("reportLogStreamDeath", () => {
         appended = true;
       },
       nodeId: "fast",
+      stream: "recipe",
       error: new Error("EPIPE"),
     });
     expect(died).toBe(false);
@@ -125,6 +129,7 @@ describe("reportLogStreamDeath", () => {
           throw sealed(nodeId);
         },
         nodeId: "fast",
+        stream: "recipe",
         error: new Error("EPIPE"),
       }),
     ).not.toThrow();
@@ -138,6 +143,7 @@ describe("reportLogStreamDeath", () => {
           throw new Error("handler boom");
         },
         nodeId: "fast",
+        stream: "recipe",
         error: new Error("EPIPE"),
       }),
     ).toThrow("handler boom");
@@ -155,6 +161,7 @@ describe("reportLogStreamDeath", () => {
           throw new Error("must not run");
         },
         nodeId: "slow",
+        stream: "recipe",
         error: new Error("EPIPE"),
       }),
     ).toThrow("onDead boom");
@@ -173,6 +180,7 @@ describe("reportLogStreamDeath", () => {
         appended = true;
       },
       nodeId: "fast",
+      stream: "recipe",
       error: new Error("EPIPE"),
     });
     expect(died).toBe(false);

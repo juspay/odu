@@ -53,13 +53,22 @@ import type {
   CatalogImportReport,
   CatalogPruneReport,
   LogPage,
+  LogStream,
   OduServiceClient,
   RetryReceipt,
   RunRow,
+  ServiceCell,
   StartReceipt,
 } from "@odu/service-client/surface";
 import { ServiceRefused } from "@odu/service-client/surface";
 import { logHasMore } from "@odu/service-client/surface";
+import {
+  CI_LOG_STREAM_SINCE,
+  CI_ROW,
+  minorBehind,
+  rowSpeaks,
+} from "@odu/service-client/surface";
+import { readServiceCell } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { verdictStateOf } from "./liveFromService";
 import { printVerdict } from "./render";
@@ -552,6 +561,10 @@ export interface LogsOpts {
   follow?: boolean;
   /** How long one followed read may wait for growth before answering empty. */
   waitMs?: number;
+  /** WHICH of the attempt's logs — absent is the recipe's own output, which
+   *  is what a bare key has always meant and must keep meaning. `"push"` is
+   *  the same attempt's push step, a separate file with its own end. */
+  stream?: LogStream;
   json: boolean;
   origin?: string;
 }
@@ -564,6 +577,39 @@ export interface LogsOpts {
 export const FOLLOW_WAIT_MS = 30_000;
 
 /**
+ * WOULD THIS DAEMON ANSWER `--stream push` WITH THE PUSH LOG — or with the
+ * recipe's, wearing the push's name?
+ *
+ * `stream` is an optional INPUT key, added to `log_read` in
+ * {@link CI_LOG_STREAM_SINCE}. The additive rule's usual cost is an answer a
+ * caller can read ("unknown verb"), but an optional input has no such answer:
+ * a daemon from before the key DROPS it as an excess property and serves the
+ * request it understood, so `odu ci logs --stream push` came back with the
+ * recipe's bytes and nothing in the page said so. Silently answering a
+ * different question is the one skew a caller must not be left to discover
+ * from the answer, so this is read BEFORE the call and refused instead.
+ *
+ * The reading is the surface's own ({@link rowSpeaks}, {@link minorBehind}),
+ * never a second spelling of `rows?.ci ?? protocolVersion` — the fallback for
+ * a pre-2.5 daemon is the half that is easy to forget. A row this daemon does
+ * not mount is not refused here: `CI_NEEDS` already made that the dial's
+ * refusal, with its own sentence.
+ */
+export function pushStreamRefusal(
+  cell: ServiceCell,
+  where: string,
+): string | null {
+  const speaks = rowSpeaks(cell.identity, CI_ROW);
+  if (!minorBehind(speaks, CI_LOG_STREAM_SINCE)) return null;
+  return (
+    `odu: the service at ${where} serves the ci row at ${speaks as string} and ` +
+    `\`--stream push\` arrived in ci ${CI_LOG_STREAM_SINCE} — that daemon drops the flag ` +
+    "and answers with the attempt's RECIPE log instead, so read that one without " +
+    "`--stream`, or `odu web --upgrade` replaces the daemon."
+  );
+}
+
+/**
  * `odu ci logs <key>` — one attempt's bytes, addressed by the key a failure
  * handed you.
  *
@@ -572,44 +618,76 @@ export const FOLLOW_WAIT_MS = 30_000;
  * spelling of an address the service already published.
  */
 export async function logsViaService(opts: LogsOpts): Promise<number> {
-  if (opts.follow === true) {
-    return withService(opts.origin, (client) => followLog(client, opts));
-  }
+  const where = opts.origin ?? serviceOrigin();
   return withService(opts.origin, async (client) => {
-    const read = await call(
-      client.surface.log.read({
-        key: opts.key,
-        ...(opts.offset === undefined ? {} : { offset: opts.offset }),
-        ...(opts.limit === undefined ? {} : { limit: opts.limit }),
-      }),
-    );
-    if (!read.ok) {
-      return read.refusal === null
-        ? reportLost(read.error, opts.json)
-        : reportRefusal(read.refusal, opts.json);
+    // ASKED ONLY WHEN THE ANSWER COULD BE WRONG. A bare read and `--stream
+    // recipe` are the same request on every daemon alive, so neither pays for
+    // a cell read; `push` is the one word an older daemon would answer with
+    // the wrong file. See {@link pushStreamRefusal}.
+    if (opts.stream === "push") {
+      const cell = await call(readServiceCell(client));
+      if (!cell.ok) {
+        return cell.refusal === null
+          ? reportLost(cell.error, opts.json)
+          : reportRefusal(cell.refusal, opts.json);
+      }
+      const refusal = pushStreamRefusal(cell.value, where);
+      if (refusal !== null) {
+        // The shape a refusal has everywhere else on this face: the sentence
+        // on stderr, a coded object under `-o json`, and exit 5 — the
+        // published code for "the request itself was refused", which is what
+        // this is even though no daemon got to say so.
+        if (opts.json) emitJson({ error: "stream_unsupported", message: refusal });
+        else process.stderr.write(`${refusal}\n`);
+        return WAIT_EXITS.refused;
+      }
     }
-    const page: LogPage = read.value;
-    if (opts.json) {
-      emitJson(page);
-      return 0;
-    }
-    process.stdout.write(page.text);
-    // Distinct from `eof`, which is only about this read: a log that is
-    // complete-false and has been read to its end is a TRUNCATED log, and
-    // saying so is the difference between "the recipe was quiet" and "the
-    // evidence is gone".
-    if (page.eof && !page.complete) {
-      process.stderr.write(
-        "\nodu: this log never got its producer's last word — it is truncated\n",
-      );
-    }
-    if (!page.eof) {
-      process.stderr.write(
-        `\nodu: more at --offset ${page.nextOffset} (of ${page.size} bytes)\n`,
-      );
-    }
-    return 0;
+    if (opts.follow === true) return followLog(client, opts);
+    return readOnePage(client, opts);
   });
+}
+
+/** One page of an attempt's log, rendered — the non-following arm of
+ *  {@link logsViaService}, kept apart so the guard above it reads as one
+ *  decision rather than as a branch inside a renderer. */
+async function readOnePage(
+  client: Pick<OduServiceClient, "surface">,
+  opts: LogsOpts,
+): Promise<number> {
+  const read = await call(
+    client.surface.log.read({
+      key: opts.key,
+      ...(opts.offset === undefined ? {} : { offset: opts.offset }),
+      ...(opts.limit === undefined ? {} : { limit: opts.limit }),
+      ...(opts.stream === undefined ? {} : { stream: opts.stream }),
+    }),
+  );
+  if (!read.ok) {
+    return read.refusal === null
+      ? reportLost(read.error, opts.json)
+      : reportRefusal(read.refusal, opts.json);
+  }
+  const page: LogPage = read.value;
+  if (opts.json) {
+    emitJson(page);
+    return 0;
+  }
+  process.stdout.write(page.text);
+  // Distinct from `eof`, which is only about this read: a log that is
+  // complete-false and has been read to its end is a TRUNCATED log, and
+  // saying so is the difference between "the recipe was quiet" and "the
+  // evidence is gone".
+  if (page.eof && !page.complete) {
+    process.stderr.write(
+      "\nodu: this log never got its producer's last word — it is truncated\n",
+    );
+  }
+  if (!page.eof) {
+    process.stderr.write(
+      `\nodu: more at --offset ${page.nextOffset} (of ${page.size} bytes)\n`,
+    );
+  }
+  return 0;
 }
 
 // ── odu ci history list ─────────────────────────────────────────────────────
@@ -850,7 +928,10 @@ function renderPrune(report: CatalogPruneReport): string {
  */
 export async function followLog(
   client: Pick<OduServiceClient, "surface">,
-  opts: Pick<LogsOpts, "key" | "offset" | "limit" | "waitMs" | "json">,
+  opts: Pick<
+    LogsOpts,
+    "key" | "offset" | "limit" | "waitMs" | "stream" | "json"
+  >,
 ): Promise<number> {
   // Negative only on the FIRST call — `--offset=-4096` means "start from the
   // last 4 KiB". After that the cursor is an absolute position, because
@@ -863,6 +944,11 @@ export async function followLog(
         key: opts.key,
         ...(cursor === undefined ? {} : { offset: cursor }),
         ...(opts.limit === undefined ? {} : { limit: opts.limit }),
+        // EVERY call of the follow, not just the first. The cursor advances
+        // within ONE stream; a cursored read that dropped the stream would
+        // resume at this offset in the recipe's log and splice two files
+        // together as though they were one.
+        ...(opts.stream === undefined ? {} : { stream: opts.stream }),
         waitMs: opts.waitMs ?? FOLLOW_WAIT_MS,
       }),
     );

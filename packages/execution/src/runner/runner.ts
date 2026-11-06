@@ -33,10 +33,11 @@ import {
   EMPTY_STATE,
   type NodeState,
   type NodeStatus,
+  type NodePush,
   pendingNode,
   type PipelineState,
 } from "@odu/run-client/surface";
-import { SETUP_NAMEPATH } from "@odu/run-client/nodeId";
+import { logStreamKey, SETUP_NAMEPATH } from "@odu/run-client/nodeId";
 import { createLogTail } from "../common/logTail";
 import { validatePipeline } from "../common/spec";
 import {
@@ -55,10 +56,14 @@ import { createGroupReaper } from "./reap";
 import { hasSnapshot, narrateSnapshot, prepareWorkspace } from "./workspace";
 import { createSnapshotUploads } from "./snapshotUpload";
 import { runsOutsideWorkspace } from "../just/ingest";
+// THE PUSH CLIENT'S OWN READING OF A FAILURE. It lives beside the client
+// because the client is what knows which of a rejection's many shapes carry
+// diagnostics; the lane's job is only to put the whole of that reading in the
+// push log rather than the first sentence of it.
+import { describeFailure } from "@odu/cache/push";
 import {
   createLanePusher,
   type LanePusher,
-  type PushedFact,
   pushConfigOf,
   PUSH_TOKEN_ENV,
 } from "./pushResults";
@@ -116,6 +121,21 @@ export function createLaneRunner(
   const pusher = deps.pusher ?? createLanePusher();
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
+  /** A NODE'S LOGS END TOGETHER, ALWAYS.
+   *
+   *  A log's terminal is a promise that nothing more is coming, and the
+   *  coordinator's drain waits for one per stream it subscribed to — so a
+   *  path that ends the recipe's log and forgets the push's does not lose a
+   *  line, it hangs the lane's teardown for the whole idle window and then
+   *  stamps a truncation notice on a node that finished cleanly. Every
+   *  terminal path routes through here for that reason: the skip cascade, the
+   *  child's `close`, setup, and an operator's cancel. A node that never
+   *  pushed ends an empty push log, which is the honest answer and the one a
+   *  reader can wait on. */
+  const endNodeLogs = (id: string): void => {
+    tail.end(id);
+    tail.end(logStreamKey(id, "push"));
+  };
 
   /** Venue hold for this agent process — at most one; release on dispose. */
   let venueHold: LocalHold | null = null;
@@ -130,7 +150,17 @@ export function createLaneRunner(
       nodes: { store: stateStore },
     },
     streams: {
-      nodeLog: { source: tail.streamSource },
+      // TWO STREAMS PER NODE, ONE PUMP. A node's recipe output and its push
+      // output are separate logs with separate terminals, and the tail keys
+      // them apart (`logStreamKey`) rather than the pump growing a second
+      // map: everything a log is — the clamp, the terminal, the late
+      // subscriber's replay — is identical for both, and a second copy of it
+      // would be a second place for the `end` protocol to go subtly wrong.
+      // `stream` absent means the recipe's, which is every subscription that
+      // existed before the push became a step.
+      nodeLog: {
+        source: ({ id, stream }) => tail.streamSource({ id: logStreamKey(id, stream) }),
+      },
     },
     // A procedure is now ONE arm — `({ input }) => Effect<Out>` — where it used
     // to be an `async` function. `Effect.sync` for the bodies that never
@@ -297,7 +327,8 @@ export function createLaneRunner(
   /** Merge a patch onto one node. `drop` removes keys outright — a
    *  `Partial<NodeState>` cannot, because the wire's `optionalKey` fields
    *  reject a present-but-`undefined` spelling, and a reset node that KEPT
-   *  its `pushed` counts would paint "pushed N paths" while pending. */
+   *  its `push` would paint the previous attempt's push step under a node
+   *  that is pending again. */
   const setNode = (
     id: string,
     patch: Partial<NodeState>,
@@ -441,10 +472,10 @@ export function createLaneRunner(
         if (node === undefined || node.status !== "pending") continue;
         if (blocked(node)) {
           setNode(id, { status: "skipped" });
-          // A skipped node never runs, so its (empty) log is complete the
-          // instant it is skipped. Terminal status and log terminal stay in
+          // A skipped node never runs, so its (empty) logs are complete the
+          // instant it is skipped. Terminal status and log terminals stay in
           // lockstep on EVERY path, so a reader can wait on all nodes alike.
-          tail.end(id);
+          endNodeLogs(id);
           changed = true;
         } else if (runnable(node) && invocations.get(id)?.phase !== "running") {
           if (id === SETUP_NODE_ID) runSetup();
@@ -471,9 +502,12 @@ export function createLaneRunner(
         durationMs: Date.now() - startedAt,
       });
       // Setup writes its narration synchronously through `tail.append`, so
-      // reaching a terminal status IS the last of its output.
+      // reaching a terminal status IS the last of its output. Setup never
+      // pushes — it builds nothing — but its push stream is ended with the
+      // rest, because "every node ends every stream" is a rule worth more
+      // than the one exception it would otherwise carry.
       inv.phase = "closed";
-      tail.end(SETUP_NODE_ID);
+      endNodeLogs(SETUP_NODE_ID);
       tick();
     };
 
@@ -575,10 +609,20 @@ export function createLaneRunner(
      *  still coming — so the frame waits for it. */
     let closeSeen = false;
     let pushing = false;
+    /** When this node's push step began, by the RUNNER's clock. Set when the
+     *  push is handed to the pusher and moved forward to the moment the
+     *  pusher announces an actual step, so the `result*` glob that precedes
+     *  one is not charged to the upload.
+     *
+     *  ONE STOPWATCH FOR BOTH ENDINGS, which is why the pusher's success
+     *  value stopped carrying a duration: a failure leaves by `throw` and can
+     *  carry nothing, so timing it there meant the red half of the feature
+     *  had no number at all and had to report zero. */
+    let pushStartedAt = 0;
     const endLog = (): void => {
       if (inv.phase === "closed") return;
       inv.phase = "closed";
-      tail.end(node.id);
+      endNodeLogs(node.id);
     };
     /** Stamp the terminal status, after whatever post-exit work this node
      *  owed. Split out of `finish` because a push runs between the two, and a
@@ -587,7 +631,14 @@ export function createLaneRunner(
     const stamp = (
       status: NodeStatus,
       exitCode: number | null,
-      pushed: PushedFact | null,
+      /** The push step's final state, or `null` for a node that has none —
+       *  no cache target, a recipe that built nothing, a closure an earlier
+       *  node already sent. `null` AFTER `begin()` fired is unreachable by
+       *  construction: `begin` is called exactly when there are fresh paths,
+       *  and from there the pusher can only answer with a fact or throw. So
+       *  there is no "was pushing, ended up with nothing" case to defend
+       *  against, and no stale `pushing` can survive this call. */
+      push: NodePush | null,
       /** The RECIPE's own duration, measured when the child exited. A push
        *  runs after that and must not be charged to it: every existing timing
        *  surface reads `durationMs` as how long the work took. */
@@ -598,7 +649,7 @@ export function createLaneRunner(
         status,
         exitCode,
         durationMs,
-        ...(pushed === null ? {} : { pushed }),
+        ...(push === null ? {} : { push }),
       });
       if (closeSeen) endLog();
       tick();
@@ -661,22 +712,87 @@ export function createLaneRunner(
       }
       const workdir = task?.workdir === undefined ? workspace : join(workspace, task.workdir);
       pushing = true;
+      pushStartedAt = Date.now();
       void pusher
-        .push(workdir, pushConfig, (line) => {
-          if (current()) tail.append(node.id, `${line}\n`);
+        .push(workdir, pushConfig, {
+          // The lane declining to push: the recipe's log, because there is no
+          // push step for it to be the output of.
+          note: (line) => {
+            if (current()) tail.append(node.id, `${line}\n`);
+          },
+          // THE STEP OPENS HERE, on the node and on the clock. The board draws
+          // `pushing` from this and nothing else: a push that only appeared in
+          // its finished form would make a minute-long upload look like a node
+          // that sat idle and then claimed some bytes.
+          //
+          // AND THE RECIPE'S DURATION GOES WITH IT, in the same cell write.
+          // It is already a fact — the child exited and `durationMs` above
+          // measured it — and withholding it until `stamp` would mean that
+          // for the whole minute an upload takes the node reads as a recipe
+          // STILL RUNNING. A reader cannot draw a push beside a recipe whose
+          // bar has no end: the recipe fills the track and the push step is
+          // left with nothing to occupy. Publishing it here changes nothing
+          // about what `durationMs` MEANS — it is the recipe's own time here
+          // and at `stamp`, and the push's time stays on the push.
+          begin: () => {
+            pushStartedAt = Date.now();
+            if (current()) {
+              setNode(node.id, { push: { state: "pushing" }, durationMs });
+            }
+          },
+          say: (line) => {
+            if (current()) tail.append(logStreamKey(node.id, "push"), `${line}\n`);
+          },
         })
         .then((pushed) => {
           pushing = false;
-          stamp("ok", exitCode, pushed, durationMs);
+          // `null` means this node had no push step at all (nothing fresh to
+          // send), and `begin` cannot have fired — so there is no `pushing`
+          // state left standing and nothing to retract.
+          stamp(
+            "ok",
+            exitCode,
+            pushed === null
+              ? null
+              : { state: "pushed", ...pushed, durationMs: Date.now() - pushStartedAt },
+            durationMs,
+          );
         })
         .catch((err: unknown) => {
           pushing = false;
+          // TWO AUDIENCES, TWO SENTENCES, AND THE LOG GETS EVERYTHING.
+          //
+          // `message` is the CELL's: one short human sentence that crosses
+          // the wire, lands on the board's row and is journalled, read by
+          // people who no longer have the log at all. It stays short because
+          // a row is one line wide. Thanks to the pusher's re-throw it now
+          // names the bucket and the origin, which is the minimum a row must
+          // carry to be worth reading.
+          //
+          // `detail` is the PUSH LOG's: `describeFailure` walks `cause` to
+          // the bottom of the chain and keeps every diagnostic the runtime
+          // attached — `code`, `errno`, `syscall`, `hostname`, `address`,
+          // `port`. Nothing here reduces an error to `.message` any more:
+          // that reduction is exactly what turned a refused connection into
+          // the bare sentence "Unable to connect. Is the computer able to
+          // access the url?" — Bun's own `fetch` wording, with no URL and no
+          // host in it — and left the operator with nothing to act on.
+          //
+          // GREEN MEANS WARMED: the recipe passed and its outputs did not
+          // reach the bucket, so the node is red, and the step that failed is
+          // the one that says why. The recipe's log keeps the recipe's
+          // output.
           const message = err instanceof Error ? err.message : String(err);
-          // GREEN MEANS WARMED. The recipe passed and its outputs did not
-          // reach the bucket, so the node is red with the client's own
-          // sentence in its log — the same shape as any other failure.
-          if (current()) tail.append(node.id, `\n[odu] push failed: ${message}\n`);
-          stamp("failed", exitCode, null, durationMs);
+          const detail = describeFailure(err);
+          if (current()) {
+            tail.append(logStreamKey(node.id, "push"), `\n[odu] push failed: ${detail}\n`);
+          }
+          stamp(
+            "failed",
+            exitCode,
+            { state: "failed", message, durationMs: Date.now() - pushStartedAt },
+            durationMs,
+          );
         });
     };
     child.on("error", (err) => {
@@ -728,7 +844,11 @@ export function createLaneRunner(
       // in-flight setup prep, or a finished child whose `close` has yet to
       // fire — so none of them can write into the log this rerun just opened.
       supersede(rid);
+      // BOTH LOGS RE-OPEN. `reset` withdraws a terminal as well as the bytes,
+      // and a push stream left sealed here would make the next attempt's
+      // first `[odu] pushing …` line a throw instead of a log line.
       tail.reset(rid, "");
+      tail.reset(logStreamKey(rid, "push"), "");
       setNode(
         rid,
         {
@@ -740,7 +860,7 @@ export function createLaneRunner(
         // WHAT IT WARMED IS NOT TRUE ANY MORE. A node about to run again has
         // pushed nothing yet, and if its re-run finds nothing new (the dedupe
         // set) the old claim would otherwise stand for good.
-        ["pushed"],
+        ["push"],
       );
     }
     tick();
@@ -766,8 +886,9 @@ export function createLaneRunner(
       durationMs,
     });
     // The supersession above already silenced the killed child, so this
-    // cancel line is the log's last word.
-    tail.end(id);
+    // cancel line is the log's last word — on both streams, because a cancel
+    // during a push leaves that stream owed a terminal nobody else will send.
+    endNodeLogs(id);
     tick();
     return true;
   };

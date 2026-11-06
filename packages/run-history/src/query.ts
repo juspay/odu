@@ -33,7 +33,7 @@ import {
   parseRunSelector,
 } from "./ids";
 import { currentOwner, ownerProvablyAlive } from "./owner";
-import { ATTEMPT_FILES, attemptDir, RUN_FILES } from "./paths";
+import { attemptDir, attemptLogFile, type LogStream, RUN_FILES } from "./paths";
 import {
   type CatalogOptions,
   catalogPath,
@@ -330,6 +330,9 @@ export interface LogGrowthOptions {
   pollMs?: number;
   signal?: AbortSignal;
   now?: () => number;
+  /** Which of the attempt's two logs to watch. The recipe's, unless a
+   *  follower said otherwise. */
+  stream?: LogStream;
 }
 
 /**
@@ -360,7 +363,7 @@ export async function waitForLogGrowth(
   const pollMs = Math.max(10, opts.pollMs ?? 150);
   const logPath = join(
     attemptDir(handle.dir, encodeNodeKey(node), attempt),
-    ATTEMPT_FILES.log,
+    attemptLogFile(opts.stream),
   );
   for (;;) {
     // `-1` for a log that is not there, which is neither growth nor a shrink:

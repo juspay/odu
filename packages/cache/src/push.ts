@@ -38,6 +38,7 @@ import {
   readCredentials as sharedReadCredentials,
   saveCredential as sharedSaveCredential,
 } from "@odu/credentials";
+import { describeFailure } from "./failure";
 import {
   isDerivationPath,
   narHashBase32,
@@ -87,6 +88,16 @@ export const saveCredential = (env: PushEnv, origin: string, token: string): Pro
 /** `http://127.0.0.1:18440/` → `http://127.0.0.1:18440`, so a token saved by one
  *  spelling is found by the other. */
 export { normalizeOrigin } from "@odu/credentials";
+
+/**
+ * WHY A PUSH FAILED, IN FULL — the cause chain, the platform's codes, the
+ * address a dial was refused at. Re-exported from this client's own door so
+ * that a caller reporting a push (a lane, the CLI, a run's node) has ONE
+ * spelling of "all of it" and never has to settle for `err.message` again:
+ * the message of a `fetch` rejection is "Unable to connect. Is the computer
+ * able to access the url?", which names neither the url nor the reason.
+ */
+export { describeFailure } from "./failure";
 
 export interface ResolvedBucket {
   origin: string;
@@ -238,8 +249,12 @@ export async function describeCache(
       token === null ? {} : { headers: { authorization: `Bearer ${token}` } },
     );
   } catch (err) {
+    // THE WHOLE CHAIN, not `err.message`: this is the first address a push
+    // ever dials, so "could not be read" without a `code` is a reader's dead
+    // end — a name that does not resolve, a port nothing listens on and a
+    // certificate nobody trusts all reach here saying nothing of themselves.
     throw new Error(
-      `${url} could not be read (${err instanceof Error ? err.message : String(err)}) — ` +
+      `${url} could not be read (${describeFailure(err)}) — ` +
         `--cache takes the substituter URL your nix.conf uses, and this one did not answer`,
     );
   }
@@ -254,7 +269,10 @@ export async function describeCache(
           "nobody. Set $ODU_CACHE_TOKEN (or --token-file), or check the URL"
         : "for the token this machine holds — check the URL, and that the token " +
           "may read this bucket";
-    throw new Error(`${url} answered ${response.status} ${why}`);
+    const said = await readBody(response);
+    throw new Error(
+      `${url} answered ${response.status} ${why}${said === "" ? "" : ` — it said: ${said}`}`,
+    );
   }
   const text = await boundedText(response, CACHE_INFO_MAX_BYTES);
   const origin = infoField(text, ODU_ORIGIN_FIELD);
@@ -719,6 +737,51 @@ export async function savedCredentialFor(
  *  "what did `nix path-info` say", for the pusher and for a pin. */
 export type ClosureEntry = PathInfo;
 
+/**
+ * WHY ONE REQUEST FAILED, AS A VALUE.
+ *
+ * A summary crosses a boundary — a lane serialises it, the board renders it —
+ * so an `Error` may not ride on one: its `cause` chain, which is the whole
+ * point, does not survive `JSON.stringify` and its stack is not a fact about
+ * the push. Everything diagnostic is therefore flattened HERE, where the
+ * request was made and the address is still known, rather than at the catch
+ * site that has only a sentence left.
+ *
+ * `message` is the whole of it on one line. The other three are the same
+ * facts as FIELDS, for a caller that wants to render the status apart from
+ * the address: `url` is null only for a failure that was not a request,
+ * `status` and `body` are null when nothing answered at all — which is
+ * precisely the distinction between "the bucket refused this" and "the bucket
+ * was never reached".
+ */
+export interface PushRefusal {
+  /** What was attempted, where, and why it failed — one dense line. */
+  message: string;
+  /** The URL dialled. */
+  url: string | null;
+  /** The status that came back; null when nothing did. */
+  status: number | null;
+  /** The server's own words, bounded; null when nothing answered. */
+  body: string | null;
+}
+
+/**
+ * A PATH THAT DID NOT MAKE IT, AND EVERY ATTEMPT MADE ON IT.
+ *
+ * All of the attempts, not the last one: a path retried three times fails for
+ * three reasons, and the interesting one is routinely the first — a 503 that
+ * became a connection reset that became a timeout is a server going down,
+ * which the last reason alone does not say.
+ */
+export interface PushFailure {
+  path: string;
+  /** Every attempt's reason, joined — the sentence to print when one is
+   *  wanted. */
+  message: string;
+  /** One per attempt, in the order they were made; the last gave up. */
+  attempts: readonly PushRefusal[];
+}
+
 export interface PushSummary {
   pushed: number;
   /**
@@ -745,9 +808,10 @@ export interface PushSummary {
   mode: UploadMode | null;
   alreadyPresent: number;
   failed: number;
-  /** One line per failure, for a caller that wants to say which paths did not
-   *  make it. */
-  failures: readonly { path: string; message: string }[];
+  /** One entry per failure, with everything every attempt said — the URL, the
+   *  status, the cause chain. A caller that wants a line prints `message`; a
+   *  caller that wants fields reads `attempts`. */
+  failures: readonly PushFailure[];
   /** WHAT THE BUCKET SERVES NOW, by name: everything in the closure it already
    *  had, plus everything this push stored. A caller that promises "every
    *  pushed path answers" checks THIS list, not the closure — the closure also
@@ -895,7 +959,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
       `${alreadyPresent} already here, ${answer.skippedUpstream.length} upstream`,
   );
 
-  const failures: { path: string; message: string }[] = [];
+  const failures: PushFailure[] = [];
   const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
   const width = options.concurrency ?? DEFAULT_CONCURRENCY;
   const partSize = options.partSize ?? DEFAULT_NAR_PART_BYTES;
@@ -929,8 +993,13 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
           say(`✅ ${storePath} stored`);
           continue;
         }
-        failures.push({ path: storePath, message: outcome.message });
-        say(`❌ ${storePath} refused: ${outcome.message}`);
+        const refusal = everyAttempt(outcome.attempts);
+        failures.push({
+          path: storePath,
+          message: refusal.message,
+          attempts: outcome.attempts,
+        });
+        say(`❌ ${storePath} refused: ${refusal.message}`);
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, Math.min(width, queue.length)) }, worker));
@@ -1027,31 +1096,39 @@ async function askMissing(
   const sending = only === undefined
     ? [...closure.values()]
     : [...closure.values()].filter((entry) => only.has(entry.storePath));
-  const response = await fetch(
-    `${bucket.origin}/_odu/v1/buckets/${bucket.name}/missing`,
-    {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({
-        paths: sending.map((entry) => ({
-          path: entry.storePath,
-          sigs: entry.sigs,
-        })),
-      }),
-    },
-  );
+  // THE FIRST REQUEST A PUSH MAKES, and therefore the one a misconfigured
+  // origin dies on — which is why every throw below names the address. A bare
+  // `fetch` rejection names neither the URL nor the reason.
+  const url = `${bucket.origin}/_odu/v1/buckets/${bucket.name}/missing`;
+  const dialed = await dial(url, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({
+      paths: sending.map((entry) => ({
+        path: entry.storePath,
+        sigs: entry.sigs,
+      })),
+    }),
+  });
+  if (!dialed.ok) throw new Error(dialed.refusal.message);
+  const { response } = dialed;
   if (!response.ok) {
-    throw new Error(
-      `the bucket refused the missing-paths query: ${response.status} ` +
-        `${await boundedText(response, ERROR_BODY_MAX_BYTES)}`,
+    const refusal = await refused(
+      "the bucket refused the missing-paths query",
+      "POST",
+      url,
+      response,
     );
+    throw new Error(refusal.message);
   }
-  const body: unknown = await response.json();
+  const read = await readJson("POST", url, response);
+  if (!read.ok) throw new Error(read.refusal.message);
+  const body = read.body;
   if (body === null || typeof body !== "object" || !("missing" in body)) {
-    throw new Error("the bucket answered the missing-paths query without a `missing` list");
+    throw new Error(`${url} answered the missing-paths query without a \`missing\` list`);
   }
   const missing = body.missing;
-  if (!Array.isArray(missing)) throw new Error("the bucket's `missing` is not a list");
+  if (!Array.isArray(missing)) throw new Error(`${url} answered a \`missing\` that is not a list`);
   const skipped = "skippedUpstream" in body && Array.isArray(body.skippedUpstream)
     ? body.skippedUpstream
     : [];
@@ -1083,47 +1160,169 @@ async function pinClosure(
   served: readonly string[],
   say: (line: string) => void,
 ): Promise<{ name: string; rootPaths: number }> {
-  const response = await fetch(`${bucket.origin}/_odu/v1/buckets/${bucket.name}/pin`, {
+  const url = `${bucket.origin}/_odu/v1/buckets/${bucket.name}/pin`;
+  const dialed = await dial(url, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     body: JSON.stringify({ name, paths: served }),
   });
+  if (!dialed.ok) throw new Error(dialed.refusal.message);
+  const { response } = dialed;
   if (!response.ok) {
-    throw new Error(
-      `the bucket refused the pin "${name}": ${response.status} ` +
-        `${await boundedText(response, ERROR_BODY_MAX_BYTES)}`,
-    );
+    const refusal = await refused(`the bucket refused the pin "${name}"`, "POST", url, response);
+    throw new Error(refusal.message);
   }
   // WHAT THE BUCKET SAYS IT HOLDS, never what this client sent: the closure
   // is resolved there, so its own roots are the only true count — and a
   // daemon that answered something else has not done what was asked.
-  const body: unknown = await response.json();
+  const read = await readJson("POST", url, response);
+  if (!read.ok) throw new Error(read.refusal.message);
+  const body = read.body;
   if (
     body === null ||
     typeof body !== "object" ||
     !("rootPaths" in body) ||
     !Array.isArray(body.rootPaths)
   ) {
-    throw new Error(`the bucket answered the pin "${name}" without a \`rootPaths\` list`);
+    throw new Error(`${url} answered the pin "${name}" without a \`rootPaths\` list`);
   }
   const rootPaths = body.rootPaths.length;
   say(`📌 ${name} now holds ${rootPaths} paths`);
   return { name, rootPaths };
 }
 
-/** A fetch rejection, as an Error. The `.catch` arm of an upload is a network
- *  failure and nothing else, so the two arms of the union stay narrow. */
-function asError(err: unknown): Error {
-  return err instanceof Error ? err : new Error(String(err));
+/**
+ * `fetch`, WITH THE ADDRESS IT DIALLED KEPT.
+ *
+ * A `fetch` rejection is a TypeError that names no URL — the client knows
+ * which address it asked for and the error does not — and under it sits the
+ * only interesting part, a `cause` carrying `ECONNREFUSED` or `ENOTFOUND` or
+ * a certificate's expiry. Both are lost by the `.catch(asError)` this
+ * replaced, and what reached a production log was the TypeError's sentence
+ * alone: "Unable to connect. Is the computer able to access the url?"
+ *
+ * So NO SITE ON THE PUSH PATH CALLS `fetch` DIRECTLY. Every one dials through
+ * here, and gets back a value that carries the address and the whole chain.
+ */
+type Dialed = { ok: true; response: Response } | { ok: false; refusal: PushRefusal };
+
+async function dial(url: string, init: RequestInit = {}): Promise<Dialed> {
+  try {
+    return { ok: true, response: await fetch(url, init) };
+  } catch (err) {
+    return { ok: false, refusal: unreachable(init.method ?? "GET", url, err) };
+  }
+}
+
+/** A request NOTHING ANSWERED: the method, the address, and every link of the
+ *  reason. `status` and `body` are null because there was no response at all —
+ *  which is the fact that distinguishes a dead address from a refusal. */
+function unreachable(method: string, url: string, err: unknown): PushRefusal {
+  return {
+    message: `${method} ${url} could not be reached: ${describeFailure(err)}`,
+    url,
+    status: null,
+    body: null,
+  };
+}
+
+/** THE SERVER'S OWN WORDS, bounded — and, when the connection died while they
+ *  were being read, why that failed instead. A refusal whose body could not be
+ *  read is still a refusal, so this never throws. */
+async function readBody(response: Response): Promise<string> {
+  try {
+    return (await boundedText(response, ERROR_BODY_MAX_BYTES)).trim();
+  } catch (err) {
+    return `the body could not be read: ${describeFailure(err)}`;
+  }
+}
+
+/** A request that WAS answered, and refused. The status alone is a code; the
+ *  body is where a cache says which token it wanted or which reference it is
+ *  waiting for, so both are kept, and the address with them. */
+async function refused(
+  what: string,
+  method: string,
+  url: string,
+  response: Response,
+): Promise<PushRefusal> {
+  const body = await readBody(response);
+  return {
+    message: `${what}: ${method} ${url} answered ${response.status}${body === "" ? "" : `: ${body}`}`,
+    url,
+    status: response.status,
+    body: body === "" ? null : body,
+  };
+}
+
+/** A JSON body, or a refusal naming the address that answered bytes this
+ *  client could not read. `response.json()` rejects with a parser's complaint
+ *  about a character offset and nothing about who sent it — which, for an
+ *  origin a `flake.nix` chose, is the only part that matters. */
+async function readJson(
+  method: string,
+  url: string,
+  response: Response,
+): Promise<{ ok: true; body: unknown } | { ok: false; refusal: PushRefusal }> {
+  try {
+    return { ok: true, body: await response.json() };
+  } catch (err) {
+    return {
+      ok: false,
+      refusal: {
+        message:
+          `${method} ${url} answered ${response.status} with a body this client ` +
+          `could not read as JSON: ${describeFailure(err)}`,
+        url,
+        status: response.status,
+        body: null,
+      },
+    };
+  }
+}
+
+/**
+ * EVERY ATTEMPT'S REASON, AS ONE REFUSAL.
+ *
+ * A path retried three times failed three times, and keeping only the last is
+ * how a server that went down reads as a timeout. The fields stay the LAST
+ * attempt's — it is the one that gave up, and a caller rendering a status
+ * wants the status that ended it — while the message carries all of them.
+ */
+function everyAttempt(tried: readonly PushRefusal[]): PushRefusal {
+  const last = tried.at(-1);
+  if (last === undefined) {
+    return { message: "no attempt was made", url: null, status: null, body: null };
+  }
+  if (tried.length === 1) return last;
+  return {
+    ...last,
+    message: tried
+      .map((one, at) => `attempt ${at + 1}/${tried.length}: ${one.message}`)
+      .join(" · "),
+  };
+}
+
+/** THE ONE SHAPE A RETRY NARRATES WITH, wherever one is made: which attempt,
+ *  of how many, and the WHOLE of what the previous one failed with — the URL
+ *  and the cause chain included, since the retry line is the only place a
+ *  recovered-from failure is ever said out loud. */
+function retryLine(
+  subject: string,
+  attempt: number,
+  attempts: number,
+  because: PushRefusal,
+): string {
+  return `↻ ${subject} (attempt ${attempt + 1}/${attempts}) after ${because.message}`;
 }
 
 type UploadOutcome =
   | { ok: true; mode: UploadMode }
-  | { ok: false; message: string };
+  | { ok: false; attempts: readonly PushRefusal[] };
 
 type NarUpload =
   | { ok: true }
-  | { ok: false; message: string; retry: boolean };
+  | { ok: false; refusal: PushRefusal; retry: boolean };
 
 /**
  * SLICE A NAR INTO REQUESTS UNDER THE PROXY'S CEILING.
@@ -1191,7 +1390,10 @@ async function* narParts(
 }
 
 /** One part, retried on its own. `index` makes the retry an overwrite, so the
- *  server never has to know which attempt it is. */
+ *  server never has to know which attempt it is. Every attempt is narrated as
+ *  it is made, and every attempt's reason survives into the refusal: a part
+ *  that took three tries failed three times, and the first failure is usually
+ *  the one that says what is actually wrong. */
 async function putPart(
   base: string,
   headers: Record<string, string>,
@@ -1202,26 +1404,34 @@ async function putPart(
   say: (line: string) => void,
   storePath: string,
   session: string,
-): Promise<{ ok: true } | { ok: false; message: string }> {
-  let lastMessage = "no attempt was made";
+): Promise<{ ok: true } | { ok: false; refusal: PushRefusal }> {
+  const url = `${base}/nar/${narName}/parts/${index}`;
+  const subject = `${storePath} part ${index + 1}`;
+  const tried: PushRefusal[] = [];
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (attempt > 0) say(`↻ ${storePath} part ${index + 1} (retry ${attempt})`);
-    const response = await fetch(`${base}/nar/${narName}/parts/${index}`, {
+    // THE PREVIOUS ATTEMPT'S REASON, said out loud before the next one is
+    // made. Nothing else ever says it: a part that eventually lands leaves no
+    // refusal behind, so a silent retry is a failure that happened and was
+    // never reported.
+    const previous = tried.at(-1);
+    if (previous !== undefined) say(retryLine(subject, attempt, attempts, previous));
+    const dialed = await dial(url, {
       method: "PUT",
       headers: { ...headers, "content-type": "application/x-nix-nar", [UPLOAD_SESSION_HEADER]: session },
       // Bun's fetch takes the bytes; the DOM `BodyInit` the type names does
       // not include this `Uint8Array` spelling.
       body: part as unknown as BodyInit,
-    }).catch(asError);
-    if (response instanceof Error) {
-      lastMessage = response.message;
+    });
+    if (!dialed.ok) {
+      tried.push(dialed.refusal);
       continue;
     }
+    const { response } = dialed;
     if (response.ok) return { ok: true };
-    lastMessage = `part ${index + 1} answered ${response.status}: ${(await boundedText(response, ERROR_BODY_MAX_BYTES)).trim()}`;
+    tried.push(await refused(`part ${index + 1} was refused`, "PUT", url, response));
     if (!worthRetrying(response.status)) break;
   }
-  return { ok: false, message: lastMessage };
+  return { ok: false, refusal: everyAttempt(tried) };
 }
 
 /**
@@ -1233,42 +1443,73 @@ async function putPart(
  * the negotiation, and this client does NOT fall back — a store-backed bucket
  * would then silently go on pushing every byte through the daemon, which is
  * the thing 2.9 removes — so it says which version it needs and stops.
+ *
+ * THE `say` SINK IS NOT HERE, deliberately: this makes ONE request and knows
+ * neither which attempt it is nor how many are allowed. Its refusal goes back
+ * as a value to {@link uploadOne}, which owns the attempt count and narrates
+ * every retried attempt — a begin that failed and was tried again included,
+ * which is exactly what no log used to show.
  */
 async function beginUpload(
   base: string,
   headers: Record<string, string>,
   narName: string,
   partSize: number,
-): Promise<UploadPlan | { error: string; retry: boolean }> {
-  const response = await fetch(`${base}/nar/${narName}/upload`, {
+): Promise<UploadPlan | { refusal: PushRefusal; retry: boolean }> {
+  const url = `${base}/nar/${narName}/upload`;
+  const dialed = await dial(url, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     // THE CLIENT'S `--part-size`, as a FLOOR: in direct mode there is no
     // proxy body limit to stay under, and the server raises it to what S3
     // and the store demand.
     body: JSON.stringify({ partSize }),
-  }).catch(asError);
-  if (response instanceof Error) return { error: response.message, retry: true };
+  });
+  if (!dialed.ok) return { refusal: dialed.refusal, retry: true };
+  const { response } = dialed;
   if (response.status === 404) {
     await response.body?.cancel().catch(() => {});
     return {
-      error:
-        `${base} does not take uploads this way: it predates cache surface ` +
-        `${UPLOAD_NEGOTIATION_SINCE}, which added the upload negotiation — upgrade the cache`,
+      refusal: {
+        message:
+          `${url} does not take uploads this way: it predates cache surface ` +
+          `${UPLOAD_NEGOTIATION_SINCE}, which added the upload negotiation — upgrade the cache`,
+        url,
+        status: 404,
+        body: null,
+      },
       retry: false,
     };
   }
   if (!response.ok) {
     return {
-      error: `beginning the upload answered ${response.status}: ${(await boundedText(response, ERROR_BODY_MAX_BYTES)).trim()}`,
+      refusal: await refused("beginning the upload", "POST", url, response),
       retry: worthRetrying(response.status),
     };
   }
-  const plan = (await response.json()) as UploadPlan;
-  if (plan.mode !== "direct" && plan.mode !== "staged") {
-    return { error: `the cache answered an upload mode this client does not know`, retry: false };
+  const read = await readJson("POST", url, response);
+  if (!read.ok) return { refusal: read.refusal, retry: true };
+  const body = read.body;
+  // THE WORD THE SERVER ACTUALLY SENT, read by narrowing rather than through
+  // the plan's own type: once `plan.mode` has been excluded of both known
+  // modes it is `never`, and the one fact worth reporting — what it said
+  // instead — is no longer spellable through it.
+  const mode: unknown =
+    body !== null && typeof body === "object" && "mode" in body ? body.mode : undefined;
+  if (mode !== "direct" && mode !== "staged") {
+    return {
+      refusal: {
+        message: `${url} answered an upload mode this client does not know: ${String(mode)}`,
+        url,
+        status: response.status,
+        body: null,
+      },
+      retry: false,
+    };
   }
-  return plan;
+  // The mode is proven; the rest of the plan is the negotiated contract's,
+  // and the caller reads it under that contract's types.
+  return body as UploadPlan;
 }
 
 /** One PART, PUT to the STORE. No odu header rides along: the URL carries
@@ -1277,19 +1518,20 @@ async function beginUpload(
 async function putToStore(
   url: string,
   body: Uint8Array,
-): Promise<{ ok: true; etag: string | null } | { ok: false; message: string }> {
-  const response = await fetch(url, {
+): Promise<{ ok: true; etag: string | null } | { ok: false; refusal: PushRefusal }> {
+  const dialed = await dial(url, {
     method: "PUT",
     headers: { "content-length": String(body.length) },
     // Bun's fetch takes the bytes; the DOM `BodyInit` the type names does not
     // include this `Uint8Array` spelling.
     body: body as unknown as BodyInit,
-  }).catch(asError);
-  if (response instanceof Error) return { ok: false, message: response.message };
+  });
+  if (!dialed.ok) return { ok: false, refusal: dialed.refusal };
+  const { response } = dialed;
   if (!response.ok) {
     return {
       ok: false,
-      message: `the store answered ${response.status} to a presigned PUT: ${(await boundedText(response, ERROR_BODY_MAX_BYTES)).trim()}`,
+      refusal: await refused("the store refused a presigned PUT", "PUT", url, response),
     };
   }
   await response.body?.cancel().catch(() => {});
@@ -1331,18 +1573,18 @@ async function uploadDirect(
     // which costs a round trip only on a NAR that is already several parts.
     let url = plan.part;
     if (index > 0) {
-      const signed = await fetch(`${base}/nar/${narName}/upload/${plan.upload}/parts/${index}`, {
-        headers,
-      }).catch(asError);
-      if (signed instanceof Error) {
+      const signUrl = `${base}/nar/${narName}/upload/${plan.upload}/parts/${index}`;
+      const dialed = await dial(signUrl, { headers });
+      if (!dialed.ok) {
         await parts.return(undefined as never);
-        return { ok: false, message: signed.message, retry: true };
+        return { ok: false, refusal: dialed.refusal, retry: true };
       }
+      const signed = dialed.response;
       if (!signed.ok) {
         await parts.return(undefined as never);
         return {
           ok: false,
-          message: `signing part ${index + 1} answered ${signed.status}: ${(await boundedText(signed, ERROR_BODY_MAX_BYTES)).trim()}`,
+          refusal: await refused(`signing part ${index + 1}`, "GET", signUrl, signed),
           // THIS IS ODU ANSWERING, not the store, so the shared rule decides
           // — plus the one status whose meaning odu defines here: a `404` is
           // an upload this daemon no longer holds, and beginning again is
@@ -1350,18 +1592,56 @@ async function uploadDirect(
           retry: signed.status === 404 || worthRetrying(signed.status),
         };
       }
-      ({ url } = (await signed.json()) as { url: string });
+      const read = await readJson("GET", signUrl, signed);
+      if (!read.ok) {
+        await parts.return(undefined as never);
+        return { ok: false, refusal: read.refusal, retry: true };
+      }
+      // A PRESIGN THAT IS NOT A STRING is a daemon answering something this
+      // client cannot dial, and PUTting to `undefined` would fail one layer
+      // down with an address nobody recognises. Say what was asked and what
+      // came back instead.
+      const signedBody = read.body;
+      const presigned =
+        signedBody !== null &&
+        typeof signedBody === "object" &&
+        "url" in signedBody &&
+        typeof signedBody.url === "string"
+          ? signedBody.url
+          : null;
+      if (presigned === null) {
+        await parts.return(undefined as never);
+        return {
+          ok: false,
+          refusal: {
+            message: `${signUrl} answered part ${index + 1}'s signature without a \`url\``,
+            url: signUrl,
+            status: signed.status,
+            body: null,
+          },
+          retry: false,
+        };
+      }
+      url = presigned;
     }
     const sent = await putToStore(url, current);
     if (!sent.ok) {
       await parts.return(undefined as never);
-      return { ok: false, message: sent.message, retry: true };
+      return { ok: false, refusal: sent.refusal, retry: true };
     }
     if (sent.etag === null) {
       await parts.return(undefined as never);
       return {
         ok: false,
-        message: `the store took part ${index + 1} without an ETag, which the join needs`,
+        // A 2xx WITH NOTHING IN IT: the store took the bytes and named no
+        // ETag, so there is no status to report that would not read as a
+        // refusal it never made — the address is the whole of the evidence.
+        refusal: {
+          message: `${url} took part ${index + 1} without an ETag, which the join needs`,
+          url,
+          status: null,
+          body: null,
+        },
         retry: false,
       };
     }
@@ -1374,12 +1654,14 @@ async function uploadDirect(
     ahead = await parts.next();
   }
 
-  const joined = await fetch(`${base}/nar/${narName}/upload/${plan.upload}/complete`, {
+  const joinUrl = `${base}/nar/${narName}/upload/${plan.upload}/complete`;
+  const dialed = await dial(joinUrl, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     body: JSON.stringify({ parts: done }),
-  }).catch(asError);
-  if (joined instanceof Error) return { ok: false, message: joined.message, retry: true };
+  });
+  if (!dialed.ok) return { ok: false, refusal: dialed.refusal, retry: true };
+  const joined = dialed.response;
   if (!joined.ok) {
     // EVERY REFUSAL HERE RE-BEGINS THE PATH. The upload this one names is
     // finished with either way — odu drops it on a refusal — and the reachable
@@ -1389,7 +1671,7 @@ async function uploadDirect(
     // attempt budget bounds it.
     return {
       ok: false,
-      message: `finishing the upload answered ${joined.status}: ${(await boundedText(joined, ERROR_BODY_MAX_BYTES)).trim()}`,
+      refusal: await refused("finishing the upload", "POST", joinUrl, joined),
       retry: true,
     };
   }
@@ -1422,17 +1704,22 @@ async function uploadStaged(
 
   if (second.done) {
     const body = first.done ? new Uint8Array(0) : first.value;
-    const response = await fetch(`${base}/nar/${narName}`, {
+    const url = `${base}/nar/${narName}`;
+    const dialed = await dial(url, {
       method: "PUT",
       headers: { ...headers, "content-type": "application/x-nix-nar" },
       // Same spelling as the part upload: Bun takes the bytes.
       body: body as unknown as BodyInit,
-    }).catch(asError);
-    if (response instanceof Error) return { ok: false, message: response.message, retry: true };
+    });
+    if (!dialed.ok) return { ok: false, refusal: dialed.refusal, retry: true };
+    const { response } = dialed;
     if (response.ok) return { ok: true };
+    // THE BODY, which this arm alone used to throw away — and it is the arm
+    // every small path takes, so the commonest refusal in the whole client
+    // was the one that said least.
     return {
       ok: false,
-      message: `nar upload answered ${response.status}`,
+      refusal: await refused("nar upload", "PUT", url, response),
       retry: worthRetrying(response.status),
     };
   }
@@ -1454,7 +1741,7 @@ async function uploadStaged(
     );
     if (!sent.ok) {
       await parts.return(undefined as never);
-      return { ok: false, message: sent.message, retry: true };
+      return { ok: false, refusal: sent.refusal, retry: true };
     }
     // PROGRESS for a large path: one line per part, so a slow upload reads as
     // work rather than as the old silence.
@@ -1465,21 +1752,34 @@ async function uploadStaged(
     ahead = await parts.next();
   }
 
-  const joined = await fetch(`${base}/nar/${narName}/complete`, {
+  const joinUrl = `${base}/nar/${narName}/complete`;
+  const dialed = await dial(joinUrl, {
     method: "POST",
     headers: { ...headers, [PARTS_HEADER]: String(index), [UPLOAD_SESSION_HEADER]: session },
-  }).catch(asError);
-  if (joined instanceof Error) return { ok: false, message: joined.message, retry: true };
+  });
+  if (!dialed.ok) return { ok: false, refusal: dialed.refusal, retry: true };
+  const joined = dialed.response;
   if (!joined.ok) {
     return {
       ok: false,
-      message: `joining ${index} parts answered ${joined.status}: ${(await boundedText(joined, ERROR_BODY_MAX_BYTES)).trim()}`,
+      refusal: await refused(`joining ${index} parts`, "POST", joinUrl, joined),
       retry: worthRetrying(joined.status),
     };
   }
   return { ok: true };
 }
 
+/**
+ * ONE PATH, UP TO `attempts` TIMES — and every attempt is kept.
+ *
+ * This is the loop that owns the attempt count, so it is the loop that
+ * NARRATES: before each retried attempt it says which attempt is about to be
+ * made, of how many, and the whole of what the previous one failed with — the
+ * URL and the cause chain included. A path that eventually lands otherwise
+ * leaves no trace of the failures it survived, and a path that does not land
+ * used to report only the last of them, which is how a server going down read
+ * as a single timeout.
+ */
 async function uploadOne(
   base: string,
   headers: Record<string, string>,
@@ -1489,7 +1789,9 @@ async function uploadOne(
   say: (line: string) => void,
   options: { partSize: number },
 ): Promise<UploadOutcome> {
-  let lastMessage = "no attempt was made";
+  /** Every attempt's reason, in order — the whole of what is reported when
+   *  the budget runs out. */
+  const tried: PushRefusal[] = [];
 
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
   // THIS PATH'S OWN PARTS (since the cache row's 2.4): another pusher of the same path, at
@@ -1504,11 +1806,15 @@ async function uploadOne(
   // rather than a refusal — so only that mode asks again.
   let plan = await beginUpload(base, headers, narName, options.partSize);
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (attempt > 0 && ("error" in plan || plan.mode === "direct")) {
-      plan = await beginUpload(base, headers, narName, options.partSize);
+    const previous = tried.at(-1);
+    if (previous !== undefined) {
+      say(retryLine(entry.storePath, attempt, attempts, previous));
+      if ("refusal" in plan || plan.mode === "direct") {
+        plan = await beginUpload(base, headers, narName, options.partSize);
+      }
     }
-    if ("error" in plan) {
-      lastMessage = plan.error;
+    if ("refusal" in plan) {
+      tried.push(plan.refusal);
       if (!plan.retry) break;
       continue;
     }
@@ -1526,28 +1832,29 @@ async function uploadOne(
             session,
           );
     if (!uploaded.ok) {
-      lastMessage = uploaded.message;
+      tried.push(uploaded.refusal);
       if (!uploaded.retry) break;
       continue;
     }
-    const infoResponse = await fetch(`${base}/${storePathHash(entry.storePath)}.narinfo`, {
+    const infoUrl = `${base}/${storePathHash(entry.storePath)}.narinfo`;
+    const dialed = await dial(infoUrl, {
       method: "PUT",
       headers: { ...headers, "content-type": "text/x-nix-narinfo" },
       body: formatPushNarinfo(entry, narName),
-    }).catch(asError);
-    if (infoResponse instanceof Error) {
-      lastMessage = infoResponse.message;
+    });
+    if (!dialed.ok) {
+      tried.push(dialed.refusal);
       continue;
     }
+    const infoResponse = dialed.response;
     // 200 IS STORED, and it is the only answer that is. Any other status —
     // a success code this pusher does not know included — is a refusal like any
     // other, said with the server's own words and not repeated.
     if (infoResponse.status === 200) return { ok: true, mode: plan.mode };
-    const said = await boundedText(infoResponse, ERROR_BODY_MAX_BYTES);
-    lastMessage = `narinfo upload answered ${infoResponse.status}: ${said}`;
+    tried.push(await refused("narinfo upload", "PUT", infoUrl, infoResponse));
     if (infoResponse.ok || !worthRetrying(infoResponse.status)) break;
   }
-  return { ok: false, message: lastMessage };
+  return { ok: false, attempts: tried };
 }
 
 /** What the client sends. The server re-signs it; the client's own signatures

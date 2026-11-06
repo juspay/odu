@@ -84,8 +84,12 @@ import {
 import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import type { SurfaceClientOf } from "@kolu/surface/project";
-import { NodeIdSchema } from "@odu/run-client/nodeId";
-import { type NodeStatus, NodeStatusSchema } from "@odu/run-client/surface";
+import { LogStreamSchema, NodeIdSchema } from "@odu/run-client/nodeId";
+import {
+  type NodeStatus,
+  NodePushSchema,
+  NodeStatusSchema,
+} from "@odu/run-client/surface";
 import { RunScopeSchema } from "@odu/run-history/schema";
 import { Schema } from "effect";
 
@@ -104,6 +108,13 @@ export type { NodeStatus };
  *  module, and `STATUS_META`'s own doc says no face keeps a second table. What
  *  a status is on the wire and what it means to a reader arrive together. */
 export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
+
+/** What a node's push is doing, and which of its two logs a reader means —
+ *  re-exported for `STATUS_META`'s reason: one contract module, one
+ *  vocabulary. A face branches on `push.state` and names a `stream` without
+ *  reaching past this surface for either. */
+export { type NodePush } from "@odu/run-client/surface";
+export { type LogStream, LOG_STREAMS } from "@odu/run-client/nodeId";
 
 /**
  * THE HOST'S CONTRACT VERSION, `major.minor` — its own verbs (the frozen control
@@ -164,12 +175,59 @@ export const HOST_CONTRACT_VERSION = "2.5";
  * 2.5: a run's `push` — where it pushes and what it warmed — on a board row
  *      and on `run_read`/`run_wait`, and `pushed` on a node (PLAN 4.1). Three
  *      optional output fields; additive.
- * 2.6: a run's `actor` — who started it, a login or `@local` — on a board row
- *      and on `run_read`/`run_wait` (PLAN 4.4); and `probing` as a fifth
+ * 2.6: TWO unreleased changes, one number, because a version describes a
+ *      SURFACE and there is one of those.
+ *
+ *      A run's `actor` — who started it, a login or `@local` — on a board row
+ *      and on `run_read`/`run_wait` (PLAN 4.4), and `probing` as a fifth
  *      venue state, so the kept reading can be republished while a probe is
  *      still dialling. Two optional output fields and one widened literal.
+ *
+ *      And the push became a STEP (PLAN 4.1): a node's `pushed` becomes
+ *      `push` — `pushing | pushed | failed`, carrying `stored` and `present`
+ *      apart, so the run page can draw the push while it is still running and
+ *      say what it failed at — `log_read` takes `stream: "recipe" | "push"`,
+ *      the node's two logs having been split apart, and the wait/read
+ *      answer's `push` gains `failedOn` and `present`. MINOR, and this is
+ *      what each direction costs, plainly:
+ *
+ *      A 2.5 READER ON A 2.6 DAEMON ignores the node's `push` and the
+ *      answer's `failedOn` — excess output properties on both — and loses the
+ *      push readout. Nothing else.
+ *
+ *      A 2.6 READER ON A 2.5 DAEMON gets no `push` on a node, so no push step
+ *      — and reads `failedOn` as ABSENT, which is why it is `optionalKey`
+ *      rather than required: the answer's `push` SHIPPED in 2.5, so a
+ *      required field added to it would make every `run_read`/`run_wait`
+ *      answer about a run with a push target fail to decode outright, losing
+ *      the whole answer rather than one readout. The same reasoning keeps
+ *      that struct's `paths` where it is, with `present` optional beside it.
+ *      The one thing such a reader genuinely cannot have is the push LOG:
+ *      `stream` is an excess INPUT property on a 2.5 daemon, dropped on the
+ *      way in, and what came back would be the recipe's log wearing the
+ *      push's name. That is the one place a version has to be read before a
+ *      call rather than after — `odu ci logs --stream push` refuses on
+ *      {@link CI_LOG_STREAM_SINCE} instead of answering with the wrong file.
+ *
+ *      Neither reader is stranded, and neither branches on a refusal that
+ *      moved.
  */
 export const CI_CONTRACT_VERSION = "2.6";
+
+/**
+ * THE RUNS' VERSION THAT INTRODUCED `log_read`'s `stream`, named because one
+ * caller must read it BEFORE it calls.
+ *
+ * The additive rule's usual cost is an "unknown verb" a caller can report. A
+ * new optional INPUT key has no such answer: a daemon from before it drops the
+ * key as excess and serves the request it understood — here, the attempt's
+ * RECIPE log in place of its push log, with nothing in the page to say which
+ * file it came from. Silence is the one skew a caller cannot be left to
+ * discover from the answer, so a face that means `stream: "push"` compares
+ * this against what the daemon publishes for {@link CI_ROW}
+ * ({@link rowSpeaks}) and refuses when it is behind.
+ */
+export const CI_LOG_STREAM_SINCE = "2.6";
 
 /** THE RUNS' ROW NAME — the word the identity cell's `rows` publishes them
  *  under, a face's needs name them by, and the plugin's own name (what the
@@ -451,10 +509,36 @@ const needReads = (need: RowNeed): string =>
 
 /** The version a daemon publishes for one row, or `null` when it does not
  *  mount it. A daemon from before 2.5 publishes no `rows`: its one number
- *  versioned the whole composed wire, so it is read as every row's. */
-function rowSpeaks(identity: ServiceIdentity, row: string): string | null {
+ *  versioned the whole composed wire, so it is read as every row's.
+ *
+ *  EXPORTED because it is the one spelling of this reading. A face that has
+ *  to know what the daemon it dialled serves for a row — to refuse a member
+ *  the daemon would answer WRONGLY rather than not at all, see
+ *  {@link CI_LOG_STREAM_SINCE} — must not re-derive `rows?.[row] ??
+ *  protocolVersion`, because the fallback is the easy half to forget and the
+ *  one that decides what a pre-2.5 daemon is read as. */
+export function rowSpeaks(identity: ServiceIdentity, row: string): string | null {
   if (identity.rows === undefined) return identity.protocolVersion;
   return identity.rows[row] ?? null;
+}
+
+/** Is what a daemon SPEAKS older, on the minor, than what a caller READS?
+ *
+ *  The majors are not compared: a differing major was already refused by
+ *  {@link admitService}, and this question is only ever asked about a daemon
+ *  that was adopted. `null` — a row the daemon does not mount — is not
+ *  "behind": there is nothing to compare, and the absence is admission's to
+ *  refuse, not a skew to warn about. A version neither side can parse is not
+ *  behind either, for the same reason: a guess here would refuse a daemon
+ *  over a string it could not read.
+ *
+ *  One spelling, two askers: {@link skewNote}, which explains every verb
+ *  added since, and a caller that must check ONE member before it uses it. */
+export function minorBehind(speaks: string | null, reads: string): boolean {
+  if (speaks === null) return false;
+  const theirs = contractMinor(speaks);
+  const ours = contractMinor(reads);
+  return theirs !== null && ours !== null && theirs < ours;
 }
 
 const UPGRADE = "upgrade the daemon (`odu web --upgrade`) or this build.";
@@ -538,20 +622,14 @@ export function skewNote(
   needs: RowNeeds,
 ): string | null {
   const host = HOST_CONTRACT_VERSION;
-  const behind = (speaks: string | null, reads: string): boolean => {
-    if (speaks === null) return false;
-    const theirs = contractMinor(speaks);
-    const ours = contractMinor(reads);
-    return theirs !== null && ours !== null && theirs < ours;
-  };
   const lines: string[] = [];
-  if (behind(cell.identity.protocolVersion, host)) {
+  if (minorBehind(cell.identity.protocolVersion, host)) {
     lines.push(`host ${cell.identity.protocolVersion} (this build ${host})`);
   }
   for (const row of Object.keys(needs).sort()) {
     const reads = needReads(needs[row] as RowNeed);
     const speaks = rowSpeaks(cell.identity, row);
-    if (behind(speaks, reads)) lines.push(`${row} ${speaks as string} (this build ${reads})`);
+    if (minorBehind(speaks, reads)) lines.push(`${row} ${speaks as string} (this build ${reads})`);
   }
   if (lines.length === 0) return null;
   return (
@@ -773,19 +851,14 @@ export const RunNodeSchema = Schema.Struct({
   /** How to ask for this attempt's output — derived once, here, so no face
    *  reassembles the three fields a log is addressed by. */
   logKey: Schema.String,
-  /** WHAT THIS NODE PUT IN THE CACHE (PLAN 4.1), read off the journal's
-   *  `pushed` event. Absent for a node that pushed nothing — a run with no
-   *  target, a recipe that built no `result`, or one whose links an earlier
-   *  node had already sent. */
-  pushed: Schema.optionalKey(
-    Schema.Struct({
-      paths: Schema.Int,
-      bytes: Schema.Int,
-      /** How long the push took, SEPARATE from the node's own `durationMs`,
-       *  which stays the recipe's time. */
-      durationMs: Schema.Int,
-    }),
-  ),
+  /** WHAT THIS NODE'S PUSH IS DOING (PLAN 4.1), read off the journal's
+   *  `pushing` / `pushed` / `push_failed` lines. Absent for a node with no
+   *  push step — a run with no target, or a recipe that built no `result`.
+   *
+   *  The lane wire's own shape, re-used rather than restated: the two hops
+   *  carry the same three states, and a second spelling here would be a
+   *  second thing to keep true. */
+  push: Schema.optionalKey(NodePushSchema),
 });
 export type RunNode = typeof RunNodeSchema.Type;
 
@@ -1342,10 +1415,43 @@ const AttentionAnswerSchema = Schema.Struct({
   push: Schema.optionalKey(
     Schema.Struct({
       ...PushedToSchema.fields,
-      /** Store paths this run put in the bucket, summed over its nodes, and
-       *  the NAR bytes they cost. */
+      /** WHAT THE BUCKET SERVES as a result of this run, summed over its
+       *  nodes, and the NAR bytes the uploads cost. The pushes that LANDED
+       *  only: a node still pushing, or one whose push failed, adds nothing
+       *  to a count that claims the bucket serves it. */
       paths: Schema.Int,
+      /**
+       * Of `paths`, how many the bucket ALREADY served — so `paths - present`
+       * is what this run actually sent. The split is what lets a reader say
+       * "3 pushed · 66 present" instead of "69 paths", which claimed
+       * sixty-nine closures crossed the network when three did.
+       *
+       * THE TOTAL IS NOT MOVED, and this is OPTIONAL, for the reason
+       * `failedOn` below is: `push` with its `paths` SHIPPED in 2.5. A 2.5
+       * daemon answers this struct without this key, and renaming `paths`
+       * (or requiring this one) would make every answer about a run with a
+       * push target fail to DECODE on a 2.6 client — losing the whole answer
+       * to gain one readout. Absent means "this daemon does not record the
+       * split"; read it as `0`, which says every path went up, and is what
+       * those daemons' own headers claimed.
+       */
+      present: Schema.optionalKey(Schema.Int),
       bytes: Schema.Int,
+      /**
+       * The nodes whose push FAILED, in roster order — empty when none did.
+       * Without it a reader of a red run cannot tell a recipe that failed
+       * from one that passed and could not reach the cache, which are
+       * different problems with different fixes.
+       *
+       * OPTIONAL, and that is the whole reason 2.6 may be a minor. `push`
+       * itself shipped in 2.5 — `paths` and `bytes` with it — so a 2.5 daemon
+       * ALREADY answers this struct, without this field. A required key here
+       * would make a 2.6 client fail to DECODE every `run_read`/`run_wait`
+       * answer about a run with a push target, losing the whole answer rather
+       * than one readout. Absent means "this daemon does not record which
+       * node's push failed"; read it as `[]`, never as "none failed".
+       */
+      failedOn: Schema.optionalKey(Schema.Array(Schema.String)),
     }),
   ),
 });
@@ -1465,6 +1571,18 @@ const LogReadInputSchema = Schema.Struct({
    * happening" and "give me every byte, resumably" are different questions.
    */
   waitMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+  /**
+   * WHICH of the node's two logs: the recipe's output, or the push that sent
+   * what it built to the cache. Absent is `"recipe"`, so every existing
+   * caller reads exactly what it always read.
+   *
+   * A PARAMETER rather than a fourth segment in the key, because the key is an
+   * address a failure hands out and a caller echoes verbatim — widening it
+   * would have retyped a token every agent, every CLI invocation and the
+   * browser's address bar already hold. The stream is a choice the READER
+   * makes about an address, like `offset`.
+   */
+  stream: Schema.optionalKey(LogStreamSchema),
 });
 export type LogReadInput = typeof LogReadInputSchema.Encoded;
 

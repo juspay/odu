@@ -1,8 +1,14 @@
 /**
- * A per-node log tail: a clamped in-memory buffer plus a delta channel, with
- * lazy creation keyed by node id. One domain concept (`nodeLog`'s server side)
- * that both the runner and the coordinator need — the runner serves it raw, the
- * coordinator composes it with a per-SHA file sink for durability.
+ * A log tail: a clamped in-memory buffer plus a delta channel, with lazy
+ * creation keyed by an opaque string. One domain concept (`nodeLog`'s server
+ * side) that both the runner and the coordinator need — the runner serves it
+ * raw, the coordinator composes it with a per-SHA file sink for durability.
+ *
+ * The key is a LOG, not a node. A node has two of them — what its recipe
+ * printed, and what pushing its outputs to the cache printed — and both want
+ * everything this module is: the clamp, the terminal, the late subscriber's
+ * replay. Which log a key names is `logStreamKey`'s business (`@odu/run-client`),
+ * so this file never grew a second map or a notion of "the push one".
  *
  *   - `append(id, text)` — clamp `buffer + text`, publish an `append` frame.
  *   - `reset(id, text)`  — clamp `text` to the buffer, publish a `snapshot`.

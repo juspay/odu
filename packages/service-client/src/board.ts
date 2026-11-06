@@ -233,6 +233,82 @@ export function laneSpan(
   };
 }
 
+/**
+ * THE PUSH, AS A SECOND SEGMENT ON THE SAME BAR — where a node's cache push
+ * sat inside the run, or `null` where there is no push to draw.
+ *
+ * A SIBLING of {@link laneSpan} rather than a parameter on it, because a push
+ * is not a lane: it has no `startedAt` of its own on the wire, and inventing
+ * one would have put a second nullable clock on `RunNode` for a fact the
+ * geometry can already derive. A push BEGINS WHERE ITS RECIPE STOPPED — the
+ * lane sends the closure as soon as the recipe exits 0 — so the recipe's own
+ * span is the origin, and asking `laneSpan` for it here is what keeps the two
+ * segments adjacent to the pixel however the clamping falls.
+ *
+ * It answers the SAME {@link LaneSpan} over the SAME {@link runElapsedMs}
+ * scale, so a face places both segments with one rule and the push cannot
+ * drift out of the track the axis labels.
+ *
+ * The two arms are the push's own, not the node's. A push still going is
+ * `running` and runs to the END OF THE TRACK — which is `now` on a live run
+ * and the verdict on a settled one, exactly as a lane left open is frozen —
+ * because a push that is still sending has no end to draw and a zero-width
+ * hatch would say it had already finished. A push that landed or failed has
+ * its own `durationMs`, clamped into whatever room is left after the recipe,
+ * so a record whose duration outran its run paints to the edge rather than
+ * past it.
+ *
+ * `null` in four cases, all of them facts: a node with no push step at all
+ * (most of them — a recipe that built no `result`, or a run with no target),
+ * the two {@link laneSpan} already answers `null` for, where there is no
+ * recipe segment to hang this one off, and a recipe that has NOT YET
+ * published its own duration — a bar still running fills the track to the
+ * clock, so there is no room after it and no segment to draw. The last one
+ * is a race the wire closes rather than the geometry: the recipe's duration
+ * is a fact the moment the child exits 0, and the lane publishes it with the
+ * `pushing` state (and on the `pushing` journal line, which is what a page
+ * folds) precisely so this arm is not the one a live push takes. Answering
+ * `null` is what keeps the remaining window honest: a zero-width segment at
+ * `left: 1` is not a smaller truth about an upload, it is a bar claiming the
+ * push both began at the end of the run and took no time.
+ */
+export function pushSpan(
+  node: Pick<RunNode, "status" | "startedAt" | "durationMs" | "push">,
+  run: Pick<RunRow, "createdAt" | "finishedAt">,
+  now: number,
+): LaneSpan | null {
+  const push = node.push;
+  if (push === undefined) return null;
+  const recipe = laneSpan(node, run, now);
+  if (recipe === null) return null;
+  const scale = runElapsedMs(run, now);
+  const startedAfterMs = clampMs(recipe.startedAfterMs + recipe.tookMs, scale);
+  // What is left of the track after the recipe — the ceiling every arm below
+  // is clamped into, computed once so "to the end" and "its own duration"
+  // cannot disagree about where the end is.
+  const room = scale - startedAfterMs;
+  // NO ROOM IS NO SEGMENT. The recipe reaches the end of the track — it is
+  // still running, or its host's clock put its end past the run's own — and
+  // whatever this push did, there is nowhere on this track to say it. The
+  // alternative is a zero-width bar at the far edge, which every arm below
+  // would then have to be read through.
+  if (room <= 0) return null;
+  const tookMs =
+    push.state === "pushing" ? room : clampMs(push.durationMs, room);
+  return {
+    kind: push.state === "pushing" ? "running" : "settled",
+    left: fractionOf(startedAfterMs, scale),
+    width: fractionOf(tookMs, scale),
+    startedAfterMs,
+    tookMs,
+  };
+}
+
+/** The run-wide fold of the same union `pushSpan` reads one of, re-exported
+ *  from its home beside `NodePushSchema` so the browser reaches every push
+ *  reading through this one module. */
+export { pushTotals } from "@odu/run-client/surface";
+
 /** HOW A LANE STOPS — which arm its bar is, and where that bar ends. One
  *  decision, so it is taken once: a lane with its own duration ends at its own
  *  duration, one still going ends at the clock, and a lane left open on a run

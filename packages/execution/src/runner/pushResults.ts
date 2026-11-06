@@ -35,13 +35,24 @@
  * Green means warmed. A recipe that built the right thing and could not store
  * it has not given the next run what this run promised, and reporting that as a
  * pass would make the cache's contents a matter of luck. The push client's own
- * sentence goes in the node's log, beside the recipe's output, and the node
- * fails — the same shape as any other failure, with no new state to learn.
+ * sentence goes in the node's PUSH log and the node fails — the same shape as
+ * any other failure, with no new state to learn.
+ *
+ * ## The push is its own STEP, so it narrates on its own stream
+ *
+ * What this module says splits three ways, which is why {@link LanePusher.push}
+ * takes three sinks instead of one `say`. The push's output is the push step's
+ * output and goes to the node's push log; the beginning of the step is a state
+ * change (`begin`) rather than a line; and a refusal to push at all — a workdir
+ * that cannot be read — has no step to belong to and goes on the recipe's log,
+ * which is where somebody asking "why did this node warm nothing" is reading.
+ * Interleaving the three cost the recipe's log the one promise it makes: that
+ * what is in it is what the recipe printed.
  */
 
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { pushToCache, type PushSummary } from "@odu/cache/push";
+import { pushToCache, type PushFailure, type PushSummary } from "@odu/cache/push";
 
 /** What a node's environment has to carry for this lane to push at all. */
 export interface PushConfig {
@@ -100,15 +111,25 @@ export function pushConfigOf(
 }
 
 /** What one node's push came to. `null` from {@link LanePusher.push} means
- *  there was nothing new to push, which is not the same as pushing zero. */
+ *  there was nothing new to push, which is not the same as pushing zero.
+ *
+ *  NO DURATION. The push's own time is the RUNNER's to measure: it starts the
+ *  clock when {@link LanePusher.push} announces the step (`begin`) and reads
+ *  it on both endings, so the number a successful push reports and the number
+ *  a failed one reports come from the same stopwatch. Timing it in here gave
+ *  the success path a duration and the failure path — which leaves by `throw`
+ *  — none, and the node's `failed` push state then had to invent one. */
 export interface PushedFact {
-  /** Store paths the bucket serves as a result of this node. */
-  paths: number;
-  /** NAR bytes this node's uploads stored. */
+  /** Store paths this node UPLOADED — `summary.pushed`, what the bucket did
+   *  not have until this node sent it. */
+  stored: number;
+  /** Store paths of this node's closure the bucket ALREADY served —
+   *  `summary.alreadyPresent`. Carried separately rather than folded into one
+   *  served total, because the two are the answer to different questions and
+   *  a reader shown only their sum reads every one of them as traffic. */
+  present: number;
+  /** NAR bytes this node's uploads stored — the size of `stored`. */
   bytes: number;
-  /** How long the push took. SEPARATE from the node's own duration, which
-   *  stays the recipe's time. */
-  durationMs: number;
 }
 
 /**
@@ -179,11 +200,30 @@ export interface LanePusher {
    * yet, looking in the directory the recipe actually RAN in. `null` when
    * there was nothing new; throws when the push failed, which is what makes
    * the node red.
+   *
+   * THREE SINKS, because a push is a STEP of its own and its narration has to
+   * be separable from the recipe's. A recipe's log is worth exactly its
+   * promise to hold the recipe's output and nothing else — the moment an
+   * `[odu] pushing 4 result paths…` lands in it, a reader grepping a build's
+   * own output is reading odu's. So the push's output goes to the node's PUSH
+   * log (`say`), the node's push state is opened by `begin`, and the one
+   * thing that belongs on the recipe's log — this module declining to push at
+   * all, which has no push step to hang itself under — goes to `note`.
    */
   push(
     workdir: string,
     config: PushConfig,
-    say: (line: string) => void,
+    hooks: {
+      /** The LANE's own explanation, on the node's recipe log: it did not even
+       *  try. Not push output — there is no push step to hang it under. */
+      note: (line: string) => void;
+      /** There IS something to send: the push step begins now. Called at most
+       *  once, before any `say`, so a runner can open the node's `pushing`
+       *  state and start its clock knowing a fact or a throw must follow. */
+      begin: () => void;
+      /** The push's OWN output, for the node's push log. */
+      say: (line: string) => void;
+    },
   ): Promise<PushedFact | null>;
 }
 
@@ -193,16 +233,14 @@ export function createLanePusher(
     /** Where this machine's Nix store is — a seam, so a suite can state a
      *  workspace with links into a store it made. */
     storeDir?: string;
-    now?: () => number;
   } = {},
 ): LanePusher {
   const send = deps.push ?? pushToCache;
-  const now = deps.now ?? Date.now;
   /** Store paths this lane has already put on the bucket. */
   const sent = new Set<string>();
 
   return {
-    async push(workdir, config, say) {
+    async push(workdir, config, hooks) {
       let found: string[];
       try {
         found = resultPathsIn(workdir, deps.storeDir);
@@ -212,7 +250,12 @@ export function createLanePusher(
         // a run that pushes nothing and says nothing, which is the one thing
         // 4.1 must never do. A line on the node rather than a red one: the
         // recipe did its job, and this is odu's reading of the dump failing.
-        say(
+        //
+        // `note`, not `say`: this is the lane explaining itself about a push
+        // that never started, and there is no push step for it to be the
+        // output of. It belongs beside the recipe's own output, which is
+        // where a reader asking "why did this node warm nothing" is looking.
+        hooks.note(
           `[odu] not pushing: ${workdir} could not be read ` +
             `(${err instanceof Error ? err.message : String(err)})`,
         );
@@ -220,24 +263,53 @@ export function createLanePusher(
       }
       const fresh = found.filter((path) => !sent.has(path));
       if (fresh.length === 0) return null;
-      const startedAt = now();
-      say(
+      // THE STEP EXISTS FROM HERE. `fresh` being non-empty is the first moment
+      // it is certain this node has a push to show — everything above it can
+      // still end in "there was nothing to send", which is not a step and must
+      // not open one. Everything below it ends in a fact or a throw, so the
+      // runner may start a clock on this call and know an ending is coming.
+      hooks.begin();
+      hooks.say(
         `[odu] pushing ${fresh.length} result path${fresh.length === 1 ? "" : "s"} ` +
           `to bucket ${config.bucket} at ${config.origin}`,
       );
-      const summary: PushSummary = await send({
-        bucket: config.bucket,
-        origin: config.origin,
-        paths: fresh,
-        // THE TOKEN, AS A TOKEN. Not through the client's discovery
-        // environment: that describes a MACHINE (its `HOME`, its saved
-        // logins), and a lane passing a one-key object would also be
-        // asserting it has neither. This lane holds the credential outright
-        // and says so.
-        credential: config.token,
-        env: {},
-        onLine: (line) => say(`[odu] ${line}`),
-      });
+      let summary: PushSummary;
+      try {
+        summary = await send({
+          bucket: config.bucket,
+          origin: config.origin,
+          paths: fresh,
+          // THE TOKEN, AS A TOKEN. Not through the client's discovery
+          // environment: that describes a MACHINE (its `HOME`, its saved
+          // logins), and a lane passing a one-key object would also be
+          // asserting it has neither. This lane holds the credential outright
+          // and says so.
+          credential: config.token,
+          env: {},
+          onLine: (line) => hooks.say(`[odu] ${line}`),
+        });
+      } catch (err) {
+        // A WHOLE-SEND REJECTION USED TO ARRIVE ANONYMOUS. The client's per
+        // path failures name their path and their bucket, but a rejection of
+        // the send ITSELF — a DNS answer that does not resolve, a refused
+        // connection, a proxy that hangs up — is a `TypeError` from `fetch`
+        // whose whole message is "Unable to connect. Is the computer able to
+        // access the url?". It names no URL. It reached the node's push log
+        // exactly like that and told a reader nothing at all: not which
+        // bucket, not which origin, not which host failed to resolve.
+        //
+        // So the lane re-throws naming the two things only IT knows — the
+        // bucket and the origin it dialled — and keeps the original as
+        // `cause`, intact. Nothing is flattened into this sentence: the
+        // runner walks the chain for the log, and a flattened string would
+        // have destroyed the `code`/`errno`/`hostname` the bottom of that
+        // chain carries.
+        throw new Error(
+          `odu: push of ${fresh.length} path${fresh.length === 1 ? "" : "s"} ` +
+            `to bucket ${config.bucket} at ${config.origin} failed`,
+          { cause: err },
+        );
+      }
       // RECORDED BEFORE THE REFUSAL IS RAISED: a path the bucket serves is one
       // the next node must not send again, whether or not a sibling path in the
       // same closure was refused.
@@ -245,15 +317,42 @@ export function createLanePusher(
       if (summary.failed > 0) {
         throw new Error(
           `odu: ${summary.failed} path${summary.failed === 1 ? "" : "s"} could not be ` +
-            `pushed to ${config.bucket} — ` +
-            summary.failures.map((failure) => `${failure.path}: ${failure.message}`).join("; "),
+            `pushed to ${config.bucket} at ${config.origin} — ` +
+            summary.failures.map(refusalLine).join("; "),
         );
       }
-      return {
-        paths: summary.served.length,
-        bytes: summary.bytes,
-        durationMs: now() - startedAt,
-      };
+      return { stored: summary.pushed, present: summary.alreadyPresent, bytes: summary.bytes };
     },
   };
+}
+
+/**
+ * ONE REFUSED PATH, SAID IN FULL.
+ *
+ * The client records every attempt as a {@link PushRefusal} — the URL it
+ * dialled, the status it was answered with, the body that came back — and
+ * this used to print `failure.message` alone. That sentence is true and it is
+ * not enough: an operator reading `413 too large` cannot tell which endpoint
+ * refused, and a 403 from a token that expired reads identically to a 403
+ * from a bucket that does not exist. So the LAST attempt — the one that gave
+ * up, and the only one whose outcome stands — contributes its URL, its status
+ * and its body alongside the message.
+ *
+ * Each fact is omitted only when the client has none: a connection that never
+ * got an answer has no status and no body, and printing `status=null` would
+ * be noise standing in for a fact nobody has.
+ */
+function refusalLine(failure: PushFailure): string {
+  const last = failure.attempts.at(-1);
+  const facts =
+    last === undefined
+      ? []
+      : [
+          last.url === null ? null : `url=${last.url}`,
+          last.status === null ? null : `status=${last.status}`,
+          last.body === null || last.body === "" ? null : `body=${last.body}`,
+        ].filter((fact): fact is string => fact !== null);
+  return facts.length === 0
+    ? `${failure.path}: ${failure.message}`
+    : `${failure.path}: ${failure.message} (${facts.join(", ")})`;
 }

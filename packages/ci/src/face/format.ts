@@ -19,7 +19,14 @@ import {
   type StatusHue,
 } from "@odu/service-client/board";
 import { STATUS_META } from "@odu/service-client/surface";
-import type { NodeStatus, RunNode } from "./types";
+import { bytes } from "@odu/cordis/format";
+import type {
+  LogPage,
+  LogStream,
+  LogTail,
+  NodeStatus,
+  RunNode,
+} from "./types";
 
 /** The five semantic hues, from the contract module rather than spelled again
  *  here — so the one place a hue is consumed is a place the compiler can check
@@ -215,4 +222,90 @@ export { scopeLabel };
  *  what the person just asked for. One mint for every control in this face. */
 export function requestId(what: string): string {
   return `web-${what}-${crypto.randomUUID()}`;
+}
+
+// ── what a push put on a bucket, and what a log pane says about itself ──────
+
+/**
+ * WHAT A PUSH PUT ON THE BUCKET, in one phrase — `3 pushed · 66 present ·
+ * 3.1 KiB`.
+ *
+ * TWO NUMBERS, because a push answers two questions and one number answered
+ * neither. `69 paths` was the SERVED total — what the bucket holds because of
+ * this node — and it read as "this run uploaded sixty-nine paths", which on a
+ * warm cache is almost never what happened. `stored` is what actually went up
+ * now; `present` is what was already there. The bytes are the stored ones, so
+ * the size and the first count are about the same event.
+ *
+ * NO `present` CLAUSE WHEN IT IS ZERO. A push that found nothing already on
+ * the bucket has nothing to say about it, and `· 0 present` on the common
+ * case is a word a reader has to read and discard. Runs recorded before the
+ * split fold to `present: 0` in the journal, so they keep reading exactly as
+ * they did.
+ *
+ * ONE PHRASE, TWO PLACES — the run header's total and the node's push step.
+ * The step wraps it in its own state word, so it reads `pushed → <bucket> ·
+ * 3 pushed · 66 present · 3.1 KiB · 87ms`, and the repetition is deliberate:
+ * the first `pushed` is the STEP's verdict and the second is a COUNT of
+ * paths, both of them srid's own vocabulary. A header and a step that spelled
+ * the same counts two ways would drift the first time one of them changed,
+ * and drift between two numbers on one page costs more than a repeated word.
+ */
+export function pushCounts(counts: {
+  stored: number;
+  present: number;
+  bytes: number;
+}): string {
+  const present = counts.present === 0 ? "" : ` · ${counts.present} present`;
+  return `${counts.stored} pushed${present} · ${bytes(counts.bytes)}`;
+}
+
+/** WHAT THE FOLLOW LEARNED BESIDES THE TEXT. A page carries facts about the
+ *  whole FILE — how big it is, and whether its producer said its last word —
+ *  and the follow used to throw both away on every page and keep the bytes.
+ *  That left the push stream, whose only reader is the follow, with no size
+ *  to show until somebody pressed a paging button. Kept as the two facts the
+ *  pane renders rather than the whole page, so nothing downstream is tempted
+ *  to draw a window's text from a value that is only ever the latest one. */
+export type FollowedPage = Pick<LogPage, "size" | "complete">;
+
+/** The one spelling of a truncated log, shared by both streams: a log that
+ *  has been read to its end but never got its producer's last word is not a
+ *  quiet recipe, it is missing evidence, and saying so is the difference. */
+const INCOMPLETE = " · incomplete — the producer never closed this log";
+
+/**
+ * WHAT THE LOG PANE SAYS ABOUT THE FILE IT IS SHOWING — the size, and whether
+ * it is whole.
+ *
+ * EACH STREAM FROM ITS OWN SOURCE, which is the whole reason this is a
+ * function rather than an expression in the pane. `collections.logTails` is
+ * keyed by the log key alone and carries the RECIPE's file; the push stream's
+ * facts come from the follow's last page, because the follow is the only
+ * thing that reads that file. A push pane that fell back to the tail would
+ * print the recipe's byte count under a heading that says Push — a wrong
+ * answer that looks exactly like a right one, which is the failure mode this
+ * pane has already had once.
+ *
+ * The push stream NAMES ITSELF (`push log`) and the recipe does not: the
+ * recipe is what a log pane is about by default, and the tabs above already
+ * say which one is selected. A push log that has not delivered a page yet is
+ * the bare label — the honest "nothing read yet", with the pane's own
+ * `Reading…` beneath it.
+ */
+export function logMetaText(view: {
+  stream: LogStream;
+  tail: LogTail | undefined;
+  followedPage: FollowedPage | null;
+}): string {
+  if (view.stream === "push") {
+    const page = view.followedPage;
+    return page === null
+      ? "push log"
+      : `push log · ${bytes(page.size)}${page.complete ? "" : INCOMPLETE}`;
+  }
+  const tail = view.tail;
+  return tail === undefined
+    ? ""
+    : `${bytes(tail.totalBytes)}${tail.complete ? "" : INCOMPLETE}`;
 }

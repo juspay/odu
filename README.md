@@ -58,6 +58,8 @@ Retry unchanged inputs to investigate a flake. Commit a source fix and start a n
 
 A live retry creates a new attempt; a finalized retry creates a linked replay. `ci run --linger` is supported but is not required for replay.
 
+**A node that pushes shows the push as its own step.** On the run's page it is a second segment under the node's bar — `pushed → <bucket> · N pushed · M present · X MiB · T`, what this node sent told apart from what the bucket already had (no `present` clause when there was none) — amber while the closure goes up, red if it does not land; the node's own duration stays the recipe's. The push's lines are a log of their own: **Recipe** and **Push** tabs on the page, `--stream push` on `odu ci logs`, `stream: "push"` on `log_read`.
+
 **The board and the API do everything the CLI does — and more.** The CLI keeps only what is shell-native: the `ci` commands, `cache push`/`login`/`use`, and `auth login`. Cache, people and tunnel administration is the board at **http://127.0.0.1:18440** or the API (`odu surface <row> <verb>`), never the CLI. Every `ci` command above has a control too — a run's page, **New run** (every option, and **Preview pipeline**), **Machines** (`ci hosts`/`ci lease`/`ci release`), **Maintenance** (`ci history import`/`prune`, `ci protect`), the Cache view, and an owner's **People**. The [docs](https://odu.kolu.dev/docs/#the-board-and-the-api-do-everything-the-cli-does) map each command to its control.
 
 ## Serve a Nix binary cache

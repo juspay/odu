@@ -141,12 +141,17 @@ consumer keeps in order to READ from a bucket — is the whole declaration;
 `run_start` resolves it, and every recipe's `result*` closure is pushed to the
 one odu cache the serving daemon has. There is no request field, no flag, no
 recipe step and no token in the tree: do NOT add `odu cache push` to a justfile
-to get this. `run_read` answers `push` — the bucket and how much landed, or
-`target: null` and a `skipped` reason saying why nothing was pushed (no flake, no odu
+to get this. `run_read` answers `push` — the bucket, `paths` and `present`
+(what the bucket already served, so `paths - present` is what this run actually
+sent), `bytes`, and `failedOn`, the nodes whose push failed — or `target: null`
+and a `skipped` reason saying why nothing was pushed (no flake, no odu
 cache named there, or one this daemon does not serve). A push that fails makes
-that node RED, so a green run means the cache is warm. Two odu caches this
-daemon serves is a `checkout_refused` at start naming both: a repository builds
-for one cache.
+that node RED, so a green run means the cache is warm — and the push is its own
+STEP, with its own state (`pushing`, `pushed`, `push failed`), its own segment
+on the run page's timeline and its own log (`log_read`'s `stream: "push"`),
+where the client's whole failure — the address it dialled and every cause
+under it — is written. Two odu caches this daemon serves is a
+`checkout_refused` at start naming both: a repository builds for one cache.
 
 **Lost replies are why `requestId` exists.** Mint one id per *intent*, never per
 attempt. If a reply is lost — a timeout, a killed tool call, a restarted harness
@@ -234,6 +239,11 @@ odu surface log_read --input '{"key":"'"$LOG_KEY"'","offset":-4096}' --json
   on `logTails`: it carries no delta verb, because its key set is whatever
   happens to be subscribed rather than a set of runs.) Evidence for a verdict is
   always `log_read`.
+- **A node has TWO logs.** `stream: "push"` on the same key reads what the
+  cache push said; absent (or `"recipe"`) reads the recipe's own output and
+  nothing else. A node that is red with a green-looking recipe log failed its
+  PUSH — read that stream before calling it a mystery. `odu ci logs --stream push`
+  is the same read from a terminal.
 
 ### 5. Retry the same commit — or start the new one
 
@@ -305,7 +315,7 @@ And say `passed` only from `settled: true`.
 | --- | --- | --- | --- | --- |
 | start | `odu surface run_start --input '{…}' --json` | `run_start` | `checkout`, `expectedSha`, `requestId`, `selectors?`, `platforms?`, `hostPins?`, `hostsFile?` (a terminal's own `$ODU_HOSTS`; agents omit it), `root?`, `noDeps?`, `noStrict?`, `noSnapshot?`, `noPost?`, `supersede?` | `accepted`, `runId`, `replayed`, `sha`, `scope`, `endpoint`, `cursor`, `existing?` |
 | wait | `odu surface run_wait --input '{…}' --json` | `run_wait` | `runId`, `after?`, `deadlineMs?` (30s default), `settle?`, `limit?` | `reason`, `settled`, `passed`, `outcome`, `failures[]`, `failuresTotal`, `cursor`, `remaining`, `reportingDebt[]`, `scope`, `sha`, `contentSha?`, `dirty?`, `actor?` (who started it) |
-| diagnose | `odu surface log_read --input '{…}' --json` | `log_read` | `key`, `offset?` (negative = tail), `limit?`, `waitMs?` (follow) | `text`, `offset`, `size`, `nextOffset`, `eof`, `complete`, `open` |
+| diagnose | `odu surface log_read --input '{…}' --json` | `log_read` | `key`, `offset?` (negative = tail), `limit?`, `waitMs?` (follow), `stream?` (`"recipe"` default, `"push"` for the cache push) | `text`, `offset`, `size`, `nextOffset`, `eof`, `complete`, `open` |
 | retry | `odu surface run_retry --input '{…}' --json` | `run_retry` | `runId`, `selector`, `requestId`, `expectAttempt?` | `mode`, `effectiveRun`, `parentRun`, `roots[]`, `resetDependants[]`, `scope`, `sha`, `cursor` |
 | cancel | `odu surface run_cancel --input '{…}' --json` | `run_cancel` | `runId`, `scope`, `requestId` | `effective`, `detail` |
 | read | `odu surface run_read --input '{…}' --json` | `run_read` | `runId`, `after?`, `limit?` | `run_wait`'s answer, without the waiting |

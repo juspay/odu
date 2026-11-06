@@ -41,6 +41,8 @@ import {
   fanId,
   isSetupNode,
   logPathFor,
+  type LogStream,
+  logStreamKey,
   onPlatform,
   SETUP_NAMEPATH,
   splitFanId,
@@ -49,6 +51,7 @@ import {
   claimingLanes,
   EMPTY_POSTING,
   leasedLanes,
+  type NodePush,
   type NodeState,
   type NodeStatus,
   oduSurface,
@@ -78,7 +81,7 @@ import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { asHostSlot, fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { takePushToken } from "./launcher";
-import { type PushedFact, pushEnvFor } from "../runner/pushResults";
+import { pushEnvFor } from "../runner/pushResults";
 import {
   ExecutionRoster,
   type ExecutionLane,
@@ -1045,6 +1048,13 @@ async function orchestrate(
    *  per ATTEMPT, sealed and read-only when the attempt ends. Both are written
    *  from the same call, so they cannot describe different output.
    *
+   *  `stream` says WHICH of a node's two logs is being written: what its
+   *  recipe printed, or what pushing its outputs to the cache printed. It is
+   *  the frame's own fact, carried from the lane tap that received it, never
+   *  re-derived here — the two are different files on disk and different
+   *  terminals on the wire, and a frame routed to the wrong one is evidence
+   *  filed under the wrong name.
+   *
    *  `resetLocal` is the interesting one. A reset means "what is in this log
    *  belongs to an invocation that no longer exists" — a resurrection's wipe,
    *  or a lane re-sending its snapshot — and for the catalog that is precisely
@@ -1052,13 +1062,21 @@ async function orchestrate(
    *  with the reason) and the bytes that follow start a new ordinal. Without
    *  it, a rerun's output would be appended onto the failure somebody was in
    *  the middle of reading. */
-  const appendLocal = (id: string, text: string): void => {
-    if (logs.isEnded(id)) return;
-    logs.append(id, text);
-    history.log(id, text, nodeHosts.get(id) ?? null);
+  const appendLocal = (
+    id: string,
+    text: string,
+    stream: LogStream = "recipe",
+  ): void => {
+    if (logs.isEnded(id, stream)) return;
+    logs.append(id, text, stream);
+    history.log(id, text, nodeHosts.get(id) ?? null, stream);
   };
-  const resetLocal = (id: string, text: string): void => {
-    logs.reset(id, text);
+  const resetLocal = (
+    id: string,
+    text: string,
+    stream: LogStream = "recipe",
+  ): void => {
+    logs.reset(id, text, stream);
     // A RE-SYNC, not a retry. The `snapshot` frame a lane opens a node's log
     // with re-sends whatever it has buffered, and the checkout file takes it
     // as a replacement — but the ATTEMPT is unchanged, so its bytes are
@@ -1066,12 +1084,38 @@ async function orchestrate(
     // empty ghost attempt for every node whose first output arrived after its
     // `running` frame, and then "attempt 2" meant nothing. The genuine restart
     // is `history.resetNode`, called where a node is actually re-run.
-    history.replaceLog(id, text, nodeHosts.get(id) ?? null);
+    history.replaceLog(id, text, nodeHosts.get(id) ?? null, stream);
   };
-  const endLocal = (id: string): void => {
-    logs.end(id);
-    history.logFinalized(id, true, null);
+  const endLocal = (id: string, stream: LogStream = "recipe"): void => {
+    logs.end(id, stream);
+    // THE ATTEMPT HAS ONE SEAL, and the recipe's terminal speaks it. An
+    // attempt record carries a single `logComplete`, a node's two streams end
+    // together (the runner ends them in lockstep on every terminal path), and
+    // a push terminal that also finalized would be a second, racing answer to
+    // one question — with the loser's reason silently dropped by the
+    // first-word-wins rule in `history`.
+    if (stream === "recipe") history.logFinalized(id, true, null);
   };
+  /** SEAL THIS NODE'S LOGS — both of them, which is the invariant every
+   *  terminal path in this run keeps.
+   *
+   *  A node that reaches a terminal status owes a terminal frame on its
+   *  recipe log AND on its push log: the fan-in serves both, and a reader
+   *  following either waits for the frame that says no more is coming. Half
+   *  a seal hangs `odu ci logs -f <node>` on the stream nobody ended — and
+   *  for nodes that never push at all (the coordinator's own logical shard
+   *  parent) the outside cannot tell an empty stream from an unfinished one,
+   *  so the empty one still gets its terminal. The runner spells the same
+   *  rule on its side as `endNodeLogs`.
+   *
+   *  The exceptions are the sites that genuinely speak about ONE stream: a
+   *  lane's own per-stream `end` frame, relayed as it arrives, and
+   *  `_ci-setup`, whose terminal belongs to the run rather than a lane. */
+  const sealNodeLogs = (id: string): void => {
+    endLocal(id);
+    endLocal(id, "push");
+  };
+
   /** The run's last word on every node's log. `end` is a promise to a reader
    *  that nothing more is coming, and only the party still able to write can
    *  make it: for a recipe node that is its lane, but for `_ci-setup@<plat>` it
@@ -1083,7 +1127,7 @@ async function orchestrate(
    *  that reaches a terminal status gets its log ended by whoever owns that
    *  outcome, and `odu ci logs -f <node>` returns on every one of them. */
   const endRunLogs = (): void => {
-    for (const id of store.get().order) endLocal(id);
+    for (const id of store.get().order) sealNodeLogs(id);
   };
 
   /** Write the one sentence that says a node's log is short, and why.
@@ -1365,7 +1409,7 @@ async function orchestrate(
       // death/cancel line to it, and more coordinator narration can still
       // follow. Its terminal belongs to `endRunLogs`, at the point the RUN is
       // done with the node rather than the lane.
-      if (splitFanId(id).namepath !== SETUP) endLocal(id);
+      if (splitFanId(id).namepath !== SETUP) sealNodeLogs(id);
     }
   };
 
@@ -1527,7 +1571,14 @@ async function orchestrate(
       header: { store: inMemoryStore<RunHeader>(initialHeader) },
     },
     streams: {
-      nodeLog: { source: logs.streamSource },
+      // The fan-in serves a node's PUSH log exactly as it serves its recipe's
+      // — same three-frame protocol, same terminal — because a reader
+      // following "what did this node put in the cache" wants the same thing
+      // a reader following a recipe does. The wire names the stream in its
+      // own field; the pump keys the two apart (`logStreamKey`).
+      nodeLog: {
+        source: ({ id, stream }) => logs.streamSource({ id: logStreamKey(id, stream) }),
+      },
     },
     // One arm per procedure — `({ input }) => Effect<Out>`. The two that await
     // a promise-shaped mutation keep it inside `Effect.promise`; the two that
@@ -1870,9 +1921,9 @@ async function orchestrate(
   /**
    * Mirror a lane node onto the public one.
    *
-   * `drop` RETRACTS keys, which a spread cannot do: `pushed` is the only
+   * `drop` RETRACTS keys, which a spread cannot do: `push` is the only
    * optional fact a node can stop having, and a rerun is where it stops —
-   * `{ pushed: undefined }` would spread the key back in and read as present
+   * `{ push: undefined }` would spread the key back in and read as present
    * to anything that asks. The lane's own `setNode` takes the same argument
    * for the same reason; a mirror that could only ADD left a reran node
    * painting the push it had not yet redone, on the board and in `run_read`.
@@ -1955,32 +2006,89 @@ async function orchestrate(
    *  while the live board showed the new ones. The VALUE is the key. */
   const pushJournalled = new Map<string, string>();
   /**
-   * A lane node says it pushed (PLAN 4.1): put the counts on the public node
-   * so the board can paint them, and the fact in the journal so a run read a
-   * week later still says what it warmed.
+   * A lane node's PUSH STEP changed (PLAN 4.1): mirror it onto the public
+   * node so the board can paint the step, and write the transition into the
+   * journal so a run read a week later still says what it warmed — and what
+   * it failed to.
+   *
+   * `undefined` is the RETRACTION: the lane reset this node for a rerun, and
+   * what the previous attempt pushed is not what this one did. The public
+   * node drops the key and the stamp goes with it — a rerun that pushes the
+   * same paths again would otherwise match the stamp of the push just
+   * retracted, write no journal line, and leave the retraction standing over
+   * a node that did push. The journal's own retraction is the
+   * `attempt_started` line the rerun already wrote; the fold reads it.
+   *
+   * THE STAMP IS THE WHOLE STATE, so each state is journalled once per node
+   * per attempt: a lane republishes its entire cell on every frame, and a
+   * bare "seen" set would write one push once per subsequent node. `pushing`
+   * followed by `pushed` is two lines (the states differ); the same `pushed`
+   * arriving on thirty frames is one.
+   *
+   * `recipeDurationMs` is the node's OWN duration as the lane last published
+   * it, and it rides the `pushing` line because that line is the only thing
+   * the journal receives while an upload runs: the node stays `running`
+   * until the push lands, so `updateNode` journals no status (nothing
+   * changed), and a page folding this journal would have no end for the
+   * recipe's bar — which left the push step with no room to draw at all.
    */
-  const notePushed = (id: string, pushed: PushedFact): void => {
-    updateNode(id, { pushed });
+  const notePush = (
+    id: string,
+    push: NodePush | undefined,
+    recipeDurationMs: number | null,
+  ): void => {
+    if (push === undefined) {
+      updateNode(id, {}, ["push"]);
+      pushJournalled.delete(id);
+      return;
+    }
+    updateNode(id, { push });
+    // No target means no bucket to name, and a journal line about a push to
+    // nowhere would be a record of something that did not happen.
     if (pushing === null) return;
-    const stamp = `${pushed.paths}:${pushed.bytes}:${pushed.durationMs}`;
+    const stamp = JSON.stringify(push);
     if (pushJournalled.get(id) === stamp) return;
     pushJournalled.set(id, stamp);
-    history.pushed({ node: id, bucket: pushing.bucket, ...pushed });
-  };
-
-  /**
-   * A lane node no longer claims a push (PLAN 4.1): it was reset for a rerun,
-   * and what the previous attempt warmed is not what this one did.
-   *
-   * The public node drops the key, and the STAMP goes with it — a rerun that
-   * pushes the same paths again would otherwise match the stamp of the push
-   * just retracted, write no journal line, and leave the retraction standing
-   * over a node that did push. The journal's own retraction is the
-   * `attempt_started` line the rerun already wrote; the fold reads it.
-   */
-  const dropPushed = (id: string): void => {
-    updateNode(id, {}, ["pushed"]);
-    pushJournalled.delete(id);
+    if (push.state === "pushing") {
+      history.pushing({
+        node: id,
+        bucket: pushing.bucket,
+        // `null` means the lane has not published one yet — then the fold
+        // keeps waiting for the status, which is the honest answer rather
+        // than a zero that would draw a recipe of no length.
+        durationMs: recipeDurationMs ?? undefined,
+      });
+      return;
+    }
+    if (push.state === "pushed") {
+      // THE WIRE SPLITS, THE JOURNAL TOTALS. The cell carries `stored` and
+      // `present` because that is what a reader wants to see; the durable
+      // line carries the SERVED total plus the already-present part, so a
+      // line written by any release means the same thing and the fold can
+      // subtract. Adding here and subtracting there is the whole of the
+      // compatibility story — no versioning, no second event kind.
+      history.pushed({
+        node: id,
+        bucket: pushing.bucket,
+        paths: push.stored + push.present,
+        present: push.present,
+        bytes: push.bytes,
+        durationMs: push.durationMs,
+      });
+      return;
+    }
+    // THE CLIENT'S OWN SENTENCE, off the cell the lane stamped it on. This
+    // line is read by people the log is not in front of — `run_read` against
+    // a coordinator that is gone, a catalog a week later — and a message
+    // that only said "the reason is in the push log" taught them that the
+    // push half failed and never why, which is half of what the event
+    // exists for.
+    history.pushFailed({
+      node: id,
+      bucket: pushing.bucket,
+      message: push.message,
+      durationMs: push.durationMs,
+    });
   };
 
   const installShardNodes = (platform: string, plan: ShardPlan): void => {
@@ -2026,7 +2134,7 @@ async function orchestrate(
       logicalId,
       `[odu] shards settled: ${statuses.join(", ")}\n`,
     );
-    endLocal(logicalId);
+    sealNodeLogs(logicalId);
     updateNode(logicalId, {
       status,
       exitCode: status === "ok" ? 0 : 1,
@@ -2774,21 +2882,30 @@ async function orchestrate(
             durationMs: laneNode.durationMs,
           });
           // AND THE RETRACTION. A lane node that was reset for a rerun drops
-          // its `pushed`, and the mirror must follow it down as well as up.
-          if (laneNode.pushed === undefined) dropPushed(id);
-          else notePushed(id, laneNode.pushed);
+          // its `push`, and the mirror must follow it down as well as up.
+          // The RECIPE's duration goes with it: a node whose push is in
+          // flight publishes no further status, so this is the journal's one
+          // chance to learn when the recipe's own bar ends.
+          notePush(id, laneNode.push, laneNode.durationMs);
           const plan = planFor(platform, laneId);
           if (plan !== undefined) {
             refreshShardAggregate(platform, plan);
           }
         }
       },
-      onLogFrame: (laneId, frame) => {
+      onLogFrame: (laneId, frame, stream) => {
         const id = publicMainId(laneId);
         if (frame.kind === "append") {
-          appendLocal(id, frame.text);
+          appendLocal(id, frame.text, stream);
         } else if (frame.kind === "end") {
-          if (laneId !== SETUP) {
+          // THE RECIPE'S TERMINAL IS THE NODE'S. A push stream ending says
+          // the push said its last word — not that the node is done, and not
+          // that its verdict may be released: the recipe's `end` is the frame
+          // that ends an attempt, and a shard aggregate refreshed off a push
+          // terminal would be reading a node the lane is still running.
+          if (stream === "push") {
+            endLocal(id, "push");
+          } else if (laneId !== SETUP) {
             endLocal(id);
             verdicts.release(id);
             const plan = planFor(platform, laneId);
@@ -2797,9 +2914,9 @@ async function orchestrate(
             }
           }
         } else if (laneId === SETUP) {
-          if (frame.text !== "") appendLocal(id, frame.text);
-        } else if (!logs.isNoopReset(id, frame.text)) {
-          resetLocal(id, frame.text);
+          if (frame.text !== "") appendLocal(id, frame.text, stream);
+        } else if (!logs.isNoopReset(id, frame.text, stream)) {
+          resetLocal(id, frame.text, stream);
         }
       },
       // A broken link is no longer the end of this platform: `laneDied` decides
@@ -3307,24 +3424,33 @@ async function orchestrate(
               // the whole burst lane settles.
               if (laneId === SETUP) updateNode(publicId, patch);
               else verdicts.offer(publicId, patch);
-              if (laneNode.pushed === undefined) dropPushed(publicId);
-              else notePushed(publicId, laneNode.pushed);
+              notePush(publicId, laneNode.push, laneNode.durationMs);
               if (laneId === plan.rootId) {
                 refreshShardAggregate(platform, plan);
               }
             }
           },
-          onLogFrame: (laneId, frame) => {
+          onLogFrame: (laneId, frame, stream) => {
             if (!laneAccepting(platform)) return;
             const publicId = publicIdFor(laneId);
-            if (frame.kind === "append") appendLocal(publicId, frame.text);
+            if (frame.kind === "append") appendLocal(publicId, frame.text, stream);
             else if (frame.kind === "snapshot") {
               if (laneId === SETUP) {
-                if (frame.text !== "") appendLocal(publicId, frame.text);
-              } else if (!logs.isNoopReset(publicId, frame.text)) {
-                resetLocal(publicId, frame.text);
+                if (frame.text !== "") appendLocal(publicId, frame.text, stream);
+              } else if (!logs.isNoopReset(publicId, frame.text, stream)) {
+                resetLocal(publicId, frame.text, stream);
               }
             } else if (frame.kind === "end") {
+              // A PUSH TERMINAL ENDS A LOG AND NOTHING ELSE. The verdict
+              // join, the shard aggregate and the burst's own teardown all
+              // hang off the RECIPE's terminal — the frame that says this
+              // node is done — and a push stream that ends first (it does:
+              // a node with nothing to push ends an empty one) would
+              // otherwise release a verdict for a node still running.
+              if (stream === "push") {
+                endLocal(publicId, "push");
+                return;
+              }
               // `_ci-setup` still has a coordinator-side producer; finishBurst
               // seals it after the recipe root settles. Every recipe node uses
               // the ordinary verdict/log join.
@@ -3342,16 +3468,23 @@ async function orchestrate(
             if (!laneAccepting(platform)) return;
             for (const id of publicLaneIds) {
               const status = store.get().nodes[id]?.status;
-              if (status === "pending" || status === "running") {
+              const unfinished = status === "pending" || status === "running";
+              if (unfinished) {
                 appendLocal(id, `\n[odu] shard lane died: ${error}\n`);
-                endLocal(id);
+              }
+              // THE SAME INVARIANT `terminalizePlatformNodes` KEEPS: this
+              // lane is gone, so this node's logs are sealed here whether or
+              // not its status moved, BEFORE the verdict is released — which
+              // is the order the verdict gate exists to impose: a terminal
+              // status published over an open log promises a finished node
+              // whose output is still on the wire.
+              sealNodeLogs(id);
+              if (unfinished) {
                 verdicts.release(id);
                 updateNode(id, {
                   status: status === "running" ? "errored" : "skipped",
                   exitCode: 1,
                 });
-              } else {
-                endLocal(id);
               }
             }
             refreshShardAggregate(platform, plan);

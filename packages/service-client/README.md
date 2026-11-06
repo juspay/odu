@@ -148,7 +148,8 @@ procedures   run.start    start a run, addressed by an explicit checkout
              run.retry    live attempt or linked replay — odu decides which
              run.cancel   explicit run / node / lane scope
              log.read     one attempt's bytes, by offset — and, with `waitMs`,
-                          the follow
+                          the follow. `stream` picks which of the attempt's
+                          two logs: absent the recipe's, `push` its push step
              catalog.*    import a checkout's legacy records; prune expired ones
              pipeline.*   the resolved DAG a checkout declares
              venue.*      the machines, and the holds on them

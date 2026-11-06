@@ -46,6 +46,7 @@
  */
 
 import { parseArgs } from "node:util";
+import { LOG_STREAMS, type LogStream } from "@odu/service-client/surface";
 import {
   cancelViaService,
   importViaService,
@@ -100,12 +101,14 @@ rerun [--run R] [--request-id ID] [--expect-attempt N] [-o json] <selector>
                               # moved on, so the selector must be a full node id
 cancel [--run R] [node|@platform] [--request-id ID] [-o json]
                               # bare = whole run; node or @plat = partial
-logs <log-key> [-f] [--offset B] [--limit B] [--wait-ms N] [-o json]
+logs <log-key> [-f] [--offset B] [--limit B] [--wait-ms N] [--stream S] [-o json]
                               # ECHO the logKey a failure reported. --offset
                               # counts from the start; a NEGATIVE one is a tail
                               # and must be joined: --offset=-4096.
                               # -f follows to the end: exits 0 with the whole
-                              # log, 1 if it was truncated
+                              # log, 1 if it was truncated.
+                              # --stream push reads the same attempt's PUSH
+                              # step instead of its recipe (default: recipe)
 history <list|show|import|prune>
                               # the per-user run catalog (odu ci history --help)
 status [-o json]              # this checkout's newest unfinished run: its
@@ -151,6 +154,22 @@ function positiveInt(flag: string, raw: string): number {
     throw new Error(`odu: ${flag} needs a positive number (got "${raw}")`);
   }
   return value;
+}
+
+/** `--stream`'s value, checked against the contract's own list.
+ *
+ *  Checked HERE rather than left to the service's schema because the answer a
+ *  typo deserves is the list of what exists, said by the thing that took the
+ *  word — a wire-level validation failure names a schema a caller of `odu ci
+ *  logs` never wrote and cannot see. */
+function logStream(raw: string): LogStream {
+  const found = LOG_STREAMS.find((one) => one === raw);
+  if (found === undefined) {
+    throw new Error(
+      `odu: --stream takes ${LOG_STREAMS.join(" or ")} (got "${raw}")`,
+    );
+  }
+  return found;
 }
 
 const HISTORY_USAGE = `usage: odu ci history <list|show|import|prune> [args]
@@ -385,6 +404,7 @@ export async function ciCommand(
           limit: { type: "string" },
           follow: { type: "boolean", short: "f" },
           "wait-ms": { type: "string" },
+          stream: { type: "string" },
           origin: { type: "string" },
           output: { type: "string", short: "o" },
         },
@@ -408,6 +428,12 @@ export async function ciCommand(
         ...(values["wait-ms"] === undefined
           ? {}
           : { waitMs: positiveInt("--wait-ms", values["wait-ms"]) }),
+        // ONE KEY, TWO STREAMS. The key still addresses the attempt; the flag
+        // says which of its two logs to read, and absent is the recipe's — so
+        // every `odu ci logs <key>` ever typed still means what it meant.
+        ...(values.stream === undefined
+          ? {}
+          : { stream: logStream(values.stream) }),
         ...(values.origin === undefined ? {} : { origin: values.origin }),
         json: values.output === "json",
       });

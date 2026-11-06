@@ -34,6 +34,7 @@ import { spawn } from "node:child_process";
 import { createReadStream, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { fifoStream } from "./fifo";
+import { describeFailure } from "./failure";
 import { base32, canonicalNarHash, NarinfoError, storePathHash } from "./narinfo";
 
 /** What the store knows about one path. `narHash` is canonical
@@ -55,20 +56,52 @@ interface Run {
   code: number | null;
   stdout: string;
   stderr: string;
+  /** THE SPAWN ITSELF FAILING, described in full — an `ENOENT` for a `nix`
+   *  that is not on this machine's PATH, an `EACCES`, an `E2BIG`. It is not
+   *  an exit code and must never be reported as one: `String(err)` keeps the
+   *  sentence and drops the `code`, which is the only part that says which of
+   *  those happened. Null when the child ran at all. */
+  failure: string | null;
+  /** The argv, as it would be typed. A failure that does not say which
+   *  command produced it leaves a reader guessing between the two `nix
+   *  path-info` spellings below and the `--store` one of them carries. */
+  argv: string;
 }
 
 /** One `nix`/`nix-store` invocation, collected. Used for everything that is not
  *  a byte stream: a path-info read, an import, a root, a delete. */
 function run(command: string, args: readonly string[]): Promise<Run> {
   const { promise, resolve } = Promise.withResolvers<Run>();
+  const argv = [command, ...args].join(" ");
   const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
   child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
-  child.on("error", (err) => resolve({ code: null, stdout, stderr: `${stderr}${String(err)}` }));
-  child.on("close", (code) => resolve({ code, stdout, stderr }));
+  child.on("error", (err) =>
+    resolve({ code: null, stdout, stderr, argv, failure: describeFailure(err) }),
+  );
+  child.on("close", (code) => resolve({ code, stdout, stderr, argv, failure: null }));
   return promise;
+}
+
+/**
+ * WHY ONE INVOCATION FAILED — the argv, what became of the child, and
+ * everything it said.
+ *
+ * All three, because any two of them leave a question: "nix exited 1" does
+ * not say which `nix`, the stderr alone does not say whether the process even
+ * started, and the argv alone does not say what went wrong. This is the whole
+ * of what the push client can tell an operator about a store it could not
+ * read.
+ */
+function whyRunFailed(result: Run): string {
+  const said = result.stderr.trim();
+  const head =
+    result.failure === null
+      ? `\`${result.argv}\` exited ${String(result.code)}`
+      : `\`${result.argv}\` could not be run: ${result.failure}`;
+  return said === "" ? head : `${head}: ${said}`;
 }
 
 /** The store URI as argv. */
@@ -88,12 +121,16 @@ async function pathInfoArgs(
   const formatted = await run("nix", [...base, "--json", "--json-format", "1", ...storeArgsOf(store), ...paths]);
   if (formatted.code === 0) return { ok: true, stdout: formatted.stdout };
   if (!/unrecognised flag|unrecognized option|unknown flag/i.test(formatted.stderr)) {
-    return { ok: false, message: formatted.stderr.trim() || `nix exited ${String(formatted.code)}` };
+    return { ok: false, message: whyRunFailed(formatted) };
   }
   const plain = await run("nix", [...base, "--json", ...storeArgsOf(store), ...paths]);
+  // BOTH SPELLINGS' REASONS when the fallback also failed. The first failure
+  // is the one that said `--json-format` is unrecognised; the second is the
+  // real one, and a reader who sees only it cannot tell that this Nix was
+  // tried twice.
   return plain.code === 0
     ? { ok: true, stdout: plain.stdout }
-    : { ok: false, message: plain.stderr.trim() || `nix exited ${String(plain.code)}` };
+    : { ok: false, message: `${whyRunFailed(plain)} (after ${whyRunFailed(formatted)})` };
 }
 
 /**
@@ -170,7 +207,7 @@ export async function nixClosure(paths: readonly string[], store: string | null)
   const answer = await pathInfoArgs(["path-info", "-r"], store, paths);
   // A FAILURE IS NOT AN EMPTY CLOSURE. A caller that got `[]` would report "no
   // such path in the store" for a store it could not read at all.
-  if (!answer.ok) throw new Error(`nix path-info -r failed: ${answer.message}`);
+  if (!answer.ok) throw new Error(`the closure could not be read: ${answer.message}`);
   return [...parsePathInfoTable(answer.stdout).values()];
 }
 
@@ -178,9 +215,16 @@ export async function nixClosure(paths: readonly string[], store: string | null)
  * A CHILD'S LAST WORDS, drained and kept.
  *
  * Its stderr MUST be consumed — a child whose stderr nobody reads blocks on a
- * full pipe — and the tail is the only part a failure has to quote, so one
- * reader does both. The answer is `: <last line>`, ready to splice onto a
+ * full pipe — and what it said is the whole of why it failed, so one reader
+ * does both. The answer is `: <everything it said>`, ready to splice onto a
  * sentence, or nothing at all.
+ *
+ * ALL OF IT, not the last line: `nix store dump-path` reports a missing path
+ * over several lines and `error: …` is rarely the last of them, so quoting
+ * one line routinely quoted the least useful one. Collapsed to a single line
+ * because these become lines in a push's log. The last two kilobytes is a
+ * bound on THIS process's memory against a child that writes without end, not
+ * an opinion about how much of a failure is worth reading.
  */
 function stderrTail(stream: Readable | null): () => string {
   let kept = "";
@@ -188,8 +232,8 @@ function stderrTail(stream: Readable | null): () => string {
     kept = `${kept}${chunk.toString("utf8")}`.slice(-2000);
   });
   return () => {
-    const last = kept.trim().split("\n").at(-1) ?? "";
-    return last === "" ? "" : `: ${last}`;
+    const said = kept.replace(/\s+/g, " ").trim();
+    return said === "" ? "" : `: ${said}`;
   };
 }
 
@@ -230,10 +274,18 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
     });
     const said = stderrTail(child.stderr);
     let exitCode: number | null = null;
+    // THE SPAWN FAILING IS NOT AN EXIT CODE. `bash` missing, or a fork that
+    // could not be made, arrives here as an `Error` with a `code` on it and
+    // never reaches `close`; reporting it as "exited -1" names a pipeline
+    // that never ran.
+    let spawnFailure: string | null = null;
     const settle = (code: number): void => {
       exitCode = code;
     };
-    child.on("error", () => settle(-1));
+    child.on("error", (err) => {
+      spawnFailure = describeFailure(err);
+      settle(-1);
+    });
     child.on("close", (code) => settle(code ?? -1));
     return {
       ended: () =>
@@ -243,7 +295,14 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
             ? { ok: true }
             : {
                 ok: false,
-                error: new Error(`nix store dump-path | zstd exited ${exitCode}${said()}`),
+                // THE WHOLE PIPELINE, as it was run: a dump that failed for a
+                // path or a store this process was not given access to is
+                // unreadable without the argv, and `--store` is in it.
+                error: new Error(
+                  spawnFailure === null
+                    ? `\`${pipelineLine}\` exited ${exitCode}${said()}`
+                    : `\`${pipelineLine}\` could not be run: ${spawnFailure}${said()}`,
+                ),
               },
       stop: () => {
         if (child.pid === undefined) return;

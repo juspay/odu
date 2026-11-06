@@ -58,6 +58,8 @@ import {
 import {
   ATTEMPT_FILES,
   attemptDir,
+  attemptLogFile,
+  type LogStream,
   catalogRoot,
   RUN_EVIDENCE,
   RUN_FILES,
@@ -424,8 +426,11 @@ export function startAttempt(
   );
   // Truncating create: an attempt directory is allocated once, but a
   // coordinator that took over a run mid-attempt re-opens the same ordinal and
-  // must not append onto bytes it did not produce.
+  // must not append onto bytes it did not produce. BOTH streams, so a reader
+  // asking for a push log that never got a line reads an empty log rather
+  // than the previous coordinator's.
   writeAtomic(join(dir, ATTEMPT_FILES.log), "");
+  writeAtomic(join(dir, ATTEMPT_FILES.pushLog), "");
   return true;
 }
 
@@ -443,12 +448,13 @@ export function writeAttemptLog(
   node: string,
   attempt: number,
   text: string,
+  stream: LogStream = "recipe",
 ): void {
   try {
     writeAtomic(
       join(
         attemptDir(handle.dir, encodeNodeKey(node), attempt),
-        ATTEMPT_FILES.log,
+        attemptLogFile(stream),
       ),
       text,
     );
@@ -468,10 +474,11 @@ export function appendAttemptLog(
   node: string,
   attempt: number,
   text: string,
+  stream: LogStream = "recipe",
 ): void {
   const path = join(
     attemptDir(handle.dir, encodeNodeKey(node), attempt),
-    ATTEMPT_FILES.log,
+    attemptLogFile(stream),
   );
   try {
     appendFileSync(path, text);
@@ -507,6 +514,9 @@ export function sealAttempt(
   const dir = attemptDir(handle.dir, encodeNodeKey(node), attempt);
   const existing = readJson(join(dir, ATTEMPT_FILES.record), decodeAttempt);
   if (existing === null) return false;
+  // `logBytes` counts the RECIPE's log: it is the number every existing
+  // reader has taken as "how much output this attempt produced", and the
+  // push's bytes are a fact about the cache, not about the recipe.
   const logPath = join(dir, ATTEMPT_FILES.log);
   let bytes = 0;
   try {
@@ -518,11 +528,15 @@ export function sealAttempt(
     join(dir, ATTEMPT_FILES.record),
     `${JSON.stringify({ ...existing, ...outcome, logBytes: bytes }, null, 2)}\n`,
   );
-  try {
-    chmodSync(logPath, 0o444);
-  } catch {
-    // A filesystem that will not take the mode (or a log that never existed)
-    // costs the belt, not the braces: the ordinal is still never reused.
+  // BOTH streams go read-only: a sealed attempt's evidence is sealed, and a
+  // push log left writable would be the one file a retry could overwrite.
+  for (const path of [logPath, join(dir, ATTEMPT_FILES.pushLog)]) {
+    try {
+      chmodSync(path, 0o444);
+    } catch {
+      // A filesystem that will not take the mode (or a log that never existed)
+      // costs the belt, not the braces: the ordinal is still never reused.
+    }
   }
   return true;
 }
@@ -651,11 +665,12 @@ export function readAttemptLog(
   node: string,
   attempt: number,
   range: { offset?: number; limit?: number } = {},
+  stream: LogStream = "recipe",
 ): LogSlice | null {
   return readFileSlice(
     join(
       attemptDir(handle.dir, encodeNodeKey(node), attempt),
-      ATTEMPT_FILES.log,
+      attemptLogFile(stream),
     ),
     range,
   );

@@ -190,13 +190,25 @@ recipe, no token goes in the repository, and the bucket name is never written
 twice. The run's write token is minted for that run, scoped to that one
 bucket, expires after 24 hours as a backstop and is revoked as soon as nothing
 is serving the run — a lingering coordinator keeps it, because a rerun still
-pushes. A push that fails makes the node RED, because green means warmed. A
-repository that names a substituter this daemon does not serve is told once,
+pushes. A repository that names a substituter this daemon does not serve is told once,
 in `_ci-setup`, and runs as before; one that names two it does serve is
 refused at start, because a repository builds for one cache — except on a
 REPLAY, which runs without pushing rather than refusing to replay. `run_read`
 answers `push`: the bucket and how much landed, or `target: null` and the
 reason.
+
+**The push is its own step.** On a run's page each node that pushes grows a
+second segment under its bar —
+`pushed → <bucket> · N pushed · M present · X MiB · T`, the paths this node
+sent told apart from the ones the bucket already had (the `present` clause is
+omitted when there were none) — starting where the recipe's bar ends, amber
+while the closure is going up and red if it does not land. The node's own
+duration stays the RECIPE's. The
+push's `[odu] …` lines are a log of their own, not appended to the recipe's:
+the page offers **Recipe** and **Push** tabs, and `log_read` takes
+`stream: "recipe" | "push"` (absent is the recipe, so every existing caller
+reads what it always read) against the same log key. A push that fails makes
+the node RED, because green means warmed.
 
 Until organisations land, the bound on all of this is the operator's: there is
 no row saying which repository owns which bucket, so any checkout this daemon
@@ -448,7 +460,7 @@ odu ci status -o json
 odu ci wait --run latest -o json
 ```
 
-`ci wait` reports an actionable failure before the other jobs settle. Read its `logKey` with `odu ci logs KEY`; add `-f` to follow. Pages carry `nextOffset`, `eof`, and `open`: keep reading until at EOF and no longer open.
+`ci wait` reports an actionable failure before the other jobs settle. Read its `logKey` with `odu ci logs KEY`; add `-f` to follow. `--stream push` reads the same node's cache push instead of its recipe. Pages carry `nextOffset`, `eof`, and `open`: keep reading until at EOF and no longer open.
 
 ```sh
 odu ci rerun --run latest test   # unchanged inputs: retry a flake
@@ -490,7 +502,7 @@ Use the [unified Odu skill](https://github.com/juspay/odu/tree/master/skills/odu
 | --- | --- | --- |
 | Start | `run_start` | Absolute checkout, expected SHA, unique request ID; retain run ID and cursor |
 | Observe | `run_wait` | Send `after` from the previous cursor; use a bounded deadline |
-| Diagnose | `log_read` | Echo the failure's log key; page with `nextOffset` |
+| Diagnose | `log_read` | Echo the failure's log key; page with `nextOffset`; `stream: "push"` for a push that failed |
 | Retry unchanged inputs | `run_retry` | Track the returned effective run and cursor |
 | Test a source fix | `run_start` | New commit, new request ID |
 | Finish | `run_read` / `run_wait` | SHA, scope, verdict, posting debt |

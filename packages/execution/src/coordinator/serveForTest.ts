@@ -19,6 +19,7 @@ import {
   type PipelineState,
   type RunHeader,
 } from "@odu/run-client/surface";
+import { type LogStream, logStreamKey } from "@odu/run-client/nodeId";
 import { createLogTail } from "../common/logTail";
 import { serveSocket, socketLogger } from "./socket";
 
@@ -26,8 +27,10 @@ export interface TestSurface {
   socketPath: string;
   setState: (state: PipelineState) => void;
   setHeader: (header: RunHeader) => void;
-  appendLog: (id: string, text: string) => void;
-  resetLog: (id: string, text: string) => void;
+  /** Feed one of a node's two logs. `stream` absent is the recipe's — the
+   *  log every consumer written before the push became a step means. */
+  appendLog: (id: string, text: string, stream?: LogStream) => void;
+  resetLog: (id: string, text: string, stream?: LogStream) => void;
   reruns: string[];
   /** Node ids passed to `node.cancel` over the socket. */
   nodeCancels: string[];
@@ -72,7 +75,14 @@ export async function serveTestSurface(
 
   const runtime = implementSurface(oduSurface, {
     cells: { nodes: { store }, header: { store: headerStore } },
-    streams: { nodeLog: { source: tail.streamSource } },
+    // Mirrors the coordinator's own wiring: the wire names the stream, the
+    // pump keys the two apart, and a consumer asking for a node's push log
+    // over this socket gets the push log.
+    streams: {
+      nodeLog: {
+        source: ({ id, stream }) => tail.streamSource({ id: logStreamKey(id, stream) }),
+      },
+    },
     procedures: {
       node: {
         rerun: ({ input }) =>
@@ -123,8 +133,8 @@ export async function serveTestSurface(
     socketPath,
     setState: (state) => runtime.ctx.cells.nodes.set(state),
     setHeader: (header) => runtime.ctx.cells.header.set(header),
-    appendLog: (id, text) => tail.append(id, text),
-    resetLog: (id, text) => tail.reset(id, text),
+    appendLog: (id, text, stream) => tail.append(logStreamKey(id, stream), text),
+    resetLog: (id, text, stream) => tail.reset(logStreamKey(id, stream), text),
     reruns,
     nodeCancels,
     laneCancels,

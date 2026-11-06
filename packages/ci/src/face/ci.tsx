@@ -36,7 +36,7 @@ import {
   type JSX,
 } from "solid-js";
 import { Board } from "./board";
-import { requestId } from "./format";
+import { type FollowedPage, requestId } from "./format";
 // The primitives this face draws with live in `@odu/face/ui` — the package of
 // no row — so the shell and every row's face get one answer to what a control
 // IS. This module used to re-export `Button` for the shell, which made the
@@ -52,7 +52,15 @@ import {
   LogPanel,
   openingNode,
 } from "./detail";
-import type { CheckoutFrame, LogPage, LogTail, NodesFrame, RunNode, RunRow } from "./types";
+import type {
+  CheckoutFrame,
+  LogPage,
+  LogStream,
+  LogTail,
+  NodesFrame,
+  RunNode,
+  RunRow,
+} from "./types";
 
 type ServiceSpec = (typeof oduServiceSurface)["spec"];
 
@@ -119,6 +127,19 @@ function isTerminalReadRefusal(err: unknown): boolean {
  *  restart and an upgrade; past that, saying so beats spinning. */
 const FOLLOW_RETRY_MS = 1_500;
 const FOLLOW_RETRY_LIMIT = 20;
+
+/** HOW LONG A START MAY GO UNANSWERED before the form takes its button back.
+ *
+ *  A number the FACE owns, because it is about a control rather than about
+ *  the wire: `run.start` has its own timeouts and its own retries, and this is
+ *  the point past which a person staring at `Starting…` has learnt nothing
+ *  more by waiting. Twenty seconds is comfortably longer than a cold
+ *  coordinator's own admission path — a start that is merely slow still lands
+ *  normally and the receipt replaces this one — and short enough that a tab
+ *  whose websocket died while it slept does not look broken for a minute.
+ *
+ *  See {@link CiFace}'s `start` for why the call is not cancelled with it. */
+const START_DEADLINE_MS = 20_000;
 
 /** WHAT THE PAGE KNOWS ABOUT THE RUNS WHETHER OR NOT IT IS DRAWING THEM.
  *
@@ -307,11 +328,48 @@ export function CiFace(props: CiFaceProps): JSX.Element {
   const selectedAttempt = createMemo<number | null>(
     () => address()?.attempt ?? null,
   );
-  // The whole-log page is cleared whenever the address moves: a panel left
-  // showing the previous node's output under a new heading is the worst kind of
-  // stale. The dependency is SAID rather than left to a bare `logKey();`
-  // statement that reads as dead code to everything but Solid.
-  createEffect(on(logKey, () => setPage(null)));
+  /**
+   * WHICH OF THE NODE'S TWO LOGS IS BEING READ.
+   *
+   * A SIGNAL and not the address, unlike the node and the attempt. Those two
+   * are the SUBJECT — what a pasted link is about, what Back walks out of —
+   * and a stream is a lens on one subject, the way the wrap toggle and the
+   * scroll position are. Writing it into `#/run/<id>/<key>` would have widened
+   * the one string this system hands out in failures, in `odu ci logs` and in
+   * the MCP face for a choice that costs one click to make again.
+   *
+   * The CHOICE is held raw; {@link stream} below is what anything reads.
+   */
+  const [streamChoice, setStreamChoice] = createSignal<LogStream>("recipe");
+  /** WHICH STREAM IS ACTUALLY ASKED FOR — the choice, narrowed by what the
+   *  selected node HAS. A node with no push step has no push log, and asking
+   *  for one would be a read nobody can answer, drawn under tabs that are not
+   *  on screen. A derivation rather than a correction in an effect, because an
+   *  effect runs AFTER the render that would have asked. */
+  const stream = createMemo<LogStream>(() =>
+    streamChoice() === "push" && selected()?.push !== undefined
+      ? "push"
+      : "recipe",
+  );
+  /** A DIFFERENT NODE OPENS ON ITS RECIPE. The stream is a lens on one
+   *  subject, so a new subject gets the default lens: somebody who read one
+   *  node's push log and then clicked the failure below it is asking about
+   *  that node's work, not about its upload. Keyed on the node alone —
+   *  switching ATTEMPT stays on the stream you were reading, which is the
+   *  whole point of comparing two attempts' push logs. */
+  createEffect(
+    on(
+      () => address()?.node ?? null,
+      () => setStreamChoice("recipe"),
+    ),
+  );
+  // The whole-log page is cleared whenever the address moves OR the stream
+  // does: a panel left showing the previous node's output under a new heading
+  // is the worst kind of stale, and a page of the recipe's log left standing
+  // under the Push tab is the same staleness wearing a different label. The
+  // dependencies are SAID rather than left to bare `logKey();` statements that
+  // read as dead code to everything but Solid.
+  createEffect(on([logKey, stream], () => setPage(null)));
   const tails = props.client.collections.logTails.use({
     keys: () => {
       const key = logKey();
@@ -505,13 +563,34 @@ export function CiFace(props: CiFaceProps): JSX.Element {
    * One mechanism, three faces, and no face that quietly sees less.
    *
    * `logTails` stays for the header's `totalBytes` / `complete`, which are
-   * facts about the whole file rather than about what has been read.
+   * facts about the whole file rather than about what has been read — and
+   * facts about the RECIPE's file only, which is why the push stream is
+   * followed through this loop and drawn without a tail behind it.
    */
   /** One followed read's deadline. `run_wait`'s, deliberately — a longer one
    *  holds a request open past what a proxy between a tab and the service will
    *  tolerate, and the loop re-issues anyway. */
   const FOLLOW_WAIT_MS = 30_000;
   const [followed, setFollowed] = createSignal<string | null>(null);
+  /**
+   * WHAT THE FOLLOW LEARNED BESIDES THE TEXT — the last page's size and
+   * whether the file is whole.
+   *
+   * Every page carries these two facts about the WHOLE file, and this loop
+   * used to keep `text` and drop them on the floor. For the recipe that cost
+   * nothing — `logTails` carries the same facts for that file — but the push
+   * stream has no tail behind it, so the Push tab could state a size only
+   * after somebody pressed a paging button, and the rest of the time the
+   * pane's byte count was the recipe's. Keeping the page's own facts makes
+   * the push stream's size a thing the pane knows for free, live, from the
+   * one reader it already has.
+   *
+   * Null until a page lands, and null again on every new subject, because
+   * "how big is this file" has no answer before the first read of it.
+   */
+  const [followedPage, setFollowedPage] = createSignal<FollowedPage | null>(
+    null,
+  );
   /** Why this log could not be READ — a refused page, or a follow that gave up.
    *  ONE destination for one event class: the two read paths used to report the
    *  same refusal in two widgets, the follow's beside the pane it is about and
@@ -520,9 +599,20 @@ export function CiFace(props: CiFaceProps): JSX.Element {
    *  because a pane that has quietly stopped updating looks exactly like a log
    *  that has quietly stopped growing. */
   const [logFault, setLogFault] = createSignal<string | null>(null);
+  // BOTH HALVES of what is being read are tracked here. The key names the
+  // attempt; the stream names which of its two logs — and an effect that read
+  // only the key went on appending the recipe's bytes into a pane that had
+  // switched to the push, which is the silent-loss failure this whole loop
+  // exists to remove, wearing the other log's label.
+  //
+  // Both are read ONCE, at the top, and the loop below closes over the
+  // VALUES: nothing inside the async body reads a signal, so this effect's
+  // dependencies are exactly these two and a re-run is always a new subject.
   createEffect(() => {
     const key = logKey();
+    const reading = stream();
     setFollowed(null);
+    setFollowedPage(null);
     setLogFault(null);
     if (key === null) return;
     let live = true;
@@ -555,6 +645,12 @@ export function CiFace(props: CiFaceProps): JSX.Element {
               ...(cursor === undefined ? { offset: -LOG_TAIL_BYTES } : { offset: cursor }),
               limit: LOG_PAGE_BYTES,
               waitMs: FOLLOW_WAIT_MS,
+              // ABSENT for the recipe, which is what the verb's own default
+              // means — so a 2.6 browser against a 2.5 daemon asks for
+              // exactly what it always asked for, and only the push tab (a
+              // tab that daemon's runs never grow, because they report no
+              // node push) names a field it would not know.
+              ...(reading === "recipe" ? {} : { stream: reading }),
             }),
           );
         } catch (err) {
@@ -586,6 +682,12 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         if (!live) return;
         refusals = 0;
         setLogFault(null);
+        // THE PAGE'S OWN FACTS, kept rather than discarded — see
+        // {@link followedPage}. Recorded here, above the rewind branch, so
+        // every answered read updates them: a log that was rewritten under
+        // the cursor is a SMALLER file, and a size left standing from before
+        // the rewrite is exactly the stale number this pane must never show.
+        setFollowedPage({ size: page.size, complete: page.complete });
         // The attempt was re-run underneath us and its log rewritten in place,
         // so the file is shorter than the cursor. Start over rather than show
         // the tail of a different attempt as a continuation of this one.
@@ -609,25 +711,109 @@ export function CiFace(props: CiFaceProps): JSX.Element {
     })();
   });
 
+  /**
+   * A WINDOW OF THIS LOG, and of no other.
+   *
+   * A read is fire-and-forget — `call` hands the promise to two callbacks and
+   * returns — so its answer lands whenever the service gets to it, which may
+   * be after the reader has moved on. The SUBJECT is the key and the stream
+   * together, and this call site used to write whatever came back into the
+   * one `page` signal with no check that either was still the one that asked.
+   *
+   * That is defect A, and it was not theoretical: a recipe page in flight
+   * when the reader pressed Push landed AFTER the effect that clears the
+   * signal, and the Push tab then drew the recipe's text, the recipe's
+   * offsets and the recipe's size — a page's worth of the wrong file,
+   * labelled with the right one. A pane that shows nothing is a pane a
+   * reader retries; a pane that shows the wrong log is one they believe.
+   *
+   * So the read carries what it asked about and the answer is dropped unless
+   * both halves still match — the same rule the start path's token guard
+   * states, for the same reason: a late answer is still an answer, but only
+   * to the question that is still being asked. The REFUSAL is guarded too; a
+   * recipe read's refusal printed beside the push pane accuses the wrong
+   * file.
+   */
   const readLogPage = (offset: number): void => {
     const key = logKey();
     if (key === null) return;
+    const reading = stream();
+    const mine = (): boolean => logKey() === key && stream() === reading;
     call(
       // ALWAYS bounded. The verb will happily return a whole log, and this used
       // to ask for one — a request whose cost is set by whatever the recipe
       // printed, which is not a thing a browser may bet a tab on.
-      props.client.procedures.log.read({ key, offset, limit: LOG_PAGE_BYTES }),
-      (answer) => setPage(answer),
+      //
+      // SAME STREAM the follow is reading — the two call sites answer one
+      // question between them ("what is in this log") and a page that silently
+      // came from the recipe while the pane said Push would be the worst kind
+      // of wrong answer: a plausible one.
+      props.client.procedures.log.read({
+        key,
+        offset,
+        limit: LOG_PAGE_BYTES,
+        ...(reading === "recipe" ? {} : { stream: reading }),
+      }),
+      (answer) => {
+        if (!mine()) return;
+        setPage(answer);
+      },
       // Beside the pane, not in the receipt channel over the node list: this is
       // the same fact the follow reports, and a refusal that landed in one of
       // two widgets depending on which read asked for it was one event class
       // with two homes.
-      setLogFault,
+      (message) => {
+        if (!mine()) return;
+        setLogFault(message);
+      },
     );
   };
 
+  /**
+   * A START, BOUNDED — the form's button always comes back.
+   *
+   * `run.start` used to leave `starting` only from inside its own callbacks,
+   * which is a bet that every call settles. It does not: a websocket that
+   * went stale while the tab was asleep — the ordinary outcome of restarting
+   * the daemon under an open page — leaves the request with nowhere to land,
+   * and the form sat on a disabled `Starting…` with no way out but a reload.
+   * A control a person cannot press and cannot clear is worse than a refusal,
+   * because a refusal at least says what happened.
+   *
+   * So the deadline is the FORM's, not the wire's: after
+   * {@link START_DEADLINE_MS} the button comes back and a sentence beside it
+   * says what odu does and does not know. The sentence is careful on purpose —
+   * an unanswered start may well have started a run, and telling somebody it
+   * failed would invite a second one.
+   *
+   * A LATE ANSWER IS STILL AN ANSWER. The timer takes the button back; it does
+   * not cancel the call, and if the receipt arrives afterwards it lands
+   * normally — opening the run that did start is exactly what the person asked
+   * for. What it must never do is land on a DIFFERENT attempt, so each start
+   * carries a token and a stale one is dropped on the floor.
+   */
+  let startToken = 0;
+  let startTimer: ReturnType<typeof setTimeout> | undefined;
+  // The view can be torn down between a press and its answer — a route change,
+  // a sign-out — and a timer that outlived it would write into a signal nobody
+  // is drawing. Registered once, at setup, where there IS an owner to register
+  // it on; `start` itself runs from an event handler, outside any.
+  onCleanup(() => clearTimeout(startTimer));
   const start = (form: StartForm): void => {
     setCreating({ kind: "starting" });
+    startToken += 1;
+    const token = startToken;
+    clearTimeout(startTimer);
+    startTimer = setTimeout(() => {
+      if (token !== startToken) return;
+      setCreating({
+        kind: "refused",
+        message:
+          "odu: the service did not answer this start within " +
+          `${Math.round(START_DEADLINE_MS / 1_000)}s. The connection may have dropped — ` +
+          "check All runs for the run before starting another.",
+      });
+    }, START_DEADLINE_MS);
     call(
       props.client.procedures.run.start({
         checkout: form.checkout,
@@ -647,6 +833,8 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         ...(form.linger ? { linger: true } : {}),
       }),
       (receipt) => {
+        if (token !== startToken) return;
+        clearTimeout(startTimer);
         if (receipt.accepted) {
           setCreating({ kind: "started", runId: receipt.runId });
           props.onRoute({ at: "run", runId: receipt.runId, log: null });
@@ -658,9 +846,36 @@ export function CiFace(props: CiFaceProps): JSX.Element {
           sha: receipt.existing?.sha ?? receipt.sha,
         });
       },
-      (message) => setCreating({ kind: "refused", message }),
+      (message) => {
+        if (token !== startToken) return;
+        clearTimeout(startTimer);
+        setCreating({ kind: "refused", message });
+      },
     );
   };
+
+  /** A FRESH FORM every time the route enters `new`. The face outlives the
+   *  screen — `Create` is re-minted by the `<Match>`, its fields with it, but
+   *  the start's own state lives up here — so without this a person who
+   *  started a run, landed on it and pressed New run again met the previous
+   *  answer: a `started` receipt about a run they were no longer looking at,
+   *  or a refusal they had already read. The preview goes with it for the same
+   *  reason: it is an answer about a checkout this visit has not named yet.
+   *
+   *  The token moves too, so a start still in flight from the previous visit
+   *  cannot land on this form. */
+  createEffect(
+    on(
+      () => props.route.at === "new",
+      (entering) => {
+        if (!entering) return;
+        startToken += 1;
+        clearTimeout(startTimer);
+        setCreating({ kind: "idle" });
+        setPreview({ kind: "idle" });
+      },
+    ),
+  );
 
   /** `pipeline.read` — what the create form's checkout would run. The
    *  checkout is sent as typed, empty included: the SERVICE refuses a path that
@@ -758,11 +973,14 @@ export function CiFace(props: CiFaceProps): JSX.Element {
                 onAttempt={(attempt) =>
                   goToLog(selected()?.id ?? null, attempt)
                 }
+                stream={stream()}
+                onStream={setStreamChoice}
                 tail={tail()}
                 followed={followed()}
+                followedPage={followedPage()}
                 logFault={logFault()}
-                pending={tailPending()}
-                error={tailError()}
+                tailPending={tailPending()}
+                tailError={tailError()}
                 page={page()}
                 onPage={readLogPage}
               />

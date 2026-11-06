@@ -23,6 +23,12 @@
  * its run, measured against the run's own elapsed — so a live run's track stays
  * full as it grows, and a lane that never started has no bar at all rather than
  * a sliver at the origin.
+ *
+ * The fifth is the PUSH's geometry, which is a second segment on the same bar
+ * and was asserted nowhere until a review found the arm that matters — a push
+ * in flight — drawing nothing at all. It hangs off the recipe's own span, so
+ * every case is about what the recipe left behind it: room, no room, or no
+ * recipe.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -34,6 +40,7 @@ import {
   isFailing,
   laneSpan,
   newestFirst,
+  pushSpan,
   runElapsedMs,
   runStatus,
   scopeLabel,
@@ -411,5 +418,152 @@ describe("where a lane sat in its run", () => {
     expect(timelineTicks(live, 3_500).map((tick) => tick.ms)).toEqual([
       0, 833, 1_667, 2_500,
     ]);
+  });
+});
+
+describe("where a node's PUSH sat in its run", () => {
+  /** The same ten-minute settled run the lane spans are read against, so a
+   *  fraction here is legible as a clock time and the two segments can be
+   *  compared against one scale. */
+  const run = row({
+    runId: "a",
+    createdAt: 1_000_000,
+    finishedAt: 1_000_000 + 600_000,
+  });
+  /** A node as the wire sends one, narrowed to the four fields the geometry
+   *  reads. `push` absent is a node that pushed nothing, which is most of
+   *  them. */
+  const node = (
+    over: Partial<Pick<RunNode, "status" | "startedAt" | "durationMs" | "push">>,
+  ): Pick<RunNode, "status" | "startedAt" | "durationMs" | "push"> => ({
+    status: "ok",
+    startedAt: 1_120_000,
+    durationMs: 180_000,
+    ...over,
+  });
+
+  it("says NOTHING about a node that pushed nothing", () => {
+    // Not a zero-width segment at the end of the recipe's bar: most nodes
+    // push nothing (no `result`, or a run with no cache target) and a step
+    // they never had must not be drawn at all.
+    expect(pushSpan(node({}), run, 9e15)).toBeNull();
+  });
+
+  it("starts a settled push exactly where the recipe's bar ENDS", () => {
+    // The push begins when the recipe exits 0 — that is the whole reason it
+    // has no `startedAt` of its own on the wire — so the two segments are
+    // adjacent to the pixel, by construction rather than by a face's
+    // arithmetic.
+    const recipe = laneSpan(node({}), run, 9e15);
+    const push = pushSpan(
+      node({ push: { state: "pushed", stored: 4, present: 0, bytes: 2_097_152, durationMs: 60_000 } }),
+      run,
+      9e15,
+    );
+    expect(push).toEqual({
+      kind: "settled",
+      left: 0.5,
+      width: 0.1,
+      startedAfterMs: 300_000,
+      tookMs: 60_000,
+    });
+    expect(push?.left).toBe((recipe?.left ?? 0) + (recipe?.width ?? 0));
+  });
+
+  it("draws a FAILED push as its own settled segment, not as a gap", () => {
+    // A failed push is a step that happened and took time. The recipe's
+    // segment stays green beside it — which half failed is the thing a bare
+    // red node cannot say.
+    expect(
+      pushSpan(
+        node({ status: "failed", push: { state: "failed", message: "413 too large", durationMs: 30_000 } }),
+        run,
+        9e15,
+      ),
+    ).toEqual({
+      kind: "settled",
+      left: 0.5,
+      width: 0.05,
+      startedAfterMs: 300_000,
+      tookMs: 30_000,
+    });
+  });
+
+  it("runs a push IN FLIGHT to the end of a live track, hatched", () => {
+    // THE CASE THE STEP EXISTS FOR, and the one that did not draw: while the
+    // closure goes up the node is still `running`, and the recipe's own
+    // duration — published with the `pushing` state, a fact since the child
+    // exited — is what gives the recipe's bar an end and the push the rest of
+    // the track. `kind: "running"` is the hatch: a push still sending has no
+    // end to draw, and a zero-width one would say it had already finished.
+    const live = row({ runId: "a", createdAt: 1_000_000, finishedAt: null });
+    const uploading = node({
+      status: "running",
+      startedAt: 1_060_000,
+      durationMs: 120_000,
+      push: { state: "pushing" },
+    });
+    expect(laneSpan(uploading, live, 1_240_000)).toEqual({
+      kind: "settled",
+      left: 0.25,
+      width: 0.5,
+      startedAfterMs: 60_000,
+      tookMs: 120_000,
+    });
+    expect(pushSpan(uploading, live, 1_240_000)).toEqual({
+      kind: "running",
+      left: 0.75,
+      width: 0.25,
+      startedAfterMs: 180_000,
+      tookMs: 60_000,
+    });
+    // And it GROWS with the track, like every live bar: two minutes later the
+    // run is six minutes long and the upload owns the last four of them.
+    expect(pushSpan(uploading, live, 1_360_000)).toEqual({
+      kind: "running",
+      left: 0.5,
+      width: 0.5,
+      startedAfterMs: 180_000,
+      tookMs: 180_000,
+    });
+  });
+
+  it("says NOTHING when the recipe has not published its duration yet", () => {
+    // The degenerate case: a recipe with no duration reads as still running,
+    // its bar fills the track, and there is no room left for a push. A
+    // zero-width segment at `left: 1` is not a smaller truth about the
+    // upload — it is a bar claiming the push began when the run ended and
+    // took no time — so the honest answer is no segment.
+    const live = row({ runId: "a", createdAt: 1_000_000, finishedAt: null });
+    expect(
+      pushSpan(
+        node({
+          status: "running",
+          startedAt: 1_060_000,
+          durationMs: null,
+          push: { state: "pushing" },
+        }),
+        live,
+        1_240_000,
+      ),
+    ).toBeNull();
+  });
+
+  it("clamps a push that outran its own run into the track", () => {
+    // A duration that reaches past the run's end paints to the edge rather
+    // than past it — the same clamp the recipe's bar takes, against the room
+    // the recipe left rather than against the whole scale.
+    const over = pushSpan(
+      node({ push: { state: "pushed", stored: 1, present: 0, bytes: 10, durationMs: 9_000_000 } }),
+      run,
+      9e15,
+    );
+    expect(over).toEqual({
+      kind: "settled",
+      left: 0.5,
+      width: 0.5,
+      startedAfterMs: 300_000,
+      tookMs: 300_000,
+    });
   });
 });

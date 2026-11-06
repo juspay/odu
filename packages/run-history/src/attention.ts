@@ -36,12 +36,14 @@
  */
 
 import type { NodeStatus } from "@odu/run-client/surface";
+import { pushTotals } from "@odu/run-client/surface";
 import { signalFromExit } from "./exit";
 import { formatCursor, type Cursor } from "./ids";
 import { isResumptionEvent } from "./schema";
 import type {
   Expiry,
   JournalEntry,
+  NodePush,
   Placement,
   RunManifest,
   RunScope,
@@ -209,8 +211,20 @@ export interface Attention {
     /** What is wrong while something WAS pushed — the bucket's key missing
      *  from `trusted-public-keys`. Null when there is nothing to say. */
     keyWarning: string | null;
-    paths: number;
+    /** Store paths this run's nodes UPLOADED, summed over the pushes that
+     *  LANDED. A node still pushing, or one whose push failed, adds nothing.
+     */
+    stored: number;
+    /** Store paths those same pushes found the bucket ALREADY serving. Kept
+     *  apart from `stored` all the way to the header: the sum of the two is
+     *  what the bucket serves because of this run, and reporting only the sum
+     *  claims every one of those paths crossed the network. */
+    present: number;
+    /** NAR bytes `stored` came to — what this run actually sent. */
     bytes: number;
+    /** The nodes whose push failed, in roster order. Empty when none did —
+     *  which is what "green means warmed" is allowed to mean. */
+    failedOn: readonly string[];
   };
 }
 
@@ -356,11 +370,11 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   /** The hosts file the lanes were declared in, from the newest lane line that
    *  carried one. Null for a run written before the field existed. */
   hostsSource: string | null;
-  /** WHAT EACH NODE PUT IN THE CACHE (PLAN 4.1), last write wins. Per NODE
+  /** WHAT EACH NODE'S PUSH IS DOING (PLAN 4.1), last write wins. Per NODE
    *  rather than per attempt: a re-run that pushes again replaces what the
    *  previous one claimed, and a reader asking "what did this node warm"
    *  means the attempt that stands. */
-  pushed: Map<string, { bucket: string; paths: number; bytes: number; durationMs: number }>;
+  push: Map<string, NodePush>;
 } {
   let roster: string[] = [];
   let scope: RunScope | null = null;
@@ -377,10 +391,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
     string,
     { context: string; lastError: string; attempts: number }
   >();
-  const pushed = new Map<
-    string,
-    { bucket: string; paths: number; bytes: number; durationMs: number }
-  >();
+  const push = new Map<string, NodePush>();
   const key = (node: string, attempt: number): string => `${node}#${attempt}`;
   const byAttempt = new Map<string, AttemptState>();
 
@@ -439,7 +450,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         // exactly the moment the claim stops being about the node a reader
         // is looking at, and a rerun that does push writes a fresh `pushed`
         // after it.
-        pushed.delete(e.node);
+        push.delete(e.node);
         break;
       }
       case "node_status": {
@@ -488,11 +499,54 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           attempts: e.attempts,
         });
         break;
-      case "pushed":
-        pushed.set(e.node, {
+      case "pushing": {
+        push.set(e.node, { state: "pushing", bucket: e.bucket });
+        // THE RECIPE'S OWN DURATION, carried on the line that opens the push
+        // because nothing else carries it in time: the node stays `running`
+        // until the upload lands, so no `node_status` is journalled, and a
+        // page reading this fold would have no end for the recipe's bar —
+        // which is what left the `pushing` segment with no room to draw.
+        // NEVER over a duration a `node_status` already wrote: a `pushing`
+        // line is older evidence than the status that follows it, and the
+        // status is the one measured at the child's exit.
+        if (e.durationMs !== undefined) {
+          const state = latest.get(e.node);
+          if (state !== undefined && state.durationMs === null) {
+            state.durationMs = e.durationMs;
+          }
+        }
+        break;
+      }
+      case "pushed": {
+        // THE LINE RECORDS A TOTAL AND A PART; A READER WANTS BOTH PARTS.
+        // `paths` is what the bucket serves as a result of this node — stored
+        // plus already-present — and `present` is the half of it the bucket
+        // already had. Subtracting is what turns the durable shape into the
+        // two numbers every surface renders.
+        //
+        // A LINE WITHOUT `present` FOLDS TO ALL-STORED, and that is the honest
+        // reading rather than a convenient one: releases before this field
+        // never recorded an already-present count, so the served total is the
+        // only thing they ever claimed, and attributing it to uploads is what
+        // those runs' headers already said. `Math.max` guards the one way the
+        // arithmetic can go negative — a line whose two numbers disagree —
+        // because a negative count on a header is worse than a zero.
+        const present = e.present ?? 0;
+        push.set(e.node, {
+          state: "pushed",
           bucket: e.bucket,
-          paths: e.paths,
+          stored: Math.max(0, e.paths - present),
+          present,
           bytes: e.bytes,
+          durationMs: e.durationMs ?? 0,
+        });
+        break;
+      }
+      case "push_failed":
+        push.set(e.node, {
+          state: "failed",
+          bucket: e.bucket,
+          message: e.message,
           durationMs: e.durationMs ?? 0,
         });
         break;
@@ -516,8 +570,38 @@ export function foldJournal(journal: readonly JournalEntry[]): {
     phase,
     lanes,
     hostsSource,
-    pushed,
+    push,
   };
+}
+
+/**
+ * THE ROSTER'S ORDER, imposed on a set of node ids.
+ *
+ * `pushTotals` folds a `Map` whose order is the order the journal first
+ * MENTIONED each node — the order pushes happened to be opened in, which is a
+ * fact about scheduling and about nothing a reader cares about. Both the wire
+ * and this payload promise `failedOn` in ROSTER order, because every face that
+ * paints a run paints its nodes in the roster's order: a header that names the
+ * failed pushes in a different one makes a reader scan the list twice to match
+ * two spellings of the same three nodes.
+ *
+ * A node the roster does not list keeps its current position relative to the
+ * other unlisted ones, AFTER everything the roster names: an empty roster (a
+ * journal read before its first line, or a torn one) must not silently reorder
+ * what it cannot speak for. `sort` is stable in every runtime odu runs on, and
+ * this relies on it.
+ */
+function inRosterOrder(
+  nodes: readonly string[],
+  roster: readonly string[],
+): readonly string[] {
+  if (nodes.length < 2 || roster.length === 0) return nodes;
+  const rank = new Map(roster.map((node, i) => [node, i]));
+  return [...nodes].sort(
+    (a, b) =>
+      (rank.get(a) ?? Number.MAX_SAFE_INTEGER) -
+      (rank.get(b) ?? Number.MAX_SAFE_INTEGER),
+  );
 }
 
 const RED = new Set(["failed", "errored"]);
@@ -587,6 +671,7 @@ export function attentionFor(
     last_error: d.lastError,
     attempts: d.attempts,
   }));
+  const pushTotal = pushTotals(fold.push);
 
   const identity: Omit<
     Attention,
@@ -641,8 +726,10 @@ export function attentionFor(
                   },
             skipped: manifest.push.skipped,
             keyWarning: manifest.push.keyWarning,
-            paths: [...fold.pushed.values()].reduce((sum, one) => sum + one.paths, 0),
-            bytes: [...fold.pushed.values()].reduce((sum, one) => sum + one.bytes, 0),
+            stored: pushTotal.stored,
+            present: pushTotal.present,
+            bytes: pushTotal.bytes,
+            failedOn: inRosterOrder(pushTotal.failedOn, fold.roster),
           },
         }),
   };

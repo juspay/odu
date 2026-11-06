@@ -22,6 +22,7 @@ import {
   credentialsPath,
   type ClosureEntry,
   describeCache,
+  describeFailure,
   discoveryToken,
   formatPushNarinfo,
   pushToCache,
@@ -426,9 +427,13 @@ describe("pushing a closure", () => {
       expect(server.seen.some((seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"))).toBe(
         false,
       );
-      // ONE LINE PER PART, and the retry names itself.
+      // THE RETRY NAMES ITSELF — and says why: which attempt, of how many,
+      // the address that refused it, and what that address answered.
       expect(lines).toContain(`⏳ ${LIBC} part 1`);
-      expect(lines).toContain(`↻ ${LIBC} part 2 (retry 1)`);
+      const retried = lines.find((line) => line.startsWith(`↻ ${LIBC} part 2`));
+      expect(retried).toContain("attempt 2/3");
+      expect(retried).toContain("/parts/1");
+      expect(retried).toContain("500");
       expect(lines).toContain(`⏳ ${LIBC} part 3`);
       expect(lines).toContain(`✅ ${LIBC} stored`);
     } finally {
@@ -779,6 +784,138 @@ describe("pushing a closure", () => {
     } finally {
       server.stop();
     }
+  });
+
+  it("names the address it dialled, and every link under the failure", async () => {
+    // WHAT A POD'S LOG SAID AND WHY IT WAS USELESS: Bun's rejection is a
+    // TypeError whose sentence names no address and carries no code. Both
+    // facts are on the error — under `.cause` — and keeping `err.message`
+    // throws them away. This asserts that neither is thrown away again.
+    const real = globalThis.fetch;
+    const dialled: string[] = [];
+    globalThis.fetch = (async (input: Request | string | URL): Promise<Response> => {
+      dialled.push(typeof input === "string" ? input : input.toString());
+      const refusedConnection = Object.assign(
+        new Error("connect ECONNREFUSED 127.0.0.1:18440"),
+        { code: "ECONNREFUSED", errno: -111, syscall: "connect", address: "127.0.0.1", port: 18440 },
+      );
+      throw new TypeError("Unable to connect. Is the computer able to access the url?", {
+        cause: refusedConnection,
+      });
+    }) as typeof fetch;
+    try {
+      const failed = await pushToCache({
+        bucket: "http://127.0.0.1:18440/main",
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+      }).then(
+        () => null,
+        (err: unknown) => (err instanceof Error ? err.message : String(err)),
+      );
+      expect(failed).not.toBeNull();
+      const said = failed as string;
+      // The address, which the rejection itself never named.
+      expect(said).toContain(dialled[0] as string);
+      expect(said).toContain("/_odu/v1/buckets/main/missing");
+      // Both links of the chain, and the connection facts under the second.
+      expect(said).toContain("Unable to connect");
+      expect(said).toContain("ECONNREFUSED");
+      expect(said).toContain("syscall=connect");
+      expect(said).toContain("port=18440");
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it("narrates every attempt, and reports every attempt's reason", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      server.failNar.set(`${storePathHash(LIBC).padEnd(52, "0")}.nar.zst`, 99);
+      const lines: string[] = [];
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        attempts: 3,
+        onLine: (line) => lines.push(line),
+      });
+      // ONE NARRATED LINE PER RETRY, each naming the attempt and the reason
+      // the previous one gave — a retry that is silent is a failure that
+      // happened and was never reported.
+      const retries = lines.filter((line) => line.startsWith(`↻ ${LIBC}`));
+      expect(retries).toHaveLength(2);
+      expect(retries[0]).toContain("attempt 2/3");
+      expect(retries[1]).toContain("attempt 3/3");
+      for (const line of retries) expect(line).toContain("500");
+      // AND THE FAILURE CARRIES THEM ALL, not only the last.
+      const failure = summary.failures[0];
+      expect(failure?.path).toBe(LIBC);
+      expect(failure?.attempts).toHaveLength(3);
+      expect(failure?.message).toContain("attempt 1/3");
+      expect(failure?.message).toContain("attempt 3/3");
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("reports the status AND the body of a refusal, against the URL it dialled", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      // The single-request NAR arm — what every small path takes, and the one
+      // that used to report a status with no body at all.
+      server.narStatus.set(`${storePathHash(LIBC).padEnd(52, "0")}.nar.zst`, 403);
+      const summary = await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        attempts: 3,
+      });
+      const failure = summary.failures[0];
+      const attempt = failure?.attempts.at(-1);
+      expect(attempt?.status).toBe(403);
+      expect(attempt?.body).toBe("nope");
+      expect(attempt?.url).toContain("/nar/");
+      expect(failure?.message).toContain("403");
+      expect(failure?.message).toContain("nope");
+      expect(failure?.message).toContain(server.origin);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("keeps an AggregateError's branches, and survives a cause that loops", () => {
+    // A happy-eyeballs dial reports BOTH addresses, and keeping one of them
+    // hides half the answer.
+    const both = new AggregateError(
+      [
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), {
+          code: "ECONNREFUSED",
+          address: "127.0.0.1",
+        }),
+        Object.assign(new Error("connect EHOSTUNREACH ::1:443"), {
+          code: "EHOSTUNREACH",
+          address: "::1",
+        }),
+      ],
+      "All attempts to connect failed",
+    );
+    const said = describeFailure(both);
+    expect(said).toContain("All attempts to connect failed");
+    expect(said).toContain("ECONNREFUSED");
+    expect(said).toContain("EHOSTUNREACH");
+    expect(said.split("\n")).toHaveLength(1);
+
+    const outer = new Error("outer");
+    const inner = new Error("inner", { cause: outer });
+    outer.cause = inner;
+    const looped = describeFailure(outer);
+    expect(looped).toContain("outer");
+    expect(looped).toContain("inner");
   });
 
   it("reports what the bucket already had, and what it refused as upstream", async () => {
