@@ -91,12 +91,14 @@ function venueHolder(row: VenueRow, now: number): string {
   return `${held.holder}${held.run === null ? "" : ` · ${held.run}`} · ${minutes}m`;
 }
 
-/** WHAT A MACHINE'S STATE IS WORTH IN COLOUR. The four venue states are the
- *  same kind of fact a run's status is — can work land here or not — so they
- *  wear the same five hues and nothing else on this page is coloured at all.
- *  A total `Record`, so a fifth venue state is a type error rather than an
- *  uncoloured cell. */
+/** WHAT A MACHINE'S STATE IS WORTH IN COLOUR. The venue states are the same
+ *  kind of fact a run's status is — can work land here or not — so they wear
+ *  the same hues and nothing else on this page is coloured at all. A total
+ *  `Record`, so a new venue state is a type error rather than an uncoloured
+ *  cell. `probing` is GREY: it is the absence of an answer, and a colour
+ *  there would be a verdict on a machine nobody has heard from. */
 const VENUE_HUE: Record<VenueRow["state"], "green" | "amber" | "grey" | "red"> = {
+  probing: "grey",
   free: "green",
   local: "green",
   busy: "amber",
@@ -137,11 +139,19 @@ export function venueSource(source: string | null): { label: string; title: stri
 }
 
 /**
- * HOW MUCH OF THE FLEET IS UP — and, when the reading is a SLICE, that it is
- * one (PLAN 4.4).
+ * WHAT THIS READING IS — a probe still running, or how much of the fleet is
+ * up (PLAN 4.4).
  *
- * A machine that is `down` is the only one work cannot land on, so that is
- * what the count is drawn at; busy is a machine doing exactly what it is for.
+ * WHILE IT IS RUNNING it says so, and says HOW MANY machines it is waiting
+ * on. The inventory is known the moment the hosts file is read and the states
+ * are not, so the service publishes the rows first, every one `probing`; this
+ * is the line that makes that visible instead of `no probe yet` sitting there
+ * for the length of an ssh timeout. The count is the one a reader can check
+ * against the rows under it.
+ *
+ * ONCE IT HAS ANSWERED, a machine that is `down` is the only one work cannot
+ * land on, so that is what the count is drawn at; busy is a machine doing
+ * exactly what it is for.
  *
  * The slice clause is the correction. A probe narrowed by the Platforms field
  * REPLACES the kept reading, so after one narrowed probe this page drew two
@@ -161,11 +171,15 @@ export function venueSource(source: string | null): { label: string; title: stri
  */
 export function fleetLine(reading: VenueReading | undefined): string | undefined {
   if (reading === undefined || reading === null) return undefined;
-  const up = reading.rows.filter((row) => row.state !== "down").length;
   const slice =
     reading.platforms.length === 0
       ? ""
       : ` · ${reading.platforms.join(" ")} only, not the whole inventory`;
+  const waiting = reading.rows.filter((row) => row.state === "probing").length;
+  if (waiting > 0) {
+    return `probing ${waiting} host${waiting === 1 ? "" : "s"}…${slice}`;
+  }
+  const up = reading.rows.filter((row) => row.state !== "down").length;
   return `${up} of ${reading.rows.length} up${slice}`;
 }
 
@@ -216,10 +230,12 @@ function venueColumns(now: () => number, probedAt: () => number): ReadonlyArray<
       label: "Age",
       align: "right",
       width: "5rem",
-      // EVERY row's age, because every row is one probe old — the fact a
-      // `down` row needs most ("down NOW" and "down when somebody last
-      // looked" call for opposite moves) and the one a column states once.
-      cell: () => ago(probedAt(), now()),
+      // EVERY row that has an answer, because every one of them is one probe
+      // old — the fact a `down` row needs most ("down NOW" and "down when
+      // somebody last looked" call for opposite moves) and the one a column
+      // states once. A row still being dialled has no reading to be the age
+      // OF, and a `0s` there would be a reading nobody took.
+      cell: (row) => (row.state === "probing" ? "—" : ago(probedAt(), now())),
     },
     { key: "holder", label: "Holder", cell: (row) => venueHolder(row, now()) },
   ];

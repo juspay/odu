@@ -452,12 +452,40 @@ export function createOduService(opts: ServiceOptions): OduService {
           probe: ({ input }) =>
             Effect.flatMap(principalOf, (principal) =>
               Effect.flatMap(
-                Effect.promise(() =>
-                  opts.ports.probeVenues({
+                Effect.promise(() => {
+                  // KEPT, so the next reader — a page opening Machines — reads
+                  // this answer rather than dialling every machine again. Only
+                  // a probe of the SERVICE'S OWN fleet: a caller's `hostsFile`
+                  // (`odu ci hosts` forwards its shell's `$ODU_HOSTS`) names that
+                  // person's machines, and keeping it would show every reader
+                  // someone else's fleet and someone else's file path.
+                  const keep = (reading: VenueReading): void => {
+                    venueStore.set(reading);
+                    runtime.ctx.cells.venues.set(reading);
+                  };
+                  const mine = input.hostsFile === undefined;
+                  return opts.ports.probeVenues({
                     platforms: input.platforms ?? [],
                     caller: callerOf(input, principal),
-                  }),
-                ),
+                    // AS IT HAPPENS, not only at the end. A probe is one ssh
+                    // timeout wide; publishing only the final answer left
+                    // every open page blank for the whole of it. The partials
+                    // go to the same cell under the same rule — a caller's
+                    // own fleet is answered and never published — so nothing
+                    // a reader sees here is something they could not see in
+                    // the answer.
+                    ...(mine
+                      ? {
+                          onReading: (partial) =>
+                            keep({
+                              at: now(),
+                              platforms: [...(input.platforms ?? [])],
+                              ...partial,
+                            }),
+                        }
+                      : {}),
+                  });
+                }),
                 (outcome) => {
                   if (!outcome.ok) {
                     return Effect.fail(
@@ -473,12 +501,6 @@ export function createOduService(opts: ServiceOptions): OduService {
                     warnings: outcome.warnings,
                     rows: outcome.rows,
                   };
-                  // KEPT, so the next reader — a page opening Machines — reads
-                  // this answer rather than dialling every machine again. Only
-                  // a probe of the SERVICE'S OWN fleet: a caller's `hostsFile`
-                  // (`odu ci hosts` forwards its shell's `$ODU_HOSTS`) names that
-                  // person's machines, and keeping it would show every reader
-                  // someone else's fleet and someone else's file path.
                   if (input.hostsFile === undefined) {
                     const reading: VenueReading = {
                       at: now(),

@@ -378,7 +378,10 @@ export interface VenueRowFacts {
   readonly host: string;
   readonly slot: number;
   readonly slots: number;
-  readonly state: "free" | "busy" | "local" | "down";
+  /** `probing` is a host that has been DIALLED and has not answered yet — a
+   *  row that exists before its state does, which is the only way a page can
+   *  show the fleet while an unreachable box burns its ssh timeout. */
+  readonly state: "probing" | "free" | "busy" | "local" | "down";
   readonly heldBy: VenueHolderFacts | null;
   readonly error: string | null;
 }
@@ -404,6 +407,23 @@ export type VenueProber = (request: {
    *  `odu ci hosts` and `odu ci run` can address different fleets from the same
    *  shell. See {@link Caller}. */
   caller: Caller;
+  /**
+   * WHAT IS KNOWN SO FAR, as it becomes known.
+   *
+   * Called once with every configured slot as `probing` — the INVENTORY,
+   * before a single machine has been dialled — and again each time a host
+   * answers. A probe is as slow as the slowest dead box in it, so without
+   * this a page says nothing for the length of an ssh timeout and then
+   * everything at once; with it, the fleet is on screen immediately and each
+   * row resolves where it stands.
+   *
+   * Optional, because `odu ci hosts` wants the answer and not the watching.
+   */
+  onReading?: (partial: {
+    source: string | null;
+    warnings: readonly string[];
+    rows: readonly VenueRowFacts[];
+  }) => void;
 }) => Promise<VenueProbeOutcome>;
 
 export interface VenueHoldResult {

@@ -1344,12 +1344,22 @@ export async function leaseLanes(opts: LeaseLanesOpts): Promise<LeasedLanes> {
   }
 }
 
-/** Probe every host in the config for `odu ci hosts`. */
+/**
+ * Probe every host in the config for `odu ci hosts`.
+ *
+ * `onProbe` is called as each host ANSWERS, so a face can draw the fleet
+ * resolving rather than wait for the slowest dead box in it: the whole call
+ * is bounded by one ssh timeout, and a page that only had the return value
+ * said nothing for all of it. The returned array is still the complete,
+ * SORTED answer — a caller that wants the result and not the watching passes
+ * no callback and is unchanged.
+ */
 export async function probeAllHosts(
   pools: Record<string, HostPool>,
   opts: {
     resolveDrvPath: ResolveRunnerDrv;
     onLog?: (line: string) => void;
+    onProbe?: (answered: { platform: string; probe: ProbeResult }) => void;
   },
 ): Promise<{ platform: string; probe: ProbeResult }[]> {
   const out: { platform: string; probe: ProbeResult }[] = [];
@@ -1364,6 +1374,7 @@ export async function probeAllHosts(
           slot,
         });
         out.push({ platform, probe });
+        opts.onProbe?.({ platform, probe });
       }),
     ),
   );

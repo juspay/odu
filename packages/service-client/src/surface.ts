@@ -165,8 +165,9 @@ export const HOST_CONTRACT_VERSION = "2.5";
  *      and on `run_read`/`run_wait`, and `pushed` on a node (PLAN 4.1). Three
  *      optional output fields; additive.
  * 2.6: a run's `actor` — who started it, a login or `@local` — on a board row
- *      and on `run_read`/`run_wait` (PLAN 4.4). Two optional output fields;
- *      additive.
+ *      and on `run_read`/`run_wait` (PLAN 4.4); and `probing` as a fifth
+ *      venue state, so the kept reading can be republished while a probe is
+ *      still dialling. Two optional output fields and one widened literal.
  */
 export const CI_CONTRACT_VERSION = "2.6";
 
@@ -1629,8 +1630,11 @@ export const VenueRowSchema = Schema.Struct({
   slot: Schema.Int,
   slots: Schema.Int,
   /** `down` is `unreachable` under the name an operator reads. `local` is a
-   *  localhost lane, which takes no remote lock at all. */
-  state: Schema.Literals(["free", "busy", "local", "down"]),
+   *  localhost lane, which takes no remote lock at all. `probing` is a host
+   *  that has been DIALLED and has not answered yet: the kept reading is
+   *  republished as the probe runs, so the fleet is on screen while an
+   *  unreachable box burns its ssh timeout rather than after it. */
+  state: Schema.Literals(["probing", "free", "busy", "local", "down"]),
   heldBy: Schema.NullOr(VenueHolderSchema),
   /** Why the probe failed, for a `down` row. Null otherwise. */
   error: Schema.NullOr(Schema.String),
