@@ -41,6 +41,10 @@ const LEDGER: ContractLedger = {
   // shipped in 2.5 and a required field there would make every answer about a
   // pushing run fail to decode.
   //
+  // A failed push also carries its `message` — the push client's own
+  // sentence, which the lane has as a value when it stamps the cell and
+  // which a reader who no longer has the push log needs.
+  //
   // MINOR despite the one removal: node `pushed` shipped in 2.5 one release
   // ago and had no reader outside this repo, and the surface otherwise only
   // grows.

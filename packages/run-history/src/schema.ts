@@ -599,29 +599,6 @@ export type NodePush =
     }
   | { state: "failed"; bucket: string; message: string; durationMs: number };
 
-/** What a run put on its bucket, over every node — the run header's total.
- *  Only pushes that LANDED count toward the bytes; the ones that failed are
- *  named instead, because "green means warmed" is a claim a failed push
- *  withdraws. */
-export function pushTotals(push: ReadonlyMap<string, NodePush>): {
-  paths: number;
-  bytes: number;
-  failedOn: readonly string[];
-} {
-  let paths = 0;
-  let bytes = 0;
-  const failedOn: string[] = [];
-  for (const [node, one] of push) {
-    if (one.state === "pushed") {
-      paths += one.paths;
-      bytes += one.bytes;
-    } else if (one.state === "failed") {
-      failedOn.push(node);
-    }
-  }
-  return { paths, bytes, failedOn };
-}
-
 // ── attempts ────────────────────────────────────────────────────────────────
 
 /** One attempt's sidecar. Written when the attempt starts (so an interrupted

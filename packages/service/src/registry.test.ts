@@ -362,10 +362,13 @@ describe("a node's push", () => {
       bytes: 4_096,
       durationMs: 1_200,
     });
-    // A FAILURE KEEPS ONLY ITS TIME. No bucket, because the run has one and
-    // the row says it; no message, because the push log does and this node's
-    // `logKey` addresses it.
-    expect(push(FAILED)).toEqual({ state: "failed", durationMs: 300 });
+    // A FAILURE DROPS ONLY THE BUCKET, which the run names once. Its
+    // message is the wire's own field and crosses unchanged.
+    expect(push(FAILED)).toEqual({
+      state: "failed",
+      message: "403 from the bucket — the token is not valid for this path",
+      durationMs: 300,
+    });
   });
 
   it("leaves the push off a node that has none, rather than zeroing it", () => {

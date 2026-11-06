@@ -25,11 +25,11 @@
 
 import { describe, expect, it } from "bun:test";
 import { Result, Schema } from "effect";
+import { pushTotals } from "@odu/run-client/surface";
 import { foldJournal } from "./attention";
 import {
   JournalEntrySchema,
   type NodePush,
-  pushTotals,
   RunEventSchema,
   RunManifestSchema,
 } from "./schema";
@@ -344,11 +344,17 @@ describe("what a run put on its bucket, over every node", () => {
     expect(totals).toEqual({
       paths: 15,
       bytes: 4_500,
+      landed: 2,
       failedOn: ["ci::e2e@x86_64-linux"],
     });
   });
 
   it("is zero and empty for a run whose nodes pushed nothing", () => {
-    expect(pushTotals(new Map())).toEqual({ paths: 0, bytes: 0, failedOn: [] });
+    expect(pushTotals(new Map())).toEqual({
+      paths: 0,
+      bytes: 0,
+      landed: 0,
+      failedOn: [],
+    });
   });
 });

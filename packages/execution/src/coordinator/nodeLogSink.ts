@@ -9,7 +9,7 @@
  * A module rather than a cluster of closures inside `orchestrate` because it
  * encapsulates ONE axis of change with a name: **which run owns the file.** The
  * file ADDRESS is not an axis here — `.ci/<sha7>/<platform>/<node>.log` is
- * `@odu/run-client`'s `logPathForStream`, the one spelling every writer and
+ * `@odu/run-client`'s `logPathFor`, the one spelling every writer and
  * reader shares, and the pump key beside it (`logStreamKey`) is the one
  * spelling of "which of a node's two streams". What this module owns is the
  * claim policy: per-commit addressing, truncate-on-first-touch per run,
@@ -22,7 +22,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   type LogStream,
-  logPathForStream,
+  logPathFor,
   logStreamKey,
 } from "@odu/run-client/nodeId";
 import { createLogTail, type CreateLogTailResult } from "../common/logTail";
@@ -63,7 +63,7 @@ export interface NodeLogSink {
 export function createNodeLogSink(repoRoot: string, sha7: string): NodeLogSink {
   const tail = createLogTail();
   const fileFor = (id: string, stream: LogStream): string =>
-    join(repoRoot, logPathForStream(sha7, id, stream));
+    join(repoRoot, logPathFor(sha7, id, stream));
   /** The log directories this process has already created. A run's node set is
    *  fixed, so this is bounded by the lane count — and since juspay/odu#84 the
    *  provisioning narration flows through `append` one line at a time

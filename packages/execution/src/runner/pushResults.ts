@@ -74,42 +74,6 @@ export const PUSH_BUCKET_ENV = "ODU_CACHE_BUCKET";
 export const PUSH_TOKEN_ENV = "ODU_CACHE_TOKEN";
 
 /**
- * HOW A FAILED PUSH ANNOUNCES ITSELF on a node's push log — the one line the
- * lane writes when the push client throws, and the marker anything reading
- * that stream looks for.
- *
- * Both halves of this wire are here for the reason the env names are: the
- * lane WRITES it (`runner.ts`) and the coordinator READS it back out of the
- * frames crossing its log tap, to put the client's own sentence in the
- * journal's `push_failed` line rather than a pointer at a log the reader may
- * not have. Two modules agreeing about a literal is a wording change away
- * from a reader that silently never matches again.
- */
-export const PUSH_FAILED_PREFIX = "[odu] push failed: ";
-
-/**
- * The push client's own sentence out of a chunk of push-log text, or `null`
- * where the chunk carries no failure line.
- *
- * The LAST occurrence, because a chunk may hold a whole re-sent buffer (a
- * lane's opening snapshot) and the newest line is the one that describes the
- * attempt a reader is looking at.
- *
- * ONE LINE of it. The client's message can run to several — a nix error with
- * a trace under it — and what this feeds is a journal field a catalog reader
- * sees as a sentence beside a node id; the whole of it stays in the log,
- * which is the thing the line is cut from.
- */
-export function pushFailureSentenceIn(text: string): string | null {
-  const at = text.lastIndexOf(PUSH_FAILED_PREFIX);
-  if (at < 0) return null;
-  const from = at + PUSH_FAILED_PREFIX.length;
-  const end = text.indexOf("\n", from);
-  const said = (end < 0 ? text.slice(from) : text.slice(from, end)).trim();
-  return said === "" ? null : said;
-}
-
-/**
  * The task environment that carries a push to a lane — the WRITING half of
  * {@link pushConfigOf}, here beside it.
  *

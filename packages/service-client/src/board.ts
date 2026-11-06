@@ -304,6 +304,11 @@ export function pushSpan(
   };
 }
 
+/** The run-wide fold of the same union `pushSpan` reads one of, re-exported
+ *  from its home beside `NodePushSchema` so the browser reaches every push
+ *  reading through this one module. */
+export { pushTotals } from "@odu/run-client/surface";
+
 /** HOW A LANE STOPS — which arm its bar is, and where that bar ends. One
  *  decision, so it is taken once: a lane with its own duration ends at its own
  *  duration, one still going ends at the clock, and a lane left open on a run

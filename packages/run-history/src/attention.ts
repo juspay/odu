@@ -36,9 +36,10 @@
  */
 
 import type { NodeStatus } from "@odu/run-client/surface";
+import { pushTotals } from "@odu/run-client/surface";
 import { signalFromExit } from "./exit";
 import { formatCursor, type Cursor } from "./ids";
-import { isResumptionEvent, pushTotals } from "./schema";
+import { isResumptionEvent } from "./schema";
 import type {
   Expiry,
   JournalEntry,

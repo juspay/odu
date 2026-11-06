@@ -81,7 +81,7 @@ import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { asHostSlot, fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
 import { takePushToken } from "./launcher";
-import { pushEnvFor, pushFailureSentenceIn } from "../runner/pushResults";
+import { pushEnvFor } from "../runner/pushResults";
 import {
   ExecutionRoster,
   type ExecutionLane,
@@ -1038,38 +1038,6 @@ async function orchestrate(
   // Bound below beside `setupLine`; declared here because interrupt teardown
   // must flush the last coalesced provisioning burst before sealing logs.
   let flushSetupLines: () => void = () => {};
-  /**
-   * THE PUSH CLIENT'S OWN SENTENCE, per node, as it crossed the push stream.
-   *
-   * A push that fails says WHY in one line on the node's push log, and the
-   * journal's `push_failed` is read by people the log is no longer in front
-   * of — a catalog reader a week later, `run_read` against a coordinator
-   * that is gone. Writing only "the reason is in the push log" there made
-   * the event a pointer to evidence the reader may not have; keeping the
-   * sentence as it goes past costs one string per node and turns the line
-   * into the answer.
-   *
-   * HERE rather than on the node wire: a cell is republished on every frame
-   * and a failure message on it would be a second copy of the log's own
-   * words for every reader to keep true. This map is read exactly once, by
-   * `notePush`, at the moment it writes the line.
-   *
-   * Keyed by public node id and cleared the way `pushJournalled` is — on the
-   * retraction a rerun publishes — because a previous attempt's reason over
-   * a new attempt's failure is worse than no reason at all.
-   */
-  const pushSaid = new Map<string, string>();
-
-  /** Keep the sentence out of a `[odu] push failed: …` line this node's push
-   *  log just received, if that is what it is.
-   *
-   *  The marker and the reader of it both come from `pushResults`, which is
-   *  where the lane writes the line: one definition, so a change to the
-   *  wording cannot quietly turn this into a function that never matches. */
-  const rememberPushFailure = (id: string, text: string): void => {
-    const said = pushFailureSentenceIn(text);
-    if (said !== null) pushSaid.set(id, said);
-  };
   /** THE THREE LOG VERBS, and the seam where evidence forks.
    *
    *  Every byte of a node's output already funnels through exactly these three
@@ -1102,12 +1070,6 @@ async function orchestrate(
     if (logs.isEnded(id, stream)) return;
     logs.append(id, text, stream);
     history.log(id, text, nodeHosts.get(id) ?? null, stream);
-    // AND WHAT THE PUSH SAID, when this is the line that says why one
-    // failed. The client's sentence crosses here on its way to the push log,
-    // and `notePush` — which journals the failure moments later, off the
-    // NODE CELL, a different stream with no ordering against this one — has
-    // no other way to reach it.
-    if (stream === "push") rememberPushFailure(id, text);
   };
   const resetLocal = (
     id: string,
@@ -1123,14 +1085,6 @@ async function orchestrate(
     // `running` frame, and then "attempt 2" meant nothing. The genuine restart
     // is `history.resetNode`, called where a node is actually re-run.
     history.replaceLog(id, text, nodeHosts.get(id) ?? null, stream);
-    // A SNAPSHOT REPLACES WHAT THIS LOG HOLDS, so what the push was last
-    // heard to say is whatever the replacement says — which for a rerun's
-    // wipe is nothing. Carrying a dead invocation's reason forward would
-    // file it under the next attempt's failure.
-    if (stream === "push") {
-      pushSaid.delete(id);
-      rememberPushFailure(id, text);
-    }
   };
   const endLocal = (id: string, stream: LogStream = "recipe"): void => {
     logs.end(id, stream);
@@ -1142,6 +1096,26 @@ async function orchestrate(
     // first-word-wins rule in `history`.
     if (stream === "recipe") history.logFinalized(id, true, null);
   };
+  /** SEAL THIS NODE'S LOGS — both of them, which is the invariant every
+   *  terminal path in this run keeps.
+   *
+   *  A node that reaches a terminal status owes a terminal frame on its
+   *  recipe log AND on its push log: the fan-in serves both, and a reader
+   *  following either waits for the frame that says no more is coming. Half
+   *  a seal hangs `odu ci logs -f <node>` on the stream nobody ended — and
+   *  for nodes that never push at all (the coordinator's own logical shard
+   *  parent) the outside cannot tell an empty stream from an unfinished one,
+   *  so the empty one still gets its terminal. The runner spells the same
+   *  rule on its side as `endNodeLogs`.
+   *
+   *  The exceptions are the sites that genuinely speak about ONE stream: a
+   *  lane's own per-stream `end` frame, relayed as it arrives, and
+   *  `_ci-setup`, whose terminal belongs to the run rather than a lane. */
+  const sealNodeLogs = (id: string): void => {
+    endLocal(id);
+    endLocal(id, "push");
+  };
+
   /** The run's last word on every node's log. `end` is a promise to a reader
    *  that nothing more is coming, and only the party still able to write can
    *  make it: for a recipe node that is its lane, but for `_ci-setup@<plat>` it
@@ -1151,16 +1125,9 @@ async function orchestrate(
    *  the lanes are closed, from both terminal paths (natural completion and
    *  `shutdown`), so the fan-in's three-frame protocol is TOTAL: every node
    *  that reaches a terminal status gets its log ended by whoever owns that
-   *  outcome, and `odu ci logs -f <node>` returns on every one of them.
-   *
-   *  BOTH STREAMS, because the fan-in serves both: a reader following a push
-   *  log waits on a terminal exactly as a reader following a recipe's does,
-   *  and a run that ended only half of what it serves would hang them. */
+   *  outcome, and `odu ci logs -f <node>` returns on every one of them. */
   const endRunLogs = (): void => {
-    for (const id of store.get().order) {
-      endLocal(id);
-      endLocal(id, "push");
-    }
+    for (const id of store.get().order) sealNodeLogs(id);
   };
 
   /** Write the one sentence that says a node's log is short, and why.
@@ -1438,23 +1405,11 @@ async function orchestrate(
       // died never returns — the wait an agent cannot afford, on exactly the
       // runs most worth reading.
       //
-      // BOTH OF A NODE'S STREAMS, which is the invariant every terminal path
-      // in this run keeps: a node that reaches a terminal status owes a
-      // terminal on its recipe log AND on its push log, because the fan-in
-      // serves both and a reader following either one waits for the frame
-      // that says no more is coming. Ending only the recipe's left a push
-      // reader hanging until `endRunLogs` at the end of the WHOLE run — and
-      // this lane is going away while the rest of the run keeps settling, so
-      // that wait is unbounded in practice.
-      //
       // `_ci-setup` excepted, and only here: this very function appends the
       // death/cancel line to it, and more coordinator narration can still
       // follow. Its terminal belongs to `endRunLogs`, at the point the RUN is
       // done with the node rather than the lane.
-      if (splitFanId(id).namepath !== SETUP) {
-        endLocal(id);
-        endLocal(id, "push");
-      }
+      if (splitFanId(id).namepath !== SETUP) sealNodeLogs(id);
     }
   };
 
@@ -2085,10 +2040,6 @@ async function orchestrate(
     if (push === undefined) {
       updateNode(id, {}, ["push"]);
       pushJournalled.delete(id);
-      // And whatever the last attempt's push was heard to say about failing.
-      // A rerun is a new attempt: its failure deserves its own reason, and
-      // the previous one standing in for it is worse than none.
-      pushSaid.delete(id);
       return;
     }
     updateNode(id, { push });
@@ -2119,25 +2070,16 @@ async function orchestrate(
       });
       return;
     }
-    // THE CLIENT'S OWN SENTENCE, caught off the push log on its way past
-    // (`rememberPushFailure`, at the log tap). This line is read by people
-    // the log is not in front of — `run_read` against a coordinator that is
-    // gone, a catalog a week later — and a message that only said "the
-    // reason is in the push log" taught them that the push half failed and
-    // never why, which is half of what the event exists for.
-    //
-    // THE POINTER REMAINS, as the fallback and nothing else. A node's cell
-    // and its log frames are two streams with no ordering between them, so
-    // the sentence may not have arrived when the cell says `failed`; an
-    // empty message would then be a record that states nothing at all,
-    // while the pointer at least says where to look.
+    // THE CLIENT'S OWN SENTENCE, off the cell the lane stamped it on. This
+    // line is read by people the log is not in front of — `run_read` against
+    // a coordinator that is gone, a catalog a week later — and a message
+    // that only said "the reason is in the push log" taught them that the
+    // push half failed and never why, which is half of what the event
+    // exists for.
     history.pushFailed({
       node: id,
       bucket: pushing.bucket,
-      message:
-        pushSaid.get(id) ??
-        `${id} could not push its outputs to ${pushing.bucket}` +
-          " — the client's own sentence is in this node's push log",
+      message: push.message,
       durationMs: push.durationMs,
     });
   };
@@ -2185,13 +2127,7 @@ async function orchestrate(
       logicalId,
       `[odu] shards settled: ${statuses.join(", ")}\n`,
     );
-    // BOTH STREAMS, the invariant every terminal path here keeps. This
-    // logical node is the coordinator's own: the shards do the pushing and
-    // nothing ever writes its push log — but a reader cannot know that from
-    // the outside, and `{ id, stream: "push" }` on a node the fan-in serves
-    // must answer a terminal rather than hang on an empty stream.
-    endLocal(logicalId);
-    endLocal(logicalId, "push");
+    sealNodeLogs(logicalId);
     updateNode(logicalId, {
       status,
       exitCode: status === "ok" ? 0 : 1,
@@ -3530,19 +3466,12 @@ async function orchestrate(
                 appendLocal(id, `\n[odu] shard lane died: ${error}\n`);
               }
               // THE SAME INVARIANT `terminalizePlatformNodes` KEEPS: this
-              // lane is gone, so BOTH of a node's streams get their terminal
-              // here, whether or not its status moved. A shard that was
-              // still pushing when its lane died owes a push terminal
-              // exactly as it owes a recipe one, and the run keeps settling
-              // around it — so a reader following the other stream would
-              // wait for `endRunLogs` at the end of the whole run.
-              //
-              // BEFORE the verdict is released, which is the order the
-              // verdict gate exists to impose: a terminal status published
-              // over an open log promises a finished node whose output is
-              // still on the wire.
-              endLocal(id);
-              endLocal(id, "push");
+              // lane is gone, so this node's logs are sealed here whether or
+              // not its status moved, BEFORE the verdict is released — which
+              // is the order the verdict gate exists to impose: a terminal
+              // status published over an open log promises a finished node
+              // whose output is still on the wire.
+              sealNodeLogs(id);
               if (unfinished) {
                 verdicts.release(id);
                 updateNode(id, {

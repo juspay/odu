@@ -60,7 +60,6 @@ import {
   createLanePusher,
   type LanePusher,
   pushConfigOf,
-  PUSH_FAILED_PREFIX,
   PUSH_TOKEN_ENV,
 } from "./pushResults";
 
@@ -760,23 +759,19 @@ export function createLaneRunner(
           // GREEN MEANS WARMED. The recipe passed and its outputs did not
           // reach the bucket, so the node is red with the client's own
           // sentence in its PUSH log — the recipe's log keeps the recipe's
-          // output, and the step that failed is the one that says why.
-          //
-          // The PREFIX is shared vocabulary, not a literal: the coordinator
-          // reads this line back off its log tap to put this very sentence
-          // in the journal's `push_failed`, and a wording change here that
-          // did not reach that reader would silently turn the record back
-          // into a pointer.
+          // output, and the step that failed is the one that says why. The
+          // same sentence rides the cell, which is what a reader who no
+          // longer has the log is told.
           if (current()) {
             tail.append(
               logStreamKey(node.id, "push"),
-              `\n${PUSH_FAILED_PREFIX}${message}\n`,
+              `\n[odu] push failed: ${message}\n`,
             );
           }
           stamp(
             "failed",
             exitCode,
-            { state: "failed", durationMs: Date.now() - pushStartedAt },
+            { state: "failed", message, durationMs: Date.now() - pushStartedAt },
             durationMs,
           );
         });

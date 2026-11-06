@@ -291,14 +291,14 @@ describe.if(hasJust)("the journal of a node that pushed", () => {
         eventsOf().filter((e) => e.kind === "node_status" && e.node === NODE).length,
       ).toBe(1);
 
-      // THE PUSH FAILS. The client's sentence reaches the coordinator on the
-      // PUSH STREAM — a different wire from the cell below, which is why the
-      // coordinator keeps it rather than reading it back out of a log.
-      lane.opts.onLogFrame("alpha", { kind: "append", text: `\n[odu] push failed: ${SAID}\n` }, "push");
+      // THE PUSH FAILS, and the cell says why: the client's sentence is on
+      // the `failed` arm the lane stamped, so the journal's line is a
+      // straight-line copy of it rather than something read back out of a
+      // log's bytes.
       lane.opts.onNodes(
         laneState("failed", {
           durationMs: 4_000,
-          push: { state: "failed", durationMs: 900 },
+          push: { state: "failed", message: SAID, durationMs: 900 },
         }),
       );
       lane.opts.onLogFrame("alpha", { kind: "end" }, "push");

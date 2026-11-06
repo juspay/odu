@@ -116,16 +116,15 @@ import type {
  * The fold's push, as the WIRE says it.
  *
  * TWO TYPES OF THE SAME NAME, on purpose. The fold's (`@odu/run-history`) is
- * what the journal recorded: the bucket a node pushed to and, on a failure,
- * the push client's own sentence. The wire's (`@odu/run-client/surface`) is
- * what a node row needs to PAINT: a state, and the counts that go beside it.
- * Narrowing happens here, once, rather than in each reader — and it is a
- * narrowing rather than a rename, which is why the two types are not shared.
+ * what the journal recorded, keyed by the bucket a node pushed to; the wire's
+ * (`@odu/run-client/surface`) is what a node row needs to PAINT. Narrowing
+ * happens here, once, rather than in each reader — and it is a narrowing
+ * rather than a rename, which is why the two types are not shared.
  *
- * A failure keeps only its duration. The message belongs to the push log,
- * which this node's `logKey` already addresses with `stream: "push"`, and a
- * row that carried a truncated copy of it would be the thing a reader trusted
- * instead of opening the log.
+ * What the narrowing drops is the BUCKET: it is a property of the run, named
+ * once on the header, and repeating it on every node would be a per-node
+ * claim nobody made. A failure's message is the wire's own field — the lane
+ * stamps it on the cell — so it crosses unchanged.
  */
 function wirePush(push: FoldNodePush): NodePush {
   switch (push.state) {
@@ -139,7 +138,7 @@ function wirePush(push: FoldNodePush): NodePush {
         durationMs: push.durationMs,
       };
     case "failed":
-      return { state: "failed", durationMs: push.durationMs };
+      return { state: "failed", message: push.message, durationMs: push.durationMs };
   }
 }
 

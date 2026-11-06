@@ -45,6 +45,7 @@ import {
   type LaneSpan,
   laneSpan,
   pushSpan,
+  pushTotals,
   runElapsedMs,
   timelineTicks,
 } from "@odu/service-client/board";
@@ -144,43 +145,48 @@ function noteSuffix(note: string | null): string {
 }
 
 /**
- * THE PUSH STEP'S WORDS AND COLOUR — one row per state, and no colour of its
- * own.
+ * THE PUSH STEP'S SENTENCE AND COLOUR — one arm per state, both halves in one
+ * place.
  *
- * A push is a STEP, so it reads like one: a word for what it is doing, a
- * glyph, and a hue. All three are borrowed from the node statuses the page
- * already paints, through the status each push state IS the analogue of — a
- * push in flight is `running`, one that landed is `ok`, one that did not is
- * `failed`. Borrowing rather than minting is the rule {@link NODE_STATUS}'s
- * own doc sets: colour on this page means one thing, assigned once, and a
- * fourth palette for a second kind of work is how a reader learns that amber
- * means two different things depending on which row it is on.
+ * A push is a STEP, so it reads like one: the word for what it is doing, then
+ * where the bytes went, then what it has to show for it. The word LEADS, and
+ * every one begins with "push", so the step names itself without a separate
+ * label repeating the word three characters later. The destination is the
+ * RUN's bucket, and when the row carrying it has not arrived the step says
+ * the state alone rather than inventing a noun for where the bytes went —
+ * this face spells no word of the row that serves buckets.
  *
- * The NODE's status is untouched by any of this. It reads the RECIPE's
- * verdict throughout — a failed push turns the node red through the lane, not
- * through this table, which is why `failed` here says "push failed" rather
- * than "failed": the row already carries one verdict and this is a second
- * fact about a different step.
+ * A push in flight claims NO counts: it has sent nothing it can count yet,
+ * and `0 paths` on it would be a claim about the bucket nobody has made. Its
+ * length is the hatched bar instead, the honest picture of "still going".
+ *
+ * NO COLOUR OF ITS OWN. `as` names the node status this push state is the
+ * analogue of, and the glyph and hue are read from there. Borrowing rather
+ * than minting is the rule {@link NODE_STATUS}'s own doc sets: colour on this
+ * page means one thing, assigned once, and a fourth palette for a second kind
+ * of work is how a reader learns that amber means two different things
+ * depending on which row it is on. The NODE's status is untouched by any of
+ * this — it reads the RECIPE's verdict throughout, which is why `failed` here
+ * says "push failed" rather than "failed".
  */
-const PUSH_META: Record<NodePush["state"], { word: string; as: NodeStatus }> = {
-  pushing: { word: "pushing", as: "running" },
-  pushed: { word: "pushed", as: "ok" },
-  failed: { word: "push failed", as: "failed" },
-};
-
-/** WHAT THE PUSH STEP SAYS, after its state — the counts a landed push has and
- *  the duration every settled one does. A push still in flight has neither: it
- *  has sent nothing it can count yet, and `0 paths` on it would be a claim
- *  about the bucket that nobody has made. Its length is the hatched bar
- *  instead, which is the honest picture of "still going". */
-function pushFacts(push: NodePush): string {
+function pushStep(
+  push: NodePush,
+  bucket: string | null,
+): { text: string; as: NodeStatus } {
+  const to = bucket === null ? "" : ` → ${bucket}`;
   switch (push.state) {
     case "pushing":
-      return "";
+      return { text: `pushing${to}`, as: "running" };
     case "pushed":
-      return ` · ${push.paths} path${push.paths === 1 ? "" : "s"} · ${bytes(push.bytes)} · ${duration(push.durationMs)}`;
+      return {
+        text: `pushed${to} · ${push.paths} path${push.paths === 1 ? "" : "s"} · ${bytes(push.bytes)} · ${duration(push.durationMs)}`,
+        as: "ok",
+      };
     case "failed":
-      return ` · ${duration(push.durationMs)}`;
+      return {
+        text: `push failed${to} · ${duration(push.durationMs)}`,
+        as: "failed",
+      };
   }
 }
 
@@ -359,23 +365,9 @@ function NodeRow(props: {
   const step = createMemo(() => {
     const push = props.node.push;
     if (push === undefined) return null;
-    const vocab = PUSH_META[push.state];
-    const status = NODE_STATUS[vocab.as];
-    return {
-      // The state word LEADS, and every one of them begins with "push" —
-      // `pushing`, `pushed`, `push failed` — so the step names itself without
-      // a separate label repeating the word three characters later.
-      //
-      // The destination is the RUN's bucket, and when the row carrying it has
-      // not arrived the step says the state alone rather than inventing a
-      // noun for where the bytes went. That is also the fence: this face
-      // spells no word of the row that serves buckets — the name it draws is
-      // a prop the shell filled, like the link under it.
-      text: `${vocab.word}${props.bucket === null ? "" : ` → ${props.bucket}`}${pushFacts(push)}`,
-      hue: status.hue,
-      glyph: status.glyph,
-      span: props.push,
-    };
+    const { text, as } = pushStep(push, props.bucket);
+    const status = NODE_STATUS[as];
+    return { text, hue: status.hue, glyph: status.glyph, span: props.push };
   });
   /** Why this row can be opened, or why it cannot. Said once and drawn twice:
    *  as the native `title` and as the `.tip` beside it. */
@@ -1048,44 +1040,30 @@ export function Detail(props: {
     () => props.run?.push?.target?.bucket ?? null,
   );
   /**
-   * WHAT THIS RUN WARMED, SUMMED — the header's own total, folded from the
-   * nodes the page is already holding.
+   * WHAT THIS RUN WARMED — {@link pushTotals} over the nodes this page is
+   * already holding, or `null` when there is nothing to say.
    *
-   * CLIENT-SIDE on purpose. `AttentionAnswer` carries a run-wide `paths` /
-   * `bytes` pair, but this view is drawn from `streams.nodes`, which is the
-   * frame that actually ticks while a run is live — a total read off a second
-   * source would lag the rows under it by a tick and a reader would see a
-   * header that disagreed with the sum of the list beneath it.
+   * The SOURCE is the decision kept here. `AttentionAnswer` carries a
+   * run-wide `paths` / `bytes` pair, but this view is drawn from
+   * `streams.nodes`, which is the frame that actually ticks while a run is
+   * live — a total read off a second wire field would lag the rows under it
+   * by a tick and a reader would see a header that disagreed with the sum of
+   * the list beneath it. What counts as a total is the fold's rule, not this
+   * page's.
    *
-   * ONLY LANDED PUSHES COUNT. A push in flight has sent nothing it can claim,
-   * and a failed one sent nothing at all; both would otherwise inflate a
-   * number people read as "what the next machine will not have to build". The
-   * failures are carried BESIDE the total rather than folded into it, because
-   * "3 paths landed and one node's push failed" is two facts and a reader
-   * needs both.
-   *
-   * `null` is a run that pushed nothing and failed at nothing — most runs,
-   * and the header stays quiet rather than printing a row of zeroes.
+   * `null` is the one presentation decision: a run that landed nothing and
+   * failed at nothing — most runs — leaves the header quiet rather than
+   * printing a row of zeroes.
    */
   const pushed = createMemo(() => {
-    let paths = 0;
-    let narBytes = 0;
-    let landed = 0;
-    const failedOn: string[] = [];
-    for (const node of nodes()) {
-      const push = node.push;
-      if (push === undefined) continue;
-      if (push.state === "pushed") {
-        landed += 1;
-        paths += push.paths;
-        narBytes += push.bytes;
-      } else if (push.state === "failed") {
-        failedOn.push(node.id);
-      }
-    }
-    return landed === 0 && failedOn.length === 0
-      ? null
-      : { paths, bytes: narBytes, failedOn };
+    const total = pushTotals(
+      nodes().flatMap((node) =>
+        node.push === undefined
+          ? []
+          : [[node.id, node.push] as readonly [string, NodePush]],
+      ),
+    );
+    return total.landed === 0 && total.failedOn.length === 0 ? null : total;
   });
   /** The whole-run cancel, held behind a question — see the `Confirm` below. */
   const [confirmingCancel, setConfirmingCancel] = createSignal(false);

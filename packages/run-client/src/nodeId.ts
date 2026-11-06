@@ -63,13 +63,22 @@ export function shortSha(sha: string): string {
 }
 
 /** The node id → durable log path fold: `ci::e2e@x86_64-linux` of run
- *  `338eb01` → `.ci/338eb01/x86_64-linux/ci::e2e.log`. RELATIVE to the
- *  checkout root, exactly as odu lays it on disk (justci's layout) — the
- *  caller joins it to the checkout it is talking about. Pure path algebra
- *  over the id split, like {@link runSocketPath} is over the checkout root;
- *  whether the file exists is a question for the filesystem. */
-export function logPathFor(sha7: string, nodeId: string): string {
-  return logPathForStream(sha7, nodeId, "recipe");
+ *  `338eb01` → `.ci/338eb01/x86_64-linux/ci::e2e.log`, and with
+ *  `stream: "push"` the push half beside it, `ci::e2e.push.log` — beside
+ *  rather than under, so one `ls` of a lane's directory shows both halves of
+ *  what a node did. RELATIVE to the checkout root, exactly as odu lays it on
+ *  disk (justci's layout) — the caller joins it to the checkout it is talking
+ *  about. Pure path algebra over the id split, like {@link runSocketPath} is
+ *  over the checkout root; whether the file exists is a question for the
+ *  filesystem. */
+export function logPathFor(
+  sha7: string,
+  nodeId: string,
+  stream: LogStream = "recipe",
+): string {
+  const { namepath, platform } = splitFanId(nodeId);
+  const suffix = stream === "push" ? "push.log" : "log";
+  return `.ci/${sha7}/${platform}/${namepath}.${suffix}`;
 }
 
 /**
@@ -96,19 +105,6 @@ export type LogStream = (typeof LOG_STREAMS)[number];
  */
 export function logStreamKey(nodeId: string, stream: LogStream = "recipe"): string {
   return stream === "push" ? `${nodeId}\u0000push` : nodeId;
-}
-
-/** The push half of {@link logPathFor}: `.ci/338eb01/x86_64-linux/ci::e2e.push.log`.
- *  Beside the recipe's log rather than under it, so one `ls` of a lane's
- *  directory shows both halves of what a node did. */
-export function logPathForStream(
-  sha7: string,
-  nodeId: string,
-  stream: LogStream = "recipe",
-): string {
-  const { namepath, platform } = splitFanId(nodeId);
-  const suffix = stream === "push" ? "push.log" : "log";
-  return `.ci/${sha7}/${platform}/${namepath}.${suffix}`;
 }
 
 export function onPlatform(id: string, platform: string): boolean {

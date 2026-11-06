@@ -29,6 +29,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { LogStream } from "@odu/run-client/nodeId";
 
 /** The environment slice this module reads. Passed in rather than reached for,
  *  so a test names the world it is testing against. */
@@ -175,10 +176,12 @@ export const ATTEMPT_FILES = {
   record: "record.json",
 } as const;
 
-/** Which of an attempt's two logs a caller means. `"recipe"` is the default
- *  everywhere: it is the log that existed first and the one every reader that
- *  does not say otherwise wants. */
-export type LogStream = "recipe" | "push";
+/** Which of an attempt's two logs a caller means — the SAME closed set the
+ *  fan-in surface names its streams with, re-exported rather than restated so
+ *  a third stream is one edit. `"recipe"` is the default everywhere: it is the
+ *  log that existed first and the one every reader that does not say otherwise
+ *  wants. */
+export type { LogStream } from "@odu/run-client/nodeId";
 
 /** One attempt's log file, by stream. The ONE place a stream name becomes a
  *  file name, so a writer and a reader cannot disagree about which bytes they

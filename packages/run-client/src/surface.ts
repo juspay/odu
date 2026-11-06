@@ -177,14 +177,54 @@ export const NodePushSchema = Schema.Union([
      *  which stays the recipe's time. */
     durationMs: Schema.Int,
   }),
-  /** The closure did not land. The client's sentence is in the node's PUSH
-   *  log — not repeated here, where it would be a second copy to keep true. */
+  /** The closure did not land, and WHY — the push client's own sentence, as
+   *  the lane had it when it stamped the cell. The whole of the client's
+   *  output stays in the node's push log; this is the one line a reader who
+   *  no longer has that log (a catalog a week later) needs. */
   Schema.Struct({
     state: Schema.Literal("failed"),
+    message: Schema.String,
     durationMs: Schema.Int,
   }),
 ]);
 export type NodePush = typeof NodePushSchema.Type;
+
+/** WHAT A RUN PUT ON ITS BUCKET, over every node — the one fold of this
+ *  union, living with the union it folds.
+ *
+ *  Only pushes that LANDED count toward the bytes; the ones that failed are
+ *  named instead, because "green means warmed" is a claim a failed push
+ *  withdraws. `landed` is the count of pushes that completed, which is NOT
+ *  `paths > 0` — a node whose closure the bucket already had lands zero
+ *  paths and is still a push that happened.
+ *
+ *  ENTRIES rather than a `ReadonlyMap`, because the two callers hold
+ *  different maps: the durable journal's fold carries `bucket` and keeps
+ *  insertion order, the browser's row carries the wire shape. Both are
+ *  iterable of `[node, push]`, and that is all this reads. */
+export function pushTotals(
+  push: Iterable<readonly [string, NodePush]>,
+): {
+  paths: number;
+  bytes: number;
+  landed: number;
+  failedOn: readonly string[];
+} {
+  let paths = 0;
+  let bytes = 0;
+  let landed = 0;
+  const failedOn: string[] = [];
+  for (const [node, one] of push) {
+    if (one.state === "pushed") {
+      paths += one.paths;
+      bytes += one.bytes;
+      landed += 1;
+    } else if (one.state === "failed") {
+      failedOn.push(node);
+    }
+  }
+  return { paths, bytes, landed, failedOn };
+}
 
 export const NodeStateSchema = Schema.Struct({
   id: NodeIdSchema,

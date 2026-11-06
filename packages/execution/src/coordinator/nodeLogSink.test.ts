@@ -11,7 +11,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { logPathFor, logPathForStream } from "@odu/run-client/nodeId";
+import { logPathFor } from "@odu/run-client/nodeId";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 
 const dirs: string[] = [];
@@ -63,11 +63,11 @@ describe("a node's two durable logs", () => {
     sink.append(id, "compiling\n");
     sink.append(id, "[odu] pushing 2 result paths\n", "push");
 
-    expect(readFileSync(join(dir, logPathForStream("abc1234", id)), "utf-8")).toBe(
+    expect(readFileSync(join(dir, logPathFor("abc1234", id)), "utf-8")).toBe(
       "compiling\n",
     );
     expect(
-      readFileSync(join(dir, logPathForStream("abc1234", id, "push")), "utf-8"),
+      readFileSync(join(dir, logPathFor("abc1234", id, "push")), "utf-8"),
     ).toBe("[odu] pushing 2 result paths\n");
   });
 
@@ -89,7 +89,7 @@ describe("a node's two durable logs", () => {
     appendIfOpen(sink, id, "too late\n");
     appendIfOpen(sink, id, "[odu] 4 paths sent\n", "push");
     expect(
-      readFileSync(join(dir, logPathForStream("abc1234", id, "push")), "utf-8"),
+      readFileSync(join(dir, logPathFor("abc1234", id, "push")), "utf-8"),
     ).toBe("[odu] 4 paths sent\n");
     expect(() => sink.append(id, "direct\n")).toThrow(/after its log ended/);
   });

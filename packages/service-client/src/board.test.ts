@@ -476,7 +476,7 @@ describe("where a node's PUSH sat in its run", () => {
     // red node cannot say.
     expect(
       pushSpan(
-        node({ status: "failed", push: { state: "failed", durationMs: 30_000 } }),
+        node({ status: "failed", push: { state: "failed", message: "413 too large", durationMs: 30_000 } }),
         run,
         9e15,
       ),

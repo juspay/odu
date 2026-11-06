@@ -44,12 +44,7 @@ import { firstFrame, runUnary, subscribe } from "../common/effectEdge";
 import { type LaneClient, laneClientOver, laneSurface } from "../common/laneSurface";
 import type { TaskSpec } from "../common/spec";
 import { createLaneRunner } from "./runner";
-import {
-  type LanePusher,
-  type PushConfig,
-  type PushedFact,
-  pushFailureSentenceIn,
-} from "./pushResults";
+import { type LanePusher, type PushConfig, type PushedFact } from "./pushResults";
 
 const PUSH_ENV = {
   ODU_CACHE_ORIGIN: "https://odu.example.org",
@@ -307,19 +302,15 @@ describe("a lane node that pushes what it built", () => {
     expect(
       node?.push?.state === "failed" && node.push.durationMs,
     ).toBeGreaterThanOrEqual(0);
-    // THE SENTENCE IS IN THE PUSH LOG. The recipe passed, and its log keeps
+    // THE CLIENT'S OWN SENTENCE, on the cell — what a reader who no longer
+    // has the log (a catalog a week later) is told the push failed of.
+    expect(node?.push?.state === "failed" && node.push.message).toBe(
+      "odu: 1 path could not be pushed to main — 413 too large",
+    );
+    // AND IN THE PUSH LOG, in full. The recipe passed, and its log keeps
     // saying exactly that.
     expect(await l.logOf("build", "push")).toContain("413 too large");
     expect(await l.logOf("build")).not.toContain("413 too large");
-    // AND IT IS THE SENTENCE A READER GETS BACK. The coordinator does not
-    // keep this log — it reads the client's words off the frames crossing
-    // its tap and puts them in the journal's `push_failed`, so what reaches
-    // a catalog a week later is the reason and not a pointer at a log that
-    // reader may not have. This is the wire between the two ends, over the
-    // real lane: the marker the runner writes and the reader that owns it.
-    expect(pushFailureSentenceIn(await l.logOf("build", "push"))).toBe(
-      "odu: 1 path could not be pushed to main — 413 too large",
-    );
   });
 
   it("RETRACTS the push on a rerun that finds nothing fresh", async () => {
