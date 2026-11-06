@@ -47,7 +47,7 @@ import {
   withDeadline,
 } from "@odu/execution/common/effectEdge";
 import type { ServiceConnection } from "@odu/service-client/dial";
-import { serviceOrigin } from "@odu/service-client/endpoint";
+import { SERVICE_ORIGIN_ENV, serviceOrigin } from "@odu/service-client/endpoint";
 import type {
   AttentionAnswer,
   ListInput,
@@ -331,6 +331,66 @@ export function checkoutHere(cwd: string = process.cwd()): string {
     throw new Error(`odu: ${cwd} is not inside a git repository`);
   }
   return checkout;
+}
+
+/**
+ * WHICH CHECKOUT, AND WHICH COMMIT, a run is about — here, or over there.
+ *
+ * `odu ci run` with no flags means "this checkout, at HEAD", and that is a read
+ * of the caller's own cwd ({@link here}). `--checkout` means something else
+ * entirely: a path on the SERVICE's machine, which this process cannot see, has
+ * no business resolving, and must therefore send verbatim.
+ *
+ * Two refusals, and each exists because the alternative is a run against
+ * something nobody named:
+ *
+ *   - **`--sha` is REQUIRED with `--checkout`.** `expectedSha` is the strict
+ *     gate: the service compares what the CALLER believes against the HEAD it
+ *     reads, and refuses a checkout that has moved on. A `--checkout` without
+ *     one would have to borrow this laptop's HEAD (a different repository's
+ *     commit) or let the service fill in its own — which is the gate comparing
+ *     a value against itself and passing for ever.
+ *   - **`--checkout` needs a remote service.** A loopback daemon shares this
+ *     shell's filesystem, so naming a path there is at best what `cd` already
+ *     does and at worst a run in a directory the caller has not looked at.
+ *     Pointing somewhere is `--origin`, or `$ODU_WEB_ORIGIN` for a whole shell.
+ */
+export function runTarget(
+  opts: { checkout?: string; sha?: string; origin?: string; cwd?: string },
+  env: Record<string, string | undefined> = process.env,
+): Here {
+  if (opts.checkout === undefined) {
+    if (opts.sha !== undefined) {
+      throw new Error(
+        "odu: --sha names the commit of --checkout, which was not given — in " +
+          "this checkout odu reads HEAD itself, so there is nothing for --sha " +
+          "to say",
+      );
+    }
+    return here(opts.cwd);
+  }
+  if (opts.sha === undefined) {
+    throw new Error(
+      "odu: --checkout needs --sha — the service refuses a checkout that has " +
+        "moved since you read it, and it can only do that against the commit " +
+        "YOU believe is there (git -C <checkout> rev-parse HEAD, on that host)",
+    );
+  }
+  const named =
+    opts.origin ??
+    (env[SERVICE_ORIGIN_ENV]?.trim() === ""
+      ? undefined
+      : env[SERVICE_ORIGIN_ENV]);
+  if (named === undefined) {
+    throw new Error(
+      "odu: --checkout names a path on the SERVICE's machine, and no service " +
+        "was named — a loopback daemon already has your working directory. " +
+        `Pass --origin https://…, or export $${SERVICE_ORIGIN_ENV}.`,
+    );
+  }
+  // VERBATIM, both. The path is resolved where it exists and the commit is
+  // read where the path is; this side knows neither and must not pretend to.
+  return { checkout: opts.checkout, sha: opts.sha };
 }
 
 /**

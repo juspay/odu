@@ -231,6 +231,22 @@ export const RunManifestSchema = Schema.Struct({
    * is a fact about registration and stays true.
    */
   registeredBy: OwnerSchema,
+  /**
+   * WHO STARTED THIS RUN — the principal the connection carried, stamped once
+   * at registration (PLAN 4.4).
+   *
+   * A signed-in person's `login`, or `"local"` for a loopback connection,
+   * which is the machine's own owner and has no login to give. The service
+   * reads it from `CurrentPrincipal`, never from the caller's input: a field
+   * a caller could type would be a claim rather than a fact.
+   *
+   * `optionalKey`, which is the third reading and the reason this is not
+   * nullable: ABSENT means the record was written before odu recorded an
+   * actor, and a face shows nothing rather than attributing somebody's run to
+   * a machine. It is PROVENANCE and not authority — revoking a token stops
+   * the next call, not the run this one launched.
+   */
+  actor: Schema.optionalKey(Schema.String),
   /** The run this one was derived from, for a finalized retry — so a face can
    *  say "this is a replay of that" instead of showing two unrelated runs of
    *  one commit. Null for a run started from a command line. */

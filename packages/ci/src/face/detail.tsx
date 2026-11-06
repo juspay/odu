@@ -881,6 +881,16 @@ export function Detail(props: {
                 <span class="detail-parent">{`replay of ${parent()}`}</span>
               )}
             </Show>
+            {/* WHO STARTED IT (PLAN 4.4). Beside the lineage and the
+                checkout, because it is the same kind of fact: provenance a
+                reader needs when the run is not theirs. Absent for a run
+                recorded before odu asked, and nothing is drawn then — an
+                invented "started by local" would be a claim about history. */}
+            <Show when={props.run?.actor}>
+              {(actor) => (
+                <span class="detail-actor">{`started by ${actor()}`}</span>
+              )}
+            </Show>
             <span class="detail-sub">{props.run?.repoRoot ?? ""}</span>
             {/* WHERE THIS RUN'S BUILDS GO (PLAN 4.1) — the bucket, linked to
                 its own page, or the one sentence saying why nothing is being

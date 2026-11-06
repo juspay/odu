@@ -21,5 +21,6 @@ export type {
   RunRow,
   ServiceCell,
   StartReceipt,
+  VenueReading,
   VenueRow,
 } from "@odu/service-client/surface";

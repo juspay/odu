@@ -832,6 +832,12 @@ async function relaunch(
     // the daemon's own `$ODU_HOSTS` is a fact about the shell that started the
     // service, which has nothing to do with the run being replayed.
     hostsFile,
+    // THE PARENT'S ACTOR (PLAN 4.4). A replay is the parent run, run again:
+    // attributing it to whoever happened to ask for the retry would make a
+    // board say two different people started one piece of work. A parent
+    // recorded before the field has none, and the replay records none either —
+    // inventing one here would be the only place an actor was ever a guess.
+    actor: manifest.actor ?? null,
     // A REPLAY never takes a checkout from whatever is running there now. The
     // run it replays has finalized; the thing occupying that checkout is
     // somebody else's, and the honest answer is the coordinator's ordinary

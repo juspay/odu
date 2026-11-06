@@ -26,6 +26,10 @@ const LEDGER: ContractLedger = {
   // — its paths, its bytes and the push's own time. Optional output fields;
   // additive.
   "2.5": "5b69127e21682efd",
+  // 2.6 — PLAN 4.4: `actor` on a run row and on a wait/read answer — who
+  // started the run, a login or `local` for a loopback caller. One optional
+  // output field in two places; additive.
+  "2.6": "e4a1146a4226f81d",
 };
 
 describe("the ci row's contract", () => {

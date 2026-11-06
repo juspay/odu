@@ -164,8 +164,11 @@ export const HOST_CONTRACT_VERSION = "2.5";
  * 2.5: a run's `push` — where it pushes and what it warmed — on a board row
  *      and on `run_read`/`run_wait`, and `pushed` on a node (PLAN 4.1). Three
  *      optional output fields; additive.
+ * 2.6: a run's `actor` — who started it, a login or `local` — on a board row
+ *      and on `run_read`/`run_wait` (PLAN 4.4). Two optional output fields;
+ *      additive.
  */
-export const CI_CONTRACT_VERSION = "2.5";
+export const CI_CONTRACT_VERSION = "2.6";
 
 /** THE RUNS' ROW NAME — the word the identity cell's `rows` publishes them
  *  under, a face's needs name them by, and the plugin's own name (what the
@@ -703,6 +706,17 @@ export const RunRowSchema = Schema.Struct({
   endpoint: Schema.NullOr(Schema.String),
   /** The run this one replays, when it is a linked retry. */
   parentRunId: Schema.NullOr(Schema.String),
+  /**
+   * WHO STARTED THIS RUN (PLAN 4.4) — the login of the person whose
+   * connection asked for it, or `local` for a loopback caller, which has no
+   * login because it is the machine's own owner.
+   *
+   * `optionalKey`, so a run recorded before this is a row WITHOUT the field
+   * rather than a row claiming nobody started it. PROVENANCE: it is stamped
+   * once from the connection's principal and never from input, and it does
+   * not grant or withhold anything.
+   */
+  actor: Schema.optionalKey(Schema.String),
   /** A cursor positioned at the row's own reading of the journal, so a caller
    *  that starts watching from the board resumes rather than replaying. */
   cursor: Schema.String,
@@ -1055,8 +1069,12 @@ const RequestId = Schema.String.check(Schema.isMinLength(1));
 const CheckoutPath = Schema.String;
 
 const StartInputSchema = Schema.Struct({
-  /** ABSOLUTE path of the checkout to run in. Explicit, never the caller's
-   *  cwd: an MCP host's cwd is not a fact about what the user meant. */
+  /** ABSOLUTE path of the checkout to run in, ON THE SERVICE'S MACHINE.
+   *  Explicit, never the caller's cwd: an MCP host's cwd is not a fact about
+   *  what the user meant, and against a remote daemon it is not even a path
+   *  that exists. From a shell this is `odu ci run --checkout <path> --sha
+   *  <sha>`; without those flags the CLI resolves the checkout it is standing
+   *  in, which only means anything on a loopback daemon. */
   checkout: Schema.String.check(Schema.isMinLength(1)),
   /** The commit the caller believes that checkout is on. Validated before
    *  acceptance — a checkout that has moved on is a REFUSAL, never a quiet
@@ -1302,6 +1320,16 @@ const AttentionAnswerSchema = Schema.Struct({
     }),
   ),
   endpoint: Schema.NullOr(Schema.String),
+  /**
+   * WHO STARTED THIS RUN (PLAN 4.4) — a login, or `local` for a loopback
+   * caller.
+   *
+   * On the ANSWER as well as on the board row, because an agent that reads a
+   * run through `run_read` and nothing else must be able to answer "whose run
+   * is this" without listing the board. Absent for a run recorded before the
+   * field.
+   */
+  actor: Schema.optionalKey(Schema.String),
   /**
    * WHERE THIS RUN PUSHED WHAT IT BUILT (PLAN 4.1) — the bucket a green run
    * warmed, or the sentence saying why it warmed nothing.

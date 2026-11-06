@@ -54,3 +54,21 @@ export function callerOf(
 ): Caller {
   return { hostsFile: input.hostsFile ?? null, principal };
 }
+
+/**
+ * WHO A RUN RECORDS AS ITS ACTOR — one word, from the principal this call
+ * carries (PLAN 4.4).
+ *
+ * A signed-in person is their `login`. A loopback connection is `"local"`,
+ * because that principal has no login: it is the machine's own owner, and
+ * inventing a name for them ("you", `$USER`, the daemon's uid) would put a
+ * second, unreliable spelling of one fact into a durable record.
+ *
+ * Here rather than at the launch port because it is a reading of the
+ * {@link Caller}, and every face that shows "started by" must read the same
+ * one — a board, a runs table and an agent disagreeing about who started a run
+ * is worse than none of them saying.
+ */
+export function actorOf(principal: Principal): string {
+  return principal.kind === "local" ? "local" : principal.login;
+}

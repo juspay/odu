@@ -9,13 +9,17 @@
  *     rather than an error;
  *   - an anonymous `/mcp` POST is `401` at the HTTP door;
  *   - the stdio bridge `odu mcp` inherits the same refusal: with no token its
- *     tool calls fail, with `$ODU_TOKEN` they answer as the person.
+ *     tool calls fail, with `$ODU_TOKEN` they answer as the person;
+ *   - and, with that token, `odu ci run --checkout … --sha …` starts a run on
+ *     the SERVER's own checkout and the run records who started it (PLAN 4.4)
+ *     — the pod's shape, driven from a shell that is not the pod's.
  *
  * The session itself (which needs a browser to complete) is the browser suite's
  * business; this file seeds one personal token directly into `auth.sqlite` —
  * the file the row documents — and tests the machine-facing half.
  */
 
+import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +29,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   buildOduBinary,
+  cleanup,
+  makeFixture,
   suitePortFor,
 } from "../../../../tests/e2e/harness";
 import {
@@ -323,5 +329,86 @@ describe("odu mcp inherits the credential", () => {
     } finally {
       await client.close();
     }
+  });
+});
+
+/**
+ * THE DOGFOOD COMMAND, FROM A SHELL THAT IS NOT THE SERVER'S (PLAN 4.4).
+ *
+ * Here because this is the only suite with a daemon behind a DOOR and a
+ * personal token to open it, which is exactly the shape the pod has. What is
+ * graded is the pair of facts a token alone never gave:
+ *
+ *   - `--checkout` + `--sha` name a checkout on the SERVICE's machine, and
+ *     the run starts there rather than wherever the caller is standing;
+ *   - the run records WHO started it, read back through `run_read`.
+ *
+ * And the refusal that makes the pair safe: a `--sha` the checkout is not on
+ * is a refusal, never a quiet run of a different commit.
+ */
+describe("odu ci run --checkout against a server with a door", () => {
+  let fixture: string;
+  let head: string;
+
+  beforeAll(() => {
+    fixture = makeFixture("pass");
+    head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: fixture,
+      encoding: "utf-8",
+    }).trim();
+  });
+
+  afterAll(() => {
+    if (fixture !== undefined) cleanup(fixture);
+  });
+
+  /** `odu ci run` from a directory that is NOT the fixture — a laptop's cwd,
+   *  which is the whole point of naming the checkout. */
+  function runThere(sha: string, extra: string[] = []) {
+    return cli(
+      [
+        "ci",
+        "run",
+        "--checkout",
+        fixture,
+        "--sha",
+        sha,
+        "--origin",
+        world.origin,
+        "--no-post",
+        "--no-wait",
+        "-o",
+        "json",
+        ...extra,
+      ],
+      { ODU_TOKEN: token },
+    );
+  }
+
+  it("refuses a commit the named checkout is not on", () => {
+    const moved = runThere("0".repeat(40));
+    expect(moved.status).not.toBe(0);
+    // The service's own sentence, about the service's own checkout — this
+    // side never read that directory and cannot have produced it.
+    expect(`${moved.stdout}${moved.stderr}`).toContain("moved since you read it");
+  });
+
+  it("starts the run there, and the run says who started it", () => {
+    const started = runThere(head);
+    expect(started.status, started.stderr).toBe(0);
+    const receipt = JSON.parse(started.stdout) as { runId: string; accepted: boolean };
+    expect(receipt.accepted).toBe(true);
+
+    // The runs are the wire's ROOT, so `odu surface run_read` takes no row
+    // word — `verb` above is for a sibling row like `auth` or `cache`.
+    const read = cli(
+      ["surface", "run_read", "--input", JSON.stringify({ runId: receipt.runId }), "--json"],
+      { ODU_TOKEN: token },
+    );
+    expect(read.status, read.stderr).toBe(0);
+    const answer = JSON.parse(read.stdout) as { actor?: string };
+    // The token's person, resolved from the connection — nothing on the wire
+    // let the caller type this.
+    expect(answer.actor).toBe(LOGIN);
   });
 });

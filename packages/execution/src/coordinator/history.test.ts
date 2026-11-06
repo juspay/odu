@@ -224,6 +224,18 @@ describe("registering a run", () => {
     expect(readManifest(handle)?.requestId).toBe("req-42");
   });
 
+  it("records WHO started the run, and omits the field when nobody said", () => {
+    // PLAN 4.4. The actor is the connection's principal, flattened to one
+    // word by the service and carried down the launch argv — a login, or
+    // `local` for a loopback caller.
+    expect(readManifest(started({ actor: "srid" }).handle)?.actor).toBe("srid");
+    expect(readManifest(started({ actor: "local" }).handle)?.actor).toBe("local");
+    // ABSENT, not `null` and not `"local"`: a launch that named no actor is a
+    // record with no answer to "who started this", which is a different fact
+    // from "the machine's own owner did" and must stay distinguishable from it.
+    expect(readManifest(started().handle)?.actor).toBeUndefined();
+  });
+
   it("mints a run id, and publishes under an explicit one verbatim", () => {
     const minted = started().history.runId;
     expect(minted).not.toBeNull();

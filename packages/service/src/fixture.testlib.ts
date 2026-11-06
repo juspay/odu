@@ -85,6 +85,8 @@ export function registerFixtureRun(
     now?: number;
     scope?: RunScope;
     parentRunId?: string | null;
+    /** Who started it, when a suite is about PLAN 4.4's record. */
+    actor?: string;
     /** Where this run pushed, when a suite is about PLAN 4.1's record. */
     push?: {
       target: { substituter: string; bucket: string; tokenId: string } | null;
@@ -114,6 +116,7 @@ export function registerFixtureRun(
       build: { oduVersion: "0.0.0", self: null, runnerFlake: null },
       parentRunId: opts.parentRunId ?? null,
       requestId: null,
+      ...(opts.actor === undefined ? {} : { actor: opts.actor }),
       ...(opts.push === undefined ? {} : { push: opts.push }),
       ...(opts.branch === undefined ? {} : { branch: opts.branch }),
     },

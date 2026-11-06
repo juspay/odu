@@ -52,7 +52,7 @@ import {
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
 import type { Effect } from "effect";
 import { requestId } from "./format";
-import type { VenueRow } from "./types";
+import type { VenueReading, VenueRow } from "./types";
 import type { CiClient } from "./ci";
 
 type Call = <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
@@ -100,6 +100,54 @@ const VENUE_HUE: Record<VenueRow["state"], "green" | "amber" | "grey" | "red"> =
   busy: "amber",
   down: "red",
 };
+
+/**
+ * WHY A MACHINE IS NOT ANSWERING, AND HOW OLD THAT READING IS (PLAN 4.4).
+ *
+ * Every configured host is a row whether or not it answered — `probeHost`
+ * returns an `unreachable` result with ssh's own sentence rather than
+ * dropping the machine — and this is the half of that row a column cannot
+ * hold: a sentence from ssh, as long as ssh wants it.
+ *
+ * The AGE rides it rather than the page's one `Probed …` line, because for a
+ * dead box that is the whole question. "boxA is down" and "boxA was down when
+ * somebody last looked, forty minutes ago" call for opposite next moves, and
+ * the second is the only one of them this page can honestly say.
+ *
+ * `null` for a machine that answered: a reachable row has nothing to add, and
+ * a note under every row would bury the four that matter.
+ */
+export function venueNote(row: VenueRow, probedAt: number, now: number): string | null {
+  if (row.state !== "down") return null;
+  const when = `did not answer when probed ${ago(probedAt, now)}`;
+  return row.error === null ? when : `${when} — ${row.error}`;
+}
+
+/**
+ * HOW MUCH OF THE FLEET IS UP — and, when the reading is a SLICE, that it is
+ * one (PLAN 4.4).
+ *
+ * A machine that is `down` is the only one work cannot land on, so that is
+ * what the count is drawn at; busy is a machine doing exactly what it is for.
+ *
+ * The slice clause is the correction. A probe narrowed by the Platforms field
+ * REPLACES the kept reading, so after one narrowed probe this page drew two
+ * rows and said "2 of 2 up" — a sentence about the whole inventory, made out
+ * of a question about a tenth of it, with the machines it did not probe
+ * nowhere on the screen. Naming the platforms is what makes the number true.
+ *
+ * `undefined` when there is no reading: neither "not asked yet" nor "asked and
+ * empty" is a count, and a confident `0 of 0 up` is worse than no line.
+ */
+export function fleetLine(reading: VenueReading, now: number): string | undefined {
+  if (reading === null) return undefined;
+  const up = reading.rows.filter((row) => row.state !== "down").length;
+  const slice =
+    reading.platforms.length === 0
+      ? ""
+      : ` · ${reading.platforms.join(" ")} only, not the whole inventory`;
+  return `${up} of ${reading.rows.length} up${slice} · probed ${ago(reading.at, now)}`;
+}
 
 /** THE FLEET, ONE ROW PER VENUE — which machine, which platform, how it last
  *  read, and who has it. A table and not a grid of cards: the question this
@@ -162,17 +210,14 @@ export function Machines(props: {
     askedOnOpen = true;
     if (answer === null) probeFor([]);
   });
-  /** HOW MANY MACHINES ARE UP, in the page's one line of state. A machine that
-   *  is `down` is the only one work cannot land on — busy is a machine doing
-   *  exactly what it is for — so that is the line the count is drawn at. */
+  /** HOW MANY MACHINES ARE UP, in the page's one line of state — and whether
+   *  the reading those machines came from is the whole inventory. The rule is
+   *  `fleetLine`'s; this only supplies the clock. */
   const upLine = createMemo<string | undefined>(() => {
     const answer = reading.value();
-    // Neither "not asked yet" nor "asked, and empty" is a count, and both draw
-    // no line rather than a confident `0 of 0 up`.
-    if (answer === undefined || answer === null) return undefined;
-    const rows = answer.rows;
-    const up = rows.filter((row) => row.state !== "down").length;
-    return `${up} of ${rows.length} up · probed ${ago(answer.at, props.now)}`;
+    // `undefined` is "the cell has not answered yet" — not a reading at all,
+    // and not the same as a reading of nothing.
+    return answer === undefined ? undefined : fleetLine(answer, props.now);
   });
 
   const [checkout, setCheckout] = createSignal("");
@@ -271,8 +316,10 @@ export function Machines(props: {
               columns={venueColumns(() => props.now)}
               rows={answer().rows}
               // A dead machine's reason is the one fact that does not fit a
-              // column: it is a sentence from ssh, as long as ssh wants.
-              note={(row) => (row.error === null ? null : row.error)}
+              // column: it is a sentence from ssh, as long as ssh wants, and
+              // it carries the age of the reading that found it — see
+              // `venueNote`.
+              note={(row) => venueNote(row, answer().at, props.now)}
             />
           </>
         )}

@@ -58,6 +58,7 @@ function request(over: Partial<LaunchRequest> = {}): LaunchRequest {
     noPost: false,
     hostPins: [],
     hostsFile: null,
+    actor: null,
     supersede: false,
     linger: false,
     push: null,
@@ -165,6 +166,15 @@ describe("launchArgv", () => {
     );
     expect(valueAfter(linked, "--parent-run")).toBe(PARENT);
     expect(valueAfter(linked, "--request-id")).toBe("agent.retry.7");
+  });
+
+  it("names the actor only when the launch knew one", () => {
+    // PLAN 4.4. `null` is a launcher that was told nothing, and it must not
+    // become `--actor local`: the child would then record the machine's own
+    // owner for a run nobody attributed.
+    expect(launchArgv(request())).not.toContain("--actor");
+    expect(valueAfter(launchArgv(request({ actor: "srid" })), "--actor")).toBe("srid");
+    expect(valueAfter(launchArgv(request({ actor: "local" })), "--actor")).toBe("local");
   });
 
   it("emits one --host per pin", () => {

@@ -107,6 +107,10 @@ export interface RunHistoryInit {
   parentRunId?: string | null;
   /** The caller's idempotency key, when the launch carried one. */
   requestId?: string | null;
+  /** WHO STARTED THIS RUN (PLAN 4.4) — a login, or `local` for a loopback
+   *  connection. Absent means nobody told this process, which the manifest
+   *  records by omitting the field. */
+  actor?: string;
   /** The id this run must publish under, when a launcher pre-minted one.
    *  Absent means mint — see `./launcher` on why a launcher does not. */
   runId?: string;
@@ -345,6 +349,10 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         },
         parentRunId: init.parentRunId ?? null,
         requestId: init.requestId ?? null,
+        // WHO STARTED IT (PLAN 4.4). `optionalKey`, which rejects a
+        // present-but-`undefined` key on encode — so a launch that named no
+        // actor omits the field rather than claiming one.
+        ...(init.actor === undefined ? {} : { actor: init.actor }),
         // WHERE THIS RUN PUSHES (PLAN 4.1). `optionalKey`, so a build that
         // resolved nothing at all omits it rather than claiming the checkout
         // reads from no cache.

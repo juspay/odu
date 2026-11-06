@@ -180,6 +180,11 @@ export interface RunArgs {
   /** The launcher's idempotency key, recorded on the manifest so a receipt and
    *  a run can be matched up after the fact. */
   requestId?: string;
+  /** WHO ASKED FOR THIS RUN (PLAN 4.4) — a login, or `local` for a loopback
+   *  connection. Recorded on the manifest; absent when the launcher had no
+   *  principal to name, which is a run with no actor rather than one this
+   *  machine's owner started. */
+  actor?: string;
   /**
    * WHERE THIS RUN PUSHES WHAT IT BUILDS (PLAN 4.1) — the substituter the
    * checkout's `flake.nix` reads from, the ORIGIN and bucket the daemon
@@ -830,6 +835,10 @@ async function orchestrate(
     ...(args.runId === undefined ? {} : { runId: args.runId }),
     ...(args.parentRunId === undefined ? {} : { parentRunId: args.parentRunId }),
     ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
+    // WHO STARTED IT (PLAN 4.4), carried from the connection the service
+    // answered. Absent stays absent: a record with no actor is a record
+    // written before anybody asked the question.
+    ...(args.actor === undefined ? {} : { actor: args.actor }),
     // WHERE THIS RUN PUSHES, as a durable fact about the run (PLAN 4.1). The
     // token id so a finalize can revoke it; never the token.
     ...(args.push === undefined &&

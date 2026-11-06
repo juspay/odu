@@ -539,6 +539,9 @@
   .detail-ref { color: var(--ink); font: 0.85rem var(--mono); }
   .detail-scope { color: var(--muted); font: 0.8rem var(--mono); }
   .detail-parent { color: var(--violet-ink); font: 0.8rem var(--mono); }
+  /* WHO STARTED IT (PLAN 4.4). Muted mono like the rest of the header's
+   * provenance: a login is a string a person compares, not a phrase. */
+  .detail-actor { color: var(--muted); font: 0.8rem var(--mono); }
   /* WHERE THIS RUN'S BUILDS GO (PLAN 4.1). Mono like the other header facts,
    * because the bucket name is a string a person pastes. */
   .detail-push { color: var(--muted); font: 0.8rem var(--mono); }
