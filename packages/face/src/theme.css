@@ -1192,8 +1192,10 @@
   }
 
   .disclosure-summary:hover { color: var(--cyan); }
-  .disclosure-summary::before { content: "▸"; font-size: 0.7rem; }
-  .disclosure-summary[aria-expanded="true"]::before { content: "▾"; }
+  /* The caret is an `aria-hidden` SPAN, not `::before`: generated content is
+     folded into a control's accessible name, and a button called
+     "▸ Hold a machine" is one no test and no screen-reader user can name. */
+  .disclosure-caret { font-size: 0.7rem; }
 
   /* ── a form's width ───────────────────────────────────────────────────────
    *

@@ -51,7 +51,10 @@ Feature: The board does everything odu does for runs
   Scenario: A hold is taken and released from the machines page
     Given a fixture checkout whose pipeline fails
     And I open the machines page
-    When I fill "Checkout" with the fixture path
+    # The form is behind a disclosure under the table: it is a thing you reach
+    # for occasionally, under a fleet you read constantly.
+    When I press "Hold a machine"
+    And I fill "Checkout" with the fixture path
     And I fill "Platforms" with this machine's platform
     And I press "Hold"
     Then the page answers with a receipt
