@@ -334,6 +334,7 @@ describe("a node's push", () => {
       node: PUSHED,
       bucket: BUCKET,
       paths: 7,
+      present: 2,
       bytes: 4_096,
       durationMs: 1_200,
     });
@@ -358,7 +359,8 @@ describe("a node's push", () => {
     expect(push(PUSHING)).toEqual({ state: "pushing" });
     expect(push(PUSHED)).toEqual({
       state: "pushed",
-      paths: 7,
+      stored: 5,
+      present: 2,
       bytes: 4_096,
       durationMs: 1_200,
     });
@@ -386,8 +388,10 @@ describe("a node's push", () => {
   it("sums only what LANDED on the run's answer, and names who failed", async () => {
     // The totals are a claim about the bucket's contents, so a node still
     // pushing and a node that failed must add nothing to them — and the one
-    // that failed has to be nameable, or a green-looking `paths` count is the
-    // only thing a reader sees about a run that half-warmed its cache.
+    // that failed has to be nameable, or a green-looking count is the only
+    // thing a reader sees about a run that half-warmed its cache. The two
+    // counts stay apart: what this run SENT and what the bucket already had
+    // are different facts, and their sum reads as traffic that never was.
     const w = open();
     const run = threeStates(w);
 
@@ -401,6 +405,7 @@ describe("a node's push", () => {
       skipped: null,
       keyWarning: null,
       paths: 7,
+      present: 2,
       bytes: 4_096,
       failedOn: [FAILED],
     });

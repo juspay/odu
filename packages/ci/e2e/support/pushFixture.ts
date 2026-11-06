@@ -92,9 +92,20 @@ function pushingFixture(storePath: string, url: string, key: string): string {
   );
   // `ln -sfn`, so a rerun of this recipe in the same checkout replaces the
   // link rather than making `result/result`.
+  //
+  // AND FOUR HUNDRED LINES OF OUTPUT, which look like padding and are not: the
+  // Push tab's defect on the pod was that it showed the RECIPE's size (`9.0
+  // KiB`) beside the push stream's name. A fixture whose two logs are both a
+  // few hundred bytes cannot tell a right number from a wrong one — the
+  // scenario would pass on the bug. These lines make the recipe's log an order
+  // of magnitude larger than the push's, so "the Push tab is reading the other
+  // file" is a visible, assertable difference.
   writeFileSync(
     join(dir, "justfile"),
-    `[metadata("ci")]\ndefault: ${PUSH_RECIPE}\n\n${PUSH_RECIPE}:\n    ln -sfn ${storePath} result\n    echo "${PUSH_RECIPE} built its result"\n`,
+    `[metadata("ci")]\ndefault: ${PUSH_RECIPE}\n\n${PUSH_RECIPE}:\n` +
+      `    ln -sfn ${storePath} result\n` +
+      `    seq 1 400 | sed 's/^/${PUSH_RECIPE} built line /'\n` +
+      `    echo "${PUSH_RECIPE} built its result"\n`,
   );
   const git = (...args: string[]): void => {
     execFileSync("git", args, { cwd: dir, encoding: "utf-8" });

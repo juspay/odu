@@ -1415,11 +1415,27 @@ const AttentionAnswerSchema = Schema.Struct({
   push: Schema.optionalKey(
     Schema.Struct({
       ...PushedToSchema.fields,
-      /** Store paths this run put in the bucket, summed over its nodes, and
-       *  the NAR bytes they cost. The pushes that LANDED only: a node still
-       *  pushing, or one whose push failed, adds nothing to a count that
-       *  claims the bucket serves it. */
+      /** WHAT THE BUCKET SERVES as a result of this run, summed over its
+       *  nodes, and the NAR bytes the uploads cost. The pushes that LANDED
+       *  only: a node still pushing, or one whose push failed, adds nothing
+       *  to a count that claims the bucket serves it. */
       paths: Schema.Int,
+      /**
+       * Of `paths`, how many the bucket ALREADY served — so `paths - present`
+       * is what this run actually sent. The split is what lets a reader say
+       * "3 pushed · 66 present" instead of "69 paths", which claimed
+       * sixty-nine closures crossed the network when three did.
+       *
+       * THE TOTAL IS NOT MOVED, and this is OPTIONAL, for the reason
+       * `failedOn` below is: `push` with its `paths` SHIPPED in 2.5. A 2.5
+       * daemon answers this struct without this key, and renaming `paths`
+       * (or requiring this one) would make every answer about a run with a
+       * push target fail to DECODE on a 2.6 client — losing the whole answer
+       * to gain one readout. Absent means "this daemon does not record the
+       * split"; read it as `0`, which says every path went up, and is what
+       * those daemons' own headers claimed.
+       */
+      present: Schema.optionalKey(Schema.Int),
       bytes: Schema.Int,
       /**
        * The nodes whose push FAILED, in roster order — empty when none did.

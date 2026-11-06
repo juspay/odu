@@ -198,9 +198,12 @@ answers `push`: the bucket and how much landed, or `target: null` and the
 reason.
 
 **The push is its own step.** On a run's page each node that pushes grows a
-second segment under its bar — `push → <bucket> · N paths · X MiB · T` —
-starting where the recipe's bar ends, amber while the closure is going up and
-red if it does not land. The node's own duration stays the RECIPE's. The
+second segment under its bar —
+`pushed → <bucket> · N pushed · M present · X MiB · T`, the paths this node
+sent told apart from the ones the bucket already had (the `present` clause is
+omitted when there were none) — starting where the recipe's bar ends, amber
+while the closure is going up and red if it does not land. The node's own
+duration stays the RECIPE's. The
 push's `[odu] …` lines are a log of their own, not appended to the recipe's:
 the page offers **Recipe** and **Push** tabs, and `log_read` takes
 `stream: "recipe" | "push"` (absent is the recipe, so every existing caller

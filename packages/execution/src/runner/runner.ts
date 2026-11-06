@@ -56,6 +56,11 @@ import { createGroupReaper } from "./reap";
 import { hasSnapshot, narrateSnapshot, prepareWorkspace } from "./workspace";
 import { createSnapshotUploads } from "./snapshotUpload";
 import { runsOutsideWorkspace } from "../just/ingest";
+// THE PUSH CLIENT'S OWN READING OF A FAILURE. It lives beside the client
+// because the client is what knows which of a rejection's many shapes carry
+// diagnostics; the lane's job is only to put the whole of that reading in the
+// push log rather than the first sentence of it.
+import { describeFailure } from "@odu/cache/push";
 import {
   createLanePusher,
   type LanePusher,
@@ -755,18 +760,32 @@ export function createLaneRunner(
         })
         .catch((err: unknown) => {
           pushing = false;
+          // TWO AUDIENCES, TWO SENTENCES, AND THE LOG GETS EVERYTHING.
+          //
+          // `message` is the CELL's: one short human sentence that crosses
+          // the wire, lands on the board's row and is journalled, read by
+          // people who no longer have the log at all. It stays short because
+          // a row is one line wide. Thanks to the pusher's re-throw it now
+          // names the bucket and the origin, which is the minimum a row must
+          // carry to be worth reading.
+          //
+          // `detail` is the PUSH LOG's: `describeFailure` walks `cause` to
+          // the bottom of the chain and keeps every diagnostic the runtime
+          // attached — `code`, `errno`, `syscall`, `hostname`, `address`,
+          // `port`. Nothing here reduces an error to `.message` any more:
+          // that reduction is exactly what turned a refused connection into
+          // the bare sentence "Unable to connect. Is the computer able to
+          // access the url?" — Bun's own `fetch` wording, with no URL and no
+          // host in it — and left the operator with nothing to act on.
+          //
+          // GREEN MEANS WARMED: the recipe passed and its outputs did not
+          // reach the bucket, so the node is red, and the step that failed is
+          // the one that says why. The recipe's log keeps the recipe's
+          // output.
           const message = err instanceof Error ? err.message : String(err);
-          // GREEN MEANS WARMED. The recipe passed and its outputs did not
-          // reach the bucket, so the node is red with the client's own
-          // sentence in its PUSH log — the recipe's log keeps the recipe's
-          // output, and the step that failed is the one that says why. The
-          // same sentence rides the cell, which is what a reader who no
-          // longer has the log is told.
+          const detail = describeFailure(err);
           if (current()) {
-            tail.append(
-              logStreamKey(node.id, "push"),
-              `\n[odu] push failed: ${message}\n`,
-            );
+            tail.append(logStreamKey(node.id, "push"), `\n[odu] push failed: ${detail}\n`);
           }
           stamp(
             "failed",

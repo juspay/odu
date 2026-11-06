@@ -215,7 +215,7 @@ describe("a lane that pushes", () => {
 
       const s = sinks();
       const first = await lane.push(w.workspace, CONFIG, s.hooks);
-      expect(first).toEqual({ paths: 1, bytes: 4096 });
+      expect(first).toEqual({ stored: 1, present: 0, bytes: 4096 });
       // THE STEP OPENED ONCE, and its narration is the PUSH's — not a line of
       // it on the recipe's log.
       expect(s.begins()).toBe(1);
@@ -268,14 +268,86 @@ describe("a lane that pushes", () => {
     }
   });
 
-  it("throws when the bucket refused a path, naming it — which is what reddens the node", async () => {
+  it("tells what it STORED apart from what the bucket already had", async () => {
+    // THE SUMMARY HAS ALWAYS KNOWN BOTH and the lane used to report their
+    // sum, so a node that uploaded one path into a closure the bucket mostly
+    // had read as four paths of traffic. The two are different facts about
+    // different things — this run's work, and this bucket's state — and the
+    // bytes belong to the first of them alone.
+    const w = world();
+    try {
+      w.build("result", "aaa-one");
+      const lane = laneWith(w.storeDir, async (options) =>
+        summary({ pushed: 1, alreadyPresent: 3, bytes: 4096, served: [...options.paths] }),
+      );
+      expect(await lane.push(w.workspace, CONFIG, sinks().hooks)).toEqual({
+        stored: 1,
+        present: 3,
+        bytes: 4096,
+      });
+    } finally {
+      w.dispose();
+    }
+  });
+
+  it("names the bucket and the origin when the SEND ITSELF rejects, and keeps the cause", async () => {
+    // THE DEFECT THIS PINS. A rejection of the send itself — a host that
+    // does not resolve, a refused connection — is a `fetch` `TypeError`
+    // whose entire message is "Unable to connect. Is the computer able to
+    // access the url?". It names no URL, no host, no bucket, and that
+    // sentence alone is what a whole push failure used to amount to.
+    //
+    // So the lane re-throws naming the two things only it knows, and keeps
+    // the original as `cause` rather than flattening it: everything the
+    // runtime attached — the `code`, the hostname — is still reachable from
+    // the error a reader is handed.
+    const w = world();
+    try {
+      w.build("result", "aaa-one");
+      const dial = Object.assign(
+        new TypeError("Unable to connect. Is the computer able to access the url?"),
+        { code: "ECONNREFUSED" },
+      );
+      const lane = laneWith(w.storeDir, async () => {
+        throw dial;
+      });
+      const s = sinks();
+      const thrown = await lane
+        .push(w.workspace, CONFIG, s.hooks)
+        .then(() => null)
+        .catch((err: unknown) => err);
+      expect(s.begins()).toBe(1);
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toContain(CONFIG.bucket);
+      expect((thrown as Error).message).toContain(CONFIG.origin);
+      // THE ORIGINAL, INTACT — not a string that once described it.
+      expect((thrown as Error).cause).toBe(dial);
+    } finally {
+      w.dispose();
+    }
+  });
+
+  it("throws when the bucket refused a path, naming it AND where it was refused", async () => {
     const w = world();
     try {
       w.build("result", "aaa-one");
       const lane = laneWith(w.storeDir, async () =>
         summary({
           failed: 1,
-          failures: [{ path: "/store/aaa-one", message: "413 too large" }],
+          failures: [
+            {
+              path: "/store/aaa-one",
+              message: "413 too large",
+              attempts: [
+                {
+                  message: "PUT refused: 413 too large",
+                  url: "https://odu.example.org/cache/main/nar/aaa-one",
+                  status: 413,
+                  body: "object exceeds the part limit",
+                },
+              ],
+            },
+          ],
           served: [],
         }),
       );
@@ -289,8 +361,15 @@ describe("a lane that pushes", () => {
       // paint a `failed` push step rather than a node that never pushed.
       expect(s.begins()).toBe(1);
       expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toContain("413 too large");
-      expect((thrown as Error).message).toContain("main");
+      const said = (thrown as Error).message;
+      expect(said).toContain("413 too large");
+      expect(said).toContain("main");
+      // AND THE REFUSAL'S OWN FACTS. "413 too large" on its own does not say
+      // which endpoint refused or what it said while refusing, and an
+      // operator cannot act on a status without a URL beside it.
+      expect(said).toContain("https://odu.example.org/cache/main/nar/aaa-one");
+      expect(said).toContain("413");
+      expect(said).toContain("object exceeds the part limit");
     } finally {
       w.dispose();
     }
@@ -309,7 +388,15 @@ describe("a lane that pushes", () => {
         const answer = refuse
           ? summary({
               failed: 1,
-              failures: [{ path: "/store/zzz-dep", message: "refused" }],
+              failures: [
+                {
+                  path: "/store/zzz-dep",
+                  message: "refused",
+                  attempts: [
+                    { message: "refused", url: null, status: null, body: null },
+                  ],
+                },
+              ],
               served: [one],
             })
           : summary({ served: [...options.paths] });

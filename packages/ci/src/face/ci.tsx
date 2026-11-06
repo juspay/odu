@@ -36,7 +36,7 @@ import {
   type JSX,
 } from "solid-js";
 import { Board } from "./board";
-import { requestId } from "./format";
+import { type FollowedPage, requestId } from "./format";
 // The primitives this face draws with live in `@odu/face/ui` — the package of
 // no row — so the shell and every row's face get one answer to what a control
 // IS. This module used to re-export `Button` for the shell, which made the
@@ -572,6 +572,25 @@ export function CiFace(props: CiFaceProps): JSX.Element {
    *  tolerate, and the loop re-issues anyway. */
   const FOLLOW_WAIT_MS = 30_000;
   const [followed, setFollowed] = createSignal<string | null>(null);
+  /**
+   * WHAT THE FOLLOW LEARNED BESIDES THE TEXT — the last page's size and
+   * whether the file is whole.
+   *
+   * Every page carries these two facts about the WHOLE file, and this loop
+   * used to keep `text` and drop them on the floor. For the recipe that cost
+   * nothing — `logTails` carries the same facts for that file — but the push
+   * stream has no tail behind it, so the Push tab could state a size only
+   * after somebody pressed a paging button, and the rest of the time the
+   * pane's byte count was the recipe's. Keeping the page's own facts makes
+   * the push stream's size a thing the pane knows for free, live, from the
+   * one reader it already has.
+   *
+   * Null until a page lands, and null again on every new subject, because
+   * "how big is this file" has no answer before the first read of it.
+   */
+  const [followedPage, setFollowedPage] = createSignal<FollowedPage | null>(
+    null,
+  );
   /** Why this log could not be READ — a refused page, or a follow that gave up.
    *  ONE destination for one event class: the two read paths used to report the
    *  same refusal in two widgets, the follow's beside the pane it is about and
@@ -593,6 +612,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
     const key = logKey();
     const reading = stream();
     setFollowed(null);
+    setFollowedPage(null);
     setLogFault(null);
     if (key === null) return;
     let live = true;
@@ -662,6 +682,12 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         if (!live) return;
         refusals = 0;
         setLogFault(null);
+        // THE PAGE'S OWN FACTS, kept rather than discarded — see
+        // {@link followedPage}. Recorded here, above the rewind branch, so
+        // every answered read updates them: a log that was rewritten under
+        // the cursor is a SMALLER file, and a size left standing from before
+        // the rewrite is exactly the stale number this pane must never show.
+        setFollowedPage({ size: page.size, complete: page.complete });
         // The attempt was re-run underneath us and its log rewritten in place,
         // so the file is shorter than the cursor. Start over rather than show
         // the tail of a different attempt as a continuation of this one.
@@ -685,9 +711,34 @@ export function CiFace(props: CiFaceProps): JSX.Element {
     })();
   });
 
+  /**
+   * A WINDOW OF THIS LOG, and of no other.
+   *
+   * A read is fire-and-forget — `call` hands the promise to two callbacks and
+   * returns — so its answer lands whenever the service gets to it, which may
+   * be after the reader has moved on. The SUBJECT is the key and the stream
+   * together, and this call site used to write whatever came back into the
+   * one `page` signal with no check that either was still the one that asked.
+   *
+   * That is defect A, and it was not theoretical: a recipe page in flight
+   * when the reader pressed Push landed AFTER the effect that clears the
+   * signal, and the Push tab then drew the recipe's text, the recipe's
+   * offsets and the recipe's size — a page's worth of the wrong file,
+   * labelled with the right one. A pane that shows nothing is a pane a
+   * reader retries; a pane that shows the wrong log is one they believe.
+   *
+   * So the read carries what it asked about and the answer is dropped unless
+   * both halves still match — the same rule the start path's token guard
+   * states, for the same reason: a late answer is still an answer, but only
+   * to the question that is still being asked. The REFUSAL is guarded too; a
+   * recipe read's refusal printed beside the push pane accuses the wrong
+   * file.
+   */
   const readLogPage = (offset: number): void => {
     const key = logKey();
     if (key === null) return;
+    const reading = stream();
+    const mine = (): boolean => logKey() === key && stream() === reading;
     call(
       // ALWAYS bounded. The verb will happily return a whole log, and this used
       // to ask for one — a request whose cost is set by whatever the recipe
@@ -701,14 +752,20 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         key,
         offset,
         limit: LOG_PAGE_BYTES,
-        ...(stream() === "recipe" ? {} : { stream: stream() }),
+        ...(reading === "recipe" ? {} : { stream: reading }),
       }),
-      (answer) => setPage(answer),
+      (answer) => {
+        if (!mine()) return;
+        setPage(answer);
+      },
       // Beside the pane, not in the receipt channel over the node list: this is
       // the same fact the follow reports, and a refusal that landed in one of
       // two widgets depending on which read asked for it was one event class
       // with two homes.
-      setLogFault,
+      (message) => {
+        if (!mine()) return;
+        setLogFault(message);
+      },
     );
   };
 
@@ -920,9 +977,10 @@ export function CiFace(props: CiFaceProps): JSX.Element {
                 onStream={setStreamChoice}
                 tail={tail()}
                 followed={followed()}
+                followedPage={followedPage()}
                 logFault={logFault()}
-                pending={tailPending()}
-                error={tailError()}
+                tailPending={tailPending()}
+                tailError={tailError()}
                 page={page()}
                 onPage={readLogPage}
               />

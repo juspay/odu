@@ -195,10 +195,15 @@ const occurrences = (haystack: string, needle: string): number =>
   haystack.split(needle).length - 1;
 
 describe("a lane node that pushes what it built", () => {
-  it("carries the push step on the node, and the client's lines in the PUSH log", async () => {
+  it("carries BOTH counts on the node, and the client's lines in the PUSH log", async () => {
+    // HALF THE CLOSURE WAS ALREADY THERE. The two numbers answer different
+    // questions — what this node sent, and what it was spared — and the lane
+    // must carry them apart all the way to the wire. Summed into one they
+    // read as "69 paths went up", which is a claim about the network that
+    // this push never made.
     const pusher = stubPusher(async (hooks) => {
       announce(hooks);
-      return { paths: 4, bytes: 2_097_152 };
+      return { stored: 3, present: 66, bytes: 2_097_152 };
     });
     const l = await lane(pusher);
     await l.configure([
@@ -217,7 +222,7 @@ describe("a lane node that pushes what it built", () => {
     ]);
     const push = last(l).nodes.build?.push;
     expect(push?.state).toBe("pushed");
-    expect(push).toMatchObject({ paths: 4, bytes: 2_097_152 });
+    expect(push).toMatchObject({ stored: 3, present: 66, bytes: 2_097_152 });
     // THE RUNNER TIMED IT. The pusher reports no duration at all any more, so
     // a number here can only have come from the lane's own clock — the same
     // one the failure path reads.
@@ -241,7 +246,7 @@ describe("a lane node that pushes what it built", () => {
     const pusher = stubPusher(async (hooks) => {
       announce(hooks);
       await landed.promise;
-      return { paths: 1, bytes: 10 };
+      return { stored: 1, present: 0, bytes: 10 };
     });
     const l = await lane(pusher);
     await l.configure([
@@ -272,7 +277,8 @@ describe("a lane node that pushes what it built", () => {
     await until(() => last(l).nodes.build?.status === "ok");
     expect(last(l).nodes.build?.push).toMatchObject({
       state: "pushed",
-      paths: 1,
+      stored: 1,
+      present: 0,
       bytes: 10,
     });
     // AND IT DID NOT MOVE. The gate above held the upload open for however
@@ -313,6 +319,50 @@ describe("a lane node that pushes what it built", () => {
     expect(await l.logOf("build")).not.toContain("413 too large");
   });
 
+  it("writes the WHOLE cause chain to the push log, and the short sentence to the cell", async () => {
+    // THE DEFECT, AT THE LANE'S END. A whole-send rejection is a `fetch`
+    // `TypeError` carrying a `code` and a hostname, wrapped by the pusher in
+    // a sentence that names the bucket and the origin. Reducing that to
+    // `.message` — which is what the runner used to write — printed the
+    // wrapper and threw away everything underneath it, leaving a push log
+    // whose entire content was one sentence with no URL in it.
+    //
+    // TWO AUDIENCES. The log gets every link of the chain, because that is
+    // where someone goes to find out what happened. The CELL gets the one
+    // short sentence, because it crosses the wire onto a board row and into
+    // a journal line read a week later, where a paragraph is not readable.
+    const dial = Object.assign(
+      new TypeError("Unable to connect. Is the computer able to access the url?"),
+      { code: "ECONNREFUSED", hostname: "odu.example.org", port: 443 },
+    );
+    const wrapped = new Error(
+      "odu: push of 1 path to bucket main at https://odu.example.org failed",
+      { cause: dial },
+    );
+    const pusher = stubPusher(async (hooks) => {
+      announce(hooks);
+      throw wrapped;
+    });
+    const l = await lane(pusher);
+    await l.configure([
+      { id: "build", command: "echo built", needs: [], env: PUSH_ENV },
+    ]);
+    await until(() => last(l).nodes.build?.status === "failed");
+
+    const node = last(l).nodes.build;
+    expect(node?.push?.state === "failed" && node.push.message).toBe(wrapped.message);
+
+    const log = await l.logOf("build", "push");
+    // THE BUCKET AND THE ORIGIN — without them a reader cannot even tell
+    // which machine was dialled.
+    expect(log).toContain("bucket main");
+    expect(log).toContain("https://odu.example.org");
+    // AND THE BOTTOM OF THE CHAIN, with the diagnostics the runtime attached.
+    expect(log).toContain("Unable to connect");
+    expect(log).toContain("ECONNREFUSED");
+    expect(log).toContain("odu.example.org");
+  });
+
   it("RETRACTS the push on a rerun that finds nothing fresh", async () => {
     // THE CASE THE RETRACTION EXISTS FOR. A rerun's push usually finds
     // nothing new — every path the recipe builds is already on the bucket
@@ -322,7 +372,7 @@ describe("a lane node that pushes what it built", () => {
     const pusher = stubPusher(async (hooks, call) => {
       if (call > 0) return null;
       announce(hooks);
-      return { paths: 2, bytes: 20 };
+      return { stored: 2, present: 0, bytes: 20 };
     });
     const l = await lane(pusher);
     await l.configure([
@@ -350,7 +400,7 @@ describe("a lane node that pushes what it built", () => {
     // node. That the node is green here is half the assertion.
     const pusher = stubPusher(async (hooks) => {
       announce(hooks);
-      return { paths: 2, bytes: 20 };
+      return { stored: 2, present: 0, bytes: 20 };
     });
     const l = await lane(pusher);
     await l.configure([
@@ -388,7 +438,7 @@ describe("a lane node that pushes what it built", () => {
   });
 
   it("does not push a recipe that FAILED", async () => {
-    const pusher = stubPusher(async () => ({ paths: 1, bytes: 1 }));
+    const pusher = stubPusher(async () => ({ stored: 1, present: 0, bytes: 1 }));
     const l = await lane(pusher);
     await l.configure([
       { id: "build", command: "exit 3", needs: [], env: PUSH_ENV },
@@ -402,7 +452,7 @@ describe("a lane node that pushes what it built", () => {
   });
 
   it("never reaches the pusher for a lane with no push configuration", async () => {
-    const pusher = stubPusher(async () => ({ paths: 1, bytes: 1 }));
+    const pusher = stubPusher(async () => ({ stored: 1, present: 0, bytes: 1 }));
     const l = await lane(pusher);
     await l.configure([{ id: "build", command: "echo built", needs: [] }]);
     await until(() => last(l).nodes.build?.status === "ok");

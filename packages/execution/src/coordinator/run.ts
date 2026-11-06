@@ -2061,10 +2061,17 @@ async function orchestrate(
       return;
     }
     if (push.state === "pushed") {
+      // THE WIRE SPLITS, THE JOURNAL TOTALS. The cell carries `stored` and
+      // `present` because that is what a reader wants to see; the durable
+      // line carries the SERVED total plus the already-present part, so a
+      // line written by any release means the same thing and the fold can
+      // subtract. Adding here and subtracting there is the whole of the
+      // compatibility story — no versioning, no second event kind.
       history.pushed({
         node: id,
         bucket: pushing.bucket,
-        paths: push.paths,
+        paths: push.stored + push.present,
+        present: push.present,
         bytes: push.bytes,
         durationMs: push.durationMs,
       });

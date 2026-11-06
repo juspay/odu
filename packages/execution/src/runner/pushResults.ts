@@ -52,7 +52,7 @@
 
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { pushToCache, type PushSummary } from "@odu/cache/push";
+import { pushToCache, type PushFailure, type PushSummary } from "@odu/cache/push";
 
 /** What a node's environment has to carry for this lane to push at all. */
 export interface PushConfig {
@@ -120,9 +120,15 @@ export function pushConfigOf(
  *  the success path a duration and the failure path — which leaves by `throw`
  *  — none, and the node's `failed` push state then had to invent one. */
 export interface PushedFact {
-  /** Store paths the bucket serves as a result of this node. */
-  paths: number;
-  /** NAR bytes this node's uploads stored. */
+  /** Store paths this node UPLOADED — `summary.pushed`, what the bucket did
+   *  not have until this node sent it. */
+  stored: number;
+  /** Store paths of this node's closure the bucket ALREADY served —
+   *  `summary.alreadyPresent`. Carried separately rather than folded into one
+   *  served total, because the two are the answer to different questions and
+   *  a reader shown only their sum reads every one of them as traffic. */
+  present: number;
+  /** NAR bytes this node's uploads stored — the size of `stored`. */
   bytes: number;
 }
 
@@ -267,19 +273,43 @@ export function createLanePusher(
         `[odu] pushing ${fresh.length} result path${fresh.length === 1 ? "" : "s"} ` +
           `to bucket ${config.bucket} at ${config.origin}`,
       );
-      const summary: PushSummary = await send({
-        bucket: config.bucket,
-        origin: config.origin,
-        paths: fresh,
-        // THE TOKEN, AS A TOKEN. Not through the client's discovery
-        // environment: that describes a MACHINE (its `HOME`, its saved
-        // logins), and a lane passing a one-key object would also be
-        // asserting it has neither. This lane holds the credential outright
-        // and says so.
-        credential: config.token,
-        env: {},
-        onLine: (line) => hooks.say(`[odu] ${line}`),
-      });
+      let summary: PushSummary;
+      try {
+        summary = await send({
+          bucket: config.bucket,
+          origin: config.origin,
+          paths: fresh,
+          // THE TOKEN, AS A TOKEN. Not through the client's discovery
+          // environment: that describes a MACHINE (its `HOME`, its saved
+          // logins), and a lane passing a one-key object would also be
+          // asserting it has neither. This lane holds the credential outright
+          // and says so.
+          credential: config.token,
+          env: {},
+          onLine: (line) => hooks.say(`[odu] ${line}`),
+        });
+      } catch (err) {
+        // A WHOLE-SEND REJECTION USED TO ARRIVE ANONYMOUS. The client's per
+        // path failures name their path and their bucket, but a rejection of
+        // the send ITSELF — a DNS answer that does not resolve, a refused
+        // connection, a proxy that hangs up — is a `TypeError` from `fetch`
+        // whose whole message is "Unable to connect. Is the computer able to
+        // access the url?". It names no URL. It reached the node's push log
+        // exactly like that and told a reader nothing at all: not which
+        // bucket, not which origin, not which host failed to resolve.
+        //
+        // So the lane re-throws naming the two things only IT knows — the
+        // bucket and the origin it dialled — and keeps the original as
+        // `cause`, intact. Nothing is flattened into this sentence: the
+        // runner walks the chain for the log, and a flattened string would
+        // have destroyed the `code`/`errno`/`hostname` the bottom of that
+        // chain carries.
+        throw new Error(
+          `odu: push of ${fresh.length} path${fresh.length === 1 ? "" : "s"} ` +
+            `to bucket ${config.bucket} at ${config.origin} failed`,
+          { cause: err },
+        );
+      }
       // RECORDED BEFORE THE REFUSAL IS RAISED: a path the bucket serves is one
       // the next node must not send again, whether or not a sibling path in the
       // same closure was refused.
@@ -287,11 +317,42 @@ export function createLanePusher(
       if (summary.failed > 0) {
         throw new Error(
           `odu: ${summary.failed} path${summary.failed === 1 ? "" : "s"} could not be ` +
-            `pushed to ${config.bucket} — ` +
-            summary.failures.map((failure) => `${failure.path}: ${failure.message}`).join("; "),
+            `pushed to ${config.bucket} at ${config.origin} — ` +
+            summary.failures.map(refusalLine).join("; "),
         );
       }
-      return { paths: summary.served.length, bytes: summary.bytes };
+      return { stored: summary.pushed, present: summary.alreadyPresent, bytes: summary.bytes };
     },
   };
+}
+
+/**
+ * ONE REFUSED PATH, SAID IN FULL.
+ *
+ * The client records every attempt as a {@link PushRefusal} — the URL it
+ * dialled, the status it was answered with, the body that came back — and
+ * this used to print `failure.message` alone. That sentence is true and it is
+ * not enough: an operator reading `413 too large` cannot tell which endpoint
+ * refused, and a 403 from a token that expired reads identically to a 403
+ * from a bucket that does not exist. So the LAST attempt — the one that gave
+ * up, and the only one whose outcome stands — contributes its URL, its status
+ * and its body alongside the message.
+ *
+ * Each fact is omitted only when the client has none: a connection that never
+ * got an answer has no status and no body, and printing `status=null` would
+ * be noise standing in for a fact nobody has.
+ */
+function refusalLine(failure: PushFailure): string {
+  const last = failure.attempts.at(-1);
+  const facts =
+    last === undefined
+      ? []
+      : [
+          last.url === null ? null : `url=${last.url}`,
+          last.status === null ? null : `status=${last.status}`,
+          last.body === null || last.body === "" ? null : `body=${last.body}`,
+        ].filter((fact): fact is string => fact !== null);
+  return facts.length === 0
+    ? `${failure.path}: ${failure.message}`
+    : `${failure.path}: ${failure.message} (${facts.join(", ")})`;
 }

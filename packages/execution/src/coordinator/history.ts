@@ -231,7 +231,13 @@ export interface RunHistory {
   pushed: (fact: {
     node: string;
     bucket: string;
+    /** What the bucket SERVES as a result of this node — stored plus
+     *  already-present. The journal keeps the total and the part rather than
+     *  the two parts, so lines written by earlier releases keep their
+     *  meaning; the fold subtracts. */
     paths: number;
+    /** Of `paths`, how many the bucket already had. */
+    present: number;
     bytes: number;
     durationMs: number;
   }) => void;
@@ -738,8 +744,8 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         // field from one whose writer had no duration to give.
         ...(durationMs === undefined ? {} : { durationMs }),
       }),
-    pushed: ({ node, bucket, paths, bytes, durationMs }) =>
-      emit({ kind: "pushed", node, bucket, paths, bytes, durationMs }),
+    pushed: ({ node, bucket, paths, present, bytes, durationMs }) =>
+      emit({ kind: "pushed", node, bucket, paths, present, bytes, durationMs }),
     pushFailed: ({ node, bucket, message, durationMs }) =>
       emit({ kind: "push_failed", node, bucket, message, durationMs }),
     currentAttempt: (node) => highest.get(node) ?? 0,

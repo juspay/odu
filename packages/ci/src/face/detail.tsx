@@ -63,12 +63,15 @@ import { bytes } from "@odu/cordis/format";
 import { CommitRef } from "./commit";
 import {
   duration,
+  type FollowedPage,
   laneCells,
   lanesOf,
+  logMetaText,
   NODE_STATUS,
   NODE_WORD,
   OUTCOME,
   projectOf,
+  pushCounts,
   scopeLabel,
 } from "./format";
 import type {
@@ -157,7 +160,7 @@ function noteSuffix(note: string | null): string {
  * this face spells no word of the row that serves buckets.
  *
  * A push in flight claims NO counts: it has sent nothing it can count yet,
- * and `0 paths` on it would be a claim about the bucket nobody has made. Its
+ * and `0 pushed` on it would be a claim about the bucket nobody has made. Its
  * length is the hatched bar instead, the honest picture of "still going".
  *
  * NO COLOUR OF ITS OWN. `as` names the node status this push state is the
@@ -179,7 +182,11 @@ function pushStep(
       return { text: `pushing${to}`, as: "running" };
     case "pushed":
       return {
-        text: `pushed${to} · ${push.paths} path${push.paths === 1 ? "" : "s"} · ${bytes(push.bytes)} · ${duration(push.durationMs)}`,
+        // {@link pushCounts} and not a second spelling of the counts: the run
+        // header above this list says the same two numbers about the whole
+        // run, and two phrasings of one fact is how a page comes to disagree
+        // with itself.
+        text: `pushed${to} · ${pushCounts(push)} · ${duration(push.durationMs)}`,
         as: "ok",
       };
     case "failed":
@@ -625,13 +632,27 @@ export function LogPanel(props: {
   /** The cursored follow's accumulated text — byte-exact, unlike the bounded
    *  tail beside it. Null before the first page arrives. */
   followed: string | null;
+  /** WHAT THAT FOLLOW LEARNED BESIDES THE TEXT — the file's size and whether
+   *  it is whole, as of its last page. The push stream's only reader is that
+   *  follow, so this is the only place the Push tab can learn how big the
+   *  file it is showing is: before this existed the pane could say a size
+   *  only after somebody had pressed a paging button, and the number it
+   *  showed the rest of the time belonged to the recipe. Null until a page
+   *  lands, which is also this pane's "nothing read yet" for that stream. */
+  followedPage: FollowedPage | null;
   /** Why this log could not be read — a refused page, or a follow that gave up.
    *  Shown beside the log rather than swallowed, because a pane that has quietly
    *  stopped updating looks exactly like a log that has quietly stopped
    *  growing. */
   logFault: string | null;
-  pending: boolean;
-  error: Error | undefined;
+  /** THE RECIPE TAIL's subscription state, and the recipe's alone —
+   *  `collections.logTails` is keyed by the log key with no stream in it.
+   *  Named for what they are rather than for the pane they are drawn in,
+   *  because unqualified they told a reader of the PUSH log that their read
+   *  was pending, or had failed, about a file nobody had asked that
+   *  collection for. */
+  tailPending: boolean;
+  tailError: Error | undefined;
   onPage: (offset: number) => void;
   page: LogPage | null;
 }): JSX.Element {
@@ -681,6 +702,23 @@ export function LogPanel(props: {
     props.stream === "push"
       ? props.node?.push?.state === "pushing"
       : props.tail?.open === true,
+  );
+
+  /** HAS THIS PANE ANYTHING TO SHOW YET — asked of whichever log is on
+   *  screen, because the two streams learn it from different places. The
+   *  recipe's answer is its tail subscription's: pending, with no tail in
+   *  hand. The push stream has no subscription at all, so its answer is its
+   *  own reader's — the follow has delivered no page and nobody has asked for
+   *  one — and it is not waiting once a fault has explained why nothing is
+   *  coming. Before this, the Push tab borrowed the recipe's answer: a pane
+   *  that said `Reading…` about a file it was not reading, and then sat
+   *  silently blank when it had genuinely read nothing. */
+  const waiting = createMemo(() =>
+    props.stream === "push"
+      ? props.followedPage === null &&
+        props.page === null &&
+        props.logFault === null
+      : props.tailPending && props.tail === undefined,
   );
 
   /** The text as the recipe COLOURED it. Memoised on `shown()`, so a re-render
@@ -807,23 +845,35 @@ export function LogPanel(props: {
                     completeness reads as a quiet recipe when it may be a lane
                     that died mid-sentence.
 
-                    Both of them are the RECIPE's — `collections.logTails`
-                    covers that file and no other — so the push stream says
-                    what it is instead of borrowing a number about a different
-                    log, and adds the window's own size once a page has been
-                    asked for. A wrong byte count is worse than none: it is the
-                    number a reader checks a truncated log against. */}
-                {props.stream === "push"
-                  ? `push log${props.page === null ? "" : ` · ${bytes(props.page.size)}`}`
-                  : props.tail === undefined
-                    ? ""
-                    : `${bytes(props.tail.totalBytes)}${props.tail.complete ? "" : " · incomplete — the producer never closed this log"}`}
+                    EACH STREAM FROM ITS OWN SOURCE, and the choice is
+                    {@link logMetaText}'s rather than this header's: the
+                    recipe's facts come from `collections.logTails`, which
+                    covers that file and no other, and the push stream's from
+                    the follow's last page, which is the only thing that reads
+                    that one. A wrong byte count is worse than none — it is
+                    the number a reader checks a truncated log against, and
+                    this pane has already shown one. */}
+                {logMetaText({
+                  stream: props.stream,
+                  tail: props.tail,
+                  followedPage: props.followedPage,
+                })}
               </span>
             </header>
-            <Show when={props.error}>
+            {/* THE RECIPE TAIL'S OWN STATE, drawn only where it applies.
+                `collections.logTails` is keyed by the log key alone and
+                subscribes to the recipe's file, so a subscription that failed
+                is a fact about THAT read: printed under the Push tab it
+                accused the push of a fault that was never its, and `Reading…`
+                announced work on a file this pane was not reading.
+
+                The push stream's honest "not yet" is its own: the follow is
+                its only reader, so until that reader has delivered a page
+                there is nothing to show and nothing has gone wrong. */}
+            <Show when={props.stream === "recipe" && props.tailError}>
               {(error) => <p class="fault">{String(error())}</p>}
             </Show>
-            <Show when={props.pending && props.tail === undefined}>
+            <Show when={waiting()}>
               <p class="empty">Reading…</p>
             </Show>
             {/* A stopped follow SAYS SO. Swallowing it left a pane that had
@@ -1043,8 +1093,8 @@ export function Detail(props: {
    * WHAT THIS RUN WARMED — {@link pushTotals} over the nodes this page is
    * already holding, or `null` when there is nothing to say.
    *
-   * The SOURCE is the decision kept here. `AttentionAnswer` carries a
-   * run-wide `paths` / `bytes` pair, but this view is drawn from
+   * The SOURCE is the decision kept here. `AttentionAnswer` carries the same
+   * run-wide counts, but this view is drawn from
    * `streams.nodes`, which is the frame that actually ticks while a run is
    * live — a total read off a second wire field would lag the rows under it
    * by a tick and a reader would see a header that disagreed with the sum of
@@ -1179,12 +1229,12 @@ export function Detail(props: {
 
                 The failures ride here too, named. A run can be green by every
                 recipe's verdict and still have left a closure behind, and
-                "pushed 40 paths" on its own would be the sentence that hides
-                it. */}
+                "3 pushed · 3.1 KiB" on its own would be the sentence that
+                hides it. */}
             <Show when={pushed()}>
               {(total) => (
                 <span class="detail-push-total">
-                  {`pushed ${total().paths} path${total().paths === 1 ? "" : "s"} · ${bytes(total().bytes)}`}
+                  {pushCounts(total())}
                   <Show when={total().failedOn.length > 0}>
                     <span class="detail-push-failed">
                       {` · push failed on ${total().failedOn.join(", ")}`}

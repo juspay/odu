@@ -211,10 +211,16 @@ export interface Attention {
     /** What is wrong while something WAS pushed — the bucket's key missing
      *  from `trusted-public-keys`. Null when there is nothing to say. */
     keyWarning: string | null;
-    /** Store paths this run's nodes put on the bucket, summed over the pushes
-     *  that LANDED. A node still pushing, or one whose push failed, adds
-     *  nothing: these are bytes the bucket serves. */
-    paths: number;
+    /** Store paths this run's nodes UPLOADED, summed over the pushes that
+     *  LANDED. A node still pushing, or one whose push failed, adds nothing.
+     */
+    stored: number;
+    /** Store paths those same pushes found the bucket ALREADY serving. Kept
+     *  apart from `stored` all the way to the header: the sum of the two is
+     *  what the bucket serves because of this run, and reporting only the sum
+     *  claims every one of those paths crossed the network. */
+    present: number;
+    /** NAR bytes `stored` came to — what this run actually sent. */
     bytes: number;
     /** The nodes whose push failed, in roster order. Empty when none did —
      *  which is what "green means warmed" is allowed to mean. */
@@ -511,15 +517,31 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         }
         break;
       }
-      case "pushed":
+      case "pushed": {
+        // THE LINE RECORDS A TOTAL AND A PART; A READER WANTS BOTH PARTS.
+        // `paths` is what the bucket serves as a result of this node — stored
+        // plus already-present — and `present` is the half of it the bucket
+        // already had. Subtracting is what turns the durable shape into the
+        // two numbers every surface renders.
+        //
+        // A LINE WITHOUT `present` FOLDS TO ALL-STORED, and that is the honest
+        // reading rather than a convenient one: releases before this field
+        // never recorded an already-present count, so the served total is the
+        // only thing they ever claimed, and attributing it to uploads is what
+        // those runs' headers already said. `Math.max` guards the one way the
+        // arithmetic can go negative — a line whose two numbers disagree —
+        // because a negative count on a header is worse than a zero.
+        const present = e.present ?? 0;
         push.set(e.node, {
           state: "pushed",
           bucket: e.bucket,
-          paths: e.paths,
+          stored: Math.max(0, e.paths - present),
+          present,
           bytes: e.bytes,
           durationMs: e.durationMs ?? 0,
         });
         break;
+      }
       case "push_failed":
         push.set(e.node, {
           state: "failed",
@@ -704,7 +726,8 @@ export function attentionFor(
                   },
             skipped: manifest.push.skipped,
             keyWarning: manifest.push.keyWarning,
-            paths: pushTotal.paths,
+            stored: pushTotal.stored,
+            present: pushTotal.present,
             bytes: pushTotal.bytes,
             failedOn: inRosterOrder(pushTotal.failedOn, fold.roster),
           },

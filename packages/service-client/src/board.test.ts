@@ -456,7 +456,7 @@ describe("where a node's PUSH sat in its run", () => {
     // arithmetic.
     const recipe = laneSpan(node({}), run, 9e15);
     const push = pushSpan(
-      node({ push: { state: "pushed", paths: 4, bytes: 2_097_152, durationMs: 60_000 } }),
+      node({ push: { state: "pushed", stored: 4, present: 0, bytes: 2_097_152, durationMs: 60_000 } }),
       run,
       9e15,
     );
@@ -554,7 +554,7 @@ describe("where a node's PUSH sat in its run", () => {
     // than past it — the same clamp the recipe's bar takes, against the room
     // the recipe left rather than against the whole scale.
     const over = pushSpan(
-      node({ push: { state: "pushed", paths: 1, bytes: 10, durationMs: 9_000_000 } }),
+      node({ push: { state: "pushed", stored: 1, present: 0, bytes: 10, durationMs: 9_000_000 } }),
       run,
       9e15,
     );

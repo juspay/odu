@@ -86,11 +86,12 @@ export interface WaitDeps extends ReadDeps {
 /**
  * Re-shape the catalog's attention payload as this surface's answer.
  *
- * Every field is a rename or a re-address; nothing is recomputed. The one thing
- * that IS built here is `logKey`: the attention payload spells its `log_key` as
- * the argv triple `odu ci logs --run` takes, and this surface addresses a log by
- * one token, so the same three facts are re-encoded for the face that will echo
- * them back.
+ * Nearly every field is a rename or a re-address. Two are BUILT: `logKey`,
+ * because the attention payload spells its `log_key` as the argv triple `odu
+ * ci logs --run` takes and this surface addresses a log by one token; and the
+ * push's `paths`, because the payload keeps what a run stored apart from what
+ * its bucket already had while this answer has published their sum under that
+ * name since 2.5.
  */
 export function answerOf(attention: Attention): AttentionAnswer {
   return {
@@ -137,7 +138,25 @@ export function answerOf(attention: Attention): AttentionAnswer {
     })),
     endpoint: attention.endpoint,
     ...(attention.actor === undefined ? {} : { actor: attention.actor }),
-    ...(attention.push === undefined ? {} : { push: attention.push }),
+    // THE ONE PLACE THIS FILE COMPUTES ANYTHING ABOUT A PUSH, and it is an
+    // addition rather than a reading: the payload holds the two counts apart
+    // (`stored`, `present`) and the ANSWER has published their sum as `paths`
+    // since 2.5. Both go out — the total under the name every existing
+    // reader already uses, the already-present half beside it — so a 2.5
+    // client keeps decoding and a 2.6 one can subtract.
+    ...(attention.push === undefined
+      ? {}
+      : {
+          push: {
+            target: attention.push.target,
+            skipped: attention.push.skipped,
+            keyWarning: attention.push.keyWarning,
+            paths: attention.push.stored + attention.push.present,
+            present: attention.push.present,
+            bytes: attention.push.bytes,
+            failedOn: attention.push.failedOn,
+          },
+        }),
   };
 }
 

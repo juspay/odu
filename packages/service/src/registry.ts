@@ -133,7 +133,8 @@ function wirePush(push: FoldNodePush): NodePush {
     case "pushed":
       return {
         state: "pushed",
-        paths: push.paths,
+        stored: push.stored,
+        present: push.present,
         bytes: push.bytes,
         durationMs: push.durationMs,
       };

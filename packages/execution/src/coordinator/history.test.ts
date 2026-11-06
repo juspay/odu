@@ -698,6 +698,7 @@ describe("recording what a node warmed", () => {
       node: NODE,
       bucket: "kolu-r2",
       paths: 12,
+      present: 4,
       bytes: 4_194_304,
       durationMs: 2_500,
     });
@@ -707,6 +708,7 @@ describe("recording what a node warmed", () => {
       node: NODE,
       bucket: "kolu-r2",
       paths: 12,
+      present: 4,
       bytes: 4_194_304,
       durationMs: 2_500,
     });

@@ -157,7 +157,7 @@ export const STATUS_META: Record<
  * afterwards from a record that appeared out of nothing.
  *
  * A UNION rather than one struct with nullable counts: only `pushed` has
- * counts to give, and `paths: 0` on a push still running would be a claim
+ * counts to give, and `stored: 0` on a push still running would be a claim
  * about the bucket that nobody made.
  *
  * The node's own `status` is unaffected by the first two states and reads the
@@ -169,9 +169,16 @@ export const NodePushSchema = Schema.Union([
   Schema.Struct({ state: Schema.Literal("pushing") }),
   Schema.Struct({
     state: Schema.Literal("pushed"),
-    /** Store paths the bucket serves as a result of this node. */
-    paths: Schema.Int,
-    /** NAR bytes this node's uploads sent. */
+    /** Store paths this node UPLOADED — what the bucket did not have and now
+     *  has because of this node. */
+    stored: Schema.Int,
+    /** Store paths of this node's closure the bucket ALREADY served. Told
+     *  apart from `stored` because the two answer different questions: one is
+     *  work this run did, the other is work it was spared. A single total of
+     *  the two reads as "69 paths went up the wire" and almost never was. */
+    present: Schema.Int,
+    /** NAR bytes this node's uploads sent — the size of `stored`, not of the
+     *  closure the bucket serves. */
     bytes: Schema.Int,
     /** How long the push took, SEPARATE from the node's own `durationMs`,
      *  which stays the recipe's time. */
@@ -192,11 +199,18 @@ export type NodePush = typeof NodePushSchema.Type;
 /** WHAT A RUN PUT ON ITS BUCKET, over every node — the one fold of this
  *  union, living with the union it folds.
  *
- *  Only pushes that LANDED count toward the bytes; the ones that failed are
- *  named instead, because "green means warmed" is a claim a failed push
- *  withdraws. `landed` is the count of pushes that completed, which is NOT
- *  `paths > 0` — a node whose closure the bucket already had lands zero
- *  paths and is still a push that happened.
+ *  THREE SUMS, SEPARATELY. `stored` and `present` are added apart all the way
+ *  up because a header that collapses them ("pushed 69 paths") says this run
+ *  sent sixty-nine closures when it sent three and found sixty-six already
+ *  there — a claim about both the network and the bucket that is wrong in
+ *  both directions. `bytes` belongs to `stored` alone: it is what went over
+ *  the wire.
+ *
+ *  Only pushes that LANDED count toward any of the three; the ones that
+ *  failed are named instead, because "green means warmed" is a claim a failed
+ *  push withdraws. `landed` is the count of pushes that completed, which is
+ *  NOT `stored > 0` — a node whose closure the bucket already had stores
+ *  nothing and is still a push that happened.
  *
  *  ENTRIES rather than a `ReadonlyMap`, because the two callers hold
  *  different maps: the durable journal's fold carries `bucket` and keeps
@@ -205,25 +219,28 @@ export type NodePush = typeof NodePushSchema.Type;
 export function pushTotals(
   push: Iterable<readonly [string, NodePush]>,
 ): {
-  paths: number;
+  stored: number;
+  present: number;
   bytes: number;
   landed: number;
   failedOn: readonly string[];
 } {
-  let paths = 0;
+  let stored = 0;
+  let present = 0;
   let bytes = 0;
   let landed = 0;
   const failedOn: string[] = [];
   for (const [node, one] of push) {
     if (one.state === "pushed") {
-      paths += one.paths;
+      stored += one.stored;
+      present += one.present;
       bytes += one.bytes;
       landed += 1;
     } else if (one.state === "failed") {
       failedOn.push(node);
     }
   }
-  return { paths, bytes, landed, failedOn };
+  return { stored, present, bytes, landed, failedOn };
 }
 
 export const NodeStateSchema = Schema.Struct({

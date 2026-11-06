@@ -150,13 +150,47 @@ describe("the journal's three push events", () => {
     expect([...fold.push.entries()]).toEqual([
       [
         node,
-        { state: "pushed", bucket: "kolu-r2", paths: 13, bytes: 5_000_000, durationMs: 40 },
+        { state: "pushed", bucket: "kolu-r2", stored: 13, present: 0, bytes: 5_000_000, durationMs: 40 },
       ],
       [
         "ci::docs@x86_64-linux",
-        { state: "pushed", bucket: "kolu-r2", paths: 1, bytes: 10, durationMs: 2_500 },
+        { state: "pushed", bucket: "kolu-r2", stored: 1, present: 0, bytes: 10, durationMs: 2_500 },
       ],
     ]);
+  });
+
+  it("tells STORED from PRESENT, and reads a line without the count as all-stored", () => {
+    // THE LINE RECORDS A TOTAL AND A PART. `paths` is what the bucket serves
+    // as a result of this node; `present` is the half it already had. The
+    // fold subtracts, so a reader gets the two numbers it renders without
+    // the durable shape having to change meaning.
+    const split = foldJournal([
+      { seq: 1, at: 1, event: { ...event, paths: 69, present: 66, bytes: 3_100 } },
+    ]);
+    expect(split.push.get(node)).toEqual({
+      state: "pushed",
+      bucket: "kolu-r2",
+      stored: 3,
+      present: 66,
+      bytes: 3_100,
+      durationMs: 2_500,
+    });
+
+    // AND A LINE WRITTEN BEFORE THE FIELD EXISTED folds to all-stored. That
+    // is not a convenient default: those runs recorded no already-present
+    // count at all, so the served total is the only claim they ever made,
+    // and it is the claim their own headers printed. Inventing a `present`
+    // for them would rewrite history; attributing the total to uploads
+    // preserves it.
+    const legacy = foldJournal([{ seq: 1, at: 1, event }]);
+    expect(legacy.push.get(node)).toEqual({
+      state: "pushed",
+      bucket: "kolu-r2",
+      stored: 12,
+      present: 0,
+      bytes: 4_194_304,
+      durationMs: 2_500,
+    });
   });
 
   it("carries a push that is still RUNNING, until the line that ends it", () => {
@@ -177,7 +211,17 @@ describe("the journal's three push events", () => {
         ]).push.entries(),
       ],
     ).toEqual([
-      [node, { state: "pushed", bucket: "kolu-r2", paths: 12, bytes: 4_194_304, durationMs: 2_500 }],
+      [
+        node,
+        {
+          state: "pushed",
+          bucket: "kolu-r2",
+          stored: 12,
+          present: 0,
+          bytes: 4_194_304,
+          durationMs: 2_500,
+        },
+      ],
     ]);
   });
 
@@ -306,16 +350,20 @@ describe("the journal's three push events", () => {
         { seq: 3, at: 3, event: { ...event, paths: 2, bytes: 20, durationMs: 7 } },
       ]).push.entries(),
     ]).toEqual([
-      [node, { state: "pushed", bucket: "kolu-r2", paths: 2, bytes: 20, durationMs: 7 }],
+      [
+        node,
+        { state: "pushed", bucket: "kolu-r2", stored: 2, present: 0, bytes: 20, durationMs: 7 },
+      ],
     ]);
   });
 });
 
 describe("what a run put on its bucket, over every node", () => {
-  const pushed = (paths: number, bytes: number): NodePush => ({
+  const pushed = (stored: number, present: number, bytes: number): NodePush => ({
     state: "pushed",
     bucket: "kolu-r2",
-    paths,
+    stored,
+    present,
     bytes,
     durationMs: 10,
   });
@@ -327,7 +375,7 @@ describe("what a run put on its bucket, over every node", () => {
     // reader needs to go and look at the node.
     const totals = pushTotals(
       new Map<string, NodePush>([
-        ["ci::build@x86_64-linux", pushed(12, 4_000)],
+        ["ci::build@x86_64-linux", pushed(12, 30, 4_000)],
         ["ci::docs@x86_64-linux", { state: "pushing", bucket: "kolu-r2" }],
         [
           "ci::e2e@x86_64-linux",
@@ -338,11 +386,16 @@ describe("what a run put on its bucket, over every node", () => {
             durationMs: 900,
           },
         ],
-        ["ci::nix@aarch64-darwin", pushed(3, 500)],
+        ["ci::nix@aarch64-darwin", pushed(3, 36, 500)],
       ]),
     );
+    // THE TWO COUNTS ARE SUMMED APART. Their total is what the bucket serves
+    // because of this run; `stored` alone is what this run sent, and the
+    // bytes belong to that half. A header given only the total says every
+    // one of those paths crossed the network.
     expect(totals).toEqual({
-      paths: 15,
+      stored: 15,
+      present: 66,
       bytes: 4_500,
       landed: 2,
       failedOn: ["ci::e2e@x86_64-linux"],
@@ -351,7 +404,8 @@ describe("what a run put on its bucket, over every node", () => {
 
   it("is zero and empty for a run whose nodes pushed nothing", () => {
     expect(pushTotals(new Map())).toEqual({
-      paths: 0,
+      stored: 0,
+      present: 0,
       bytes: 0,
       landed: 0,
       failedOn: [],

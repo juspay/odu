@@ -500,12 +500,28 @@ export const RunEventSchema = Schema.Union([
    * client verifies; `bytes` is the UNCOMPRESSED NAR size of what was
    * uploaded, which is what a closure states and what `nix path-info -S`
    * answers — not what zstd made of it on the way.
+   *
+   * `present` SPLITS that served total without moving it. Readers want the
+   * two apart — what this run sent versus what the bucket already had — and
+   * the obvious shape would have been to replace `paths` with `stored`. It is
+   * not done, because this is the DURABLE record: lines written by every
+   * release before this one are still on disk and still read, and a renamed
+   * field would make all of them decode as a run that pushed nothing. So
+   * `paths` keeps its meaning exactly, `present` is `optionalKey`, and the
+   * fold subtracts. A line without `present` folds to "all of it went up",
+   * which is not a guess: those runs recorded no already-present count
+   * because the client's split was never carried, and the served total is the
+   * only number they ever stated.
    */
   Schema.Struct({
     kind: Schema.Literal("pushed"),
     node: Schema.String,
     bucket: Schema.String,
     paths: Schema.Int,
+    /** Of `paths`, how many the bucket ALREADY served before this node — so
+     *  `paths - present` is what this node uploaded. `optionalKey`, so a line
+     *  written before this field still decodes. */
+    present: Schema.optionalKey(Schema.Int),
     bytes: Schema.Int,
     /** HOW LONG THE PUSH TOOK, on its own. A node's `durationMs` is the
      *  RECIPE's time and stays that: a run whose timings silently absorbed
@@ -581,8 +597,12 @@ export type JournalEntry = typeof JournalEntrySchema.Type;
  *
  * A union rather than a record with nullable counts, because the three states
  * answer different questions and only one of them has counts to give: a reader
- * holding `{ state: "pushing" }` cannot accidentally render `0 paths` as a
+ * holding `{ state: "pushing" }` cannot accidentally render `0 stored` as a
  * fact about the bucket.
+ *
+ * THE COUNTS ARE SPLIT HERE, not on the line: the journal records the served
+ * total and an optional already-present count, and the fold turns that pair
+ * into the two numbers every reader actually wants.
  *
  * `bucket` and `message` are here but NOT on the node wire: the bucket is a
  * property of the run (one target, on the header) and the message is already
@@ -593,7 +613,10 @@ export type NodePush =
   | {
       state: "pushed";
       bucket: string;
-      paths: number;
+      /** Paths this node uploaded. */
+      stored: number;
+      /** Paths of this node's closure the bucket already served. */
+      present: number;
       bytes: number;
       durationMs: number;
     }
