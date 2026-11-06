@@ -23,7 +23,7 @@
 import { describe, expect, it } from "bun:test";
 import type { RunOpts } from "./serviceCommands";
 import { startInputOf } from "./serviceCommands";
-import { runTarget } from "./serviceFace";
+import { runTarget, type RunTarget } from "./serviceFace";
 
 const POD = "/data/checkouts/kolu";
 const SHA = "b".repeat(40);
@@ -53,7 +53,8 @@ function opts(over: Partial<RunOpts> = {}): RunOpts {
 describe("odu ci run --checkout", () => {
   it("sends the path and the commit exactly as typed", () => {
     const at = runTarget({ checkout: POD, sha: SHA, origin: ORIGIN }, NOWHERE);
-    expect(at).toEqual({ checkout: POD, sha: SHA });
+    // `mine: false` — the run's world is the service's, not this shell's.
+    expect(at).toEqual({ checkout: POD, sha: SHA, mine: false });
   });
 
   it("refuses without --sha, because the strict gate has nothing to compare", () => {
@@ -73,7 +74,7 @@ describe("odu ci run --checkout", () => {
       { checkout: POD, sha: SHA },
       { ODU_WEB_ORIGIN: ORIGIN },
     );
-    expect(at).toEqual({ checkout: POD, sha: SHA });
+    expect(at).toEqual({ checkout: POD, sha: SHA, mine: false });
   });
 
   it("accepts a loopback origin that was NAMED — the check is naming, not distance", () => {
@@ -82,7 +83,7 @@ describe("odu ci run --checkout", () => {
     // rule about addresses that odu has no reason to hold.
     expect(
       runTarget({ checkout: POD, sha: SHA, origin: "http://127.0.0.1:18440" }, NOWHERE),
-    ).toEqual({ checkout: POD, sha: SHA });
+    ).toEqual({ checkout: POD, sha: SHA, mine: false });
   });
 
   it("does not take an EMPTY $ODU_WEB_ORIGIN as a naming", () => {
@@ -103,19 +104,23 @@ describe("odu ci run --checkout", () => {
 });
 
 describe("what the start asks for", () => {
+  /** The two targets a start can have, built the ONE way a start builds them.
+   *  Hand-writing a `RunTarget` here would be a second source for `mine` —
+   *  the very thing `runTarget` answering it is meant to rule out. */
+  const there = (): RunTarget =>
+    runTarget({ checkout: POD, sha: SHA, origin: ORIGIN }, NOWHERE);
+  const hereAt = (): RunTarget => ({ checkout: "/code/app", sha: SHA, mine: true });
+
   it("carries the named pair verbatim into run.start", () => {
-    const input = startInputOf(
-      { checkout: POD, sha: SHA },
-      opts({ checkout: POD, sha: SHA, origin: ORIGIN }),
-    );
+    const input = startInputOf(there(), opts({ checkout: POD, sha: SHA, origin: ORIGIN }));
     expect(input.checkout).toBe(POD);
     expect(input.expectedSha).toBe(SHA);
   });
 
   /** This process's `$ODU_HOSTS`, set for the duration of one claim and put
-   *  back — the runner's own value decides nothing. Without this the two
-   *  assertions below both read `""` and pass for a reason that has nothing
-   *  to do with forwarding. */
+   *  back — the runner's own value decides nothing. Without this the
+   *  assertions below read `""` and pass for a reason that has nothing to do
+   *  with forwarding. */
   function withHosts<T>(value: string | undefined, body: () => T): T {
     const before = process.env.ODU_HOSTS;
     if (value === undefined) delete process.env.ODU_HOSTS;
@@ -134,38 +139,32 @@ describe("what the start asks for", () => {
     // named `http://127.0.0.1:…` is this one — and a path the service has not
     // got is skipped by `loadHosts`, which falls through to its own chain.
     withHosts("/fleets/mine.json", () => {
-      const remote = startInputOf(
-        { checkout: POD, sha: SHA },
-        opts({ checkout: POD, sha: SHA, origin: ORIGIN }),
-      );
-      const local = startInputOf({ checkout: "/code/app", sha: SHA }, opts());
+      const remote = startInputOf(there(), opts({ checkout: POD, sha: SHA, origin: ORIGIN }));
+      const local = startInputOf(hereAt(), opts());
       expect(remote.hostsFile).toBe("/fleets/mine.json");
       expect(local.hostsFile).toBe("/fleets/mine.json");
     });
   });
 
-  it("sends NO hostsFile for a --checkout run from a shell that has none", () => {
+  it("sends NO hostsFile when the run's world is not this shell and it has none", () => {
     // `""` is not silence. It is kept as `""` all the way to `coordinatorEnv`,
     // which ASSIGNS it — so the coordinator would run with `ODU_HOSTS=""` and
     // the SERVICE's own variable blanked. On a pod whose Deployment sets the
     // fleet, that is the only inventory there is, bypassed. Absent is the
     // reading that leaves the daemon's configuration standing.
     withHosts(undefined, () => {
-      const remote = startInputOf(
-        { checkout: POD, sha: SHA },
-        opts({ checkout: POD, sha: SHA, origin: ORIGIN }),
-      );
-      expect("hostsFile" in remote).toBe(false);
+      expect("hostsFile" in startInputOf(there(), opts({ checkout: POD, sha: SHA, origin: ORIGIN })))
+        .toBe(false);
     });
   });
 
-  it("still sends `\"\"` for a run in THIS checkout, which IS this shell's world", () => {
+  it("still sends `\"\"` for a run in THIS shell's world", () => {
     // The reading the comment in `startInputOf` has always protected: a person
     // who just unset `$ODU_HOSTS` means it, and saying nothing here would hand
-    // their run the daemon's fleet instead.
+    // their run the daemon's fleet instead. Keyed on the TARGET's `mine`, so
+    // `--checkout $PWD` against this same daemon keeps it.
     withHosts(undefined, () => {
-      const local = startInputOf({ checkout: "/code/app", sha: SHA }, opts());
-      expect(local.hostsFile).toBe("");
+      expect(startInputOf(hereAt(), opts()).hostsFile).toBe("");
     });
   });
 });

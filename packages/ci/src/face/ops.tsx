@@ -136,11 +136,17 @@ export function venueNote(row: VenueRow, probedAt: number, now: number): string 
  * of a question about a tenth of it, with the machines it did not probe
  * nowhere on the screen. Naming the platforms is what makes the number true.
  *
- * `undefined` when there is no reading: neither "not asked yet" nor "asked and
- * empty" is a count, and a confident `0 of 0 up` is worse than no line.
+ * `undefined` for either ABSENCE — the cell has not answered (`undefined`),
+ * or it answered that nothing has probed since this service started (`null`).
+ * Both of them here rather than one here and one at the caller: "when is there
+ * no line" is one rule, and neither "not asked yet" nor "asked and empty" is a
+ * count, so a confident `0 of 0 up` is worse than no line either way.
  */
-export function fleetLine(reading: VenueReading, now: number): string | undefined {
-  if (reading === null) return undefined;
+export function fleetLine(
+  reading: VenueReading | undefined,
+  now: number,
+): string | undefined {
+  if (reading === undefined || reading === null) return undefined;
   const up = reading.rows.filter((row) => row.state !== "down").length;
   const slice =
     reading.platforms.length === 0
@@ -211,14 +217,9 @@ export function Machines(props: {
     if (answer === null) probeFor([]);
   });
   /** HOW MANY MACHINES ARE UP, in the page's one line of state — and whether
-   *  the reading those machines came from is the whole inventory. The rule is
-   *  `fleetLine`'s; this only supplies the clock. */
-  const upLine = createMemo<string | undefined>(() => {
-    const answer = reading.value();
-    // `undefined` is "the cell has not answered yet" — not a reading at all,
-    // and not the same as a reading of nothing.
-    return answer === undefined ? undefined : fleetLine(answer, props.now);
-  });
+   *  the reading those machines came from is the whole inventory. The whole
+   *  rule is `fleetLine`'s, both absences included; this supplies the clock. */
+  const upLine = createMemo(() => fleetLine(reading.value(), props.now));
 
   const [checkout, setCheckout] = createSignal("");
   const [noWait, setNoWait] = createSignal(false);

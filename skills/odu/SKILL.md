@@ -559,7 +559,7 @@ told because four things change for an agent.
   ```
 
 - **A run records who started it.** `run_read` answers `actor` — the token's
-  login, or `local` on a loopback daemon — and the board and `odu ci history
+  login, or `@local` on a loopback daemon — and the board and `odu ci history
   list --all` show `started by <login>` (`--all`, because such a run's
   checkout is a path on the server, not yours). Provenance, not authority:
   revoking a token stops the next call, not a run already launched.
@@ -769,7 +769,7 @@ declares.
   `--checkout` is refused unless a service is NAMED (`--origin` or
   `$ODU_WEB_ORIGIN`; the check is naming, not distance — the default is the
   daemon for where you stand). Your `$ODU_HOSTS` is still sent. Every run
-  also records `actor` — the connection's principal, a login or `local` —
+  also records `actor` — the connection's principal, a login or `@local` —
   answered by `run_read` and shown as `started by <login>` on the board and
   in `odu ci history list --all`. It is provenance, not
   authority: a revoked token stops the next call, not a launched run.

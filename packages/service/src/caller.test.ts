@@ -35,7 +35,7 @@ import {
   CI_CONTRACT_VERSION,
   CI_ROW,
 } from "@odu/service-client/surface";
-import { actorOf, type Caller } from "./caller";
+import { actorOf, LOCAL_ACTOR, type Caller } from "./caller";
 import { createOduService } from "./service";
 import {
   makeWorld,
@@ -249,12 +249,16 @@ describe("the caller is assembled once per call", () => {
  * and the e2e drives the whole chain against a real daemon.
  */
 describe("the actor a run is recorded with", () => {
-  it("is a signed-in person's login, and `local` for the machine's own owner", () => {
+  it("is a signed-in person's login, and a RESERVED word for the machine's own owner", () => {
     expect(actorOf({ kind: "user", login: "srid", role: "member" })).toBe("srid");
     expect(actorOf({ kind: "user", login: "octo", role: "owner" })).toBe("octo");
     // `local` has no login to give: it is not a person, and inventing a name
-    // for it would put a second spelling of one fact into every manifest.
-    expect(actorOf(LOCAL_OWNER)).toBe("local");
+    // for it would put a second spelling of one fact into every manifest. The
+    // word carries an `@`, which a GitHub login cannot — so a user called
+    // `local` can never be mistaken for the loopback owner in a record that
+    // is already on disk and cannot be migrated.
+    expect(actorOf(LOCAL_OWNER)).toBe(LOCAL_ACTOR);
+    expect(LOCAL_ACTOR).toContain("@");
   });
 
   it("comes from the CONNECTION on a start, never from the input", async () => {

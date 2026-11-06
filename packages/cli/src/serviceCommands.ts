@@ -72,7 +72,7 @@ import {
   firstFrame,
   formatAgo,
   git,
-  type Here,
+  type RunTarget,
   hostsFileHere,
   nodesStream,
   patience,
@@ -131,7 +131,10 @@ export interface RunOpts {
  * three of its readings — a path always, `""` only when this shell IS the
  * run's world.
  */
-export function startInputOf(at: Here, opts: RunOpts) {
+export function startInputOf(at: RunTarget, opts: RunOpts) {
+  // ONE read of this shell's variable, resolved once — see the long note on
+  // the field below for which of its three readings travels when.
+  const shellHosts = hostsFileHere(opts.cwd);
   return {
     checkout: at.checkout,
     expectedSha: at.sha,
@@ -172,9 +175,12 @@ export function startInputOf(at: Here, opts: RunOpts) {
     // honest reading there is the third one, ABSENT — "I have no shell in
     // this world" — which is the only one that leaves the daemon's
     // configuration standing.
-    ...(opts.checkout !== undefined && hostsFileHere(opts.cwd) === ""
-      ? {}
-      : { hostsFile: hostsFileHere(opts.cwd) }),
+    //
+    // Read off `at.mine`, never off `opts.checkout`: the flag was a PROXY
+    // for "is this shell the run's world", `runTarget` is where that is
+    // decided, and the proxy is wrong for `--checkout $PWD` against this
+    // same daemon. One fact, one source.
+    ...(at.mine || shellHosts !== "" ? { hostsFile: shellHosts } : {}),
     ...(opts.root === undefined ? {} : { root: opts.root }),
     noDeps: opts.noDeps,
     noStrict: opts.noStrict,

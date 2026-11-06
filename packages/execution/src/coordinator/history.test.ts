@@ -226,11 +226,11 @@ describe("registering a run", () => {
 
   it("records WHO started the run, and omits the field when nobody said", () => {
     // PLAN 4.4. The actor is the connection's principal, flattened to one
-    // word by the service and carried down the launch argv — a login, or
-    // `local` for a loopback caller.
+    // word by the service and carried down the launch argv — a login, or the
+    // reserved `@local` for a loopback caller.
     expect(readManifest(started({ actor: "srid" }).handle)?.actor).toBe("srid");
-    expect(readManifest(started({ actor: "local" }).handle)?.actor).toBe("local");
-    // ABSENT, not `null` and not `"local"`: a launch that named no actor is a
+    expect(readManifest(started({ actor: "@local" }).handle)?.actor).toBe("@local");
+    // ABSENT, not `null` and not `"@local"`: a launch that named no actor is a
     // record with no answer to "who started this", which is a different fact
     // from "the machine's own owner did" and must stay distinguishable from it.
     expect(readManifest(started().handle)?.actor).toBeUndefined();

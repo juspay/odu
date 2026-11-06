@@ -180,7 +180,7 @@ export interface RunArgs {
   /** The launcher's idempotency key, recorded on the manifest so a receipt and
    *  a run can be matched up after the fact. */
   requestId?: string;
-  /** WHO ASKED FOR THIS RUN (PLAN 4.4) — a login, or `local` for a loopback
+  /** WHO ASKED FOR THIS RUN (PLAN 4.4) — a login, or `@local` for a loopback
    *  connection. Recorded on the manifest; absent when the launcher had no
    *  principal to name, which is a run with no actor rather than one this
    *  machine's owner started. */

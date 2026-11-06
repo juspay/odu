@@ -196,7 +196,7 @@ export ODU_TOKEN=odu_… ODU_WEB_ORIGIN=https://odu.example
 odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
 ```
 
-Every run records **who started it** — the token's person, or `local` on a loopback daemon — shown as `started by <login>` on the run's header and in `odu ci history list --all`, and answered by `run_read`. (`--all`, because a run started this way has the SERVER's path as its checkout, not yours.)
+Every run records **who started it** — the token's person, or `@local` on a loopback daemon — shown as `started by <login>` on the run's header and in `odu ci history list --all`, and answered by `run_read`. (`--all`, because a run started this way has the SERVER's path as its checkout, not yours.)
 
 ## Develop
 

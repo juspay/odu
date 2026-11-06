@@ -170,11 +170,11 @@ describe("launchArgv", () => {
 
   it("names the actor only when the launch knew one", () => {
     // PLAN 4.4. `null` is a launcher that was told nothing, and it must not
-    // become `--actor local`: the child would then record the machine's own
+    // become `--actor @local`: the child would then record the machine's own
     // owner for a run nobody attributed.
     expect(launchArgv(request())).not.toContain("--actor");
     expect(valueAfter(launchArgv(request({ actor: "srid" })), "--actor")).toBe("srid");
-    expect(valueAfter(launchArgv(request({ actor: "local" })), "--actor")).toBe("local");
+    expect(valueAfter(launchArgv(request({ actor: "@local" })), "--actor")).toBe("@local");
   });
 
   it("emits one --host per pin", () => {

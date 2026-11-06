@@ -223,7 +223,7 @@ export function launchArgv(request: LaunchRequest): string[] {
   if (request.requestId !== null) {
     args.push("--request-id", request.requestId);
   }
-  // WHO STARTED IT (PLAN 4.4). A login or `local`; absent when the launcher
+  // WHO STARTED IT (PLAN 4.4). A login or `@local`; absent when the launcher
   // had no principal to name, which the child records as no actor at all.
   if (request.actor !== null) {
     args.push("--actor", request.actor);

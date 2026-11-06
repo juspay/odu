@@ -427,7 +427,7 @@ odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-po
 
 Your `$ODU_HOSTS` is sent when it names a **path**, `--checkout` included: a face does not decide that your fleet stops applying to your own run, and a path the server has not got is skipped by its resolution chain, which falls through to the server's own `~/.config/odu/hosts.json`. A shell with **no** `$ODU_HOSTS` sends nothing at all for a `--checkout` run — saying "mine is empty" about a world you are not in would blank the server's own variable, and on a pod whose Deployment sets the fleet that is the only inventory there is.
 
-Every run records **who started it** — the token's person, or `local` on a loopback daemon. It appears as `started by <login>` on the run's header and in `odu ci history list --all` (`--all`, because such a run's checkout is a path on the server, not yours), and `run_read` answers it as `actor`. It is provenance, not authority: revoking a token stops the next call, not a run already launched.
+Every run records **who started it** — the token's person, or `@local` on a loopback daemon (a login cannot contain `@`, so the reserved word can never be mistaken for a person). It appears as `started by <login>` on the run's header and in `odu ci history list --all` (`--all`, because such a run's checkout is a path on the server, not yours), and `run_read` answers it as `actor`. It is provenance, not authority: revoking a token stops the next call, not a run already launched.
 
 Revoking a token on the profile page, signing out, or a session expiring ends every connection that credential opened: nothing further is served on it, the socket itself is closed, and an open board tab meets the sign-in page.
 

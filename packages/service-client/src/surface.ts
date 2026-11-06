@@ -164,7 +164,7 @@ export const HOST_CONTRACT_VERSION = "2.5";
  * 2.5: a run's `push` — where it pushes and what it warmed — on a board row
  *      and on `run_read`/`run_wait`, and `pushed` on a node (PLAN 4.1). Three
  *      optional output fields; additive.
- * 2.6: a run's `actor` — who started it, a login or `local` — on a board row
+ * 2.6: a run's `actor` — who started it, a login or `@local` — on a board row
  *      and on `run_read`/`run_wait` (PLAN 4.4). Two optional output fields;
  *      additive.
  */
@@ -708,7 +708,7 @@ export const RunRowSchema = Schema.Struct({
   parentRunId: Schema.NullOr(Schema.String),
   /**
    * WHO STARTED THIS RUN (PLAN 4.4) — the login of the person whose
-   * connection asked for it, or `local` for a loopback caller, which has no
+   * connection asked for it, or `@local` for a loopback caller, which has no
    * login because it is the machine's own owner.
    *
    * `optionalKey`, so a run recorded before this is a row WITHOUT the field
@@ -1321,7 +1321,7 @@ const AttentionAnswerSchema = Schema.Struct({
   ),
   endpoint: Schema.NullOr(Schema.String),
   /**
-   * WHO STARTED THIS RUN (PLAN 4.4) — a login, or `local` for a loopback
+   * WHO STARTED THIS RUN (PLAN 4.4) — a login, or `@local` for a loopback
    * caller.
    *
    * On the ANSWER as well as on the board row, because an agent that reads a

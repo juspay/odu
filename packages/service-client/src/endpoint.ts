@@ -58,15 +58,30 @@ function withoutTrailingSlashes(origin: string): string {
   return origin.slice(0, end);
 }
 
+/**
+ * THE ORIGIN THE ENVIRONMENT NAMES, or `undefined` when it names none.
+ *
+ * Split out of {@link serviceOrigin} because two callers want opposite halves
+ * of one rule: most want "where do I dial", which is this or the default;
+ * `odu ci run --checkout` wants "did anybody SAY where", which is this and the
+ * absence. Spelling the trim-and-empty test twice would let
+ * `ODU_WEB_ORIGIN="  "` mean "unset" to one of them and "named" to the other,
+ * and the second reader is the one deciding whether to refuse.
+ */
+export function namedOrigin(
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const raw = env[SERVICE_ORIGIN_ENV]?.trim();
+  return raw === undefined || raw === "" ? undefined : withoutTrailingSlashes(raw);
+}
+
 /** The origin this process should use, from the environment or the default.
  *  Trailing slashes are trimmed so `origin + path` is never `//rpc/ws` — a
  *  path the listener compares for EQUALITY and would silently destroy. */
 export function serviceOrigin(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const raw = env[SERVICE_ORIGIN_ENV]?.trim();
-  const origin = raw === undefined || raw === "" ? DEFAULT_SERVICE_ORIGIN : raw;
-  return withoutTrailingSlashes(origin);
+  return namedOrigin(env) ?? DEFAULT_SERVICE_ORIGIN;
 }
 
 /** The env var naming the address a BUCKET is reachable at from outside, when

@@ -700,7 +700,7 @@ Commits and PR bodies use the earlier names.
     with a required `--sha` sends both verbatim (refused unless a service is
     named — `--origin`/`ODU_WEB_ORIGIN` — since the default is the daemon for
     where you stand), and a run now records `actor` — the principal's login,
-    or `local` — so "who started this" is answerable after the fact. The
+    or `@local` — so "who started this" is answerable after the fact. The
     host-side list above stays until 5.1 moves the inventory into org venues.
 
 [^repos]: `run.start` accepts a repository plus a SHA as well as an absolute

@@ -47,7 +47,11 @@ import {
   withDeadline,
 } from "@odu/execution/common/effectEdge";
 import type { ServiceConnection } from "@odu/service-client/dial";
-import { SERVICE_ORIGIN_ENV, serviceOrigin } from "@odu/service-client/endpoint";
+import {
+  namedOrigin,
+  SERVICE_ORIGIN_ENV,
+  serviceOrigin,
+} from "@odu/service-client/endpoint";
 import type {
   AttentionAnswer,
   ListInput,
@@ -302,6 +306,20 @@ export interface Here {
   sha: string;
 }
 
+/**
+ * The checkout a RUN is about, and whether this shell is the world it happens
+ * in.
+ *
+ * `mine` is not "did the caller pass `--checkout`": it is the answer that flag
+ * was a proxy for, decided once in {@link runTarget}. Every per-caller fact
+ * that only holds for a run in this shell's own world — `$ODU_HOSTS`'s
+ * "my shell has none" reading, today — reads THIS rather than the flag, so the
+ * two can never say different things about one run.
+ */
+export interface RunTarget extends Here {
+  mine: boolean;
+}
+
 export function git(args: string[], cwd: string): string | null {
   const out = spawnSync("git", args, { cwd, encoding: "utf-8" });
   return out.status === 0 ? out.stdout.trim() : null;
@@ -354,13 +372,22 @@ export function checkoutHere(cwd: string = process.cwd()): string {
  *     distance: an explicit `--origin http://127.0.0.1:18440` is accepted, and
  *     so it should be — a developer with two daemons on one machine means the
  *     one they named. What is refused is the DEFAULT, where naming a path the
- *     caller is not standing in is at best what `cd` already does. Name it
- *     with `--origin`, or `$ODU_WEB_ORIGIN` for a whole shell.
+ *     caller is not standing in is at best what `cd` already does. Whether the
+ *     environment NAMES one is `namedOrigin`'s rule and not a second copy of
+ *     it here: one reader asks "where do I dial" and gets the default, this
+ *     one asks "did anybody say", and two spellings of the trim-and-empty
+ *     test would answer `$ODU_WEB_ORIGIN="  "` differently.
+ *
+ * It answers `mine` as well as the pair, because "is this shell the run's
+ * world" is decided HERE and nowhere else. A caller re-deriving it from the
+ * flag would be a second source for one fact — and the two can disagree, since
+ * `--checkout $PWD --origin <this daemon>` is a path in the caller's own world
+ * that the flag calls elsewhere.
  */
 export function runTarget(
   opts: { checkout?: string; sha?: string; origin?: string; cwd?: string },
   env: Record<string, string | undefined> = process.env,
-): Here {
+): RunTarget {
   if (opts.checkout === undefined) {
     if (opts.sha !== undefined) {
       throw new Error(
@@ -369,7 +396,7 @@ export function runTarget(
           "to say",
       );
     }
-    return here(opts.cwd);
+    return { ...here(opts.cwd), mine: true };
   }
   if (opts.sha === undefined) {
     throw new Error(
@@ -378,12 +405,7 @@ export function runTarget(
         "YOU believe is there (git -C <checkout> rev-parse HEAD, on that host)",
     );
   }
-  const named =
-    opts.origin ??
-    (env[SERVICE_ORIGIN_ENV]?.trim() === ""
-      ? undefined
-      : env[SERVICE_ORIGIN_ENV]);
-  if (named === undefined) {
+  if ((opts.origin ?? namedOrigin(env)) === undefined) {
     throw new Error(
       "odu: --checkout names a path on the SERVICE's machine, so say which " +
         "service — this command was given none, and the default one is the " +
@@ -393,7 +415,7 @@ export function runTarget(
   }
   // VERBATIM, both. The path is resolved where it exists and the commit is
   // read where the path is; this side knows neither and must not pretend to.
-  return { checkout: opts.checkout, sha: opts.sha };
+  return { checkout: opts.checkout, sha: opts.sha, mine: false };
 }
 
 /**

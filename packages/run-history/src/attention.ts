@@ -188,7 +188,7 @@ export interface Attention {
   endpoint: string | null;
 
   /**
-   * WHO STARTED THIS RUN (PLAN 4.4) — a login, or `local` for a loopback
+   * WHO STARTED THIS RUN (PLAN 4.4) — a login, or `@local` for a loopback
    * caller. Absent for a run recorded before the field, which is not the same
    * as a run nobody started.
    */

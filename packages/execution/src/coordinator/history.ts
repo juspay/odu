@@ -107,7 +107,7 @@ export interface RunHistoryInit {
   parentRunId?: string | null;
   /** The caller's idempotency key, when the launch carried one. */
   requestId?: string | null;
-  /** WHO STARTED THIS RUN (PLAN 4.4) — a login, or `local` for a loopback
+  /** WHO STARTED THIS RUN (PLAN 4.4) — a login, or `@local` for a loopback
    *  connection. Absent means nobody told this process, which the manifest
    *  records by omitting the field. */
   actor?: string;

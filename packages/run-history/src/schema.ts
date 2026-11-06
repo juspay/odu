@@ -235,7 +235,8 @@ export const RunManifestSchema = Schema.Struct({
    * WHO STARTED THIS RUN — the principal the connection carried, stamped once
    * at registration (PLAN 4.4).
    *
-   * A signed-in person's `login`, or `"local"` for a loopback connection,
+   * A signed-in person's `login`, or the reserved `"@local"` for a loopback
+   * connection (a login cannot contain `@`, so the two never collide),
    * which is the machine's own owner and has no login to give. The service
    * reads it from `CurrentPrincipal`, never from the caller's input: a field
    * a caller could type would be a claim rather than a fact.
