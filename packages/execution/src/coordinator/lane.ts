@@ -35,7 +35,11 @@ import {
   type SshProv,
   sshConnector,
 } from "@kolu/surface-remote";
-import { SETUP_NAMEPATH } from "@odu/run-client/nodeId";
+import {
+  type LogStream,
+  logStreamKey,
+  SETUP_NAMEPATH,
+} from "@odu/run-client/nodeId";
 import { type NodeLogFrame, type PipelineState } from "@odu/run-client/surface";
 import { absorbSealedLogAppend } from "../common/logTail";
 import type { TaskSpec } from "../common/spec";
@@ -95,7 +99,10 @@ export interface LaneOptions {
   /** Provision / lifecycle lines — land in `_ci-setup@<platform>`'s log. */
   onSetupLine: (line: string) => void;
   onNodes: (state: PipelineState) => void;
-  onLogFrame: (nodeId: string, frame: NodeLogFrame) => void;
+  /** One frame off one of a node's two log streams. `stream` says which —
+   *  the lane taps both for every task node, and the two are routed to
+   *  different files and different terminals downstream. */
+  onLogFrame: (nodeId: string, frame: NodeLogFrame, stream: LogStream) => void;
   /** Terminal lane death (never called after `close()`). */
   onDead: (error: string) => void;
 }
@@ -197,8 +204,13 @@ export function reportLogStreamDeath(opts: {
   silenced: boolean;
   transportDown: boolean;
   die: (error: string) => void;
-  onLogFrame: (nodeId: string, frame: NodeLogFrame) => void;
+  onLogFrame: (nodeId: string, frame: NodeLogFrame, stream: LogStream) => void;
   nodeId: string;
+  /** WHICH subscription died. The note goes on that stream and no other: a
+   *  push tap that lost its feed has nothing to say about the recipe's
+   *  output, and writing there would put an `[odu]` line in the one log whose
+   *  whole promise is that it holds the recipe's bytes and nothing else. */
+  stream: LogStream;
   error: unknown;
 }): void {
   if (opts.silenced) return;
@@ -207,10 +219,11 @@ export function reportLogStreamDeath(opts: {
     opts.die(`log stream died (${opts.nodeId}): ${message}`);
   }
   try {
-    opts.onLogFrame(opts.nodeId, {
-      kind: "append",
-      text: `\n[odu] log stream error: ${message}\n`,
-    });
+    opts.onLogFrame(
+      opts.nodeId,
+      { kind: "append", text: `\n[odu] log stream error: ${message}\n` },
+      opts.stream,
+    );
   } catch (err) {
     absorbSealedLogAppend(err);
   }
@@ -377,20 +390,30 @@ export function startLane(opts: LaneOptions): Lane {
     if (!closed && !dead) die("lane state stream ended");
   };
 
-  /** Every node this lane taps a log for — the runner prepends `_ci-setup`
-   *  itself, and ends the log of every node it owns, skipped ones included. */
+  /** Every node this lane taps logs for — the runner prepends `_ci-setup`
+   *  itself, and ends the logs of every node it owns, skipped ones included. */
   const loggedIds = new Set([SETUP_NAMEPATH, ...opts.tasks.map((t) => t.id)]);
-  /** Nodes whose log stream has delivered its terminal `end` frame. */
+  /** Which (node, stream) pairs have delivered their terminal `end` frame.
+   *  Keyed by the same `logStreamKey` the runner pumps under, so the lane's
+   *  bookkeeping and the producer's cannot drift on what a stream IS. */
   const logComplete = new Set<string>();
+  /** The streams this lane is owed a terminal for, per node. Two for a task
+   *  node — its recipe and its push — and ONE for `_ci-setup`, which runs no
+   *  recipe and pushes nothing: nobody subscribes to a setup push log, so
+   *  expecting its terminal would park every drain for the full idle window
+   *  on a stream that was never tapped. */
+  const streamsOf = (id: string): readonly LogStream[] =>
+    id === SETUP_NAMEPATH ? ["recipe"] : ["recipe", "push"];
 
-  const attachLog = (client: LaneClient, id: string): void => {
+  const attachLog = (client: LaneClient, id: string, stream: LogStream): void => {
+    const key = logStreamKey(id, stream);
     void (async () => {
         // Pull and handler are separate tries: a sealed-log throw from
         // `onLogFrame` must not be recast as feed death, and a handler bug
         // must not be recast as lane death. `for await` would put both in
         // one catch.
         const frames = subscribe(
-          client.surface.nodeLog.get({ id }),
+          client.surface.nodeLog.get({ id, stream }),
           lifetime.signal,
         );
         for (;;) {
@@ -408,6 +431,7 @@ export function startLane(opts: LaneOptions): Lane {
               die,
               onLogFrame: opts.onLogFrame,
               nodeId: id,
+              stream,
               error: err,
             });
             return;
@@ -415,15 +439,17 @@ export function startLane(opts: LaneOptions): Lane {
           if (next.done) return;
           const frame = next.value;
           if (closed || dead) return;
-          // Completion is not a latch: a rerun re-opens the node's log, and
-          // the snapshot that starts its new output withdraws it again.
-          if (frame.kind === "end") logComplete.add(id);
-          else if (frame.kind === "snapshot") logComplete.delete(id);
+          // Completion is not a latch: a rerun re-opens the node's logs, and
+          // the snapshot that starts its new output withdraws it again. PER
+          // STREAM, because a node is drained only when both of its streams
+          // have said their last word.
+          if (frame.kind === "end") logComplete.add(key);
+          else if (frame.kind === "snapshot") logComplete.delete(key);
           // Every frame is forwarded, `end` included — the fan-in serves the
           // same three-frame protocol to attach clients, so completion is a
           // fact readers downstream get too, not one this lane keeps.
           try {
-            opts.onLogFrame(id, frame);
+            opts.onLogFrame(id, frame, stream);
           } catch (err) {
             absorbSealedLogAppend(err);
           }
@@ -434,7 +460,7 @@ export function startLane(opts: LaneOptions): Lane {
 
   const attachLogs = (client: LaneClient): void => {
     for (const id of loggedIds) {
-      attachLog(client, id);
+      for (const stream of streamsOf(id)) attachLog(client, id, stream);
     }
   };
 
@@ -449,7 +475,9 @@ export function startLane(opts: LaneOptions): Lane {
       }
       for (const task of tasks) {
         loggedIds.add(task.id);
-        attachLog(client, task.id);
+        for (const stream of streamsOf(task.id)) {
+          attachLog(client, task.id, stream);
+        }
       }
       return true;
     } catch {
@@ -479,9 +507,14 @@ export function startLane(opts: LaneOptions): Lane {
     }
   };
 
-  /** Nodes still owing output — the drain's remaining work, and its answer. */
+  /** Nodes still owing output — the drain's remaining work, and its answer.
+   *  A node owes until EVERY stream it was tapped for has delivered its
+   *  terminal; the answer is in node ids, because what a caller does with it
+   *  is stamp a truncation notice on a node. */
   const undrained = (): string[] =>
-    [...loggedIds].filter((id) => !logComplete.has(id));
+    [...loggedIds].filter((id) =>
+      streamsOf(id).some((stream) => !logComplete.has(logStreamKey(id, stream))),
+    );
 
   /** The drain's answer, built from what the lane actually still owes rather
    *  than from the branch that noticed: a lane that went quiet having

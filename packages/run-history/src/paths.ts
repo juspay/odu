@@ -162,6 +162,27 @@ export function attemptDir(
   return join(dir, RUN_FILES.attempts, encodedNode, String(attempt));
 }
 
-/** The two files an attempt directory holds: raw bytes, and the sidecar that
- *  says what they are. */
-export const ATTEMPT_FILES = { log: "log", record: "record.json" } as const;
+/** The files an attempt directory holds: the recipe's raw bytes, the push's
+ *  raw bytes, and the sidecar that says what they are.
+ *
+ *  TWO LOGS, because a node does two things: it runs a recipe, and then it
+ *  puts what the recipe built in the cache. Interleaving them cost the reader
+ *  the one thing a log is for — the recipe's log stopped being exactly the
+ *  recipe's output the moment a push appended `[odu] …` to it. */
+export const ATTEMPT_FILES = {
+  log: "log",
+  pushLog: "push.log",
+  record: "record.json",
+} as const;
+
+/** Which of an attempt's two logs a caller means. `"recipe"` is the default
+ *  everywhere: it is the log that existed first and the one every reader that
+ *  does not say otherwise wants. */
+export type LogStream = "recipe" | "push";
+
+/** One attempt's log file, by stream. The ONE place a stream name becomes a
+ *  file name, so a writer and a reader cannot disagree about which bytes they
+ *  are addressing. */
+export function attemptLogFile(stream: LogStream = "recipe"): string {
+  return stream === "push" ? ATTEMPT_FILES.pushLog : ATTEMPT_FILES.log;
+}

@@ -69,7 +69,13 @@ export type PreviewState =
 
 /** What the form is doing. `existing` is not an error: the caller asked for a
  *  checkout that already has a live run, and being shown that run is almost
- *  certainly what they wanted. */
+ *  certainly what they wanted.
+ *
+ *  `starting` is BOUNDED BY ITS OWNER, and this form relies on that: the
+ *  submit is disabled while it holds, so a state that could be entered and
+ *  never left is a dead button and a reload. Whoever sets it owes a deadline
+ *  that takes it off again — `ci.tsx`'s `START_DEADLINE_MS` — and the answer
+ *  it leaves behind, refusal included, is drawn directly under the control. */
 export type CreateState =
   | { kind: "idle" }
   | { kind: "starting" }
@@ -273,15 +279,41 @@ export function Create(props: {
           </Show>
         </div>
       </form>
-      {/* A refusal INTERRUPTS — `Receipt`'s `refused` tone announces it with
+      {/* THE ANSWER TO THE PRESS, DIRECTLY UNDER THE BUTTON THAT ASKED.
+
+          These two used to sit at the BOTTOM of the section, below a pipeline
+          preview that is as tall as the checkout's DAG — so the refusal to a
+          start could be an entire panel away from the control a person had
+          just pressed, off the fold on any checkout with more than a handful
+          of recipes. A start that is bounded by a deadline (see `ci.tsx`'s
+          `START_DEADLINE_MS`) makes that worse rather than better: the button
+          coming back out of `Starting…` is only half the story, and the half
+          that says WHY was somewhere else on the page.
+
+          A refusal INTERRUPTS — `Receipt`'s `refused` tone announces it with
           `alert` rather than `status` — because it is the answer to the thing
           the person just pressed, and the form is still sitting there looking
           ready.
 
-          NEITHER receipt here is dismissable, unlike the run page's. There is
+          NO receipt here is dismissable, unlike the run page's. There is
           nothing to be stuck with: this form's one control replaces its answer
           the moment it is pressed again, so a Dismiss button would be a second
           way to clear something one press already clears. */}
+      <Show when={props.state.kind === "refused" ? props.state : null}>
+        {(refused) => <Receipt tone="refused">{refused().message}</Receipt>}
+      </Show>
+      <Show when={props.state.kind === "existing" ? props.state : null}>
+        {(existing) => (
+          <Receipt tone="ok">
+            {`That checkout already has a live run at ${existing().sha.slice(0, 7)}. `}
+            <Button onClick={() => props.onOpen(existing().runId)}>
+              Open it
+            </Button>
+            {" — or tick “Take the checkout” above and start again."}
+          </Receipt>
+        )}
+      </Show>
+      {/* The PREVIEW's own refusal, beside the panel it would have filled. */}
       <Show when={props.preview.kind === "refused" ? props.preview : null}>
         {(refused) => <Receipt tone="refused">{refused().message}</Receipt>}
       </Show>
@@ -315,20 +347,6 @@ export function Create(props: {
               </ul>
             </div>
           </Panel>
-        )}
-      </Show>
-      <Show when={props.state.kind === "refused" ? props.state : null}>
-        {(refused) => <Receipt tone="refused">{refused().message}</Receipt>}
-      </Show>
-      <Show when={props.state.kind === "existing" ? props.state : null}>
-        {(existing) => (
-          <Receipt tone="ok">
-            {`That checkout already has a live run at ${existing().sha.slice(0, 7)}. `}
-            <Button onClick={() => props.onOpen(existing().runId)}>
-              Open it
-            </Button>
-            {" — or tick “Take the checkout” above and start again."}
-          </Receipt>
         )}
       </Show>
     </section>

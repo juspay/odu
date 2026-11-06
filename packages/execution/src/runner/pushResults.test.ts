@@ -2,7 +2,7 @@
  * THE LANE'S PUSH (PLAN 4.1) — what it finds, what it sends ONCE, and what
  * happens when the bucket refuses.
  *
- * Three properties, and each would otherwise be discovered in production:
+ * Four properties, and each would otherwise be discovered in production:
  *
  *   - **`result*`, resolved.** A `nix build --out-link result` leaves a
  *     symlink, and the closure is of what it POINTS AT. A chain of links, a
@@ -15,6 +15,11 @@
  *   - **A refusal is a throw**, because the runner turns it into a red node:
  *     green means warmed, and a recipe whose outputs did not reach the bucket
  *     has not given the next run what this run promised.
+ *   - **Three sinks, and `begin` is a promise.** The push's own output goes to
+ *     the push step's log, the lane explaining itself goes to the recipe's,
+ *     and `begin` fires exactly when there is something to send — so a runner
+ *     that saw it may rely on a fact or a throw arriving after, and a node
+ *     with nothing fresh never opens a step at all.
  *
  * The store directory, the cache description and the push client are all
  * injected. This is about the lane's decisions; a suite that needed a Nix and
@@ -84,21 +89,47 @@ const summary = (over: Partial<PushSummary> = {}): PushSummary => ({
   ...over,
 });
 
-/** A pusher with a stated upload and a stated clock, so a push's own duration
- *  is an exact number rather than whatever the machine took. */
+/** A pusher with a stated upload. No clock seam any more: the push's own
+ *  duration is the RUNNER's measurement now, which is what lets the success
+ *  and failure paths share one stopwatch — see `lanePush.test.ts` for the
+ *  node-visible half. */
 function laneWith(
   storeDir: string,
   push: (options: PushOptions) => Promise<PushSummary>,
 ): LanePusher {
-  let tick = 1_000;
-  return createLanePusher({
-    storeDir,
-    push,
-    now: () => {
-      tick += 250;
-      return tick;
+  return createLanePusher({ storeDir, push });
+}
+
+/** The three sinks a push narrates through, each remembered apart — which is
+ *  itself the property under test. `note` is the lane explaining itself on
+ *  the RECIPE's log, `say` is the push step's own output, and `begin` is the
+ *  step opening at all; a module that mixed them would put `[odu] pushing 4
+ *  result paths` in the log whose whole promise is the recipe's bytes. */
+function sinks(): {
+  hooks: Parameters<LanePusher["push"]>[2];
+  notes: string[];
+  said: string[];
+  begins: () => number;
+} {
+  const notes: string[] = [];
+  const said: string[] = [];
+  let begins = 0;
+  return {
+    hooks: {
+      note: (line) => {
+        notes.push(line);
+      },
+      begin: () => {
+        begins += 1;
+      },
+      say: (line) => {
+        said.push(line);
+      },
     },
-  });
+    notes,
+    said,
+    begins: () => begins,
+  };
 }
 
 describe("what a lane finds to push", () => {
@@ -125,7 +156,7 @@ describe("what a lane finds to push", () => {
     }
   });
 
-  it("THROWS for a directory that is not there, and the lane says so on the node", async () => {
+  it("THROWS for a directory that is not there, and the lane NOTES it on the recipe's log", async () => {
     // The silent half of the module-workdir bug. Where a recipe ran is
     // DERIVED from `just`'s dump, so it can be derived wrongly — and an empty
     // list made a wrong answer indistinguishable from a recipe that built
@@ -133,14 +164,18 @@ describe("what a lane finds to push", () => {
     // which directory was looked in.
     expect(() => resultPathsIn("/nonexistent-workspace")).toThrow();
 
-    const lines: string[] = [];
+    const s = sinks();
     const lane = laneWith("/nix/store", async () => {
       throw new Error("the push client must never be reached");
     });
-    expect(
-      await lane.push("/nonexistent-workspace", CONFIG, (line) => lines.push(line)),
-    ).toBeNull();
-    expect(lines.join("\n")).toContain("not pushing: /nonexistent-workspace");
+    expect(await lane.push("/nonexistent-workspace", CONFIG, s.hooks)).toBeNull();
+    // ON THE RECIPE'S LOG, and nowhere else. There is no push step here —
+    // `begin` never fired — so there is no push log for this sentence to land
+    // in, and a reader asking why this node warmed nothing is reading the
+    // recipe's output.
+    expect(s.notes.join("\n")).toContain("not pushing: /nonexistent-workspace");
+    expect(s.said).toEqual([]);
+    expect(s.begins()).toBe(0);
   });
 
   it("reads the push configuration off a task's environment, and only a whole one", () => {
@@ -178,8 +213,14 @@ describe("a lane that pushes", () => {
         return summary({ served: [...options.paths] });
       });
 
-      const first = await lane.push(w.workspace, CONFIG, () => {});
-      expect(first).toEqual({ paths: 1, bytes: 4096, durationMs: 250 });
+      const s = sinks();
+      const first = await lane.push(w.workspace, CONFIG, s.hooks);
+      expect(first).toEqual({ paths: 1, bytes: 4096 });
+      // THE STEP OPENED ONCE, and its narration is the PUSH's — not a line of
+      // it on the recipe's log.
+      expect(s.begins()).toBe(1);
+      expect(s.said.join("\n")).toContain("pushing 1 result path to bucket main");
+      expect(s.notes).toEqual([]);
       expect(sent).toHaveLength(1);
       expect(sent[0]?.paths).toEqual([one]);
       // WHERE THE DAEMON SAID, and nowhere else: the lane asks no server what
@@ -193,11 +234,16 @@ describe("a lane that pushes", () => {
       expect(sent[0]?.credential).toBe(CONFIG.token);
       expect(sent[0]?.env).toEqual({});
 
-      // THE SECOND NODE leaves the same link. Nothing new, so nothing is sent
-      // and nothing is claimed.
-      const second = await lane.push(w.workspace, CONFIG, () => {});
+      // THE SECOND NODE leaves the same link. Nothing new, so nothing is sent,
+      // nothing is claimed — and NO STEP IS OPENED: a node with nothing fresh
+      // to push has no push step at all, which is what `begin` firing exactly
+      // when `fresh` is non-empty buys the runner.
+      const again = sinks();
+      const second = await lane.push(w.workspace, CONFIG, again.hooks);
       expect(second).toBeNull();
       expect(sent).toHaveLength(1);
+      expect(again.begins()).toBe(0);
+      expect(again.said).toEqual([]);
     } finally {
       w.dispose();
     }
@@ -212,9 +258,9 @@ describe("a lane that pushes", () => {
         sent.push(options);
         return summary({ served: [...options.paths] });
       });
-      await lane.push(w.workspace, CONFIG, () => {});
+      await lane.push(w.workspace, CONFIG, sinks().hooks);
       const second = w.build("result-doc", "bbb-doc");
-      await lane.push(w.workspace, CONFIG, () => {});
+      await lane.push(w.workspace, CONFIG, sinks().hooks);
       expect(sent).toHaveLength(2);
       expect(sent[1]?.paths).toEqual([second]);
     } finally {
@@ -233,10 +279,15 @@ describe("a lane that pushes", () => {
           served: [],
         }),
       );
+      const s = sinks();
       const thrown = await lane
-        .push(w.workspace, CONFIG, () => {})
+        .push(w.workspace, CONFIG, s.hooks)
         .then(() => null)
         .catch((err: unknown) => err);
+      // THE STEP HAD ALREADY OPENED. A throw can only reach the runner after
+      // `begin`, which is what lets it time the failure off one clock and
+      // paint a `failed` push step rather than a node that never pushed.
+      expect(s.begins()).toBe(1);
       expect(thrown).toBeInstanceOf(Error);
       expect((thrown as Error).message).toContain("413 too large");
       expect((thrown as Error).message).toContain("main");
@@ -264,9 +315,9 @@ describe("a lane that pushes", () => {
           : summary({ served: [...options.paths] });
         return answer;
       });
-      await lane.push(w.workspace, CONFIG, () => {}).catch(() => {});
+      await lane.push(w.workspace, CONFIG, sinks().hooks).catch(() => {});
       refuse = false;
-      expect(await lane.push(w.workspace, CONFIG, () => {})).toBeNull();
+      expect(await lane.push(w.workspace, CONFIG, sinks().hooks)).toBeNull();
       expect(sent).toHaveLength(1);
     } finally {
       w.dispose();

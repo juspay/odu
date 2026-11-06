@@ -136,7 +136,7 @@ const help: SurfaceCliHelp = {
     run_start:
       `run_start --input '{"checkout":"/code/app","expectedSha":"$SHA","requestId":"start-1"}' --json`,
     run_wait: `run_wait --input '{"runId":"$RUN","after":"$CURSOR"}' --json`,
-    log_read: `log_read --input '{"key":"$LOG_KEY","offset":-4096}' --json`,
+    log_read: `log_read --input '{"key":"$LOG_KEY","offset":-4096,"stream":"push"}' --json`,
     run_retry:
       `run_retry --input '{"runId":"$RUN","selector":"ci::unit","requestId":"retry-1"}' --json`,
     run_cancel:

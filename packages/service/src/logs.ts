@@ -175,10 +175,28 @@ export function readLog(
     }
     const handle = handleFor(key.runId, catalog);
     const limit = input.limit ?? DEFAULT_LOG_PAGE_BYTES;
-    const slice = readAttemptLog(handle, key.node, key.attempt, {
-      ...(input.offset === undefined ? {} : { offset: input.offset }),
-      limit,
-    });
+    // WHICH OF THE ATTEMPT'S TWO STREAMS. Absent is the recipe's own output —
+    // the reading every caller written before the push became a step makes,
+    // and the one a bare key still means. The stream is a choice about WHAT TO
+    // READ at an address, never part of the address: the page below echoes
+    // `input.key` verbatim, so a follower's cursor stays valid across both and
+    // no second key grammar has to be parsed, formatted or taught.
+    const stream = input.stream;
+    // An attempt recorded before the push had its own log has no `push.log` at
+    // all, so a `push` read of it finds nothing and takes the same no-evidence
+    // refusal a wrong attempt number does. That is the right answer and not a
+    // case to special-case: "this attempt kept no such record" is exactly what
+    // happened, and an empty success would read as "it pushed, and was quiet".
+    const slice = readAttemptLog(
+      handle,
+      key.node,
+      key.attempt,
+      {
+        ...(input.offset === undefined ? {} : { offset: input.offset }),
+        limit,
+      },
+      stream,
+    );
     if (slice === null) return Effect.fail(noEvidence(key));
     const page = pageOf(handle, key, input.key, slice, clock());
     // THE WAIT FIRES ONLY FOR A CAUGHT-UP FOLLOWER. `bytesRead === 0` is
@@ -211,6 +229,10 @@ export function readLog(
           // which may have been a negative tail.
           from: page.nextOffset,
           deadlineMs: input.waitMs,
+          // THE WAIT WATCHES THE FILE THIS READ IS OF. A follow of the push
+          // stream that polled the recipe's log would wake on the recipe's
+          // bytes and answer an empty page, and sleep through the push's own.
+          ...(stream === undefined ? {} : { stream }),
           ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
           ...(deps.now === undefined ? {} : { now: deps.now }),
           signal: controller.signal,
@@ -229,10 +251,13 @@ export function readLog(
       // A shrink included: re-reading at a cursor the file no longer reaches
       // comes back clamped, which is how the caller learns its offsets moved.
       () => {
-        const grown = readAttemptLog(handle, key.node, key.attempt, {
-          offset: page.nextOffset,
-          limit,
-        });
+        const grown = readAttemptLog(
+          handle,
+          key.node,
+          key.attempt,
+          { offset: page.nextOffset, limit },
+          stream,
+        );
         return grown === null
           ? Effect.fail(noEvidence(key))
           : Effect.succeed(pageOf(handle, key, input.key, grown, clock()));
@@ -248,6 +273,13 @@ export function readLog(
  * absent item rather than an error, because a browser subscribing to a node
  * that has not started yet is asking a reasonable question and the answer is
  * "not yet".
+ *
+ * **THE TAIL IS THE RECIPE'S, and stays so.** There is no `stream` here and
+ * there should not be: the live view's tail is the work a node is DOING, and a
+ * collection keyed by log key alone is what lets a page subscribe to a node
+ * without first knowing which of its streams has bytes. The push's output is
+ * paged, followed and shown through `log.read` with `stream: "push"` — a tab a
+ * reader opens, not a second frame every watcher of every node pays for.
  */
 export function readTail(
   key: string,

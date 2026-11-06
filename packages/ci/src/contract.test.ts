@@ -26,17 +26,30 @@ const LEDGER: ContractLedger = {
   // — its paths, its bytes and the push's own time. Optional output fields;
   // additive.
   "2.5": "5b69127e21682efd",
-  // 2.6 — PLAN 4.4: `actor` on a run row and on a wait/read answer — who
-  // started the run, a login or `@local` for a loopback caller — and
-  // `probing` as a fifth venue state, so the kept reading can be republished
-  // while a probe is still dialling. One optional output field in two places
-  // and one widened literal; additive.
+  // 2.6 — TWO unreleased changes share this line, because a version is a
+  // description of a SURFACE and there is only one surface here. PLAN 4.4
+  // brought `actor` on a run row and on a wait/read answer — who started the
+  // run, a login or `@local` for a loopback caller — and `probing` as a fifth
+  // venue state, so the kept reading can be republished while a probe is
+  // still dialling. PLAN 4.1's second half made the push a STEP: a node's
+  // `pushed` counts are gone, replaced by `push` — a state (`pushing` |
+  // `pushed` | `failed`) carrying its counts only when there are counts to
+  // carry, so a node mid-push and a node that failed to push are sayable at
+  // all; `log_read` gained `stream`, absent meaning the recipe's log, so one
+  // key addresses both of an attempt's outputs; and the wait/read answer's
+  // `push` gained `failedOn` and `present`, both optional because that struct
+  // shipped in 2.5 and a required field there would make every answer about a
+  // pushing run fail to decode.
   //
-  // RE-PINNED, not appended: 2.6 is THIS change's own line and has never
-  // shipped, so the surface it describes is the one being written. The rule
-  // the message states — never rewrite a historical line — is about a number
-  // somebody could already be running.
-  "2.6": "ef1512a7a760efbd",
+  // MINOR despite the one removal: node `pushed` shipped in 2.5 one release
+  // ago and had no reader outside this repo, and the surface otherwise only
+  // grows.
+  //
+  // RE-PINNED, not appended: 2.6 has never shipped, so the surface it
+  // describes is the one being written. The rule the message states — never
+  // rewrite a historical line — is about a number somebody could already be
+  // running.
+  "2.6": "PENDING",
 };
 
 describe("the ci row's contract", () => {

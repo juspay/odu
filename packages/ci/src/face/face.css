@@ -190,13 +190,43 @@
   .node-attempt,
   .node-host,
   .node-duration,
-  .node-exit,
-  .node-pushed { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
+  .node-exit { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
   .node-exit { color: var(--red-ink); }
-  /* `.node-pushed` stays `--muted` with the rest of the trim: colour carries
-   * STATUS on this board and nothing else, and a green cell on a node that
-   * failed on its push would read as a second verdict. */
   .node-controls { display: flex; gap: 0.3rem; flex: none; }
+
+  /* ── a node's PUSH, as its own step ───────────────────────────────────────
+   *
+   * A LINE OF ITS OWN under the row, between the node's cells and the track
+   * they are measured in. It used to be one more cell on the node's button,
+   * which could only ever report a push that had already finished — a push in
+   * flight had nothing to add, and a push that FAILED showed up as a missing
+   * cell beside a red node whose recipe was green.
+   *
+   * `flex-basis: 100%` with an `order` between the cells (none) and the track
+   * (9) is what puts it on its own line in the row's existing wrap, with no
+   * second grid and nothing for `.node-track`'s box to collide with — the
+   * timeline scenario asserts that box is the axis's, and a sibling line above
+   * it does not move it.
+   *
+   * The INSET matches the track's, so the step's glyph sits over the bar it
+   * describes rather than over the row's edge. */
+  .node-push-step {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    order: 8;
+    flex-basis: 100%;
+    min-width: 0;
+    margin: 0 0 0.2rem 0.5rem;
+    color: var(--muted);
+    font: 0.78rem var(--mono);
+    /* One line, clipped. The sentence ends in counts a reader scans, and a
+       bucket name long enough to wrap would push the track down a line on
+       some rows and not others. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 
   /* ── the lane timeline ────────────────────────────────────────────────────
    *
@@ -254,6 +284,26 @@
       transparent 4px 8px
     );
     opacity: 0.85;
+  }
+
+  /* The push's own segment, in the SAME track as the recipe's bar — the push
+     happens inside the same run, on the same clock, immediately after the
+     recipe it continues, and a rail of its own would be a bar measured
+     against a scale nothing labels.
+
+     AFTER `.node-bar` and `.node-bar-running` on purpose: these two
+     declarations override theirs at equal specificity, so source order is the
+     whole of the rule and moving this block up would silently stop it
+     working.
+
+     Inset vertically so the two segments read as two STEPS rather than one
+     bar that changed colour mid-way. They are adjacent to the pixel by
+     construction — `pushSpan` starts exactly where `laneSpan` stops — which
+     is precisely the case where a seam has to be drawn rather than left to a
+     reader to infer from a change of hue. */
+  .node-push-bar {
+    inset-block: 1px;
+    opacity: 0.9;
   }
 
   /* The scale, once per list rather than once per row. `aria-hidden` in the
@@ -361,9 +411,15 @@
 
   .log-meta { color: var(--muted); font: 0.78rem var(--mono); margin-right: auto; }
 
-  /* The attempt picker and the page-window readout. Both are FACTS rather than
-     decoration — the window offsets are the same byte offsets `odu logs
-     --offset` takes, and a person copying one needs the digits to line up. */
+  /* The stream tabs, the attempt picker and the page-window readout. The
+     first two are the same shape — a row of buttons, one of them pressed —
+     so they share one rule rather than two spellings that drift apart the
+     first time somebody changes a gap.
+
+     Both are FACTS rather than decoration: the window offsets are the same
+     byte offsets `odu logs --offset` takes, and a person copying one needs
+     the digits to line up. */
+  .log-streams,
   .attempts { display: flex; flex-wrap: wrap; gap: 0.25rem; }
   .log-page { color: var(--muted); font: 0.78rem var(--mono); white-space: nowrap; }
 
@@ -545,6 +601,12 @@
   /* WHERE THIS RUN'S BUILDS GO (PLAN 4.1). Mono like the other header facts,
    * because the bucket name is a string a person pastes. */
   .detail-push { color: var(--muted); font: 0.8rem var(--mono); }
+  /* AND WHAT LANDED. Same trim as the target beside it, because the two read
+   * as one sentence about this run's cache — except the failure note, which
+   * is the one thing on the header that is a verdict rather than a fact and
+   * takes the red ink the node rows' exit codes already use. */
+  .detail-push-total { color: var(--muted); font: 0.8rem var(--mono); }
+  .detail-push-failed { color: var(--red-ink); }
   .detail-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
   /* TWO TO THREE. The node list holds ids that are a namepath and a platform

@@ -1,47 +1,69 @@
 /**
  * The coordinator's durable projection of the shared log tail: every mutation
  * of a node's in-memory tail also lands in `.ci/<sha7>/<platform>/<node>.log`
- * (justci's layout). The tail is the shared primitive — the runner serves it
- * raw — and durability is the coordinator's addition on top of it.
+ * — or `<node>.push.log`, for the half of a node that puts its outputs in the
+ * cache (justci's layout, plus the push's own file beside it). The tail is the
+ * shared primitive — the runner serves it raw — and durability is the
+ * coordinator's addition on top of it.
  *
  * A module rather than a cluster of closures inside `orchestrate` because it
  * encapsulates ONE axis of change with a name: **which run owns the file.** The
  * file ADDRESS is not an axis here — `.ci/<sha7>/<platform>/<node>.log` is
- * `@odu/run-client`'s `logPathFor`, the one spelling every writer and reader
- * shares. What this module owns is the claim policy: per-commit addressing,
- * truncate-on-first-touch per run, `appendFileSync` over a buffered writer —
- * every one of those edits lands here and nowhere else. The run keeps the
- * policy that is genuinely its own: which frame routes where, and when a
- * node's log has had the run's last word.
+ * `@odu/run-client`'s `logPathForStream`, the one spelling every writer and
+ * reader shares, and the pump key beside it (`logStreamKey`) is the one
+ * spelling of "which of a node's two streams". What this module owns is the
+ * claim policy: per-commit addressing, truncate-on-first-touch per run,
+ * `appendFileSync` over a buffered writer — every one of those edits lands
+ * here and nowhere else. The run keeps the policy that is genuinely its own:
+ * which frame routes where, and when a node's log has had the run's last word.
  */
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { logPathFor } from "@odu/run-client/nodeId";
+import {
+  type LogStream,
+  logPathForStream,
+  logStreamKey,
+} from "@odu/run-client/nodeId";
 import { createLogTail, type CreateLogTailResult } from "../common/logTail";
 
+/**
+ * Every verb takes the STREAM last and defaults it to the recipe's.
+ *
+ * A node has two logs — what its recipe printed, and what pushing its outputs
+ * to the cache printed — and both are durable, both are claimed per run, both
+ * end. Threading the stream through rather than minting a second sink per
+ * node is what keeps "the first touch of a run truncates" one policy instead
+ * of two: `madeDirs` and `openedFiles` are keyed by PATH, so the push log's
+ * file is claimed by exactly the same rule as the recipe's, in the same place.
+ *
+ * The default is `"recipe"` because that is what every caller that does not
+ * know about the push means, including the ones written before it existed.
+ */
 export interface NodeLogSink {
   /** Append to the tail and to the durable file. */
-  append: (id: string, text: string) => void;
+  append: (id: string, text: string, stream?: LogStream) => void;
   /** Replace the tail's buffer and the file's contents (a rerun's snapshot). */
-  reset: (id: string, text: string) => void;
-  /** Publish this node's log terminal. Does NOT claim the file — see the body. */
-  end: (id: string) => void;
+  reset: (id: string, text: string, stream?: LogStream) => void;
+  /** Publish this stream's log terminal. Does NOT claim the file — see the body. */
+  end: (id: string, stream?: LogStream) => void;
   /** Claim a node's file for this run without writing anything. */
-  claim: (id: string) => void;
+  claim: (id: string, stream?: LogStream) => void;
   /** Would `reset(id, text)` change anything a reader can observe? */
-  isNoopReset: CreateLogTailResult["isNoopReset"];
-  /** Has this node's log published its terminal — i.e. is the run done
+  isNoopReset: (id: string, text: string, stream?: LogStream) => boolean;
+  /** Has this stream's log published its terminal — i.e. is the run done
    *  expecting bytes for it? */
-  isEnded: CreateLogTailResult["isEnded"];
+  isEnded: (id: string, stream?: LogStream) => boolean;
   /** The `nodeLog` source this coordinator serves on `.ci/odu.sock`, and the
-   *  live view's `openLog` seam. */
+   *  live view's `openLog` seam. Keyed by the PUMP's key (`logStreamKey`), so
+   *  a caller serving the wire's `{ id, stream }` composes the two. */
   streamSource: CreateLogTailResult["streamSource"];
 }
 
 export function createNodeLogSink(repoRoot: string, sha7: string): NodeLogSink {
   const tail = createLogTail();
-  const fileFor = (id: string): string => join(repoRoot, logPathFor(sha7, id));
+  const fileFor = (id: string, stream: LogStream): string =>
+    join(repoRoot, logPathForStream(sha7, id, stream));
   /** The log directories this process has already created. A run's node set is
    *  fixed, so this is bounded by the lane count — and since juspay/odu#84 the
    *  provisioning narration flows through `append` one line at a time
@@ -64,8 +86,8 @@ export function createNodeLogSink(repoRoot: string, sha7: string): NodeLogSink {
    *  truncates. Named for the claim rather than for the path resolution because
    *  the claim is the policy — "which run owns this file" — and the path is
    *  just how it is addressed. Returns the path so writers can chain. */
-  const claimLog = (id: string): string => {
-    const file = fileFor(id);
+  const claimLog = (id: string, stream: LogStream): string => {
+    const file = fileFor(id, stream);
     const dir = dirname(file);
     if (!madeDirs.has(dir)) {
       mkdirSync(dir, { recursive: true });
@@ -79,13 +101,13 @@ export function createNodeLogSink(repoRoot: string, sha7: string): NodeLogSink {
   };
 
   return {
-    append: (id, text) => {
-      tail.append(id, text);
-      appendFileSync(claimLog(id), text);
+    append: (id, text, stream = "recipe") => {
+      tail.append(logStreamKey(id, stream), text);
+      appendFileSync(claimLog(id, stream), text);
     },
-    reset: (id, text) => {
-      tail.reset(id, text);
-      writeFileSync(claimLog(id), text);
+    reset: (id, text, stream = "recipe") => {
+      tail.reset(logStreamKey(id, stream), text);
+      writeFileSync(claimLog(id, stream), text);
     },
     // Publishes the terminal and NOTHING else — deliberately not a claim.
     //
@@ -98,14 +120,15 @@ export function createNodeLogSink(repoRoot: string, sha7: string): NodeLogSink {
     // wearing the opposite mask. A claim belongs where the run has actually
     // produced that node's outcome: a write, or a lane frame saying the node
     // finished under this run (`claim` below).
-    end: (id) => {
-      tail.end(id);
+    end: (id, stream = "recipe") => {
+      tail.end(logStreamKey(id, stream));
     },
-    claim: (id) => {
-      claimLog(id);
+    claim: (id, stream = "recipe") => {
+      claimLog(id, stream);
     },
-    isEnded: tail.isEnded,
-    isNoopReset: tail.isNoopReset,
+    isEnded: (id, stream = "recipe") => tail.isEnded(logStreamKey(id, stream)),
+    isNoopReset: (id, text, stream = "recipe") =>
+      tail.isNoopReset(logStreamKey(id, stream), text),
     streamSource: tail.streamSource,
   };
 }
@@ -119,7 +142,11 @@ export function appendIfOpen(
   sink: Pick<NodeLogSink, "append" | "isEnded">,
   id: string,
   text: string,
+  /** Which of the node's two logs. The guard and the write must name the
+   *  SAME one: a push line checked against the recipe's terminal would be
+   *  skipped while the push log was still open, or thrown into a sealed one. */
+  stream: LogStream = "recipe",
 ): void {
-  if (sink.isEnded(id)) return;
-  sink.append(id, text);
+  if (sink.isEnded(id, stream)) return;
+  sink.append(id, text, stream);
 }

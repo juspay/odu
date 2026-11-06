@@ -69,8 +69,46 @@ export function shortSha(sha: string): string {
  *  over the id split, like {@link runSocketPath} is over the checkout root;
  *  whether the file exists is a question for the filesystem. */
 export function logPathFor(sha7: string, nodeId: string): string {
+  return logPathForStream(sha7, nodeId, "recipe");
+}
+
+/**
+ * WHICH OF A NODE'S TWO LOGS. A node does two things — it runs a recipe, and
+ * then it puts what the recipe built in the cache — and each writes its own
+ * bytes. `"recipe"` is the default everywhere a stream is not named: it is the
+ * log that existed first and the one a reader means unless it says otherwise.
+ */
+export const LOG_STREAMS = ["recipe", "push"] as const;
+export const LogStreamSchema = Schema.Literals(LOG_STREAMS);
+export type LogStream = (typeof LOG_STREAMS)[number];
+
+/**
+ * The key one node's one stream is pumped under.
+ *
+ * The log pump is a map of string → buffer, and a node's push needs a SECOND
+ * entry in it. A suffix that no node id can collide with rather than a derived
+ * node id (`ci::nix+push@linux`), because a fake id would split under
+ * {@link splitFanId} into a namepath nobody scheduled — and every reader that
+ * paints the run as recipes × platforms would grow a phantom row.
+ *
+ * Internal to the pump and its two ends: the WIRE names the stream in its own
+ * field (`nodeLog.get({ id, stream })`), so this spelling never crosses it.
+ */
+export function logStreamKey(nodeId: string, stream: LogStream = "recipe"): string {
+  return stream === "push" ? `${nodeId}\u0000push` : nodeId;
+}
+
+/** The push half of {@link logPathFor}: `.ci/338eb01/x86_64-linux/ci::e2e.push.log`.
+ *  Beside the recipe's log rather than under it, so one `ls` of a lane's
+ *  directory shows both halves of what a node did. */
+export function logPathForStream(
+  sha7: string,
+  nodeId: string,
+  stream: LogStream = "recipe",
+): string {
   const { namepath, platform } = splitFanId(nodeId);
-  return `.ci/${sha7}/${platform}/${namepath}.log`;
+  const suffix = stream === "push" ? "push.log" : "log";
+  return `.ci/${sha7}/${platform}/${namepath}.${suffix}`;
 }
 
 export function onPlatform(id: string, platform: string): boolean {

@@ -53,6 +53,7 @@ import type {
   CatalogImportReport,
   CatalogPruneReport,
   LogPage,
+  LogStream,
   OduServiceClient,
   RetryReceipt,
   RunRow,
@@ -552,6 +553,10 @@ export interface LogsOpts {
   follow?: boolean;
   /** How long one followed read may wait for growth before answering empty. */
   waitMs?: number;
+  /** WHICH of the attempt's logs — absent is the recipe's own output, which
+   *  is what a bare key has always meant and must keep meaning. `"push"` is
+   *  the same attempt's push step, a separate file with its own end. */
+  stream?: LogStream;
   json: boolean;
   origin?: string;
 }
@@ -581,6 +586,7 @@ export async function logsViaService(opts: LogsOpts): Promise<number> {
         key: opts.key,
         ...(opts.offset === undefined ? {} : { offset: opts.offset }),
         ...(opts.limit === undefined ? {} : { limit: opts.limit }),
+        ...(opts.stream === undefined ? {} : { stream: opts.stream }),
       }),
     );
     if (!read.ok) {
@@ -850,7 +856,10 @@ function renderPrune(report: CatalogPruneReport): string {
  */
 export async function followLog(
   client: Pick<OduServiceClient, "surface">,
-  opts: Pick<LogsOpts, "key" | "offset" | "limit" | "waitMs" | "json">,
+  opts: Pick<
+    LogsOpts,
+    "key" | "offset" | "limit" | "waitMs" | "stream" | "json"
+  >,
 ): Promise<number> {
   // Negative only on the FIRST call — `--offset=-4096` means "start from the
   // last 4 KiB". After that the cursor is an absolute position, because
@@ -863,6 +872,11 @@ export async function followLog(
         key: opts.key,
         ...(cursor === undefined ? {} : { offset: cursor }),
         ...(opts.limit === undefined ? {} : { limit: opts.limit }),
+        // EVERY call of the follow, not just the first. The cursor advances
+        // within ONE stream; a cursored read that dropped the stream would
+        // resume at this offset in the recipe's log and splice two files
+        // together as though they were one.
+        ...(opts.stream === undefined ? {} : { stream: opts.stream }),
         waitMs: opts.waitMs ?? FOLLOW_WAIT_MS,
       }),
     );

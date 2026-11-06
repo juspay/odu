@@ -10,6 +10,8 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { releaseOwnership } from "@odu/run-history/owner";
+import { Effect } from "effect";
+import { readRun } from "./wait";
 import { appendEvent, expireRun } from "@odu/run-history/store";
 import { createRegistry, projectRun } from "./registry";
 import { REFRESH_MS } from "./service";
@@ -276,6 +278,129 @@ describe("the run registry", () => {
     const later = at + OWNERSHIP_GRACE_MS + 1;
     expect(registry.refresh(later).upserted.map((r) => r.runId)).toEqual([run.runId]);
     expect(registry.row(run.runId)?.state).toBe("owner_lost");
+  });
+});
+
+/**
+ * THE PUSH, AS A NODE'S OWN STEP.
+ *
+ * A node has two pieces of work and either can fail on its own: the recipe,
+ * and the push of what the recipe built. So the journal records three states
+ * for the second one and the node row carries them, which is what lets a
+ * reader tell "the tests are red" from "the tests passed and the bucket was
+ * unreachable" without opening a log.
+ *
+ * What is NOT on the node is as deliberate as what is. The fold knows the
+ * bucket (the run's, carried once on the row) and the failure's message (the
+ * push log's first business, addressable at the node's own `logKey`), and
+ * neither is copied here — a second home for a fact is a second thing that
+ * can be stale, and a truncated error on a row is what a reader would trust
+ * instead of the log that has the whole of it.
+ */
+describe("a node's push", () => {
+  const PUSHING = "unit@x86_64-linux";
+  const PUSHED = "lint@x86_64-linux";
+  const FAILED = "build@x86_64-linux";
+  const BUCKET = "odu-main";
+
+  /** A finished run whose three nodes are each in a different push state. */
+  const threeStates = (w: World) => {
+    const run = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha: "c".repeat(40),
+      push: {
+        target: {
+          substituter: "https://cache.example/odu-main",
+          bucket: BUCKET,
+          tokenId: "tok-1",
+        },
+        skipped: null,
+        keyWarning: null,
+      },
+    });
+    writeRoster(run.handle, run.token, [PUSHING, PUSHED, FAILED]);
+    for (const id of [PUSHING, PUSHED, FAILED]) {
+      writeNode(w, run.handle, run.token, { id, status: "ok" });
+    }
+    // The push's own lines, appended after each node's status the way a lane
+    // does: the recipe passed, and the push is the step that follows it.
+    appendEvent(run.handle, run.token, {
+      kind: "pushing",
+      node: PUSHING,
+      bucket: BUCKET,
+    });
+    appendEvent(run.handle, run.token, {
+      kind: "pushed",
+      node: PUSHED,
+      bucket: BUCKET,
+      paths: 7,
+      bytes: 4_096,
+      durationMs: 1_200,
+    });
+    appendEvent(run.handle, run.token, {
+      kind: "push_failed",
+      node: FAILED,
+      bucket: BUCKET,
+      message: "403 from the bucket — the token is not valid for this path",
+      durationMs: 300,
+    });
+    return run;
+  };
+
+  it("projects all three states onto the node rows, and nothing more", () => {
+    const w = open();
+    const run = threeStates(w);
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+
+    const nodes = registry.nodes(run.runId) ?? [];
+    const push = (id: string) => nodes.find((one) => one.id === id)?.push;
+    expect(push(PUSHING)).toEqual({ state: "pushing" });
+    expect(push(PUSHED)).toEqual({
+      state: "pushed",
+      paths: 7,
+      bytes: 4_096,
+      durationMs: 1_200,
+    });
+    // A FAILURE KEEPS ONLY ITS TIME. No bucket, because the run has one and
+    // the row says it; no message, because the push log does and this node's
+    // `logKey` addresses it.
+    expect(push(FAILED)).toEqual({ state: "failed", durationMs: 300 });
+  });
+
+  it("leaves the push off a node that has none, rather than zeroing it", () => {
+    // A node of a run with nowhere to push and a node that pushed nothing are
+    // the same absence to a reader, and an absence is what the schema says.
+    const w = open();
+    const run = registerFixtureRun(w, { repoRoot: "/code/b", sha: "d".repeat(40) });
+    writeRoster(run.handle, run.token, [PUSHED]);
+    writeNode(w, run.handle, run.token, { id: PUSHED, status: "ok" });
+    const registry = createRegistry({ root: w.catalogRoot });
+    registry.refresh();
+    expect(registry.nodes(run.runId)?.[0]?.push).toBeUndefined();
+  });
+
+  it("sums only what LANDED on the run's answer, and names who failed", async () => {
+    // The totals are a claim about the bucket's contents, so a node still
+    // pushing and a node that failed must add nothing to them — and the one
+    // that failed has to be nameable, or a green-looking `paths` count is the
+    // only thing a reader sees about a run that half-warmed its cache.
+    const w = open();
+    const run = threeStates(w);
+
+    const answer = await Effect.runPromise(
+      Effect.result(readRun({ runId: run.runId }, { catalog: { root: w.catalogRoot } })),
+    );
+    expect(answer._tag).toBe("Success");
+    if (answer._tag !== "Success") return;
+    expect(answer.success.push).toEqual({
+      target: { substituter: "https://cache.example/odu-main", bucket: BUCKET },
+      skipped: null,
+      keyWarning: null,
+      paths: 7,
+      bytes: 4_096,
+      failedOn: [FAILED],
+    });
   });
 });
 

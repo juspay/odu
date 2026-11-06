@@ -233,6 +233,62 @@ export function laneSpan(
   };
 }
 
+/**
+ * THE PUSH, AS A SECOND SEGMENT ON THE SAME BAR — where a node's cache push
+ * sat inside the run, or `null` where there is no push to draw.
+ *
+ * A SIBLING of {@link laneSpan} rather than a parameter on it, because a push
+ * is not a lane: it has no `startedAt` of its own on the wire, and inventing
+ * one would have put a second nullable clock on `RunNode` for a fact the
+ * geometry can already derive. A push BEGINS WHERE ITS RECIPE STOPPED — the
+ * lane sends the closure as soon as the recipe exits 0 — so the recipe's own
+ * span is the origin, and asking `laneSpan` for it here is what keeps the two
+ * segments adjacent to the pixel however the clamping falls.
+ *
+ * It answers the SAME {@link LaneSpan} over the SAME {@link runElapsedMs}
+ * scale, so a face places both segments with one rule and the push cannot
+ * drift out of the track the axis labels.
+ *
+ * The two arms are the push's own, not the node's. A push still going is
+ * `running` and runs to the END OF THE TRACK — which is `now` on a live run
+ * and the verdict on a settled one, exactly as a lane left open is frozen —
+ * because a push that is still sending has no end to draw and a zero-width
+ * hatch would say it had already finished. A push that landed or failed has
+ * its own `durationMs`, clamped into whatever room is left after the recipe,
+ * so a record whose duration outran its run paints to the edge rather than
+ * past it.
+ *
+ * `null` in three cases, all of them facts: a node with no push step at all
+ * (most of them — a recipe that built no `result`, or a run with no target),
+ * and the two {@link laneSpan} already answers `null` for, where there is no
+ * recipe segment to hang this one off.
+ */
+export function pushSpan(
+  node: Pick<RunNode, "status" | "startedAt" | "durationMs" | "push">,
+  run: Pick<RunRow, "createdAt" | "finishedAt">,
+  now: number,
+): LaneSpan | null {
+  const push = node.push;
+  if (push === undefined) return null;
+  const recipe = laneSpan(node, run, now);
+  if (recipe === null) return null;
+  const scale = runElapsedMs(run, now);
+  const startedAfterMs = clampMs(recipe.startedAfterMs + recipe.tookMs, scale);
+  // What is left of the track after the recipe — the ceiling every arm below
+  // is clamped into, computed once so "to the end" and "its own duration"
+  // cannot disagree about where the end is.
+  const room = scale - startedAfterMs;
+  const tookMs =
+    push.state === "pushing" ? room : clampMs(push.durationMs, room);
+  return {
+    kind: push.state === "pushing" ? "running" : "settled",
+    left: fractionOf(startedAfterMs, scale),
+    width: fractionOf(tookMs, scale),
+    startedAfterMs,
+    tookMs,
+  };
+}
+
 /** HOW A LANE STOPS — which arm its bar is, and where that bar ends. One
  *  decision, so it is taken once: a lane with its own duration ends at its own
  *  duration, one still going ends at the clock, and a lane left open on a run

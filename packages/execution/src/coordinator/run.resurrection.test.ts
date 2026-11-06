@@ -230,12 +230,14 @@ function harness(opts: { hold?: () => Promise<void> } = {}) {
     expect(laneOpts.snapshot?.commit).toMatch(/^[0-9a-f]{40}$/);
     lanes.push(entry);
     // What a REAL lane does the moment it attaches: `nodeLog.get({ id })` opens
-    // with a `snapshot` frame for every node it owns, and a fresh runner's
-    // buffer is empty. Without it a fake hides what the coordinator does with a
-    // snapshot — `resetLocal`, a truncating write — which is exactly where a
-    // notice written into a retried node's log used to go to die.
+    // with a `snapshot` frame for every node it owns, on BOTH of its streams,
+    // and a fresh runner's buffers are empty. Without it a fake hides what the
+    // coordinator does with a snapshot — `resetLocal`, a truncating write —
+    // which is exactly where a notice written into a retried node's log used
+    // to go to die.
     for (const id of ["_ci-setup", ...laneOpts.tasks.map((t) => t.id)]) {
-      laneOpts.onLogFrame(id, { kind: "snapshot", text: "" });
+      laneOpts.onLogFrame(id, { kind: "snapshot", text: "" }, "recipe");
+      laneOpts.onLogFrame(id, { kind: "snapshot", text: "" }, "push");
     }
     return {
       platform: laneOpts.platform,
@@ -387,7 +389,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
           gamma: "pending",
         }),
       );
-      first.opts.onLogFrame("alpha", laneFrame({ kind: "append", text: "ALPHA OUTPUT\n" }));
+      first.opts.onLogFrame("alpha", laneFrame({ kind: "append", text: "ALPHA OUTPUT\n" }), "recipe");
       first.opts.onNodes(
         laneState({
           "_ci-setup": "ok",
@@ -396,7 +398,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
           gamma: "pending",
         }),
       );
-      first.opts.onLogFrame("alpha", laneFrame({ kind: "end" }));
+      first.opts.onLogFrame("alpha", laneFrame({ kind: "end" }), "recipe");
       await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
       expect(nodes.statusOf("beta")).toBe("running");
 
@@ -462,8 +464,8 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       second.opts.onNodes(
         laneState({ "_ci-setup": "ok", beta: "ok", gamma: "ok" }),
       );
-      second.opts.onLogFrame("beta", laneFrame({ kind: "end" }));
-      second.opts.onLogFrame("gamma", laneFrame({ kind: "end" }));
+      second.opts.onLogFrame("beta", laneFrame({ kind: "end" }), "recipe");
+      second.opts.onLogFrame("gamma", laneFrame({ kind: "end" }), "recipe");
 
       expect(await outcome).toBe(0);
       const recorded = handleFor("placement-retry", { root: join(dir, ".ci", "state", "runs") });
@@ -504,6 +506,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       first.opts.onLogFrame(
         "alpha",
         laneFrame({ kind: "append", text: "ALPHA OUTPUT\n" }),
+        "recipe",
       );
       // `ok` reported, log NOT ended: the verdict gate holds it, so the fan-in
       // still says `running` — which is exactly the trap.
@@ -539,8 +542,8 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       lanes[1]!.opts.onNodes(
         laneState({ "_ci-setup": "ok", beta: "ok", gamma: "ok" }),
       );
-      lanes[1]!.opts.onLogFrame("beta", laneFrame({ kind: "end" }));
-      lanes[1]!.opts.onLogFrame("gamma", laneFrame({ kind: "end" }));
+      lanes[1]!.opts.onLogFrame("beta", laneFrame({ kind: "end" }), "recipe");
+      lanes[1]!.opts.onLogFrame("gamma", laneFrame({ kind: "end" }), "recipe");
       expect(await outcome).toBe(0);
     } finally {
       await nodes.close();
@@ -654,7 +657,7 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
         laneState({ "_ci-setup": "ok", alpha: "ok", beta: "ok", gamma: "ok" }),
       );
       for (const id of ["alpha", "beta", "gamma"]) {
-        second.opts.onLogFrame(id, laneFrame({ kind: "end" }));
+        second.opts.onLogFrame(id, laneFrame({ kind: "end" }), "recipe");
       }
       expect(await outcome).toBe(0);
     } finally {

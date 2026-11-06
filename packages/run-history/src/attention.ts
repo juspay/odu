@@ -38,10 +38,11 @@
 import type { NodeStatus } from "@odu/run-client/surface";
 import { signalFromExit } from "./exit";
 import { formatCursor, type Cursor } from "./ids";
-import { isResumptionEvent } from "./schema";
+import { isResumptionEvent, pushTotals } from "./schema";
 import type {
   Expiry,
   JournalEntry,
+  NodePush,
   Placement,
   RunManifest,
   RunScope,
@@ -209,8 +210,14 @@ export interface Attention {
     /** What is wrong while something WAS pushed — the bucket's key missing
      *  from `trusted-public-keys`. Null when there is nothing to say. */
     keyWarning: string | null;
+    /** Store paths this run's nodes put on the bucket, summed over the pushes
+     *  that LANDED. A node still pushing, or one whose push failed, adds
+     *  nothing: these are bytes the bucket serves. */
     paths: number;
     bytes: number;
+    /** The nodes whose push failed, in roster order. Empty when none did —
+     *  which is what "green means warmed" is allowed to mean. */
+    failedOn: readonly string[];
   };
 }
 
@@ -356,11 +363,11 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   /** The hosts file the lanes were declared in, from the newest lane line that
    *  carried one. Null for a run written before the field existed. */
   hostsSource: string | null;
-  /** WHAT EACH NODE PUT IN THE CACHE (PLAN 4.1), last write wins. Per NODE
+  /** WHAT EACH NODE'S PUSH IS DOING (PLAN 4.1), last write wins. Per NODE
    *  rather than per attempt: a re-run that pushes again replaces what the
    *  previous one claimed, and a reader asking "what did this node warm"
    *  means the attempt that stands. */
-  pushed: Map<string, { bucket: string; paths: number; bytes: number; durationMs: number }>;
+  push: Map<string, NodePush>;
 } {
   let roster: string[] = [];
   let scope: RunScope | null = null;
@@ -377,10 +384,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
     string,
     { context: string; lastError: string; attempts: number }
   >();
-  const pushed = new Map<
-    string,
-    { bucket: string; paths: number; bytes: number; durationMs: number }
-  >();
+  const push = new Map<string, NodePush>();
   const key = (node: string, attempt: number): string => `${node}#${attempt}`;
   const byAttempt = new Map<string, AttemptState>();
 
@@ -439,7 +443,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         // exactly the moment the claim stops being about the node a reader
         // is looking at, and a rerun that does push writes a fresh `pushed`
         // after it.
-        pushed.delete(e.node);
+        push.delete(e.node);
         break;
       }
       case "node_status": {
@@ -488,11 +492,23 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           attempts: e.attempts,
         });
         break;
+      case "pushing":
+        push.set(e.node, { state: "pushing", bucket: e.bucket });
+        break;
       case "pushed":
-        pushed.set(e.node, {
+        push.set(e.node, {
+          state: "pushed",
           bucket: e.bucket,
           paths: e.paths,
           bytes: e.bytes,
+          durationMs: e.durationMs ?? 0,
+        });
+        break;
+      case "push_failed":
+        push.set(e.node, {
+          state: "failed",
+          bucket: e.bucket,
+          message: e.message,
           durationMs: e.durationMs ?? 0,
         });
         break;
@@ -516,7 +532,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
     phase,
     lanes,
     hostsSource,
-    pushed,
+    push,
   };
 }
 
@@ -587,6 +603,7 @@ export function attentionFor(
     last_error: d.lastError,
     attempts: d.attempts,
   }));
+  const pushTotal = pushTotals(fold.push);
 
   const identity: Omit<
     Attention,
@@ -641,8 +658,9 @@ export function attentionFor(
                   },
             skipped: manifest.push.skipped,
             keyWarning: manifest.push.keyWarning,
-            paths: [...fold.pushed.values()].reduce((sum, one) => sum + one.paths, 0),
-            bytes: [...fold.pushed.values()].reduce((sum, one) => sum + one.bytes, 0),
+            paths: pushTotal.paths,
+            bytes: pushTotal.bytes,
+            failedOn: pushTotal.failedOn,
           },
         }),
   };

@@ -146,10 +146,11 @@ for (const scenario of [
             setImmediate(() => {
               // This opens the durable attempts before their first status frame.
               for (const id of ids)
-                opts.onLogFrame(id, {
-                  kind: "snapshot",
-                  text: `on ${opts.host}\n`,
-                });
+                opts.onLogFrame(
+                  id,
+                  { kind: "snapshot", text: `on ${opts.host}\n` },
+                  "recipe",
+                );
               for (const id of ids)
                 state.nodes[id] = { ...state.nodes[id]!, status: "running" };
               opts.onNodes(structuredClone(state));
@@ -161,7 +162,10 @@ for (const scenario of [
                 };
               // Verdicts arrive before log ends and are published later by the gate.
               opts.onNodes(structuredClone(state));
-              for (const id of ids) opts.onLogFrame(id, { kind: "end" });
+              // Both of a node's streams end; the recipe's is the one that
+              // carries the node's own terminal, and this fake pushes nothing.
+              for (const id of ids) opts.onLogFrame(id, { kind: "end" }, "recipe");
+              for (const id of ids) opts.onLogFrame(id, { kind: "end" }, "push");
             });
           };
           runTasks(["_ci-setup", ...opts.tasks.map((t) => t.id)]);

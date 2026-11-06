@@ -84,8 +84,12 @@ import {
 import { buildSurfaceFace } from "@kolu/surface/client";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import type { SurfaceClientOf } from "@kolu/surface/project";
-import { NodeIdSchema } from "@odu/run-client/nodeId";
-import { type NodeStatus, NodeStatusSchema } from "@odu/run-client/surface";
+import { LogStreamSchema, NodeIdSchema } from "@odu/run-client/nodeId";
+import {
+  type NodeStatus,
+  NodePushSchema,
+  NodeStatusSchema,
+} from "@odu/run-client/surface";
 import { RunScopeSchema } from "@odu/run-history/schema";
 import { Schema } from "effect";
 
@@ -104,6 +108,13 @@ export type { NodeStatus };
  *  module, and `STATUS_META`'s own doc says no face keeps a second table. What
  *  a status is on the wire and what it means to a reader arrive together. */
 export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
+
+/** What a node's push is doing, and which of its two logs a reader means —
+ *  re-exported for `STATUS_META`'s reason: one contract module, one
+ *  vocabulary. A face branches on `push.state` and names a `stream` without
+ *  reaching past this surface for either. */
+export { type NodePush } from "@odu/run-client/surface";
+export { type LogStream, LOG_STREAMS } from "@odu/run-client/nodeId";
 
 /**
  * THE HOST'S CONTRACT VERSION, `major.minor` — its own verbs (the frozen control
@@ -164,10 +175,22 @@ export const HOST_CONTRACT_VERSION = "2.5";
  * 2.5: a run's `push` — where it pushes and what it warmed — on a board row
  *      and on `run_read`/`run_wait`, and `pushed` on a node (PLAN 4.1). Three
  *      optional output fields; additive.
- * 2.6: a run's `actor` — who started it, a login or `@local` — on a board row
- *      and on `run_read`/`run_wait` (PLAN 4.4); and `probing` as a fifth
- *      venue state, so the kept reading can be republished while a probe is
- *      still dialling. Two optional output fields and one widened literal.
+ * 2.6: TWO unreleased changes, one number, because a version describes a
+ *      SURFACE and there is one of those. A run's `actor` — who started it, a
+ *      login or `@local` — on a board row and on `run_read`/`run_wait` (PLAN
+ *      4.4), and `probing` as a fifth venue state, so the kept reading can be
+ *      republished while a probe is still dialling. And the push became a
+ *      STEP (PLAN 4.1): a node's `pushed` becomes `push` — `pushing | pushed
+ *      | failed`, carrying `stored` and `present` apart, so the run page can
+ *      draw the push while it is still running and say what it failed at;
+ *      `log_read` takes `stream: "recipe" | "push"`, the node's two logs
+ *      having been split apart; and the wait/read answer's `push` gained
+ *      `failedOn` and `present`, both OPTIONAL because that struct shipped in
+ *      2.5 and a required field there would make every answer about a pushing
+ *      run fail to decode. MINOR despite the one removal: node `pushed`
+ *      shipped one release ago with no reader outside this repo, and a 2.6
+ *      reader against a 2.5 daemon shows no push step and reads the recipe
+ *      log it always read. Neither direction is stranded.
  */
 export const CI_CONTRACT_VERSION = "2.6";
 
@@ -773,19 +796,14 @@ export const RunNodeSchema = Schema.Struct({
   /** How to ask for this attempt's output — derived once, here, so no face
    *  reassembles the three fields a log is addressed by. */
   logKey: Schema.String,
-  /** WHAT THIS NODE PUT IN THE CACHE (PLAN 4.1), read off the journal's
-   *  `pushed` event. Absent for a node that pushed nothing — a run with no
-   *  target, a recipe that built no `result`, or one whose links an earlier
-   *  node had already sent. */
-  pushed: Schema.optionalKey(
-    Schema.Struct({
-      paths: Schema.Int,
-      bytes: Schema.Int,
-      /** How long the push took, SEPARATE from the node's own `durationMs`,
-       *  which stays the recipe's time. */
-      durationMs: Schema.Int,
-    }),
-  ),
+  /** WHAT THIS NODE'S PUSH IS DOING (PLAN 4.1), read off the journal's
+   *  `pushing` / `pushed` / `push_failed` lines. Absent for a node with no
+   *  push step — a run with no target, or a recipe that built no `result`.
+   *
+   *  The lane wire's own shape, re-used rather than restated: the two hops
+   *  carry the same three states, and a second spelling here would be a
+   *  second thing to keep true. */
+  push: Schema.optionalKey(NodePushSchema),
 });
 export type RunNode = typeof RunNodeSchema.Type;
 
@@ -1343,9 +1361,16 @@ const AttentionAnswerSchema = Schema.Struct({
     Schema.Struct({
       ...PushedToSchema.fields,
       /** Store paths this run put in the bucket, summed over its nodes, and
-       *  the NAR bytes they cost. */
+       *  the NAR bytes they cost. The pushes that LANDED only: a node still
+       *  pushing, or one whose push failed, adds nothing to a count that
+       *  claims the bucket serves it. */
       paths: Schema.Int,
       bytes: Schema.Int,
+      /** The nodes whose push FAILED, in roster order — empty when none did.
+       *  Without it a reader of a red run cannot tell a recipe that failed
+       *  from one that passed and could not reach the cache, which are
+       *  different problems with different fixes. */
+      failedOn: Schema.Array(Schema.String),
     }),
   ),
 });
@@ -1465,6 +1490,18 @@ const LogReadInputSchema = Schema.Struct({
    * happening" and "give me every byte, resumably" are different questions.
    */
   waitMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+  /**
+   * WHICH of the node's two logs: the recipe's output, or the push that sent
+   * what it built to the cache. Absent is `"recipe"`, so every existing
+   * caller reads exactly what it always read.
+   *
+   * A PARAMETER rather than a fourth segment in the key, because the key is an
+   * address a failure hands out and a caller echoes verbatim — widening it
+   * would have retyped a token every agent, every CLI invocation and the
+   * browser's address bar already hold. The stream is a choice the READER
+   * makes about an address, like `offset`.
+   */
+  stream: Schema.optionalKey(LogStreamSchema),
 });
 export type LogReadInput = typeof LogReadInputSchema.Encoded;
 

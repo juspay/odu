@@ -40,7 +40,7 @@
  */
 
 import type { NodeStatus } from "@odu/run-client/surface";
-import { splitFanId } from "@odu/run-client/nodeId";
+import { type LogStream, splitFanId } from "@odu/run-client/nodeId";
 import { signalFromExit } from "@odu/run-history/exit";
 import { mintRunId } from "@odu/run-history/ids";
 import {
@@ -161,16 +161,36 @@ export interface RunHistory {
       host: string | null;
     },
   ) => void;
-  /** Mirror a node's output into its current attempt's log. */
-  log: (node: string, text: string, host?: string | null) => void;
+  /** Mirror a node's output into its current attempt's log. `stream` picks
+   *  WHICH of the attempt's two logs — the recipe's, unless the caller is
+   *  routing a push frame. */
+  log: (
+    node: string,
+    text: string,
+    host?: string | null,
+    stream?: LogStream,
+  ) => void;
   /** This node's log has had its last word — the other half of the seal.
    *  FIRST caller wins: a truncation notice and the lane's own `end` frame
    *  both arrive for one attempt and they disagree by design, since the notice
-   *  is written precisely because the `end` never came. */
+   *  is written precisely because the `end` never came.
+   *
+   *  NO STREAM ARGUMENT, deliberately. An attempt has ONE `logComplete` and
+   *  one seal, and a node's two streams end together (the runner ends them in
+   *  lockstep on every terminal path) — so this is a fact about the attempt,
+   *  spoken by the recipe's terminal. A per-stream completion would be two
+   *  flags for one question, and a reader would have to decide which of them
+   *  "this attempt's log is complete" meant. */
   logFinalized: (node: string, complete: boolean, reason: string | null) => void;
   /** A lane re-sent this node's buffered tail. NOT a retry: the attempt is the
-   *  same attempt, so its bytes are replaced in place. */
-  replaceLog: (node: string, text: string, host?: string | null) => void;
+   *  same attempt, so its bytes are replaced in place — in the stream the
+   *  snapshot came from. */
+  replaceLog: (
+    node: string,
+    text: string,
+    host?: string | null,
+    stream?: LogStream,
+  ) => void;
   /** This node's work is starting over on a new invocation — a resurrection
    *  re-running an interrupted node. Seals the open attempt as superseded so
    *  the bytes that follow land on a NEW ordinal, never on top of the failure
@@ -179,6 +199,17 @@ export interface RunHistory {
   postingDebt: (
     rows: readonly { context: string; lastError: string; attempts: number }[],
   ) => void;
+  /**
+   * A node's push BEGAN (PLAN 4.1) — its recipe exited 0 and the lane started
+   * sending the closure.
+   *
+   * Journalled rather than kept in the live cell, because every face that
+   * paints a run reads a fold of this journal — including the live one. A
+   * `pushing` that never reached a line here would be invisible to a reader
+   * the moment the coordinator's socket went away, and an upload that takes a
+   * minute would appear, finished, out of nothing.
+   */
+  pushing: (fact: { node: string; bucket: string }) => void;
   /** A node's outputs landed in the cache (PLAN 4.1). Written when a recipe
    *  exits 0 and its `result*` closure was pushed, so a finished run can say
    *  what it warmed without the bucket having to be asked. `durationMs` is
@@ -191,6 +222,22 @@ export interface RunHistory {
     bucket: string;
     paths: number;
     bytes: number;
+    durationMs: number;
+  }) => void;
+  /**
+   * A node's push FAILED — the recipe passed and its outputs did not reach
+   * the bucket, which is what reddens the node.
+   *
+   * Its own line rather than nothing, because a red status alone cannot say
+   * WHICH half of the node failed: a reader of a finished run would see a red
+   * recipe where the recipe in fact passed. `message` is the sentence that
+   * went into the node's push log, so a catalog reader gets the reason
+   * without having to open the log beside it.
+   */
+  pushFailed: (fact: {
+    node: string;
+    bucket: string;
+    message: string;
     durationMs: number;
   }) => void;
   /**
@@ -269,7 +316,9 @@ export const NO_HISTORY: RunHistory = {
   replaceLog: () => {},
   resetNode: () => {},
   postingDebt: () => {},
+  pushing: () => {},
   pushed: () => {},
+  pushFailed: () => {},
   // `false`, not `true`: no history means no durable record, and a caller must
   // be able to tell its reply "the acceptance was not written down" rather
   // than promise a line that will never exist.
@@ -569,7 +618,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       current.outcome = { status, exitCode: outcome.exitCode };
       sealIfComplete(node);
     },
-    log: (node, text, host = null) => {
+    log: (node, text, host = null, stream = "recipe") => {
       if (fenced) return;
       // Output before any status — the provisioning narration into
       // `_ci-setup@<platform>` is exactly this. Open attempt 1 lazily rather
@@ -577,7 +626,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       if (!open.has(node)) beginAttempt(node, host);
       const attempt = open.get(node)?.attempt;
       if (attempt === undefined) return;
-      appendAttemptLog(handle, node, attempt, text);
+      appendAttemptLog(handle, node, attempt, text, stream);
     },
     logFinalized: (node, complete, reason) => {
       const current = open.get(node);
@@ -602,7 +651,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       current.log = { complete, reason };
       sealIfComplete(node);
     },
-    replaceLog: (node, text, host = null) => {
+    replaceLog: (node, text, host = null, stream = "recipe") => {
       if (fenced) return;
       if (!open.has(node)) beginAttempt(node, host);
       const attempt = open.get(node)?.attempt;
@@ -621,7 +670,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       //
       // So the file is RECONCILED against the snapshot rather than replaced by
       // it. Three cases, and the third is the one worth naming:
-      const held = readAttemptLog(handle, node, attempt)?.text ?? "";
+      const held = readAttemptLog(handle, node, attempt, {}, stream)?.text ?? "";
       if (held !== "" && held.endsWith(text)) {
         // We are level with the producer or ahead of it. Nothing to do — and
         // in particular nothing to UNDO.
@@ -631,7 +680,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       if (overlap > 0 || held === "") {
         // We are behind: the snapshot continues where our bytes stop. Append
         // only the part we do not have.
-        appendAttemptLog(handle, node, attempt, text.slice(overlap));
+        appendAttemptLog(handle, node, attempt, text.slice(overlap), stream);
         return;
       }
       // NO OVERLAP AT ALL. Either the producer started over (a rerun's
@@ -650,6 +699,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
             "[odu] log truncated: this node's output ran ahead of the recorder" +
               " — what follows does not continue what precedes it\n" +
               text,
+        stream,
       );
     },
     resetNode: (node, reason) => {
@@ -667,8 +717,11 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         });
       }
     },
+    pushing: ({ node, bucket }) => emit({ kind: "pushing", node, bucket }),
     pushed: ({ node, bucket, paths, bytes, durationMs }) =>
       emit({ kind: "pushed", node, bucket, paths, bytes, durationMs }),
+    pushFailed: ({ node, bucket, message, durationMs }) =>
+      emit({ kind: "push_failed", node, bucket, message, durationMs }),
     currentAttempt: (node) => highest.get(node) ?? 0,
     retryAccepted: ({ requestId, inputDigest, roots, resetDependants }) => {
       if (fenced) return false;

@@ -44,6 +44,7 @@ import {
   isActive,
   type LaneSpan,
   laneSpan,
+  pushSpan,
   runElapsedMs,
   timelineTicks,
 } from "@odu/service-client/board";
@@ -71,7 +72,9 @@ import {
 } from "./format";
 import type {
   LogPage,
+  LogStream,
   LogTail,
+  NodePush,
   NodesFrame,
   NodeStatus,
   RunNode,
@@ -138,6 +141,47 @@ const wentWrong = (node: RunNode): boolean =>
  */
 function noteSuffix(note: string | null): string {
   return note === null || note === "" ? "" : ` — ${note}`;
+}
+
+/**
+ * THE PUSH STEP'S WORDS AND COLOUR — one row per state, and no colour of its
+ * own.
+ *
+ * A push is a STEP, so it reads like one: a word for what it is doing, a
+ * glyph, and a hue. All three are borrowed from the node statuses the page
+ * already paints, through the status each push state IS the analogue of — a
+ * push in flight is `running`, one that landed is `ok`, one that did not is
+ * `failed`. Borrowing rather than minting is the rule {@link NODE_STATUS}'s
+ * own doc sets: colour on this page means one thing, assigned once, and a
+ * fourth palette for a second kind of work is how a reader learns that amber
+ * means two different things depending on which row it is on.
+ *
+ * The NODE's status is untouched by any of this. It reads the RECIPE's
+ * verdict throughout — a failed push turns the node red through the lane, not
+ * through this table, which is why `failed` here says "push failed" rather
+ * than "failed": the row already carries one verdict and this is a second
+ * fact about a different step.
+ */
+const PUSH_META: Record<NodePush["state"], { word: string; as: NodeStatus }> = {
+  pushing: { word: "pushing", as: "running" },
+  pushed: { word: "pushed", as: "ok" },
+  failed: { word: "push failed", as: "failed" },
+};
+
+/** WHAT THE PUSH STEP SAYS, after its state — the counts a landed push has and
+ *  the duration every settled one does. A push still in flight has neither: it
+ *  has sent nothing it can count yet, and `0 paths` on it would be a claim
+ *  about the bucket that nobody has made. Its length is the hatched bar
+ *  instead, which is the honest picture of "still going". */
+function pushFacts(push: NodePush): string {
+  switch (push.state) {
+    case "pushing":
+      return "";
+    case "pushed":
+      return ` · ${push.paths} path${push.paths === 1 ? "" : "s"} · ${bytes(push.bytes)} · ${duration(push.durationMs)}`;
+    case "failed":
+      return ` · ${duration(push.durationMs)}`;
+  }
 }
 
 /**
@@ -282,6 +326,17 @@ function NodeRow(props: {
    *  node that has not started, which draws no bar at all. Computed by the
    *  caller, which is the one place the run and the clock both are. */
   span: LaneSpan | null;
+  /** WHERE ITS PUSH SAT, from the same geometry and on the same scale — the
+   *  segment that begins where the recipe's bar ends. `null` on a node with no
+   *  push step, which is most of them. Computed by the caller for the same
+   *  reason the recipe's is: the run and the clock are both up there. */
+  push: LaneSpan | null;
+  /** WHERE THIS RUN PUSHES. The run's own `push.target.bucket`, because every
+   *  node of a run sends to the same bucket or to none — the node carries what
+   *  its push DID, never where it went, and a second copy of the destination
+   *  per row would be a thing to keep true. `null` while the row has not
+   *  arrived, which the step spells rather than inventing a name. */
+  bucket: string | null;
   selected: string | null;
   onSelect: (node: RunNode) => void;
   controls: DetailControls;
@@ -290,6 +345,38 @@ function NodeRow(props: {
 }): JSX.Element {
   const meta = (): (typeof NODE_STATUS)[RunNode["status"]] =>
     NODE_STATUS[props.node.status];
+  /**
+   * THE PUSH STEP, ASSEMBLED ONCE — its sentence, its colour and its geometry
+   * in one object, or `null` on a node that has no push at all.
+   *
+   * One accessor because the row draws this step in TWO places: the line
+   * under the button, and the segment inside the track. Two independent
+   * `<Show>`s over two different props — the node's `push` and the caller's
+   * span — could disagree about whether there is a step here at all, which is
+   * a bar with no label or a label with no bar. There is one question, so it
+   * is asked once and both drawings hang off the answer.
+   */
+  const step = createMemo(() => {
+    const push = props.node.push;
+    if (push === undefined) return null;
+    const vocab = PUSH_META[push.state];
+    const status = NODE_STATUS[vocab.as];
+    return {
+      // The state word LEADS, and every one of them begins with "push" —
+      // `pushing`, `pushed`, `push failed` — so the step names itself without
+      // a separate label repeating the word three characters later.
+      //
+      // The destination is the RUN's bucket, and when the row carrying it has
+      // not arrived the step says the state alone rather than inventing a
+      // noun for where the bytes went. That is also the fence: this face
+      // spells no word of the row that serves buckets — the name it draws is
+      // a prop the shell filled, like the link under it.
+      text: `${vocab.word}${props.bucket === null ? "" : ` → ${props.bucket}`}${pushFacts(push)}`,
+      hue: status.hue,
+      glyph: status.glyph,
+      span: props.push,
+    };
+  });
   /** Why this row can be opened, or why it cannot. Said once and drawn twice:
    *  as the native `title` and as the `.tip` beside it. */
   const hint = (): string =>
@@ -328,16 +415,6 @@ function NodeRow(props: {
         </Show>
         <Show when={props.node.exitCode !== null && props.node.exitCode !== 0}>
           <span class="node-exit">{`exit ${props.node.exitCode ?? 0}`}</span>
-        </Show>
-        {/* WHAT THIS NODE WARMED (PLAN 4.1). Absent on a node that pushed
-            nothing, which is most of them: a recipe that builds no `result`,
-            or one whose links an earlier node in this run already sent. */}
-        <Show when={props.node.pushed}>
-          {(pushed) => (
-            <span class="node-pushed">
-              {`pushed ${pushed().paths} path${pushed().paths === 1 ? "" : "s"} · ${bytes(pushed().bytes)} · ${duration(pushed().durationMs)}`}
-            </span>
-          )}
         </Show>
         {/* The drawn half of the `title` above. This control is hand-spelled
             rather than built from `Button` — it is a row of labelled cells —
@@ -382,6 +459,36 @@ function NodeRow(props: {
         </Show>
       </span>
       </Show>
+      {/* THE PUSH, AS ITS OWN STEP — a line of its own under the node, because
+          it is a second piece of work with a second verdict and it used to be
+          a trailing cell on the node's own button. As a cell it could only
+          ever say what had ALREADY happened: a push in flight had nothing to
+          append, so the minute a lane spends sending a closure looked exactly
+          like a node that pushed nothing at all, and a push that FAILED
+          appeared as a missing cell beside a red node whose recipe was green.
+
+          Its own line rather than a second list row: the push belongs TO this
+          node — it is the same attempt's second half, addressed by the same
+          log key — and a sibling `li` would have made the node list disagree
+          with the node count above it.
+
+          `role="group"` with the node's own name, so the step is addressable
+          and announced as one thing rather than three loose spans. The name
+          carries the node id because a run has one of these per node and two
+          controls sharing an accessible name are ambiguous to a person and
+          unaddressable to anything that finds an element by what it says. */}
+      <Show when={step()}>
+        {(push) => (
+          <span
+            class="node-push-step"
+            role="group"
+            aria-label={`Push ${props.node.id}`}
+          >
+            <span class={`glyph hue-${push().hue}`}>{push().glyph}</span>
+            {push().text}
+          </span>
+        )}
+      </Show>
       {/* THE TIMELINE — where this node's latest attempt ran inside the run,
           not merely how long it took, so parallel work reads as parallel and
           the critical path is the bar nothing overlaps.
@@ -414,6 +521,40 @@ function NodeRow(props: {
                   width: `${span().width * 100}%`,
                 }}
               />
+            </Show>
+          )}
+        </Show>
+        {/* THE PUSH SEGMENT, IN THE SAME TRACK. Not a track of its own: the
+            axis above this list is drawn in one box and `packages/ci/e2e`'s
+            timeline scenario asserts every node's track is THAT box, so a
+            second rail under the row would be a bar measured against a scale
+            nothing labels. It is also the truth of the thing — the push
+            happens inside the same run, on the same clock, immediately after
+            the recipe whose bar it continues.
+
+            Its hue is the PUSH's, not the node's, which is the one place on
+            this row the two can differ: a red segment under a green bar is a
+            node whose recipe passed and whose closure did not land, and that
+            difference is the whole reason this step exists. The hatch follows
+            the same `kind` the recipe's does, so a push still sending reads as
+            provisional in the same vocabulary. */}
+        <Show when={step()}>
+          {(push) => (
+            <Show when={push().span}>
+              {(span) => (
+                <Show when={span().left < 1}>
+                  <span
+                    class={`node-bar node-push-bar hue-${push().hue}`}
+                    classList={{
+                      "node-bar-running": span().kind === "running",
+                    }}
+                    style={{
+                      left: `${span().left * 100}%`,
+                      width: `${span().width * 100}%`,
+                    }}
+                  />
+                </Show>
+              )}
             </Show>
           )}
         </Show>
@@ -455,12 +596,17 @@ function writeWrap(on: boolean): void {
 /**
  * The log panel for the selected attempt.
  *
- * Three questions the raw tail cannot answer, and one control each:
+ * Four questions the raw tail cannot answer, and one control each:
  *
  *   - **Which attempt.** `RunNode.attempt` is the HIGHEST attempt recorded, and
  *     a retried node's earlier attempt holds the evidence of the failure that
  *     caused the retry — the thing a person came to read. It was reachable only
  *     by hand-editing the URL, which is not a control.
+ *   - **Which STREAM.** A node that pushes has two logs on one key: what the
+ *     recipe printed, and what the push client said while it sent the closure.
+ *     The second one is where a failed push explains itself, and without a
+ *     control for it the only evidence of a red node whose recipe exited 0
+ *     was unreachable from the page that drew it red.
  *   - **Which part.** A log is unbounded, so it is read a window at a time and
  *     the window says where it is. See {@link LOG_PAGE_BYTES}.
  *   - **Am I still following it.** A pane that stopped moving because the reader
@@ -477,6 +623,12 @@ export function LogPanel(props: {
   node: RunNode | null;
   attempt: number | null;
   onAttempt: (attempt: number) => void;
+  /** WHICH of the node's two logs is on screen. OWNED UPSTREAM, beside the log
+   *  key, because it is one half of what the two `log.read` call sites ask
+   *  for — a copy here would be a second answer to "which log am I reading"
+   *  and the pane would show one while the wire fetched the other. */
+  stream: LogStream;
+  onStream: (stream: LogStream) => void;
   tail: LogTail | undefined;
   /** The cursored follow's accumulated text — byte-exact, unlike the bounded
    *  tail beside it. Null before the first page arrives. */
@@ -510,12 +662,34 @@ export function LogPanel(props: {
   // which is the one state a reader cannot distinguish from "the log stopped
   // growing". When the follow is faulted the tail is the fresher of the two,
   // so it wins, and the sentence beside the pane says why.
+  //
+  // AND THE TAIL IS THE RECIPE'S, which is why the push stream stops one step
+  // short of it. `collections.logTails` is keyed by the log key alone and
+  // carries the recipe's bytes; falling back to it on the Push tab would put
+  // the recipe's output under a heading that says Push — the one failure mode
+  // worse than an empty pane, because it looks like an answer. There is
+  // nothing to lose by stopping: the push stream's follow opens with a
+  // `-LOG_TAIL_BYTES` read, so its first page IS a tail and lands in the same
+  // breath.
   const shown = createMemo(() => {
     const paged = props.page?.text;
     if (paged !== undefined) return paged;
     const following = props.logFault === null ? props.followed : null;
+    if (props.stream === "push") return following ?? "";
     return following ?? props.tail?.text ?? "";
   });
+
+  /** IS THE STREAM ON SCREEN STILL BEING WRITTEN — the fact the footer's
+   *  "following" marker is about, asked of whichever log is shown. The tail's
+   *  `open` answers it for the recipe; for the push it is the push's own
+   *  state, because the tail collection does not cover that file and a marker
+   *  driven by the recipe's would announce a finished push as live (or a live
+   *  one as finished) on a node whose recipe had stopped. */
+  const growing = createMemo(() =>
+    props.stream === "push"
+      ? props.node?.push?.state === "pushing"
+      : props.tail?.open === true,
+  );
 
   /** The text as the recipe COLOURED it. Memoised on `shown()`, so a re-render
    *  that changes nothing else does not re-scan the page.
@@ -527,12 +701,18 @@ export function LogPanel(props: {
   const spans = createMemo(() => ansiSpans(shown()));
 
   /** A new SUBJECT is a fresh request to see the newest output, not a
-   *  continuation of wherever the last one was scrolled to. The dependency is
-   *  SAID, with Solid's own explicit form, rather than left to two bare
-   *  expression statements that read as dead code to a reader, to a linter and
-   *  to anything that strips no-ops. */
+   *  continuation of wherever the last one was scrolled to. The STREAM is one
+   *  of the three things that make it a new subject: switching to the push
+   *  log is asking to read a different file, and inheriting the scroll
+   *  position of the recipe's would land a reader in the middle of it. The
+   *  dependencies are SAID, with Solid's own explicit form, rather than left
+   *  to bare expression statements that read as dead code to a reader, to a
+   *  linter and to anything that strips no-ops. */
   createEffect(
-    on([() => props.node?.id, () => props.attempt], () => setStuck(true)),
+    on(
+      [() => props.node?.id, () => props.attempt, () => props.stream],
+      () => setStuck(true),
+    ),
   );
   createEffect(() => {
     shown();
@@ -563,6 +743,41 @@ export function LogPanel(props: {
                 of it there is. Everything about the WINDOW moved to the foot. */}
             <header class="log-head">
               <h3>{node().id}</h3>
+              {/* RECIPE | PUSH, and only on a node that HAS a push: one log
+                  is not a choice, and a group of one button announcing itself
+                  as a group is noise a screen reader has to read.
+
+                  The attempt picker's idiom exactly — a `role="group"` with a
+                  name, holding `Button`s whose `pressed` is their selection —
+                  because that is what these are: two buttons, one of which is
+                  currently chosen. `@odu/face/ui` has no tab primitive, and a
+                  pair of buttons is not reason enough to grow one; a real
+                  `tablist` would also owe this page roving focus, arrow-key
+                  movement and `tabpanel` wiring for a control a reader
+                  presses once.
+
+                  "Log" rather than "Stream": the name is read out before the
+                  button a person is about to press, and `Log: Recipe` is what
+                  this is. It does not collide with anything else on the page —
+                  the pane beside it is `Node output`. */}
+              <Show when={node().push !== undefined}>
+                <span class="log-streams" role="group" aria-label="Log">
+                  <Button
+                    title="what the recipe printed"
+                    pressed={props.stream === "recipe"}
+                    onClick={() => props.onStream("recipe")}
+                  >
+                    Recipe
+                  </Button>
+                  <Button
+                    title="what the push client said while it sent this node's closure"
+                    pressed={props.stream === "push"}
+                    onClick={() => props.onStream("push")}
+                  >
+                    Push
+                  </Button>
+                </span>
+              </Show>
               {/* The attempt picker, and only where there is a choice to make:
                   a node on its first attempt has one log, and a group of one
                   button announcing itself as a group is noise a screen reader
@@ -598,10 +813,19 @@ export function LogPanel(props: {
                 {/* TWO facts, never one: `complete` says the log got its
                     producer's last word. A short log that says nothing about
                     completeness reads as a quiet recipe when it may be a lane
-                    that died mid-sentence. */}
-                {props.tail === undefined
-                  ? ""
-                  : `${bytes(props.tail.totalBytes)}${props.tail.complete ? "" : " · incomplete — the producer never closed this log"}`}
+                    that died mid-sentence.
+
+                    Both of them are the RECIPE's — `collections.logTails`
+                    covers that file and no other — so the push stream says
+                    what it is instead of borrowing a number about a different
+                    log, and adds the window's own size once a page has been
+                    asked for. A wrong byte count is worse than none: it is the
+                    number a reader checks a truncated log against. */}
+                {props.stream === "push"
+                  ? `push log${props.page === null ? "" : ` · ${bytes(props.page.size)}`}`
+                  : props.tail === undefined
+                    ? ""
+                    : `${bytes(props.tail.totalBytes)}${props.tail.complete ? "" : " · incomplete — the producer never closed this log"}`}
               </span>
             </header>
             <Show when={props.error}>
@@ -714,11 +938,14 @@ export function LogPanel(props: {
                 Wrap
               </Button>
               {/* FOLLOWING, or the way back to it — and the marker is drawn
-                  only while the attempt is OPEN. A finished attempt's log
-                  cannot grow, so "following" on one is a pane announcing it is
-                  waiting for something that is never coming. "Jump to latest"
-                  stays either way: scrolling back to the end of a log is worth
-                  a control whether or not the end is still moving. */}
+                  only while the LOG ON SCREEN is still open. A finished
+                  attempt's log cannot grow, so "following" on one is a pane
+                  announcing it is waiting for something that is never coming;
+                  see {@link growing} for why the push stream answers that
+                  from its own state rather than from the recipe's tail.
+                  "Jump to latest" stays either way: scrolling back to the end
+                  of a log is worth a control whether or not the end is still
+                  moving. */}
               <span class="log-follow">
                 <Show
                   when={stuck()}
@@ -737,7 +964,7 @@ export function LogPanel(props: {
                     </Button>
                   }
                 >
-                  <Show when={props.tail?.open === true}>
+                  <Show when={growing()}>
                     <span class="glyph hue-amber">●</span>
                     following
                   </Show>
@@ -812,6 +1039,54 @@ export function Detail(props: {
   const lanes = createMemo(() => [...laneMap().keys()]);
   const laneNodes = (platform: string): readonly RunNode[] =>
     laneMap().get(platform) ?? [];
+  /** WHERE THIS RUN'S PUSHES GO, or `null` for a run that pushes nowhere —
+   *  read off the RUN, because every node of a run sends to the same bucket
+   *  or to none, and the node carries what its push did rather than where it
+   *  went. The node rows take it from here so the destination is spelled in
+   *  one place on this page. */
+  const bucket = createMemo<string | null>(
+    () => props.run?.push?.target?.bucket ?? null,
+  );
+  /**
+   * WHAT THIS RUN WARMED, SUMMED — the header's own total, folded from the
+   * nodes the page is already holding.
+   *
+   * CLIENT-SIDE on purpose. `AttentionAnswer` carries a run-wide `paths` /
+   * `bytes` pair, but this view is drawn from `streams.nodes`, which is the
+   * frame that actually ticks while a run is live — a total read off a second
+   * source would lag the rows under it by a tick and a reader would see a
+   * header that disagreed with the sum of the list beneath it.
+   *
+   * ONLY LANDED PUSHES COUNT. A push in flight has sent nothing it can claim,
+   * and a failed one sent nothing at all; both would otherwise inflate a
+   * number people read as "what the next machine will not have to build". The
+   * failures are carried BESIDE the total rather than folded into it, because
+   * "3 paths landed and one node's push failed" is two facts and a reader
+   * needs both.
+   *
+   * `null` is a run that pushed nothing and failed at nothing — most runs,
+   * and the header stays quiet rather than printing a row of zeroes.
+   */
+  const pushed = createMemo(() => {
+    let paths = 0;
+    let narBytes = 0;
+    let landed = 0;
+    const failedOn: string[] = [];
+    for (const node of nodes()) {
+      const push = node.push;
+      if (push === undefined) continue;
+      if (push.state === "pushed") {
+        landed += 1;
+        paths += push.paths;
+        narBytes += push.bytes;
+      } else if (push.state === "failed") {
+        failedOn.push(node.id);
+      }
+    }
+    return landed === 0 && failedOn.length === 0
+      ? null
+      : { paths, bytes: narBytes, failedOn };
+  });
   /** The whole-run cancel, held behind a question — see the `Confirm` below. */
   const [confirmingCancel, setConfirmingCancel] = createSignal(false);
   return (
@@ -913,6 +1188,29 @@ export function Detail(props: {
                         {noteSuffix(push().keyWarning)}
                       </>
                     )}
+                  </Show>
+                </span>
+              )}
+            </Show>
+            {/* AND WHAT ACTUALLY LANDED. The line above says where this run
+                pushes; this one says whether anything got there, which is the
+                difference between "configured to warm the cache" and "the
+                cache is warm". Beside the target rather than under each node
+                because it is a fact about the RUN — the per-node detail is on
+                the node's own push step.
+
+                The failures ride here too, named. A run can be green by every
+                recipe's verdict and still have left a closure behind, and
+                "pushed 40 paths" on its own would be the sentence that hides
+                it. */}
+            <Show when={pushed()}>
+              {(total) => (
+                <span class="detail-push-total">
+                  {`pushed ${total().paths} path${total().paths === 1 ? "" : "s"} · ${bytes(total().bytes)}`}
+                  <Show when={total().failedOn.length > 0}>
+                    <span class="detail-push-failed">
+                      {` · push failed on ${total().failedOn.join(", ")}`}
+                    </span>
                   </Show>
                 </span>
               )}
@@ -1070,6 +1368,15 @@ export function Detail(props: {
                             ? null
                             : laneSpan(node(), props.run, props.now)
                         }
+                        // The push's segment, on the same scale and from the
+                        // same module — `null` on a node with no push, which
+                        // is what draws no second segment at all.
+                        push={
+                          props.run === undefined
+                            ? null
+                            : pushSpan(node(), props.run, props.now)
+                        }
+                        bucket={bucket()}
                         selected={props.selected?.id ?? null}
                         onSelect={props.onSelect}
                         controls={props.controls}

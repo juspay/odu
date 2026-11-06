@@ -30,7 +30,7 @@ import { defineSurface, type SurfaceTypes } from "@kolu/surface/define";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import type { SurfaceClientOf } from "@kolu/surface/project";
 import { Schema } from "effect";
-import { NodeIdSchema } from "./nodeId";
+import { LogStreamSchema, NodeIdSchema } from "./nodeId";
 
 /** The zod→Effect Schema mapping is LAW on this surface (kolu PLAN #17), and
  *  every field below is wire-bearing:
@@ -147,6 +147,45 @@ export const STATUS_META: Record<
   },
 };
 
+/**
+ * A NODE'S PUSH, AS ITS OWN STEP (PLAN 4.1).
+ *
+ * Three states, because a push is work with a beginning: the recipe exits 0,
+ * the lane starts sending the closure, and a minute later it has landed or it
+ * has not. The run page draws this as a second segment under the node's bar —
+ * so `pushing` has to be observable while it is happening, not inferred
+ * afterwards from a record that appeared out of nothing.
+ *
+ * A UNION rather than one struct with nullable counts: only `pushed` has
+ * counts to give, and `paths: 0` on a push still running would be a claim
+ * about the bucket that nobody made.
+ *
+ * The node's own `status` is unaffected by the first two states and reads the
+ * RECIPE's verdict throughout; a failed push is what turns it red, which is
+ * the rule 4.1 set and this does not change.
+ */
+export const NodePushSchema = Schema.Union([
+  /** The recipe exited 0 and the closure is on its way. */
+  Schema.Struct({ state: Schema.Literal("pushing") }),
+  Schema.Struct({
+    state: Schema.Literal("pushed"),
+    /** Store paths the bucket serves as a result of this node. */
+    paths: Schema.Int,
+    /** NAR bytes this node's uploads sent. */
+    bytes: Schema.Int,
+    /** How long the push took, SEPARATE from the node's own `durationMs`,
+     *  which stays the recipe's time. */
+    durationMs: Schema.Int,
+  }),
+  /** The closure did not land. The client's sentence is in the node's PUSH
+   *  log — not repeated here, where it would be a second copy to keep true. */
+  Schema.Struct({
+    state: Schema.Literal("failed"),
+    durationMs: Schema.Int,
+  }),
+]);
+export type NodePush = typeof NodePushSchema.Type;
+
 export const NodeStateSchema = Schema.Struct({
   id: NodeIdSchema,
   name: Schema.String,
@@ -161,26 +200,16 @@ export const NodeStateSchema = Schema.Struct({
   /** Wall-clock run time in ms once terminal; `null` otherwise. */
   durationMs: Schema.NullOr(Schema.Number),
   /**
-   * WHAT THIS NODE PUT IN THE CACHE (PLAN 4.1) — set by the lane runner when a
-   * recipe exits 0 and its `result*` closure was pushed.
+   * WHAT THIS NODE'S PUSH IS DOING (PLAN 4.1) — set by the lane runner the
+   * moment a recipe exits 0, and replaced when the push ends.
    *
    * `optionalKey` and absent by default, because absent is the ordinary
    * answer: a run with no push target, a recipe that built no `result`, and a
-   * node that only re-pushed paths an earlier node in this run already sent all
-   * mean "nothing new went to the bucket", and `0` would be a claim this field
-   * is not entitled to make about a run that never pushed at all.
+   * node that only re-pushed paths an earlier node in this run already sent
+   * all mean "this node has no push step", and a zeroed record would be a
+   * claim this field is not entitled to make about a run that never pushed.
    */
-  pushed: Schema.optionalKey(
-    Schema.Struct({
-      /** Store paths the bucket serves as a result of this node. */
-      paths: Schema.Int,
-      /** NAR bytes this node's uploads sent. */
-      bytes: Schema.Int,
-      /** How long the push took, SEPARATE from the node's own `durationMs`,
-       *  which stays the recipe's time. */
-      durationMs: Schema.Int,
-    }),
-  ),
+  push: Schema.optionalKey(NodePushSchema),
 });
 export type NodeState = typeof NodeStateSchema.Type;
 
@@ -444,7 +473,12 @@ export const nodePrimitives = {
   },
   streams: {
     nodeLog: {
-      inputSchema: Schema.Struct({ id: NodeIdSchema }),
+      /** WHICH node, and WHICH of its two logs. `stream` absent is the
+       *  recipe's — the subscription every existing reader opens, unchanged. */
+      inputSchema: Schema.Struct({
+        id: NodeIdSchema,
+        stream: Schema.optionalKey(LogStreamSchema),
+      }),
       outputSchema: NodeLogMessageSchema,
     },
   },

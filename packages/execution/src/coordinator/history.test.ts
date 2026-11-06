@@ -711,6 +711,38 @@ describe("recording what a node warmed", () => {
       durationMs: 2_500,
     });
   });
+
+  it("writes the push's BEGINNING and its failure, which a red status cannot say", () => {
+    // A push is a step with a beginning, and the run page reads a fold of
+    // this journal — live run included. A `pushing` that never reached a line
+    // here would be invisible to every reader the moment the coordinator went
+    // away, and a minute-long upload would appear, finished, out of nothing.
+    //
+    // `push_failed` is the other half: a node's red status alone cannot say
+    // WHICH of its two steps failed, so a reader of a finished run would see
+    // a red recipe where the recipe in fact passed.
+    const { history, handle } = started();
+
+    history.pushing({ node: NODE, bucket: "kolu-r2" });
+    history.pushFailed({
+      node: NODE,
+      bucket: "kolu-r2",
+      message: "odu: 1 path could not be pushed to kolu-r2 — 413 too large",
+      durationMs: 900,
+    });
+
+    const written = readJournal(handle).entries.slice(-2).map((entry) => entry.event);
+    expect(written).toEqual([
+      { kind: "pushing", node: NODE, bucket: "kolu-r2" },
+      {
+        kind: "push_failed",
+        node: NODE,
+        bucket: "kolu-r2",
+        message: "odu: 1 path could not be pushed to kolu-r2 — 413 too large",
+        durationMs: 900,
+      },
+    ]);
+  });
 });
 
 describe("settle → retry → settle, through the real writer and the real reader", () => {
