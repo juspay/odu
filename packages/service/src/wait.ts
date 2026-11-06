@@ -136,6 +136,7 @@ export function answerOf(attention: Attention): AttentionAnswer {
       attempts: row.attempts,
     })),
     endpoint: attention.endpoint,
+    ...(attention.actor === undefined ? {} : { actor: attention.actor }),
     ...(attention.push === undefined ? {} : { push: attention.push }),
   };
 }

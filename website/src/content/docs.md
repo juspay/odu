@@ -93,7 +93,7 @@ The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`lo
 
 | You want | CLI | API verb | On the board |
 | --- | --- | --- | --- |
-| start a run, every option | `odu ci run …` | `run_start` | **New run** — recipes, platforms, host pins, justfile root, hosts file, no-deps, no-strict, no-post, supersede, linger |
+| start a run, every option | `odu ci run …` | `run_start` | **New run** — recipes, platforms, host pins, justfile root, hosts file, no-deps, no-strict, no-post, supersede, linger. `--checkout ABS --sha SHA` names a checkout on a service you name, instead of the one you are standing in |
 | see the pipeline first | `odu ci dump`, `odu ci graph` | `pipeline_read` | **New run** → **Preview pipeline** |
 | retry, cancel, read a log | `odu ci rerun`, `odu ci cancel`, `odu ci logs` | `run_retry`, `run_cancel`, `log_read` | a run's page |
 | machines and holds | `odu ci hosts`, `odu ci lease`, `odu ci release` | `venue_probe`, `venue_hold`, `venue_release` | **Machines** |
@@ -272,13 +272,13 @@ Each row versions its own surface. The daemon publishes the host's version and e
 | Row | Contract | Who reads it |
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
-| `ci` (runs) | **2.5** | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
+| `ci` (runs) | **2.6** | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
 | `cache` | **4.6** | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
 | `metrics` (the host's own fragment) | **1.0** | `odu surface metrics`, a Prometheus at `/metrics` |
 
-Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource; **4.0** runs retention on `lastWanted` and drops the last-access field a path and `cache_stats_read` used to carry, and adds `cache_bucket_retention`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan` and `orphans` on the GC report (`retentionDays` at creation is now optional, defaulting to 90 days); **4.1** adds `readsFrom` on a bucket row and on `cache_bucket_describe`, `publicUrl` on a declared store, `migration` on a bucket row, and `cache_bucket_migrate`, which moves a bucket's objects between stores; **4.2** adds `writesTo` on a bucket row — `"store"` when `odu cache push` uploads straight into the bucket's store through presigned URLs and odu reads the object back to verify it, `"odu"` when the bytes cross the daemon — and the upload negotiation the push client speaks to learn it; **4.3** adds `cache_bucket_delete`, which takes a bucket's objects out of its store and then deletes the bucket with its paths, pins and its own tokens; **4.4** adds an optional `retentionDays` to `cache_gc_plan` alone, so a dry run can ask what another retention would take without writing one — `cache_gc_run` does not take it; **4.5** adds `group`, `name`, `sort` and `descending` to `cache_bucket_paths`, so a bucket is grouped by package and ordered by the row — counted over the whole bucket rather than over whichever page a reader holds. **4.6** adds a token's `label`, so the bucket page's Tokens list says `run <id>` for a credential odu minted for a run. Runs **2.5** adds a run's `push` — where it pushes and what it warmed — on a board row and on `run_read`/`run_wait`, and `pushed` on a node. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
+Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource; **4.0** runs retention on `lastWanted` and drops the last-access field a path and `cache_stats_read` used to carry, and adds `cache_bucket_retention`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan` and `orphans` on the GC report (`retentionDays` at creation is now optional, defaulting to 90 days); **4.1** adds `readsFrom` on a bucket row and on `cache_bucket_describe`, `publicUrl` on a declared store, `migration` on a bucket row, and `cache_bucket_migrate`, which moves a bucket's objects between stores; **4.2** adds `writesTo` on a bucket row — `"store"` when `odu cache push` uploads straight into the bucket's store through presigned URLs and odu reads the object back to verify it, `"odu"` when the bytes cross the daemon — and the upload negotiation the push client speaks to learn it; **4.3** adds `cache_bucket_delete`, which takes a bucket's objects out of its store and then deletes the bucket with its paths, pins and its own tokens; **4.4** adds an optional `retentionDays` to `cache_gc_plan` alone, so a dry run can ask what another retention would take without writing one — `cache_gc_run` does not take it; **4.5** adds `group`, `name`, `sort` and `descending` to `cache_bucket_paths`, so a bucket is grouped by package and ordered by the row — counted over the whole bucket rather than over whichever page a reader holds. **4.6** adds a token's `label`, so the bucket page's Tokens list says `run <id>` for a credential odu minted for a run. Runs **2.5** adds a run's `push` — where it pushes and what it warmed — on a board row and on `run_read`/`run_wait`, and `pushed` on a node; **2.6** adds a run's `actor` — who started it, a login or `local` — on a board row and on `run_read`/`run_wait`. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
 
 
 ## Server mode
@@ -413,6 +413,21 @@ ODU_TOKEN=odu_... odu mcp --origin https://odu.example.com
 ```
 
 Every `odu` command, and the MCP bridge, send the token as `Authorization: Bearer` on the connection they open. `ODU_TOKEN` wins over a stored credential, so one shell can be somebody else.
+
+### Run the server's CI from your shell
+
+The token above is all a run needs. What a shell must add is WHICH checkout: your cwd is a fact about your laptop, and the server's filesystem is not yours — so name the path on the server, and the commit you believe is there.
+
+```sh
+export ODU_TOKEN=odu_… ODU_WEB_ORIGIN=https://odu.example.com
+odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
+```
+
+`--sha` is **required** with `--checkout`: it is the strict gate, and a checkout that has moved on is refused rather than quietly run at a different commit. `--checkout` is refused unless a service is **named** (`--origin`, or `ODU_WEB_ORIGIN` as above) — the check is naming, not distance, so an explicit `http://127.0.0.1:18440` is accepted; what is refused is the default, which is the daemon for the directory you are standing in. Without the flags `odu ci run` means this checkout, as it always has.
+
+Your `$ODU_HOSTS` is sent when it names a **path**, `--checkout` included: a face does not decide that your fleet stops applying to your own run, and a path the server has not got is skipped by its resolution chain, which falls through to the server's own `~/.config/odu/hosts.json`. A shell with **no** `$ODU_HOSTS` sends nothing at all for a `--checkout` run — saying "mine is empty" about a world you are not in would blank the server's own variable, and on a pod whose Deployment sets the fleet that is the only inventory there is.
+
+Every run records **who started it** — the token's person, or `@local` on a loopback daemon (a login cannot contain `@`, so the reserved word can never be mistaken for a person). It appears as `started by <login>` on the run's header and in `odu ci history list --all` (`--all`, because such a run's checkout is a path on the server, not yours), and `run_read` answers it as `actor`. It is provenance, not authority: revoking a token stops the next call, not a run already launched.
 
 Revoking a token on the profile page, signing out, or a session expiring ends every connection that credential opened: nothing further is served on it, the socket itself is closed, and an open board tab meets the sign-in page.
 
@@ -559,7 +574,7 @@ odu mcp
 
 | Command | Purpose / useful flags | On the board |
 | --- | --- | --- |
-| `ci run [recipe[@platform]…]` | `--host P=ADDR`, `--platform P`, `--root NAMEPATH`, `--no-deps`, `--no-post`, `--no-strict`, `--no-snapshot`, `--no-wait`, `--linger`, `--supersede`. Pushes every recipe's `result*` closure to the odu cache this repository's `flake.nix` already reads from | **New run** |
+| `ci run [recipe[@platform]…]` | `--host P=ADDR`, `--platform P`, `--root NAMEPATH`, `--checkout ABS` with `--sha SHA` (a checkout on the service; needs the service named by `--origin` or `ODU_WEB_ORIGIN`), `--no-deps`, `--no-post`, `--no-strict`, `--no-snapshot`, `--no-wait`, `--linger`, `--supersede`. Pushes every recipe's `result*` closure to the odu cache this repository's `flake.nix` already reads from | **New run** |
 | `ci status`, `ci attach` | Current checkout's run; `-o json` for machine output | the board's row, a run's page |
 | `ci wait [--run R]` | `--after CURSOR`, `--deadline-ms N`, `--settle`, `--expected-sha SHA`; `--timeout-ms` aliases the deadline | a run's page, live |
 | `ci rerun [--run R] SELECTOR` | `--expect-attempt N`, `--request-id ID` | a node's **Retry** |

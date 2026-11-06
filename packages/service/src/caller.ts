@@ -54,3 +54,35 @@ export function callerOf(
 ): Caller {
   return { hostsFile: input.hostsFile ?? null, principal };
 }
+
+/**
+ * WHAT A LOOPBACK CONNECTION IS CALLED in a run's `actor` field.
+ *
+ * `@local` and not `local`, because the field is one string space shared with
+ * GitHub logins and it is DURABLE: every manifest already written spells its
+ * answer, and the `ci` contract publishes it. A login cannot contain `@`, so
+ * this is a word no person can ever be — which is what keeps "the machine's
+ * own owner" and "a user called local" distinguishable for as long as the
+ * records last. The same reservation is what a later principal kind would
+ * need, and it costs nothing to have made it now.
+ */
+export const LOCAL_ACTOR = "@local";
+
+/**
+ * WHO A RUN RECORDS AS ITS ACTOR — one word, from the principal this call
+ * carries (PLAN 4.4).
+ *
+ * A signed-in person is their `login`. A loopback connection is
+ * {@link LOCAL_ACTOR}, because that principal has no login: it is the
+ * machine's own owner, and inventing a name for them ("you", `$USER`, the
+ * daemon's uid) would put a second, unreliable spelling of one fact into a
+ * durable record.
+ *
+ * Here rather than at the launch port because it is a reading of the
+ * {@link Caller}, and every face that shows "started by" must read the same
+ * one — a board, a runs table and an agent disagreeing about who started a run
+ * is worse than none of them saying.
+ */
+export function actorOf(principal: Principal): string {
+  return principal.kind === "local" ? LOCAL_ACTOR : principal.login;
+}

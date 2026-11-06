@@ -539,6 +539,9 @@
   .detail-ref { color: var(--ink); font: 0.85rem var(--mono); }
   .detail-scope { color: var(--muted); font: 0.8rem var(--mono); }
   .detail-parent { color: var(--violet-ink); font: 0.8rem var(--mono); }
+  /* WHO STARTED IT (PLAN 4.4). Muted mono like the rest of the header's
+   * provenance: a login is a string a person compares, not a phrase. */
+  .detail-actor { color: var(--muted); font: 0.8rem var(--mono); }
   /* WHERE THIS RUN'S BUILDS GO (PLAN 4.1). Mono like the other header facts,
    * because the bucket name is a string a person pastes. */
   .detail-push { color: var(--muted); font: 0.8rem var(--mono); }
@@ -624,11 +627,76 @@
     gap: 0.35rem;
   }
 
-  /* THE PROBE'S AGE AND SLICE ride a `Facts` line, which brings its own type
-     and colour; the paragraph around it is only the hook the acceptance suite
-     reads, so all it owes the layout is to drop the browser's margins and let
-     `.screen`'s gap space it. */
-  .venue-age { margin: 0; }
+  /* ── the machines page ────────────────────────────────────────────────────
+   *
+   * ONE TOOLBAR ROW: the slice, the control, the age. A `.field` is a grid of
+   * label-over-input everywhere else on this board; here it is the one place
+   * a label belongs BESIDE its input, because the row is read across rather
+   * than down and the input holds one short token. */
+  .venue-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .venue-bar .field {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  /* A PLATFORM IS A SHORT TOKEN, so the box is one. A full-width input said
+     the field took a paragraph and pushed the control it belongs to onto its
+     own band. */
+  .venue-bar .input { width: 16rem; max-width: 100%; }
+
+  /* The age, and the hosts file that answered, as one quiet line beside the
+     button that refreshes them. `.venue-age` is the acceptance suite's hook. */
+  .venue-age {
+    margin: 0;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+
+  /* THE HOSTS FILE, SHORT. The whole path is in `title` — a
+     `/nix/store/<32 hex>-hosts.json` printed in full was the longest string
+     on the page and the reason this line wrapped. */
+  .venue-source {
+    max-width: 14rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--mono);
+  }
+
+  /* THE FLEET. Four columns are sized to what they hold and `Holder` — the
+     one unbounded string — takes the slack, so a wider window widens the
+     column with something to say rather than the one holding `ci@petit`. The
+     cap is why 1920 does not stretch a five-column table across a metre of
+     screen; `.table` is `table-layout: fixed`, so nothing inside widens it. */
+  .venues { max-width: 72rem; }
+  .venue-host { display: inline-block; overflow: hidden; text-overflow: ellipsis; }
+  /* A pool's slot is a qualifier on the machine, not a column of `1/1`. */
+  .venue-slot { color: var(--muted); }
+  /* WHY A MACHINE IS DOWN: one line under its row, clipped, whole on hover. */
+  .venue-why {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* The hold form, under the table it acts on. */
+  .venue-hold {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.75rem 0 0.25rem;
+  }
 
   @container (max-width: 60rem) {
     .detail-body { grid-template-columns: minmax(0, 1fr); }

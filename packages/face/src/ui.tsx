@@ -547,6 +547,13 @@ export function Disclosure(props: {
         aria-expanded={props.open}
         onClick={() => props.onToggle()}
       >
+        {/* THE CARET IS DECORATION, and it has to be an ELEMENT to say so.
+            Drawn as `::before` it was still CSS-generated content, which
+            Chromium folds into the accessible NAME — so this control was
+            called "▸ Hold a machine" and `getByRole("button", { name })`
+            found nothing. `aria-expanded` is the state's one announcement;
+            the glyph is its drawing, exactly as the table's sort arrow is. */}
+        <span class="disclosure-caret" aria-hidden="true">{props.open ? "▾" : "▸"}</span>
         {props.summary}
       </button>
       <Show when={props.open}>{props.children}</Show>

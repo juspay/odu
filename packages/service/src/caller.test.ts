@@ -35,7 +35,7 @@ import {
   CI_CONTRACT_VERSION,
   CI_ROW,
 } from "@odu/service-client/surface";
-import type { Caller } from "./caller";
+import { actorOf, LOCAL_ACTOR, type Caller } from "./caller";
 import { createOduService } from "./service";
 import {
   makeWorld,
@@ -232,6 +232,50 @@ describe("the caller is assembled once per call", () => {
       );
       // The port is the proof: a refusal never reaches it.
       expect(ports.launches).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
+});
+
+/**
+ * WHO THE RUN RECORDS (PLAN 4.4).
+ *
+ * `actorOf` is the one reading of a principal that reaches a durable record,
+ * and the two faces that show it ("started by …" on a run header and in the
+ * runs table) read that record rather than deriving a second answer. What is
+ * pinned here is the reading itself, and that a start reaches its port with
+ * the principal that reading is taken from — the root binds the two together,
+ * and the e2e drives the whole chain against a real daemon.
+ */
+describe("the actor a run is recorded with", () => {
+  it("is a signed-in person's login, and a RESERVED word for the machine's own owner", () => {
+    expect(actorOf({ kind: "user", login: "srid", role: "member" })).toBe("srid");
+    expect(actorOf({ kind: "user", login: "octo", role: "owner" })).toBe("octo");
+    // `local` has no login to give: it is not a person, and inventing a name
+    // for it would put a second spelling of one fact into every manifest. The
+    // word carries an `@`, which a GitHub login cannot — so a user called
+    // `local` can never be mistaken for the loopback owner in a record that
+    // is already on disk and cannot be migrated.
+    expect(actorOf(LOCAL_OWNER)).toBe(LOCAL_ACTOR);
+    expect(LOCAL_ACTOR).toContain("@");
+  });
+
+  it("comes from the CONNECTION on a start, never from the input", async () => {
+    const signedIn: Principal = { kind: "user", login: "srid", role: "member" };
+    const ports = recordingPorts();
+    const { face, close } = serve(ports, signedIn);
+    try {
+      await asked(
+        face.surface.run.start({
+          checkout: CHECKOUT,
+          expectedSha: HEAD,
+          requestId: "caller-start-actor",
+        }),
+      );
+      const carried = ports.launches[0]?.caller.principal;
+      expect(carried).toEqual(signedIn);
+      expect(actorOf(carried ?? LOCAL_OWNER)).toBe("srid");
     } finally {
       await close();
     }

@@ -67,10 +67,21 @@ Every command below is a client of the shared odu service. It is started for you
 if none is running; nothing here runs CI by itself.
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
-    [--no-deps] [--no-strict] [--no-snapshot] [--no-post] [--supersede]
-    [--no-wait] [--request-id ID] [--progress json] [-o json]
+    [--checkout ABS --sha SHA] [--no-deps] [--no-strict] [--no-snapshot]
+    [--no-post] [--supersede] [--no-wait] [--request-id ID] [--progress json]
+    [-o json]
                               # start a run in THIS checkout and watch it.
                               # Ctrl-C stops watching; the run keeps going.
+                              # --checkout names a path on the SERVICE's
+                              # machine instead. It needs a service NAMED
+                              # (--origin or $ODU_WEB_ORIGIN; the default is
+                              # the daemon for where you stand) and REQUIRES
+                              # --sha: the commit you believe is there, which
+                              # the service refuses if it moved. Your
+                              # $ODU_HOSTS is still sent when it names a
+                              # path (one the service has not got falls
+                              # through to its chain); with none set,
+                              # nothing is sent and the service's own stands.
                               # Every recipe's result* closure is pushed to
                               # the odu cache this repository's flake.nix
                               # nixConfig already reads from, when this daemon
@@ -292,6 +303,11 @@ export async function ciCommand(
           platform: { type: "string", multiple: true },
           host: { type: "string", multiple: true },
           root: { type: "string" },
+          // THE RUN'S SUBJECT, when it is not this checkout: a path on the
+          // SERVICE's machine and the commit the caller believes is on it.
+          // Parsed as a pair and refused as a pair — see `runTarget`.
+          checkout: { type: "string" },
+          sha: { type: "string" },
           "no-deps": { type: "boolean" },
           "no-strict": { type: "boolean" },
           "no-snapshot": { type: "boolean" },
@@ -331,6 +347,8 @@ export async function ciCommand(
           ? {}
           : { requestId: values["request-id"] }),
         ...(values.origin === undefined ? {} : { origin: values.origin }),
+        ...(values.checkout === undefined ? {} : { checkout: values.checkout }),
+        ...(values.sha === undefined ? {} : { sha: values.sha }),
         json: values.output === "json",
       });
     }

@@ -422,6 +422,9 @@ function project(
     reportingDebt: fold.debt.size,
     endpoint: attention.endpoint,
     parentRunId: manifest.parentRunId,
+    // WHO STARTED IT (PLAN 4.4) — the manifest's own stamp, not a second
+    // derivation: the row, `run_read` and the browser all read one field.
+    ...(manifest.actor === undefined ? {} : { actor: manifest.actor }),
     // The cursor a caller resumes from if it starts watching HERE. The
     // journal's highest sequence rather than the attention payload's own
     // cursor: that one advances only through events actually delivered, and

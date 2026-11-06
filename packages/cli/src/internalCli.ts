@@ -78,6 +78,7 @@ async function runCoordinator(rest: string[]): Promise<number> {
       "run-id": { type: "string" },
       "parent-run": { type: "string" },
       "request-id": { type: "string" },
+      actor: { type: "string" },
       push: { type: "string" },
       "push-origin": { type: "string" },
       "push-bucket": { type: "string" },
@@ -115,6 +116,10 @@ async function runCoordinator(rest: string[]): Promise<number> {
       ...(values["request-id"] === undefined
         ? {}
         : { requestId: values["request-id"] }),
+      // WHO STARTED IT (PLAN 4.4), as the launcher resolved it from the
+      // connection. Absent when nothing told us, which the catalog records as
+      // a run with no actor rather than one started by this machine.
+      ...(values.actor === undefined ? {} : { actor: values.actor }),
       // WHERE THIS RUN PUSHES (PLAN 4.1). Four flags and no token: the
       // launcher left that in `runs/<id>/push.token`, which the coordinator
       // reads and unlinks. An argv is public on the machine.

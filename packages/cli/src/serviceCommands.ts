@@ -72,7 +72,7 @@ import {
   firstFrame,
   formatAgo,
   git,
-  here,
+  type RunTarget,
   hostsFileHere,
   nodesStream,
   patience,
@@ -80,6 +80,7 @@ import {
   reportLost,
   reportRefusal,
   requestId,
+  runTarget,
   WAIT_EXITS,
   waitExitFor,
   watchNodes,
@@ -112,6 +113,82 @@ export interface RunOpts {
   json: boolean;
   origin?: string;
   cwd?: string;
+  /** A checkout on the SERVICE's machine, sent verbatim — the pod's
+   *  `/data/checkouts/<repo>` rather than anything under this shell. Requires
+   *  {@link RunOpts.sha} and a named service; see `runTarget`. */
+  checkout?: string;
+  /** The commit the caller believes {@link RunOpts.checkout} is on, sent as
+   *  `expectedSha`. Only meaningful beside a `checkout`. */
+  sha?: string;
+}
+
+/**
+ * WHAT `odu ci run` ASKS FOR — the whole of the mutation, as one value.
+ *
+ * Pure and exported so the two claims it carries can be stated rather than
+ * inferred from a live service: the target travels VERBATIM (whatever
+ * `runTarget` resolved, this does not touch), and `$ODU_HOSTS` travels on all
+ * three of its readings — a path always, `""` only when this shell IS the
+ * run's world.
+ */
+export function startInputOf(at: RunTarget, opts: RunOpts) {
+  // ONE read of this shell's variable, resolved once — see the long note on
+  // the field below for which of its three readings travels when.
+  const shellHosts = hostsFileHere(opts.cwd);
+  return {
+    checkout: at.checkout,
+    expectedSha: at.sha,
+    requestId: requestId(opts.requestId),
+    selectors: opts.selectors,
+    platforms: opts.platforms,
+    hostPins: opts.hostPins,
+    // THIS shell's `$ODU_HOSTS`, because this is the shell the person
+    // typed in. The service is a singleton somebody else may have
+    // started, and `loadHosts` runs in the coordinator it spawns — so a
+    // variable that is not carried here is a variable that stopped
+    // working the moment `odu ci run` became a client.
+    // Made absolute HERE, against the caller's cwd, because that is the
+    // only place the relative form has a meaning. `$ODU_HOSTS=hosts.json`
+    // has always meant "in the directory I am standing in".
+    //
+    // ALWAYS sent, including as `""`. A terminal knows the answer either
+    // way, and saying nothing would mean "use the service's own" — right
+    // for an agent, wrong for the person who just unset the variable.
+    //
+    // `--checkout` DOES NOT CHANGE THAT FOR A PATH. An earlier revision
+    // dropped the variable outright there, which was a face deciding,
+    // silently, that a person's fleet did not apply to their own run — and
+    // the flag does not even imply a different machine: a service named as
+    // `http://127.0.0.1:18440` is this one. It is also unnecessary. A path
+    // that does not exist on the service is SKIPPED by `loadHosts`
+    // (`existsSync` → next candidate), so a laptop's `$ODU_HOSTS` naming a
+    // file the pod has not got falls through to the service's own
+    // `~/.config/odu/hosts.json`.
+    //
+    // IT DOES CHANGE IT FOR `""`, and that pair is the whole rule. `""` is
+    // not silence: `callerOf` keeps it (`caller.ts:50-56`) and
+    // `coordinatorEnv` ASSIGNS it, so the coordinator runs with
+    // `ODU_HOSTS=""` and the SERVICE's own variable is blanked — on a pod
+    // whose Deployment sets `$ODU_HOSTS`, that bypasses the only fleet
+    // there is and `fanoutPools` refuses. `""` means "MY shell has none",
+    // which is an answer about a world the run is not happening in; the
+    // honest reading there is the third one, ABSENT — "I have no shell in
+    // this world" — which is the only one that leaves the daemon's
+    // configuration standing.
+    //
+    // Read off `at.mine`, never off `opts.checkout`: the flag was a PROXY
+    // for "is this shell the run's world", `runTarget` is where that is
+    // decided, and the proxy is wrong for `--checkout $PWD` against this
+    // same daemon. One fact, one source.
+    ...(at.mine || shellHosts !== "" ? { hostsFile: shellHosts } : {}),
+    ...(opts.root === undefined ? {} : { root: opts.root }),
+    noDeps: opts.noDeps,
+    noStrict: opts.noStrict,
+    noSnapshot: opts.noSnapshot,
+    noPost: opts.noPost,
+    supersede: opts.supersede,
+    linger: opts.linger,
+  };
 }
 
 /**
@@ -131,38 +208,9 @@ export interface RunOpts {
  * laptop without killing their CI.
  */
 export async function runViaService(opts: RunOpts): Promise<number> {
-  const at = here(opts.cwd);
+  const at = runTarget(opts);
   return withService(opts.origin, async (client) => {
-    const started = await call(
-      client.surface.run.start({
-        checkout: at.checkout,
-        expectedSha: at.sha,
-        requestId: requestId(opts.requestId),
-        selectors: opts.selectors,
-        platforms: opts.platforms,
-        hostPins: opts.hostPins,
-        // THIS shell's `$ODU_HOSTS`, because this is the shell the person
-        // typed in. The service is a singleton somebody else may have
-        // started, and `loadHosts` runs in the coordinator it spawns — so a
-        // variable that is not carried here is a variable that stopped
-        // working the moment `odu ci run` became a client.
-        // Made absolute HERE, against the caller's cwd, because that is the
-        // only place the relative form has a meaning. `$ODU_HOSTS=hosts.json`
-        // has always meant "in the directory I am standing in".
-        //
-        // ALWAYS sent, including as `""`. A terminal knows the answer either
-        // way, and saying nothing would mean "use the service's own" — right
-        // for an agent, wrong for the person who just unset the variable.
-        hostsFile: hostsFileHere(opts.cwd),
-        ...(opts.root === undefined ? {} : { root: opts.root }),
-        noDeps: opts.noDeps,
-        noStrict: opts.noStrict,
-        noSnapshot: opts.noSnapshot,
-        noPost: opts.noPost,
-        supersede: opts.supersede,
-        linger: opts.linger,
-      }),
-    );
+    const started = await call(client.surface.run.start(startInputOf(at, opts)));
     if (!started.ok) {
       return started.refusal === null
         ? reportLost(started.error, opts.json)
@@ -624,7 +672,11 @@ export function renderRows(rows: readonly RunRow[], now: number): string {
     const verdict =
       r.state === "settled" ? (r.outcome ?? (r.passed ? "passed" : "failed")) : r.state;
     const debt = r.reportingDebt > 0 ? `  ⇐${r.reportingDebt}` : "";
-    return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}${r.contentSha === undefined ? "" : `→${r.contentSha.slice(0, 7)}`}  ${r.branch ?? "-"}  ${verdict}  ${duration(runElapsedMs(r, now))}  ${formatAgo(now - r.createdAt)} ago${debt}`;
+    // WHO STARTED IT (PLAN 4.4), when the record says. Appended rather than
+    // columned, and omitted entirely for a run recorded before the field: a
+    // dash here would be a claim that nobody did.
+    const by = r.actor === undefined ? "" : `  started by ${r.actor}`;
+    return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}${r.contentSha === undefined ? "" : `→${r.contentSha.slice(0, 7)}`}  ${r.branch ?? "-"}  ${verdict}  ${duration(runElapsedMs(r, now))}  ${formatAgo(now - r.createdAt)} ago${debt}${by}`;
   });
   return `${lines.join("\n")}\n`;
 }

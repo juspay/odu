@@ -38,8 +38,10 @@ import { ago } from "@odu/cordis/format";
 import {
   BackLink,
   Button,
+  Disclosure,
   Facts,
   Field,
+  Fields,
   PageHead,
   Panel,
   Pill,
@@ -52,7 +54,7 @@ import {
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
 import type { Effect } from "effect";
 import { requestId } from "./format";
-import type { VenueRow } from "./types";
+import type { VenueReading, VenueRow } from "./types";
 import type { CiClient } from "./ci";
 
 type Call = <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
@@ -89,41 +91,153 @@ function venueHolder(row: VenueRow, now: number): string {
   return `${held.holder}${held.run === null ? "" : ` · ${held.run}`} · ${minutes}m`;
 }
 
-/** WHAT A MACHINE'S STATE IS WORTH IN COLOUR. The four venue states are the
- *  same kind of fact a run's status is — can work land here or not — so they
- *  wear the same five hues and nothing else on this page is coloured at all.
- *  A total `Record`, so a fifth venue state is a type error rather than an
- *  uncoloured cell. */
+/** WHAT A MACHINE'S STATE IS WORTH IN COLOUR. The venue states are the same
+ *  kind of fact a run's status is — can work land here or not — so they wear
+ *  the same hues and nothing else on this page is coloured at all. A total
+ *  `Record`, so a new venue state is a type error rather than an uncoloured
+ *  cell. `probing` is GREY: it is the absence of an answer, and a colour
+ *  there would be a verdict on a machine nobody has heard from. */
 const VENUE_HUE: Record<VenueRow["state"], "green" | "amber" | "grey" | "red"> = {
+  probing: "grey",
   free: "green",
   local: "green",
   busy: "amber",
   down: "red",
 };
 
-/** THE FLEET, ONE ROW PER VENUE — which machine, which platform, how it last
- *  read, and who has it. A table and not a grid of cards: the question this
- *  page answers ("is anything free?") is asked of the whole fleet at once, and
- *  that is read down a column. The clock arrives as a thunk because the holder
- *  column ages between probes while the rows themselves do not move. */
-function venueColumns(now: () => number): ReadonlyArray<TableColumn<VenueRow>> {
+/**
+ * WHY A MACHINE IS NOT ANSWERING — the ssh sentence, as the row's second line.
+ *
+ * Every configured host is a row whether or not it answered: `probeHost`
+ * returns an `unreachable` result carrying ssh's own words rather than
+ * dropping the machine. This is the half of that row no column can hold — a
+ * sentence as long as ssh wants it — so it is a note UNDER the row, clipped to
+ * one line with the whole of it in the cell's `title`.
+ *
+ * The age is NOT here: it is a column now, which is where a fact every row
+ * has belongs. `null` for a machine that answered — a note under every row
+ * would bury the ones that matter.
+ */
+export function venueNote(row: VenueRow): string | null {
+  if (row.state !== "down") return null;
+  return row.error ?? "did not answer, and the probe gave no reason";
+}
+
+/**
+ * THE HOSTS FILE, IN THE WIDTH OF A TOOLBAR.
+ *
+ * The path that won is a fact worth having and a `/nix/store/…-hosts.json` is
+ * 60 characters of hash nobody reads — printed in full it was the longest
+ * string on the page and the reason the toolbar wrapped. The last segment is
+ * what distinguishes one from another; the whole path rides `title`, so
+ * nothing is lost and the line stays one line.
+ */
+export function venueSource(source: string | null): { label: string; title: string } {
+  if (source === null) return { label: "local lanes only", title: "no hosts file was found" };
+  const last = source.split("/").filter((part) => part !== "").at(-1) ?? source;
+  return { label: last, title: source };
+}
+
+/**
+ * WHAT THIS READING IS — a probe still running, or how much of the fleet is
+ * up (PLAN 4.4).
+ *
+ * WHILE IT IS RUNNING it says so, and says HOW MANY machines it is waiting
+ * on. The inventory is known the moment the hosts file is read and the states
+ * are not, so the service publishes the rows first, every one `probing`; this
+ * is the line that makes that visible instead of `no probe yet` sitting there
+ * for the length of an ssh timeout. The count is the one a reader can check
+ * against the rows under it.
+ *
+ * ONCE IT HAS ANSWERED, a machine that is `down` is the only one work cannot
+ * land on, so that is what the count is drawn at; busy is a machine doing
+ * exactly what it is for.
+ *
+ * The slice clause is the correction. A probe narrowed by the Platforms field
+ * REPLACES the kept reading, so after one narrowed probe this page drew two
+ * rows and said "2 of 2 up" — a sentence about the whole inventory, made out
+ * of a question about a tenth of it, with the machines it did not probe
+ * nowhere on the screen. Naming the platforms is what makes the number true.
+ *
+ * `undefined` for either ABSENCE — the cell has not answered (`undefined`),
+ * or it answered that nothing has probed since this service started (`null`).
+ * Both of them here rather than one here and one at the caller: "when is there
+ * no line" is one rule, and neither "not asked yet" nor "asked and empty" is a
+ * count, so a confident `0 of 0 up` is worse than no line either way.
+ *
+ * NO AGE. It was here and in the toolbar and in a third `Probed …` facts
+ * line, three readings of one clock stacked above a five-row table. The age
+ * belongs beside the control that refreshes it, and on each row.
+ */
+export function fleetLine(reading: VenueReading | undefined): string | undefined {
+  if (reading === undefined || reading === null) return undefined;
+  const slice =
+    reading.platforms.length === 0
+      ? ""
+      : ` · ${reading.platforms.join(" ")} only, not the whole inventory`;
+  const waiting = reading.rows.filter((row) => row.state === "probing").length;
+  if (waiting > 0) {
+    return `probing ${waiting} host${waiting === 1 ? "" : "s"}…${slice}`;
+  }
+  const up = reading.rows.filter((row) => row.state !== "down").length;
+  return `${up} of ${reading.rows.length} up${slice}`;
+}
+
+/**
+ * THE FLEET, ONE ROW PER VENUE — which machine, which platform, how it last
+ * read, how old that reading is, and who has it.
+ *
+ * FIVE FIXED COLUMNS, SIZED TO WHAT THEY HOLD, and only `Holder` gives. The
+ * previous shape left `Machine` with no width, so the one column holding a
+ * twelve-character host name absorbed every pixel a wider window added — 911
+ * of 1631 at 1920 — and squeezed the four facts a person actually scans into
+ * the right edge. A column's width is a property of its CONTENT, not of the
+ * window: an ssh address is `ci@pureintent`, a platform is a Nix tuple, a
+ * state is one word, an age is `12m`. Holder is the one unbounded string
+ * (login · run · age), so it takes the slack and clips.
+ *
+ * SLOT is gone as a column and rides `Machine`, shown only for a pool with
+ * more than one: `1/1` down a whole table is a column of no information, and
+ * this page is read down its columns.
+ *
+ * The clock arrives as a thunk because the age and holder columns tick
+ * between probes while the rows themselves do not move.
+ */
+function venueColumns(now: () => number, probedAt: () => number): ReadonlyArray<TableColumn<VenueRow>> {
   return [
-    { key: "host", label: "Machine", cell: (row) => row.host },
-    { key: "platform", label: "Platform", width: "13rem", cell: (row) => <code>{row.platform}</code> },
+    {
+      key: "host",
+      label: "Machine",
+      width: "15rem",
+      cell: (row) => (
+        <span class="venue-host" title={row.host}>
+          {row.host}
+          <Show when={row.slots > 1}>
+            <span class="venue-slot">{` ${row.slot + 1}/${row.slots}`}</span>
+          </Show>
+        </span>
+      ),
+    },
+    { key: "platform", label: "Platform", width: "11rem", cell: (row) => <code>{row.platform}</code> },
     {
       key: "state",
       label: "State",
-      width: "7rem",
+      width: "6rem",
       cell: (row) => <Pill hue={VENUE_HUE[row.state]}>{row.state}</Pill>,
     },
     {
-      key: "slot",
-      label: "Slot",
+      key: "age",
+      label: "Age",
       align: "right",
       width: "5rem",
-      cell: (row) => `${row.slot + 1}/${row.slots}`,
+      // EVERY row that has an answer, because every one of them is one probe
+      // old — the fact a `down` row needs most ("down NOW" and "down when
+      // somebody last looked" call for opposite moves) and the one a column
+      // states once. A row still being dialled has no reading to be the age
+      // OF, and a `0s` there would be a reading nobody took.
+      cell: (row) => (row.state === "probing" ? "—" : ago(probedAt(), now())),
     },
-    { key: "holder", label: "Holder", width: "20rem", cell: (row) => venueHolder(row, now()) },
+    { key: "holder", label: "Holder", cell: (row) => venueHolder(row, now()) },
   ];
 }
 
@@ -162,20 +276,15 @@ export function Machines(props: {
     askedOnOpen = true;
     if (answer === null) probeFor([]);
   });
-  /** HOW MANY MACHINES ARE UP, in the page's one line of state. A machine that
-   *  is `down` is the only one work cannot land on — busy is a machine doing
-   *  exactly what it is for — so that is the line the count is drawn at. */
-  const upLine = createMemo<string | undefined>(() => {
-    const answer = reading.value();
-    // Neither "not asked yet" nor "asked, and empty" is a count, and both draw
-    // no line rather than a confident `0 of 0 up`.
-    if (answer === undefined || answer === null) return undefined;
-    const rows = answer.rows;
-    const up = rows.filter((row) => row.state !== "down").length;
-    return `${up} of ${rows.length} up · probed ${ago(answer.at, props.now)}`;
-  });
+  /** HOW MANY MACHINES ARE UP, in the page's one line of state — and whether
+   *  the reading those machines came from is the whole inventory. The whole
+   *  rule is `fleetLine`'s, both absences included. */
+  const upLine = createMemo(() => fleetLine(reading.value()));
 
   const [checkout, setCheckout] = createSignal("");
+  /** IS THE HOLD FORM OPEN? The caller's bit, not `<details>`'s — a republish
+   *  re-mints this subtree and the platform's own state would die with it. */
+  const [holding, setHolding] = createSignal(false);
   const [noWait, setNoWait] = createSignal(false);
   const control = createControl(props.call);
   /** The checkout as typed, empty included — the SERVICE refuses a path that
@@ -218,90 +327,97 @@ export function Machines(props: {
 
   return (
     <section class="screen ops" aria-label="machines">
-      {/* The probe is the page's one whole-screen action, so it rides the head
-          beside the line it refreshes. The field it narrows sits under them,
-          because a platform list is a thing you type rather than a thing you
-          press. */}
-      <PageHead
-        title="Machines"
-        sub={upLine()}
-        actions={
-          <Button disabled={probing.busy()} onClick={() => probeFor(tokens(platforms()))}>
-            {probing.busy() ? "Probing…" : "Probe machines"}
-          </Button>
-        }
-      />
-      <div class="form">
-        <Field id="venue-platforms" label="Platforms" hint="space-separated; empty means all">
+      <PageHead title="Machines" sub={upLine()} />
+      {/* ONE COMPACT ROW: the slice you want, the control that fetches it, and
+          how old what you are looking at is. It was a full-width text input, a
+          helper sentence under it, and a separate `Probed … platforms … hosts
+          /nix/store/…` line — three bands of chrome above a five-row table,
+          and the store path alone was the longest string on the page. The
+          placeholder says what the field takes, so the hint is gone; the
+          hosts file is its last segment with the whole path on hover. */}
+      <div class="venue-bar">
+        <Field id="venue-platforms" label="Platforms">
           <TextInput
             id="venue-platforms"
             value={platforms()}
-            placeholder="x86_64-linux aarch64-darwin"
+            placeholder="all"
             onValue={setPlatforms}
           />
         </Field>
+        <Button disabled={probing.busy()} onClick={() => probeFor(tokens(platforms()))}>
+          {probing.busy() ? "Probing…" : "Probe machines"}
+        </Button>
+        {/* `.venue-age` is the acceptance suite's hook for this phrase, and it
+            belongs beside the button that refreshes it. */}
+        <Show when={reading.value()}>
+          {(answer) => (
+            <span class="venue-age">
+              {`Probed ${ago(answer().at, props.now)}`}
+              <span class="venue-source" title={venueSource(answer().source).title}>
+                {venueSource(answer().source).label}
+              </span>
+            </span>
+          )}
+        </Show>
       </div>
       <Show when={probing.fault()}>{(message) => <Receipt tone="refused">{message()}</Receipt>}</Show>
       <Show when={reading.value()} fallback={<p class="empty">no probe yet</p>}>
         {(answer) => (
           <>
-            {/* WHAT THIS READING IS: its age, the slice it covers, and the
-                hosts file that answered — facts, not a sentence. The age leads
-                because it is what decides whether to trust the rows under it,
-                and `.venue-age` is the acceptance suite's hook for exactly
-                that phrase. */}
-            <p class="venue-age">
-              <Facts
-                items={[
-                  { value: `Probed ${ago(answer().at, props.now)}` },
-                  {
-                    label: "platforms",
-                    value: answer().platforms.length === 0 ? "all" : answer().platforms.join(" "),
-                  },
-                  { label: "hosts", value: answer().source ?? "local lanes only", muted: true },
-                ]}
-              />
-            </p>
             <For each={answer().warnings}>{(warning) => <p class="fault">{warning}</p>}</For>
             {/* `.venues` is the acceptance suite's hook for the fleet, and it
                 rides the container whichever element draws it. */}
             <Table
               class="venues"
               label="venues"
-              columns={venueColumns(() => props.now)}
+              columns={venueColumns(() => props.now, () => answer().at)}
               rows={answer().rows}
-              // A dead machine's reason is the one fact that does not fit a
-              // column: it is a sentence from ssh, as long as ssh wants.
-              note={(row) => (row.error === null ? null : row.error)}
+              // A dead machine's reason is the one fact no column can hold: a
+              // sentence from ssh, as long as ssh wants. One line under the
+              // row, clipped, with the whole of it on hover.
+              note={(row) => {
+                const why = venueNote(row);
+                return why === null ? null : (
+                  <span class="venue-why" title={why}>
+                    {why}
+                  </span>
+                );
+              }}
             />
           </>
         )}
       </Show>
 
       {/* A HOLD IS A STATE CHANGE, so it is the runs' floor: drawn for a
-          member, refused by the service below one. */}
+          member, refused by the service below one. BEHIND A DISCLOSURE,
+          because it is a form you reach for occasionally under a table you
+          read constantly — open, it was half the page's height. */}
       <Show when={props.canRun}>
-        <Panel title="Hold a machine" label="hold">
-          <div class="panel-body">
-            <div class="admin-section">
+        <Disclosure
+          summary="Hold a machine"
+          open={holding()}
+          onToggle={() => setHolding((was) => !was)}
+        >
+          <div class="venue-hold" aria-label="hold">
+            <Fields>
               <Field id="hold-checkout" label="Checkout">
                 <TextInput id="hold-checkout" value={checkout()} placeholder="/code/app" onValue={setCheckout} />
               </Field>
               <Toggle id="no-wait" checked={noWait()} onChecked={setNoWait}>
                 Do not queue behind a holder (--no-wait)
               </Toggle>
-              <div class="control-row">
-                <Button disabled={control.busy()} onClick={hold}>
-                  Hold
-                </Button>
-                <Button disabled={control.busy()} onClick={release}>
-                  Release
-                </Button>
-              </div>
-              <ControlAnswer control={control} />
+            </Fields>
+            <div class="control-row">
+              <Button disabled={control.busy()} onClick={hold}>
+                Hold
+              </Button>
+              <Button disabled={control.busy()} onClick={release}>
+                Release
+              </Button>
             </div>
+            <ControlAnswer control={control} />
           </div>
-        </Panel>
+        </Disclosure>
       </Show>
     </section>
   );

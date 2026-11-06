@@ -58,6 +58,7 @@ import type {
   PushTarget,
   ServicePorts,
 } from "@odu/service/ports";
+import { actorOf } from "@odu/service/caller";
 import { preparePush } from "@odu/service/pushGrant";
 
 /**
@@ -316,9 +317,16 @@ export function webPorts(
     // The engine's `LaunchRequest` still spells the caller's inventory as the
     // flat `hostsFile` it has always taken; the port hands it a Caller. The
     // adaptation belongs HERE, at the root, because `@odu/service` cannot name
-    // the engine's type and `@odu/execution` cannot name the service's.
+    // the engine's type and `@odu/execution` cannot name the service's. The
+    // ACTOR (PLAN 4.4) is the second reading of that same caller: the
+    // principal the connection carried, flattened to the one word a manifest
+    // and a board row record.
     launch: ({ caller, ...request }) =>
-      launcher({ ...request, hostsFile: caller.hostsFile }),
+      launcher({
+        ...request,
+        hostsFile: caller.hostsFile,
+        actor: actorOf(caller.principal),
+      }),
     retry: (request) =>
       retryRecordedRun({
         runId: request.runId,

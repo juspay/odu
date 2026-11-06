@@ -188,6 +188,13 @@ export interface Attention {
   endpoint: string | null;
 
   /**
+   * WHO STARTED THIS RUN (PLAN 4.4) — a login, or `@local` for a loopback
+   * caller. Absent for a run recorded before the field, which is not the same
+   * as a run nobody started.
+   */
+  actor?: string;
+
+  /**
    * WHERE THIS RUN PUSHED WHAT IT BUILT (PLAN 4.1), and how much landed.
    *
    * Absent for a run recorded before the field, which is NOT the same as a
@@ -614,6 +621,10 @@ export function attentionFor(
     actionable,
     unreadable_events: sources.unreadableEvents,
     endpoint: sources.endpoint,
+    // WHO STARTED IT (PLAN 4.4), straight off the manifest. Absent stays
+    // absent: a run recorded before the field has no actor, which is a
+    // different answer from "the machine's own owner".
+    ...(manifest?.actor === undefined ? {} : { actor: manifest.actor }),
     // WHERE THIS RUN PUSHED, and how much it landed (PLAN 4.1): the target
     // off the manifest, the counts summed over the journal's own events. Both
     // survive the coordinator, which is the point of recording them.

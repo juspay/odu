@@ -114,6 +114,16 @@ export interface LaunchRequest {
    * `loadHosts` already reads as unset.
    */
   readonly hostsFile: string | null;
+  /**
+   * WHO ASKED FOR THIS RUN (PLAN 4.4) — a login, `"local"` for a loopback
+   * connection, or `null` when the launcher has no principal to name.
+   *
+   * Stamped on the manifest by the child, which is where every other durable
+   * fact about a run is written. `null` rather than a default string: a
+   * launcher that was never told is a record with no actor, and that absence
+   * is exactly what distinguishes it from a run somebody did start locally.
+   */
+  readonly actor: string | null;
   /** Take the checkout from a run that is already in progress there, rather
    *  than being refused by it. The coordinator owns what that MEANS (cancel the
    *  incumbent, confirm it is gone, then claim the lock — see `./run`), and it
@@ -212,6 +222,11 @@ export function launchArgv(request: LaunchRequest): string[] {
   }
   if (request.requestId !== null) {
     args.push("--request-id", request.requestId);
+  }
+  // WHO STARTED IT (PLAN 4.4). A login or `@local`; absent when the launcher
+  // had no principal to name, which the child records as no actor at all.
+  if (request.actor !== null) {
+    args.push("--actor", request.actor);
   }
   // WHERE THIS RUN PUSHES (PLAN 4.1), and the one line its setup log owes —
   // but NOT the token, which is the whole reason there is a `--push-token-id`

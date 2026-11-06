@@ -10,7 +10,7 @@
  * whichever face asked — `@odu/cli`'s terminal projection, or a browser.
  */
 
-import { loadHosts } from "@odu/execution/coordinator/hosts";
+import { asHostSlot, type HostPool, loadHosts } from "@odu/execution/coordinator/hosts";
 import {
   isMixedPool,
   probeAllHosts,
@@ -63,6 +63,35 @@ function rowFacts(platform: string, probe: ProbeResult): VenueRowFacts {
   };
 }
 
+/** ONE SLOT'S IDENTITY — platform, host and slot number. The key a partial
+ *  reading replaces a row by: a pool may hold the same host twice (two slots),
+ *  and the host alone would make one answer overwrite the other. */
+function slotKey(row: { platform: string; host: string; slot: number }): string {
+  return `${row.platform}\u0000${row.host}\u0000${row.slot}`;
+}
+
+/**
+ * A ROW FOR A MACHINE NOBODY HAS DIALLED YET.
+ *
+ * The inventory is known the moment the hosts file is read; the states are
+ * not, and a probe is as slow as the slowest dead box in it. So the rows go
+ * out first, every one of them `probing`, and each is replaced as its host
+ * answers — rather than a page saying nothing for thirty seconds and then
+ * everything at once.
+ */
+function pendingFacts(platform: string, entry: HostPool[number]): VenueRowFacts {
+  const slot = asHostSlot(entry);
+  return {
+    platform,
+    host: slot.host,
+    slot: slot.slot,
+    slots: slot.slots,
+    state: "probing",
+    heldBy: null,
+    error: null,
+  };
+}
+
 /**
  * Probe the configured venues — every one, or only the platforms asked for.
  *
@@ -91,6 +120,13 @@ export async function venueInventory(request: {
    *  the daemon's fleet while `odu ci run` used the caller's. See
    *  {@link Caller}. */
   caller: Caller;
+  /** WHAT IS KNOWN SO FAR — the inventory before any dial, then each host as
+   *  it answers. See {@link VenueProber}. */
+  onReading?: (partial: {
+    source: string | null;
+    warnings: readonly string[];
+    rows: readonly VenueRowFacts[];
+  }) => void;
 }): Promise<VenueProbeOutcome> {
   const config = loadHosts(request.caller.hostsFile ?? undefined);
   const configured = Object.keys(config.hosts).sort();
@@ -152,13 +188,38 @@ export async function venueInventory(request: {
   // host: the dial below would otherwise report the same misbuilt-package
   // fault against every machine in the inventory.
   requireBakedRunnerSource();
+
+  // THE INVENTORY GOES OUT BEFORE THE FIRST DIAL. Everything above this line
+  // is a read of a config file; everything below is one ssh timeout wide. A
+  // watcher gets the machines, their platforms and the file that named them
+  // immediately, and each row resolves in place.
+  const pending = new Map<string, VenueRowFacts>(
+    Object.entries(pools).flatMap(([platform, pool]) =>
+      pool.map((entry) => {
+        const facts = pendingFacts(platform, entry);
+        return [slotKey(facts), facts] as const;
+      }),
+    ),
+  );
+  const publish = (): void =>
+    request.onReading?.({ source: config.source, warnings, rows: [...pending.values()] });
+  publish();
+
   const probed = await probeAllHosts(pools, {
     resolveDrvPath: laneRunnerDrvPath,
+    onProbe: ({ platform, probe }) => {
+      const facts = rowFacts(platform, probe);
+      pending.set(slotKey(facts), facts);
+      publish();
+    },
   });
   return {
     ok: true,
     source: config.source,
     warnings,
+    // The SORTED answer, not the map: `probeAllHosts` orders by platform,
+    // host and slot, and a reader of the final value should not have to
+    // re-derive an order the port already decided.
     rows: probed.map(({ platform, probe }) => rowFacts(platform, probe)),
   };
 }

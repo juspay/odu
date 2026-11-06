@@ -177,6 +177,32 @@ describe("run.read", () => {
     expect(read.success.failures[0]?.excerpt).toContain("assertion failed");
   });
 
+  it("answers WHO started the run, and says nothing for a record that predates it", async () => {
+    // PLAN 4.4. On the answer as well as on the board row, so an agent that
+    // reads one run and nothing else can tell whose work it is looking at.
+    const w = open();
+    const catalog = { root: w.catalogRoot };
+    const mine = registerFixtureRun(w, {
+      repoRoot: "/code/app",
+      sha: SHA,
+      actor: "srid",
+    });
+    const old = registerFixtureRun(w, { repoRoot: "/code/other", sha: SHA });
+
+    const read = await run(readRun({ runId: mine.runId }, { catalog }));
+    expect(read._tag).toBe("Success");
+    if (read._tag !== "Success") return;
+    expect(read.success.actor).toBe("srid");
+
+    // ABSENT, never `"local"`: a run recorded before odu asked the question
+    // has no answer to it, and attributing it to this machine's owner would
+    // be the one place an actor was invented rather than carried.
+    const before = await run(readRun({ runId: old.runId }, { catalog }));
+    expect(before._tag).toBe("Success");
+    if (before._tag !== "Success") return;
+    expect(before.success.actor).toBeUndefined();
+  });
+
   it("returns at once for a run that is still going, rather than holding", async () => {
     // The whole difference between the two verbs: this one does not hold the
     // call open. A read of a live run answers `still_running` immediately —

@@ -312,7 +312,9 @@ What each step delivers:
   `ci@croissant` and `ci@naiveintent`, the pod has one ssh identity authorised
   on every lane's `ci` user, lane hosts trust the pod's substituter, and an
   operator can start a run from a shell, not only from a signed-in
-  browser.[^podci]
+  browser. **The odu side is done:** a personal token was already enough, so
+  what shipped is `odu ci run --checkout <abs> --sha <sha>` (a path on the
+  service, sent verbatim) and `actor` on every run — who started it.[^podci]
 
 ### Phase 5: hosted CI
 
@@ -689,10 +691,17 @@ Commits and PR bodies use the earlier names.
     pinned by keyscan; `nix.settings.trusted-users = [ "ci" ]` on every lane,
     else Nix ignores the substituter and keys the coordinator hands it; the
     checkout under `/data/checkouts/<repo>` until 5.1 manages clones. odu: a
-    `metrics`-style operator token that opens `run_start`/`run_read` from a
-    shell — today every verb but identity reads refuses a connection without a
-    session, so the dogfood run had to be clicked. Both stay until 5.1 moves
-    the inventory into org venues and 3.1 gives operators a principal.
+    PERSONAL token already drives every run verb — the CLI sends `$ODU_TOKEN`
+    as `Authorization: Bearer` on the websocket upgrade and the auth row
+    resolves it to a signed-in principal — so no operator-token kind was
+    needed, and the earlier plan for a `metrics`-style one is withdrawn. What
+    was missing was the CHECKOUT: `odu ci run` computed the laptop's toplevel
+    and HEAD, so a shell could not name a path on the pod. `--checkout <abs>`
+    with a required `--sha` sends both verbatim (refused unless a service is
+    named — `--origin`/`ODU_WEB_ORIGIN` — since the default is the daemon for
+    where you stand), and a run now records `actor` — the principal's login,
+    or `@local` — so "who started this" is answerable after the fact. The
+    host-side list above stays until 5.1 moves the inventory into org venues.
 
 [^repos]: `run.start` accepts a repository plus a SHA as well as an absolute
     checkout. The in-house VM pool is one org's inventory, and `hosts.json`
