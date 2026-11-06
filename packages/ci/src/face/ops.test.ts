@@ -98,6 +98,51 @@ describe("the fleet line", () => {
     expect(line).toBe("2 of 3 up");
   });
 
+  it("says what a probe is still waiting on, and how many", () => {
+    // The inventory is published before the first dial, so the rows are on
+    // screen while an unreachable box burns its ssh timeout. `no probe yet`
+    // sat there for the whole of it.
+    const line = fleetLine({
+      at: NOW,
+      platforms: [],
+      source: "/etc/odu/hosts.json",
+      warnings: [],
+      rows: [
+        machine({ host: "a", state: "probing" }),
+        machine({ host: "b", state: "probing" }),
+        machine({ host: "c", state: "free" }),
+      ],
+    });
+    // The number is the rows still OUT, which is what a reader can check
+    // against the table under it — not the size of the fleet.
+    expect(line).toBe("probing 2 hosts…");
+  });
+
+  it("counts one host singular, because a sentence is read not parsed", () => {
+    const line = fleetLine({
+      at: NOW,
+      platforms: [],
+      source: null,
+      warnings: [],
+      rows: [machine({ host: "a", state: "probing" })],
+    });
+    expect(line).toBe("probing 1 host…");
+  });
+
+  it("keeps the slice clause while it is still probing", () => {
+    // A narrowed probe is narrowed from its first frame, and a count read as
+    // the whole fleet is as wrong before the answer as after it.
+    const line = fleetLine({
+      at: NOW,
+      platforms: ["aarch64-darwin"],
+      source: null,
+      warnings: [],
+      rows: [machine({ platform: "aarch64-darwin", host: "mac", state: "probing" })],
+    });
+    expect(line).toContain("probing 1 host…");
+    expect(line).toContain("aarch64-darwin");
+  });
+
   it("says a narrowed reading is a SLICE, so its count is not read as the fleet", () => {
     const line = fleetLine({
       at: NOW,

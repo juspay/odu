@@ -27,9 +27,16 @@ const LEDGER: ContractLedger = {
   // additive.
   "2.5": "5b69127e21682efd",
   // 2.6 — PLAN 4.4: `actor` on a run row and on a wait/read answer — who
-  // started the run, a login or `@local` for a loopback caller. One optional
-  // output field in two places; additive.
-  "2.6": "e4a1146a4226f81d",
+  // started the run, a login or `@local` for a loopback caller — and
+  // `probing` as a fifth venue state, so the kept reading can be republished
+  // while a probe is still dialling. One optional output field in two places
+  // and one widened literal; additive.
+  //
+  // RE-PINNED, not appended: 2.6 is THIS change's own line and has never
+  // shipped, so the surface it describes is the one being written. The rule
+  // the message states — never rewrite a historical line — is about a number
+  // somebody could already be running.
+  "2.6": "ef1512a7a760efbd",
 };
 
 describe("the ci row's contract", () => {
