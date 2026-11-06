@@ -535,19 +535,22 @@ told because four things change for an agent.
   the server's profile page — `auth_token_create` needs a signed-in session,
   so a tokenless shell cannot mint it (and on loopback the principal is
   `local`, which is not signed in either). Store it with `odu auth login
-  <origin> --token odu_…`, or set `ODU_TOKEN`, and pass `--origin` (or export
-  `ODU_WEB_ORIGIN`). Every `odu` command and the MCP bridge send it as
-  `Authorization: Bearer` on the connection they open. Without one, the daemon
-  answers only `auth_user_whoami`, `auth_user_grant` and its own identity —
-  every other verb is refused.
+  <origin>`, pasting the token on stdin — `--token` exists but puts it in
+  your shell history, and the CLI says so — or set `ODU_TOKEN`; then pass
+  `--origin` (or export `ODU_WEB_ORIGIN`). Every `odu` command and the MCP
+  bridge send it as `Authorization: Bearer` on the connection they open.
+  Without one, the daemon answers only `auth_user_whoami`,
+  `auth_user_grant` and its own identity — every other verb is refused.
 - **A run on another service names that service's checkout.** Your cwd is a
   fact about your machine, so `odu ci run --checkout <abs path on the server>
   --sha <sha>` sends both verbatim. `--sha` is REQUIRED with `--checkout` (the
   strict gate: a checkout that moved on is refused, not quietly run), and
   `--checkout` is refused unless a service is NAMED — the check is naming, not
   distance, so an explicit `http://127.0.0.1:…` is fine; what is refused is
-  the default, the daemon for where you stand. Your `$ODU_HOSTS` is sent as
-  always; a path the server has not got falls through to its own chain.
+  the default, the daemon for where you stand. Your `$ODU_HOSTS` is sent when
+  it names a PATH (one the server has not got falls through to its own
+  chain); a shell with none sends nothing at all, so the server's own
+  variable stands rather than being blanked.
 
   ```sh
   # mint on the server's profile page (a browser), then:

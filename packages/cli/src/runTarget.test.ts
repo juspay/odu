@@ -112,19 +112,60 @@ describe("what the start asks for", () => {
     expect(input.expectedSha).toBe(SHA);
   });
 
-  it("sends this shell's $ODU_HOSTS for EVERY run, --checkout included", () => {
+  /** This process's `$ODU_HOSTS`, set for the duration of one claim and put
+   *  back — the runner's own value decides nothing. Without this the two
+   *  assertions below both read `""` and pass for a reason that has nothing
+   *  to do with forwarding. */
+  function withHosts<T>(value: string | undefined, body: () => T): T {
+    const before = process.env.ODU_HOSTS;
+    if (value === undefined) delete process.env.ODU_HOSTS;
+    else process.env.ODU_HOSTS = value;
+    try {
+      return body();
+    } finally {
+      if (before === undefined) delete process.env.ODU_HOSTS;
+      else process.env.ODU_HOSTS = before;
+    }
+  }
+
+  it("sends this shell's $ODU_HOSTS path for EVERY run, --checkout included", () => {
     // A face does not get to decide that a person's fleet stops applying to
     // their own run. `--checkout` does not even imply another machine — a
     // named `http://127.0.0.1:…` is this one — and a path the service has not
     // got is skipped by `loadHosts`, which falls through to its own chain.
-    const remote = startInputOf(
-      { checkout: POD, sha: SHA },
-      opts({ checkout: POD, sha: SHA, origin: ORIGIN }),
-    );
-    const local = startInputOf({ checkout: "/code/app", sha: SHA }, opts());
-    expect(remote.hostsFile).toBe(local.hostsFile);
-    // Always a string, including `""` — the reading that says "my shell has
-    // none", which is different from saying nothing at all.
-    expect(typeof remote.hostsFile).toBe("string");
+    withHosts("/fleets/mine.json", () => {
+      const remote = startInputOf(
+        { checkout: POD, sha: SHA },
+        opts({ checkout: POD, sha: SHA, origin: ORIGIN }),
+      );
+      const local = startInputOf({ checkout: "/code/app", sha: SHA }, opts());
+      expect(remote.hostsFile).toBe("/fleets/mine.json");
+      expect(local.hostsFile).toBe("/fleets/mine.json");
+    });
+  });
+
+  it("sends NO hostsFile for a --checkout run from a shell that has none", () => {
+    // `""` is not silence. It is kept as `""` all the way to `coordinatorEnv`,
+    // which ASSIGNS it — so the coordinator would run with `ODU_HOSTS=""` and
+    // the SERVICE's own variable blanked. On a pod whose Deployment sets the
+    // fleet, that is the only inventory there is, bypassed. Absent is the
+    // reading that leaves the daemon's configuration standing.
+    withHosts(undefined, () => {
+      const remote = startInputOf(
+        { checkout: POD, sha: SHA },
+        opts({ checkout: POD, sha: SHA, origin: ORIGIN }),
+      );
+      expect("hostsFile" in remote).toBe(false);
+    });
+  });
+
+  it("still sends `\"\"` for a run in THIS checkout, which IS this shell's world", () => {
+    // The reading the comment in `startInputOf` has always protected: a person
+    // who just unset `$ODU_HOSTS` means it, and saying nothing here would hand
+    // their run the daemon's fleet instead.
+    withHosts(undefined, () => {
+      const local = startInputOf({ checkout: "/code/app", sha: SHA }, opts());
+      expect(local.hostsFile).toBe("");
+    });
   });
 });

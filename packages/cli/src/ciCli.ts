@@ -78,8 +78,10 @@ run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH
                               # the daemon for where you stand) and REQUIRES
                               # --sha: the commit you believe is there, which
                               # the service refuses if it moved. Your
-                              # $ODU_HOSTS is still sent; a path the service
-                              # has not got falls through to its own chain.
+                              # $ODU_HOSTS is still sent when it names a
+                              # path (one the service has not got falls
+                              # through to its chain); with none set,
+                              # nothing is sent and the service's own stands.
                               # Every recipe's result* closure is pushed to
                               # the odu cache this repository's flake.nix
                               # nixConfig already reads from, when this daemon

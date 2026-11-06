@@ -127,8 +127,9 @@ export interface RunOpts {
  *
  * Pure and exported so the two claims it carries can be stated rather than
  * inferred from a live service: the target travels VERBATIM (whatever
- * `runTarget` resolved, this does not touch), and `$ODU_HOSTS` travels for
- * EVERY run, `--checkout` included.
+ * `runTarget` resolved, this does not touch), and `$ODU_HOSTS` travels on all
+ * three of its readings — a path always, `""` only when this shell IS the
+ * run's world.
  */
 export function startInputOf(at: Here, opts: RunOpts) {
   return {
@@ -151,17 +152,29 @@ export function startInputOf(at: Here, opts: RunOpts) {
     // way, and saying nothing would mean "use the service's own" — right
     // for an agent, wrong for the person who just unset the variable.
     //
-    // `--checkout` IS NOT AN EXCEPTION, and an earlier revision of this
-    // function made it one. Dropping the variable there was a face deciding,
+    // `--checkout` DOES NOT CHANGE THAT FOR A PATH. An earlier revision
+    // dropped the variable outright there, which was a face deciding,
     // silently, that a person's fleet did not apply to their own run — and
     // the flag does not even imply a different machine: a service named as
     // `http://127.0.0.1:18440` is this one. It is also unnecessary. A path
     // that does not exist on the service is SKIPPED by `loadHosts`
     // (`existsSync` → next candidate), so a laptop's `$ODU_HOSTS` naming a
     // file the pod has not got falls through to the service's own
-    // `~/.config/odu/hosts.json` — the same answer dropping it would have
-    // produced, reached by the rule that was already written down.
-    hostsFile: hostsFileHere(opts.cwd),
+    // `~/.config/odu/hosts.json`.
+    //
+    // IT DOES CHANGE IT FOR `""`, and that pair is the whole rule. `""` is
+    // not silence: `callerOf` keeps it (`caller.ts:50-56`) and
+    // `coordinatorEnv` ASSIGNS it, so the coordinator runs with
+    // `ODU_HOSTS=""` and the SERVICE's own variable is blanked — on a pod
+    // whose Deployment sets `$ODU_HOSTS`, that bypasses the only fleet
+    // there is and `fanoutPools` refuses. `""` means "MY shell has none",
+    // which is an answer about a world the run is not happening in; the
+    // honest reading there is the third one, ABSENT — "I have no shell in
+    // this world" — which is the only one that leaves the daemon's
+    // configuration standing.
+    ...(opts.checkout !== undefined && hostsFileHere(opts.cwd) === ""
+      ? {}
+      : { hostsFile: hostsFileHere(opts.cwd) }),
     ...(opts.root === undefined ? {} : { root: opts.root }),
     noDeps: opts.noDeps,
     noStrict: opts.noStrict,
