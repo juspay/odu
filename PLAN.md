@@ -293,11 +293,14 @@ What each step delivers:
 
 ### Phase 4: CI pushes for you
 
-- **4.1 The run pushes.** A repo that reads from an odu cache builds for it:
-  the `extra-substituters` line already in `flake.nix` `nixConfig` is the only
-  declaration, and `odu ci run` pushes every recipe's outputs there. Nothing in
-  any recipe, no token in the repo, no second place to name the bucket.
-  Readers of a cache they can't write to build as before and are told once.[^runpush]
+- **4.1 ✅ The run pushes** (#159, #162). A repo that reads from an odu cache
+  builds for it: the `extra-substituters` line already in `flake.nix`
+  `nixConfig` is the only declaration, and `odu ci run` pushes every recipe's
+  `result*` closure there after the recipe exits 0. Nothing in any recipe, no
+  token in the repo, no second place to name the bucket. The push is its own
+  step on the run page with its own log stream. Dogfooded on kolu
+  (juspay/kolu#2345): the lanes warm `kolu-r2` and the linux GitHub push job
+  is gone.[^runpush]
 - **4.2 Provenance and pins.** A path on the bucket page links to the run and
   commit that built it. `[metadata("odu:pin")]` on a recipe keeps its closure
   out of GC under `<repo>@<ref>/<system>`, the same pin the Action makes.[^pins]
@@ -305,16 +308,15 @@ What each step delivers:
   the host owner installs it, lanes still hold no repo credentials, and a cache
   outage only queues paths. Deferred until a lane's own store stops being
   enough.[^hook]
-- **4.4 The pod runs CI.** The "Ours" shape for real: the service that serves
-  the cache is the one that runs the lanes, so 4.1 pushes without a second
-  odu. The dogfood of 4.1 stood this up by hand on one lane; this item makes
-  it configuration: the pod's lane inventory names `ci@pureintent`,
-  `ci@croissant` and `ci@naiveintent`, the pod has one ssh identity authorised
-  on every lane's `ci` user, lane hosts trust the pod's substituter, and an
-  operator can start a run from a shell, not only from a signed-in
-  browser. **The odu side is done:** a personal token was already enough, so
-  what shipped is `odu ci run --checkout <abs> --sha <sha>` (a path on the
-  service, sent verbatim) and `actor` on every run — who started it.[^podci]
+- **4.4 ✅ The pod runs CI** (#161 + nixos-config). The "Ours" shape for real:
+  the service that serves the cache is the one that runs the lanes. The pod's
+  inventory names `ci@croissant`, `ci@naiveintent` and `ci@petit`, reached
+  through Tailscale-operator egress Services; one pod ssh identity is
+  authorised on every lane's `ci` user; lanes trust the pod's substituter. A
+  personal token was enough to act from a shell — what shipped is `odu ci run
+  --checkout <abs> --sha <sha>` and `actor` on every run. Still manual until
+  5.1: the checkout under `/data/checkouts/<repo>`, and the tailnet policy
+  (lanes ← `tag:k8s` on 22, pod ← lanes on 443).[^podci]
 
 ### Phase 5: hosted CI
 
@@ -383,8 +385,8 @@ Commits and PR bodies use the earlier names.
 | PR 1 | 1.2 | | PR 3d | 2.8 |
 | PR 1.5 | 1.3 | | PR 3g | 2.9 |
 | PR 2 (+hotfix) | 1.4 | | PR 4 | 3.1 |
-| PR 2.5 | 1.5 | | PR 5, 6 | 4.1, 4.2 (4.3 deferred) |
-| PR 3e | 1.6 | | PR 6.5 | 4.4 (nixos-config + odu) |
+| PR 2.5 | 1.5 | | #159, #162 | 4.1 ✅ (4.3 deferred) |
+| PR 3e | 1.6 | | #161 + nixos-config | 4.4 ✅ |
 | PR 3a | 2.1 | | PR 7, 8 | 5.1, 5.2 |
 | PR 3b (+fix) | 2.2 | | PR 9, 10 | 5.3, 5.4 |
 | PR 3f | 2.3 | | PR 11 | folded into 2.4–2.9 |
@@ -684,13 +686,19 @@ Commits and PR bodies use the earlier names.
     run's token, re-pointing the pin of the same name.
 
 [^podci]: Two repositories. nixos-config: `ODU_HOSTS` on the Deployment names
-    the lanes; `hostNetwork: true` so the pod dials tailnet names through the
-    node's tailscaled (one line, versus one Tailscale egress Service per lane);
-    the pod's ed25519 identity as a Secret from 1Password, its public key in
-    each lane's `users.users.ci.openssh.authorizedKeys.keys`, `known_hosts`
-    pinned by keyscan; `nix.settings.trusted-users = [ "ci" ]` on every lane,
-    else Nix ignores the substituter and keys the coordinator hands it; the
-    checkout under `/data/checkouts/<repo>` until 5.1 manages clones. odu: a
+    the lanes; one Tailscale-operator egress Service per lane
+    (`tailscale.com/tailnet-fqdn`) with ssh-config aliases, so the daemon keeps
+    binding only the pod (`hostNetwork` was the rejected alternative); the
+    pod's ed25519 identity as a Secret from 1Password, its public key in each
+    lane's `users.users.ci.openssh.authorizedKeys.keys` through a shared
+    `odu-lane` module; `known_hosts` pinned by keyscan;
+    `nix.settings.trusted-users = [ "ci" ]` on every lane, else Nix ignores the
+    substituter and keys the coordinator hands it; the workspace root
+    `/tmp/odu` must be writable by the `ci` user (#164). The lane must not be
+    the pod's own node: its builds filled the disk and the kubelet evicted the
+    pod mid-run. Two tailnet policy rules outside any repo: `tag:k8s` →
+    lanes on tcp:22, lanes → `tag:k8s` on tcp:443. The checkout under
+    `/data/checkouts/<repo>` until 5.1 manages clones. odu: a
     PERSONAL token already drives every run verb — the CLI sends `$ODU_TOKEN`
     as `Authorization: Bearer` on the websocket upgrade and the auth row
     resolves it to a signed-in principal — so no operator-token kind was
