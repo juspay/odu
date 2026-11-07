@@ -282,6 +282,38 @@ export class UnrecordedObject extends Error {
   }
 }
 
+/**
+ * A READ WHOSE OBJECT MOVED UNDER IT.
+ *
+ * A read of a large object is several requests, and S3 resolves each against
+ * the key AS IT IS THEN. Two answers say the same thing: a `412`, when the
+ * `If-Match` on the first window's ETag no longer holds, and a `206` carrying
+ * FEWER bytes than the range asked for, which is a window reaching past an
+ * object that got shorter. Neither is truncation by the service and neither is
+ * a corrupt upload — the bytes the reader was promised are simply gone — so
+ * both fail the stream with this one error and this one sentence.
+ *
+ * It is an error rather than a refusal because it happens MID-STREAM, after
+ * `get` has answered; the caller learns of it on the stream it is reading.
+ * A caller that is proving bytes (`@odu/cache`'s readback) turns it into a
+ * refusal of the upload, never a failure of the process.
+ */
+export class ObjectChanged extends Error {
+  readonly _tag = "ObjectChanged";
+  constructor(
+    readonly key: string,
+    /** The version the read was bound to, when the first window named one. */
+    readonly etag: string | undefined,
+    /** What the service answered, in its own numbers. */
+    detail: string,
+  ) {
+    super(
+      `${key} changed while it was being read — ${detail}` +
+        (etag === undefined ? "" : ` (the read was bound to ETag ${etag})`),
+    );
+  }
+}
+
 /** A key is a relative path of plain segments: no `..`, no leading slash. */
 export function safeKey(key: string): string {
   const clean = key.replaceAll("\\", "/");

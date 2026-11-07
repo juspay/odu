@@ -263,6 +263,7 @@ Each row contributes its own numbers; the host renders them.
 | `odu_node_duration_seconds` | histogram | `recipe`, `platform`, `outcome` | journal `node_status`, each entry folded once |
 | `odu_lane_reachable`, `odu_lane_held` | gauge | `host`, `platform` / `host` | the last venue probe; absent until something has probed |
 | `odu_metrics_contributor_up` | gauge | `contributor` | `0` when a row failed this scrape — the scrape is still served |
+| `odu_unhandled_total` | counter | `kind` (`rejection`\|`exception`) | rejections and exceptions the daemon caught and kept serving through — both labels present from the first scrape |
 
 **Counters are process-local** and reset when the daemon restarts; that is standard, and `rate()` handles it. The numbers that must survive a restart are gauges read from storage. The catalog walk is bounded (the 200 newest runs, repeated at most every ten seconds), so a scrape costs the same on a catalog of ten thousand runs as on one of two hundred — and what it *publishes* is not that window: each run and each journal entry is folded **once** into totals that only grow, because a counter read off a sliding window falls every time a run leaves it, and a scraper reads a fall as a reset. The run totals therefore start at whatever the window held when the daemon started.
 

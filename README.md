@@ -175,8 +175,11 @@ daemon restarts; gauges (`odu_cache_paths`, `odu_cache_bytes`, `odu_cache_pins`,
 `odu_cache_hits`) are read from storage at the scrape. `odu_runs_total`,
 `odu_run_duration_seconds` and `odu_node_duration_seconds` accumulate from the
 on-disk catalog — each run folded once, so they never fall — and
-`odu_lane_reachable`/`odu_lane_held` come from the last venue probe. Behind the
-NixOS module the route is proxied beside `/cache/`.
+`odu_lane_reachable`/`odu_lane_held` come from the last venue probe.
+`odu_unhandled_total` is the daemon's own counter, labelled `kind`
+(`rejection`|`exception`): the rejections and exceptions the daemon caught and
+kept serving through, present at zero from the first scrape. Behind the NixOS
+module the route is proxied beside `/cache/`.
 
 ## Agents and remote access
 

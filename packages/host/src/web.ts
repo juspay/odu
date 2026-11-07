@@ -153,6 +153,7 @@ import {
 import { metricsFragment } from "./metricsFragment";
 import { metricsRoute } from "./metricsRoute";
 import { openMetricsTokens } from "./metricsTokens";
+import { installUnhandledGuard, unhandledReading } from "./unhandled";
 import {
   assertPackaged,
   bakedBuild,
@@ -321,6 +322,17 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     stopHandlers.push(() => process.off(signal, onSignal));
   }
 
+  // AND THE FAULTS NOBODY CAUGHT. Beside the signal handlers because it is the
+  // same kind of thing — a process-level listener owned by this tenure and
+  // removed with it — but for the opposite event: not an operator asking the
+  // daemon to stop, a bug trying to stop it. Issue #160's readback failure
+  // reached `process.on("unhandledRejection")` and exited 1; with this
+  // installed it is a log line and a counter, and the service keeps serving.
+  // ONLY HERE: the CLI's other commands are short-lived processes that should
+  // still die on a fault they cannot handle.
+  const unhandled = installUnhandledGuard({ log });
+  stopHandlers.push(unhandled.remove);
+
   // ── THE ROSTER ──────────────────────────────────────────────────────────
   //
   // EVERY ROW, NAMED ONCE, HERE — and this file is a root, which is what makes
@@ -434,6 +446,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // nothing itself — a host that read a row's database to publish its hit
     // rate would be the reach `@odu/cordis` exists to prevent.
     const metrics = metricsBroker();
+    // THE HOST'S OWN ONE. The rule above is about ROWS, not about the host's
+    // process: these two counts are a property of this process and of no row,
+    // so the host contributes them itself rather than inventing a row to hold
+    // them. Withdrawn on the way out like any other contributor, so a scrape
+    // can never land on a guard whose listeners are already gone.
+    stopHandlers.push(
+      metrics.add({ name: "host/unhandled", read: () => unhandledReading(unhandled) }),
+    );
     // THE OPERATOR'S CREDENTIAL AND THE STATE ROOT, derived ONCE. The tags
     // below carry them to the rows; the host's own metrics fragment and route
     // are not plugins and cannot read a tag, so they read these — not the

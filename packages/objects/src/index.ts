@@ -8,6 +8,7 @@ export {
   type DirectStore,
   factsCounter,
   type ObjectBody,
+  ObjectChanged,
   type ObjectFacts,
   type ObjectRefusal,
   type ObjectStore,

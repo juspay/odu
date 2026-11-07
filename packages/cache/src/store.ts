@@ -33,6 +33,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createReadStream, statSync } from "node:fs";
 import { Readable } from "node:stream";
+import { ObjectChanged } from "@odu/objects";
 import { fifoStream } from "./fifo";
 import { describeFailure } from "./failure";
 import { base32, canonicalNarHash, NarinfoError, storePathHash } from "./narinfo";
@@ -374,7 +375,17 @@ export type NarCheck =
       /** The self-reference modulo hash, when one was requested. */
       selfHash: string | null;
     }
-  | { ok: false; absent: boolean; message: string };
+  | {
+      ok: false;
+      absent: boolean;
+      message: string;
+      /** THE BYTES MOVED WHILE THEY WERE BEING READ — a store answering an
+       *  {@link ObjectChanged}, not a NAR that is wrong. The upload is refused
+       *  either way; the caller says which happened, because "the temp key was
+       *  rewritten under the readback" and "the client sent a bad NAR" are two
+       *  different operator problems (issue #160). */
+      changed?: true;
+    };
 
 /** The decompressor for a narinfo's `Compression`. `none` and an absent field
  *  both mean the NAR is stored raw; anything else is a format odu cannot read
@@ -424,6 +435,13 @@ export function verifyNarFile(
 /**
  * THE SAME CHECK over a KEPT OBJECT, from whichever store holds it — the
  * self-CA pass reads a row's bytes this way, so it needs no file of its own.
+ *
+ * THE WEB STREAM IS READ BY HAND rather than through `Readable.fromWeb`: Bun
+ * 1.3.13 drops a failing web stream's error on the floor there — no `'error'`
+ * on the Readable, an unhandled rejection in the process, and a daemon that
+ * exits 1 while refusing one upload (issue #160). A reader loop hands the
+ * failure to `destroy`, which is the `'error'` this function already knows how
+ * to turn into `{ok: false}`.
  */
 export function verifyNarStream(
   object: { stream: ReadableStream<Uint8Array>; size: number },
@@ -431,15 +449,55 @@ export function verifyNarStream(
   selfHashPart: string | null = null,
 ): Promise<NarCheck> {
   return verifyNar(
-    {
-      name: "the stored object",
-      open: () => Readable.fromWeb(object.stream as unknown as import("node:stream/web").ReadableStream<Uint8Array>),
-      size: () => object.size,
-    },
+    { name: "the stored object", open: () => readableOf(object.stream), size: () => object.size },
     compression,
     selfHashPart,
   );
 }
+
+/** A web stream as a `Readable`, FAILURES INCLUDED. One read in flight at a
+ *  time: `push` may call `read` again from inside itself, and a second
+ *  `reader.read()` on a reader already reading rejects. */
+function readableOf(stream: ReadableStream<Uint8Array>): Readable {
+  const reader = stream.getReader();
+  let reading = false;
+  const readable = new Readable({
+    read() {
+      if (reading) return;
+      reading = true;
+      reader.read().then(
+        ({ done, value }) => {
+          reading = false;
+          readable.push(done ? null : value);
+        },
+        (err: unknown) => {
+          reading = false;
+          readable.destroy(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    },
+    destroy(err, done) {
+      void reader.cancel(err ?? undefined).catch(() => {});
+      done(err);
+    },
+  });
+  return readable;
+}
+
+/**
+ * WHY A READ COULD NOT BE JUDGED, from the error that ended it.
+ *
+ * Three failures, three different operator problems: a file that is not there
+ * (`absent`, which another proof may still answer), an object the store
+ * rewrote under the read (`changed`), and everything else — a broken pipe, a
+ * refused connection, bad bytes.
+ */
+const unreadable = (err: unknown): NarCheck => ({
+  ok: false,
+  absent: (err as NodeJS.ErrnoException).code === "ENOENT",
+  message: String(err),
+  ...(err instanceof ObjectChanged ? { changed: true as const } : {}),
+});
 
 /** The bytes a verify reads: opened ONCE, and the length they should have. */
 interface NarBytes {
@@ -491,8 +549,7 @@ async function verifyNar(
     try {
       actual = bytes.size();
     } catch (err) {
-      const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
-      resolve({ ok: false, absent: missing, message: String(err) });
+      resolve(unreadable(err));
       return;
     }
     if (actual !== fileSize) {
@@ -550,14 +607,13 @@ async function verifyNar(
     file.on("error", (err) => {
       if (settled) return;
       settled = true;
+      // NOTHING WILL FEED THE DECOMPRESSOR NOW. Its stdin stays open while it
+      // waits for bytes that are not coming, so it is ended here rather than
+      // left running past the answer this read already has.
+      child.stdin?.end();
       // The file going away between a `stat` and this open is the ordinary
       // consequence of a concurrent drain; it is absence, not bad bytes.
-      const code = (err as NodeJS.ErrnoException).code;
-      resolve({
-        ok: false,
-        absent: code === "ENOENT",
-        message: String(err),
-      });
+      resolve(unreadable(err));
     });
     file.pipe(child.stdin as NodeJS.WritableStream);
     source = child.stdout;
@@ -576,8 +632,7 @@ async function verifyNar(
   source.on("error", (err) => {
     if (settled) return;
     settled = true;
-    const code = (err as NodeJS.ErrnoException).code;
-    resolve({ ok: false, absent: code === "ENOENT", message: String(err) });
+    resolve(unreadable(err));
   });
   source.on("end", () => {
     ended = true;

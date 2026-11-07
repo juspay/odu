@@ -9,6 +9,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -22,9 +23,18 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { s3ObjectStore } from "@odu/objects";
+import { type Gateway, startGateway } from "@odu/objects/testing";
 import { fifoStream } from "./fifo";
-import { narHashModuloHasher, nixDump, parsePathInfoTable, verifyNarFile } from "./store";
+import {
+  type NarCheck,
+  narHashModuloHasher,
+  nixDump,
+  parsePathInfoTable,
+  verifyNarFile,
+  verifyNarStream,
+} from "./store";
 import { contentAddressOf } from "./storePath";
 
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
@@ -336,4 +346,109 @@ describe("an upload's bytes", () => {
       });
     }
   });
+});
+
+/**
+ * THE READBACK THAT KILLED A POD (issue #160). A direct upload is proved by
+ * streaming the temp object back out of the store, and the window GETs that
+ * stream it can answer SHORT — the object was rewritten under the read. The
+ * failure belongs to the upload, which is refused; it must never belong to the
+ * process, which went down with an uncaught `S3Failure` printed twenty times.
+ *
+ * Against versitygw, with a `send` that drops the last bytes of the window
+ * starting at 1 MiB: a real store, a real range request, and a lie of exactly
+ * the shape R2 told.
+ */
+describe("a readback whose window comes up short", () => {
+  let gateway: Gateway;
+  beforeAll(async () => {
+    gateway = await startGateway();
+  });
+  afterAll(async () => {
+    await gateway.stop();
+  });
+
+  /** A `send` whose GETs from byte `from` answer 206 with their last ten bytes
+   *  dropped — the window shorter than the range it promised. */
+  const lyingFrom = (from: number) =>
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await fetch(url, init);
+      const range = new Headers(init?.headers).get("range");
+      if (response.status !== 206 || range?.startsWith(`bytes=${from}-`) !== true) return response;
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      return new Response(bytes.subarray(0, bytes.length - 10), { status: 206, headers });
+    }) as typeof fetch;
+
+  /** The object, put honestly; read back through a store that lies. */
+  async function readbackOf(bytes: Uint8Array): Promise<{
+    stream: ReadableStream<Uint8Array>;
+    size: number;
+  }> {
+    const target = await gateway.bucket();
+    const put = await s3ObjectStore({ target }).put("main/nar/readback", new Blob([bytes as BlobPart]));
+    expect(put.ok).toBe(true);
+    const object = await s3ObjectStore({ target, send: lyingFrom(1024 * 1024) }).get("main/nar/readback");
+    if (object === null) throw new Error("the object this case just put is not there");
+    return object;
+  }
+
+  /** `verifyNarStream`, with the window's rejection caught by nobody watched
+   *  for: an unhandled rejection is the crash, and a verify that never settles
+   *  is the hang the same bug causes. Both are failures of this case.
+   *
+   *  A WALL-CLOCK WATCHDOG, deliberately: "never settles" has no event to
+   *  await — that is what it means — so the only way to assert it is to stop
+   *  waiting. It costs nothing on a green run, which settles at once. */
+  async function verified(
+    object: { stream: ReadableStream<Uint8Array>; size: number },
+    compression: string,
+  ): Promise<{ checked: NarCheck | "never settled"; loose: string[] }> {
+    const loose: string[] = [];
+    const watch = (err: unknown): void => {
+      loose.push(String(err));
+    };
+    process.on("unhandledRejection", watch);
+    const watchdog = Promise.withResolvers<"never settled">();
+    const timer = setTimeout(() => watchdog.resolve("never settled"), 10_000);
+    try {
+      const checked = await Promise.race([verifyNarStream(object, compression), watchdog.promise]);
+      // A rejection nobody owns is reported at the END of a turn, so give the
+      // loop one before reading what came loose.
+      const turned = Promise.withResolvers<void>();
+      setImmediate(() => turned.resolve());
+      await turned.promise;
+      return { checked, loose };
+    } finally {
+      clearTimeout(timer);
+      process.off("unhandledRejection", watch);
+    }
+  }
+
+  it("refuses the upload and leaves no rejection loose — raw bytes", async () => {
+    const { checked, loose } = await verified(await readbackOf(randomBytes(3 << 20)), "none");
+    expect(loose).toEqual([]);
+    expect(checked).toMatchObject({
+      ok: false,
+      absent: false,
+      changed: true,
+      message: expect.stringContaining("changed while it was being read"),
+    });
+  }, 30_000);
+
+  it("refuses the upload and leaves no rejection loose — through the decompressor", async () => {
+    // THE POD'S OWN PATH: a `.nar.zst`, so the failing stream is the one being
+    // piped INTO zstd rather than the one being hashed.
+    const compressed = spawnSync("zstd", ["-c"], { input: randomBytes(3 << 20), maxBuffer: 8 << 20 });
+    expect(compressed.status).toBe(0);
+    const { checked, loose } = await verified(await readbackOf(compressed.stdout), "zstd");
+    expect(loose).toEqual([]);
+    expect(checked).toMatchObject({
+      ok: false,
+      absent: false,
+      changed: true,
+      message: expect.stringContaining("changed while it was being read"),
+    });
+  }, 30_000);
 });

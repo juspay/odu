@@ -525,7 +525,18 @@ export function createStaging(deps: StagingDeps): Staging {
       // THE REASON IS A TOKEN, the message is the sentence: `reason` is what
       // an operator groups these lines by, and the decompressor's stderr has
       // a cardinality of one per upload.
-      if (!checked.ok) return await refuse(`${info.url}: ${checked.message}`, "unreadable");
+      //
+      // `short_read` IS NOT `unreadable`. The temp key is one the client still
+      // holds a presigned PUT for, so a rewrite between the GET that measured
+      // the object and the GETs that read it leaves a window short — the
+      // bytes proved are gone, which is the client racing its own upload, not
+      // a NAR odu cannot read (issue #160).
+      if (!checked.ok) {
+        return await refuse(
+          `${info.url}: ${checked.message}`,
+          checked.changed === true ? "short_read" : "unreadable",
+        );
+      }
       if (checked.narHash !== info.narHash) {
         return await refuse(
           `${info.url} hashes to ${checked.narHash} but the narinfo says ` +

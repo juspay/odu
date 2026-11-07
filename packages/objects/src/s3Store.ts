@@ -10,6 +10,7 @@ import {
   type CopyOptions,
   factsCounter,
   isTemp,
+  ObjectChanged,
   type ObjectFacts,
   type ObjectStore,
   type PutOptions,
@@ -613,14 +614,25 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * EVERY WINDOW MUST BE AS LONG AS ITS RANGE. The caller has already promised
    * the length (a `content-length` from the row), so a window that answers 206
    * with fewer bytes would truncate the object WITHOUT an error, and the client
-   * would see only a hash mismatch. It fails the stream with an `S3Failure`
-   * naming the key and the counts instead.
+   * would see only a hash mismatch.
    *
    * AND EVERY WINDOW MUST BE THE SAME OBJECT. A read of several windows is
    * several requests, and S3 resolves each against the key AS IT IS THEN — so
    * a key rewritten between two of them would hand the reader a splice of two
    * objects, hashing to nothing either of them has. Each window after the
-   * first carries `If-Match` on the first's ETag, and a `412` fails the read.
+   * first carries `If-Match` on the first's ETag.
+   *
+   * THOSE ARE ONE CONDITION, NOT TWO, and the stream fails with one sentence
+   * for both ({@link ObjectChanged}): a `412` is a key whose bytes were
+   * replaced, and a short `206` is a key whose bytes got SHORTER between the
+   * GET that measured the object and the GET reading this window. A rewrite
+   * that kept the length is caught by the ETag, one that changed it by the
+   * count — and a reader that is proving bytes refuses them either way.
+   *
+   * THE REJECTION IS THE STREAM'S, NOT THE PULL'S: `controller.error` fails
+   * the stream for whoever is reading it, where a `throw` out of `pull` is a
+   * rejection the reader may never be handed (Bun 1.3.13's
+   * `Readable.fromWeb` drops it, and the daemon exited 1 — issue #160).
    */
   function windowed(
     key: string,
@@ -631,8 +643,8 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     control: AbortController,
   ): ReadableStream<Uint8Array> {
     const version = first.headers.get("etag") ?? undefined;
-    const short = (response: Response, span: number, got: number): S3Failure =>
-      new S3Failure(`GET ${key} (a window)`, response, `answered ${got} of the ${span} bytes asked for`);
+    const short = (span: number, got: number): ObjectChanged =>
+      new ObjectChanged(key, version, `a window of ${span} bytes answered ${got}`);
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = (first.body as ReadableStream<Uint8Array>).getReader();
     let firstRead = 0;
     let position = from;
@@ -644,10 +656,21 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       const next = fetchWindow(key, position, to, control.signal, version).then(async (response) => {
         if (response.status !== 206) {
           const body = await response.text().catch(() => "");
+          // THE THREE WAYS A SERVICE SAYS "NOT THOSE BYTES ANY MORE". `412` is
+          // the `If-Match` refused; `416` is a range this read already measured
+          // as present, so the object got shorter; and a short `206` is the
+          // same shrink on a service that honours neither (R2 answered one on
+          // a key a client re-PUT — issue #160).
+          if (response.status === 412) {
+            throw new ObjectChanged(key, version, "a window answered 412, so the key holds other bytes now");
+          }
+          if (response.status === 416) {
+            throw new ObjectChanged(key, version, "a window answered 416, so the object is shorter than it was");
+          }
           throw new S3Failure(`GET ${key} (a window)`, response, body);
         }
         const window = await response.arrayBuffer();
-        if (window.byteLength !== span) throw short(response, span, window.byteLength);
+        if (window.byteLength !== span) throw short(span, window.byteLength);
         return window;
       });
       position = to + 1;
@@ -658,39 +681,41 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     let prefetched = open();
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
-        for (;;) {
-          const piece = pieces.shift();
-          if (piece !== undefined) {
-            controller.enqueue(piece);
-            return;
-          }
-          if (reader !== null) {
-            const next = await reader.read();
-            if (!next.done) {
-              firstRead += next.value.length;
-              controller.enqueue(next.value);
+        try {
+          for (;;) {
+            const piece = pieces.shift();
+            if (piece !== undefined) {
+              controller.enqueue(piece);
               return;
             }
-            reader = null;
-            if (firstRead !== from - start) {
-              control.abort();
-              throw short(first, from - start, firstRead);
+            if (reader !== null) {
+              const next = await reader.read();
+              if (!next.done) {
+                firstRead += next.value.length;
+                controller.enqueue(next.value);
+                return;
+              }
+              reader = null;
+              if (firstRead !== from - start) throw short(from - start, firstRead);
+            }
+            if (prefetched === null) {
+              controller.close();
+              return;
+            }
+            const window = await prefetched;
+            prefetched = open();
+            // Views of the one buffer, in the chunk size a stream reader expects.
+            pieces = [];
+            for (let at = 0; at < window.byteLength; at += READ_PIECE) {
+              pieces.push(new Uint8Array(window, at, Math.min(READ_PIECE, window.byteLength - at)));
             }
           }
-          if (prefetched === null) {
-            controller.close();
-            return;
-          }
-          const window = await prefetched.catch((err: unknown) => {
-            control.abort();
-            throw err;
-          });
-          prefetched = open();
-          // Views of the one buffer, in the chunk size a stream reader expects.
-          pieces = [];
-          for (let at = 0; at < window.byteLength; at += READ_PIECE) {
-            pieces.push(new Uint8Array(window, at, Math.min(READ_PIECE, window.byteLength - at)));
-          }
+        } catch (err) {
+          // EVERY FAILURE IS THE STREAM'S. The GETs still in flight are
+          // dropped, and the reader is handed the error on its next `read` —
+          // nothing is left for the process to catch.
+          control.abort();
+          controller.error(err);
         }
       },
       async cancel(reason) {

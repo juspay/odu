@@ -192,6 +192,10 @@ describe("the scrape", () => {
     expect(sampleOf(body, "odu_metrics_contributor_up", { contributor: "ci" })).toBe(1);
     // The runs' contributor is live even with an empty catalog.
     expect(sampleOf(body, "odu_runs_total", { outcome: "passed" })).toBe(0);
+    // AND THE HOST'S OWN GUARD, present at zero on a daemon that has caught
+    // nothing: the series exists before the first fault, so an alert on it can
+    // be written today rather than after the next #160.
+    expect(sampleOf(body, "odu_unhandled_total", { kind: "rejection" })).toBe(0);
   }, 900_000);
 
   it("answers an anonymous scrape with 401 and a sentence, not a page", async () => {
