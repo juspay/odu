@@ -278,11 +278,13 @@ What each step delivers:
     point: the daemon moved 99 MiB of NAR in the first row and none in the
     second — what it spends now is a readback on its own downlink, which the
     client never waits on beyond the narinfo.
-- **2.10 The admin CLI is retired.** The board and the API are the product, so
-  the CLI keeps only what needs a shell on the machine that holds the paths or
-  the checkout: `odu ci …`, `odu cache use|login|push`, `odu auth login`, and
-  the service itself. Every administrative verb is a control on the board and
-  a verb on the API, proved one by one before it is removed.[^retire]
+- **2.10 ✅ The admin CLI is retired.** The board and the API are the product,
+  so the CLI keeps only what needs a shell on the machine that holds the paths
+  or the checkout: `odu ci …`, `odu cache use|login|push`, `odu auth login`,
+  and the service itself (`web`, `surface`, `mcp`). Every administrative verb
+  is a control on the board and a verb on the API; the bespoke commands went
+  one PR at a time through 2.4–2.9, and `odu surface <row> <verb>` is the full
+  API by derivation.[^retire]
 
 ### Phase 3: teams
 
