@@ -24,7 +24,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { s3Fetch, type S3Target } from "@odu/objects";
+import { isTemp, s3Fetch, type S3Target } from "@odu/objects";
 import { type Gateway, startGateway } from "@odu/objects/testing";
 import {
   BIG,
@@ -95,10 +95,11 @@ function startStoreProxy(upstream: string): { port: number; stop: () => void } {
         ...(body === undefined ? {} : { body }),
         redirect: "manual",
       });
-      // The key, as the service sees it: the path is `/<bucket>/<key>`.
+      // The key, as the service sees it: the path is `/<bucket>/<key>`. What
+      // makes a key TEMP is `@odu/objects`' to say, not this suite's.
       const key = decodeURIComponent(url.pathname).split("/").slice(2).join("/");
       const opening = request.headers.get("range")?.startsWith("bytes=0-") === true;
-      if (!rewriteNextTempRead || request.method !== "GET" || !opening || !key.includes("/.tmp-")) {
+      if (!rewriteNextTempRead || request.method !== "GET" || !opening || !isTemp(key)) {
         return answer;
       }
       // ARMED, AND THIS IS THE EVENT. The window is read out whole before the

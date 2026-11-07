@@ -17,7 +17,9 @@ export {
   sameFacts,
   type StoredObject,
   /** The prefix a key that is not an object yet carries — what a direct
-   *  upload writes to before anybody has proved its bytes. */
+   *  upload writes to before anybody has proved its bytes — and the question
+   *  "is this key one of those", which no caller should answer by hand. */
+  isTemp,
   TEMP,
   UnrecordedObject,
   type UploadedPart,

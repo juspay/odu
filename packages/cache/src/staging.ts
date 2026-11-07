@@ -537,7 +537,7 @@ export function createStaging(deps: StagingDeps): Staging {
       if (!checked.ok) {
         return await refuse(
           `${info.url}: ${checked.message}`,
-          checked.changed === true ? "short_read" : "unreadable",
+          checked.why === "changed" ? "short_read" : "unreadable",
         );
       }
       if (checked.narHash !== info.narHash) {

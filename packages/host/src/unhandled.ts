@@ -24,6 +24,7 @@
  * CLI command that merely links this module never acquire them.
  */
 
+import type { MetricsReading } from "@odu/cordis/metrics";
 import type { Logger } from "@kolu/surface-daemon";
 
 /** Which of the two process-level faults a count or a line belongs to. */
@@ -145,23 +146,22 @@ export function installUnhandledGuard(options: UnhandledGuardOptions): Unhandled
   };
 }
 
-/** The exposition name, spelled ONCE — the docs quote it, the e2e scrape asserts
- *  it, and the contributor below emits it. */
-export const UNHANDLED_METRIC = "odu_unhandled_total";
-
 /**
- * THE GUARD AS A SCRAPE CONTRIBUTOR'S READING. Both labelled points are always
- * present, zeros included: a series that springs into existence at the first
- * crash is a series no alert can be written against beforehand.
+ * THE GUARD AS A SCRAPE CONTRIBUTOR'S READING, in the broker's own shape.
+ * Both labelled points are always present, zeros included: a series that
+ * springs into existence at the first crash is a series no alert can be
+ * written against beforehand.
+ *
+ * The name is a literal here and prose in the three surface docs, which is
+ * what every metric in this repo is: the exposition's vocabulary is the
+ * docs-sync surface, not a TypeScript constant.
  */
-export function unhandledReading(guard: UnhandledGuard): {
-  counters: [{ name: string; help: string; points: { labels: { kind: UnhandledKind }; value: number }[] }];
-} {
+export function unhandledReading(guard: UnhandledGuard): MetricsReading {
   const counts = guard.counts();
   return {
     counters: [
       {
-        name: UNHANDLED_METRIC,
+        name: "odu_unhandled_total",
         help: "Unhandled rejections and uncaught exceptions the daemon caught and kept serving through.",
         points: [
           { labels: { kind: "rejection" }, value: counts.rejection },

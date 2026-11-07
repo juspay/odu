@@ -359,10 +359,13 @@ export function narHashModuloHasher(hashPart: string): {
 /**
  * What a staged upload's bytes came to, or why they could not be read.
  *
- * `absent` is not a flavour of "wrong": a file that is not there has not been
- * judged, and the caller may have another way to prove the same bytes. A file
- * that IS there and hashes to something else has been judged, and is the
- * client's error.
+ * A FAILURE IS AT MOST ONE OF THREE THINGS, so it carries one `why` rather
+ * than a flag each. `absent` is not a flavour of "wrong": a file that is not
+ * there has not been judged, and the caller may have another way to prove the
+ * same bytes. `changed` is the store not delivering the object the read was
+ * promised, which is not the client's bad NAR either (issue #160). Everything
+ * else — a decompressor that exited, a length that disagreed — HAS been
+ * judged, and is the client's error.
  */
 export type NarCheck =
   | {
@@ -377,14 +380,9 @@ export type NarCheck =
     }
   | {
       ok: false;
-      absent: boolean;
       message: string;
-      /** THE READ DID NOT GET THE BYTES IT WAS PROMISED — a store answering an
-       *  {@link ObjectChanged}, not a NAR that is wrong. The upload is refused
-       *  either way; the caller says which happened, because "the store did
-       *  not deliver the object" and "the client sent a bad NAR" are two
-       *  different operator problems (issue #160). */
-      changed?: true;
+      /** Which of the two unjudged failures this was, when it was one. */
+      why?: "absent" | "changed";
     };
 
 /** The decompressor for a narinfo's `Compression`. `none` and an absent field
@@ -485,18 +483,22 @@ function readableOf(stream: ReadableStream<Uint8Array>): Readable {
 }
 
 /**
- * WHY A READ COULD NOT BE JUDGED, from the error that ended it.
+ * A READ THAT ENDED IN AN ERROR, CLASSIFIED — the one place the three
+ * failures of {@link NarCheck} are told apart.
  *
- * Three failures, three different operator problems: a file that is not there
- * (`absent`, which another proof may still answer), an object the store
- * rewrote under the read (`changed`), and everything else — a broken pipe, a
- * refused connection, bad bytes.
+ * Not named for any of its verdicts: a file that is not there (`absent`,
+ * which another proof may still answer), a store that did not deliver the
+ * object (`changed`), and everything else — a broken pipe, a refused
+ * connection, bad bytes — which is a judgement and carries no `why`.
  */
-const unreadable = (err: unknown): NarCheck => ({
+const unjudged = (err: unknown): NarCheck => ({
   ok: false,
-  absent: (err as NodeJS.ErrnoException).code === "ENOENT",
   message: String(err),
-  ...(err instanceof ObjectChanged ? { changed: true as const } : {}),
+  ...(err instanceof ObjectChanged
+    ? { why: "changed" as const }
+    : (err as NodeJS.ErrnoException).code === "ENOENT"
+      ? { why: "absent" as const }
+      : {}),
 });
 
 /** The bytes a verify reads: opened ONCE, and the length they should have. */
@@ -513,7 +515,7 @@ async function verifyNar(
 ): Promise<NarCheck> {
   const decompressor = decompressorOf(compression);
   if (decompressor !== null && !Array.isArray(decompressor)) {
-    return { ok: false, absent: false, message: decompressor.error };
+    return { ok: false, message: decompressor.error };
   }
 
   const { promise, resolve } = Promise.withResolvers<NarCheck>();
@@ -535,11 +537,7 @@ async function verifyNar(
     if (settled || !ended || !fileEnded || code === null) return;
     settled = true;
     if (code !== 0) {
-      resolve({
-        ok: false,
-        absent: false,
-        message: `${decompressor?.[0] ?? "the NAR"} exited ${code}${said()}`,
-      });
+      resolve({ ok: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}${said()}` });
       return;
     }
     // THE DECOMPRESSOR CAN EXIT 0 EARLY (bzip2 warns about trailing garbage),
@@ -549,15 +547,11 @@ async function verifyNar(
     try {
       actual = bytes.size();
     } catch (err) {
-      resolve(unreadable(err));
+      resolve(unjudged(err));
       return;
     }
     if (actual !== fileSize) {
-      resolve({
-        ok: false,
-        absent: false,
-        message: `${bytes.name} is ${actual} bytes but ${fileSize} were read`,
-      });
+      resolve({ ok: false, message: `${bytes.name} is ${actual} bytes but ${fileSize} were read` });
       return;
     }
     resolve({
@@ -583,14 +577,14 @@ async function verifyNar(
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
-      resolve({ ok: false, absent: false, message: `${decompressor[0]}: ${String(err)}` });
+      resolve({ ok: false, message: `${decompressor[0]}: ${String(err)}` });
     });
     child.on("close", (exit) => {
       code = exit ?? -1;
       settle();
     });
     if (child.stdout === null) {
-      return { ok: false, absent: false, message: `${decompressor[0]} produced no output` };
+      return { ok: false, message: `${decompressor[0]} produced no output` };
     }
     // EPIPE once the child has had enough is the ordinary end of a pipe.
     child.stdin?.on("error", () => {});
@@ -613,7 +607,7 @@ async function verifyNar(
       child.stdin?.end();
       // The file going away between a `stat` and this open is the ordinary
       // consequence of a concurrent drain; it is absence, not bad bytes.
-      resolve(unreadable(err));
+      resolve(unjudged(err));
     });
     file.pipe(child.stdin as NodeJS.WritableStream);
     source = child.stdout;
@@ -632,7 +626,7 @@ async function verifyNar(
   source.on("error", (err) => {
     if (settled) return;
     settled = true;
-    resolve(unreadable(err));
+    resolve(unjudged(err));
   });
   source.on("end", () => {
     ended = true;

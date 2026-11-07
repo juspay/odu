@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { objectStoreContract } from "../test/contract";
-import { type Gateway, startGateway } from "../test/versitygw";
+import { type Gateway, shortWindowFrom, startGateway } from "../test/testing";
 import { createHash } from "node:crypto";
 import { diskObjectStore } from "./diskStore";
 import { ObjectChanged, UnrecordedObject } from "./objectStore";
@@ -367,27 +367,16 @@ describe("s3 object store: round trips", () => {
     expect(seen.every((one) => one.signal?.aborted === true)).toBe(true);
   });
 
-  /** A `send` whose GETs from byte `from` answer 206 with their last ten bytes
-   *  dropped — a window shorter than the range it promised. */
-  const lyingFrom = (from: number) =>
-    (async (url: string | URL | Request, init?: RequestInit) => {
-      const response = await fetch(url, init);
-      const range = new Headers(init?.headers).get("range");
-      if (response.status !== 206 || range?.startsWith(`bytes=${from}-`) !== true) return response;
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      const headers = new Headers(response.headers);
-      headers.delete("content-length");
-      return new Response(bytes.subarray(0, bytes.length - 10), { status: 206, headers });
-    }) as typeof fetch;
-
+  // The short window comes from the package's own testing door, so this suite
+  // and a consumer's drive their readers with the same lie.
   it("fails the read as a CHANGED OBJECT when a window answers fewer bytes than its range", async () => {
     const target = await gateway.bucket();
     const bytes = new Uint8Array(3 * 1024 * 1024).map((_, at) => at % 251);
     expect((await s3ObjectStore({ target, partSize: PART }).put("main/nar/s", once(bytes))).ok).toBe(true);
-    // A later window, and the first one — each is held to its own range, and a
-    // window that came up short is the key having got shorter under the read.
+    // A later window, and the first one — each is held to its own range: a
+    // window that came up short is not the object this read was promised.
     for (const from of [1024 * 1024, 0]) {
-      const got = await s3ObjectStore({ target, partSize: PART, send: lyingFrom(from) }).get("main/nar/s");
+      const got = await s3ObjectStore({ target, partSize: PART, send: shortWindowFrom(from) }).get("main/nar/s");
       expect(got?.size).toBe(bytes.length);
       const read = new Response(got?.stream).arrayBuffer();
       await expect(read).rejects.toBeInstanceOf(ObjectChanged);

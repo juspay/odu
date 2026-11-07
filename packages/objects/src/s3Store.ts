@@ -630,10 +630,11 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * not arrive — it names the counts and the ETag and infers no cause — and a
    * reader that is proving bytes refuses them.
    *
-   * THE REJECTION IS THE STREAM'S, NOT THE PULL'S: `controller.error` fails
-   * the stream for whoever is reading it, where a `throw` out of `pull` is a
-   * rejection the reader may never be handed (Bun 1.3.13's
-   * `Readable.fromWeb` drops it, and the daemon exited 1 — issue #160).
+   * THE REJECTION IS THE STREAM'S, NOT THE PULL'S: one `catch` aborts the
+   * GETs still in flight and hands the reader the error on its next `read`,
+   * where a `throw` out of `pull` leaves a rejection the reader may never be
+   * handed at all — which is how a refused upload once ended a process
+   * (issue #160; the conversion that dropped it is named in `@odu/cache`).
    */
   function windowed(
     key: string,
@@ -657,13 +658,11 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       const next = fetchWindow(key, position, to, control.signal, version).then(async (response) => {
         if (response.status !== 206) {
           // THE THREE WAYS A SERVICE SAYS "NOT THOSE BYTES ANY MORE" — see
-          // {@link ObjectChanged}. The body is read only for the failure that
-          // carries one: these two are decided by the status alone.
-          if (response.status === 412) {
-            throw new ObjectChanged(key, version, "a window answered 412, so the key holds other bytes now");
-          }
-          if (response.status === 416) {
-            throw new ObjectChanged(key, version, "a window answered 416, so the object is shorter than it was");
+          // {@link ObjectChanged}. These two are decided by the status alone,
+          // and the sentence says what was seen, not what it meant; only the
+          // failure that carries a body reads one.
+          if (response.status === 412 || response.status === 416) {
+            throw new ObjectChanged(key, version, `a window answered ${response.status}`);
           }
           const body = await response.text().catch(() => "");
           throw new S3Failure(`GET ${key} (a window)`, response, body);

@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { s3ObjectStore } from "@odu/objects";
-import { type Gateway, startGateway } from "@odu/objects/testing";
+import { type Gateway, shortWindowFrom, startGateway } from "@odu/objects/testing";
 import { fifoStream } from "./fifo";
 import {
   type NarCheck,
@@ -218,12 +218,17 @@ describe("an upload's bytes", () => {
     expect(checked.ok).toBe(true);
     if (checked.ok) expect(checked.narSize).toBe(5);
 
-    expect(await verifyNarFile(path, "lz4")).toMatchObject({ ok: false, absent: false });
+    // A FORMAT ODU CANNOT READ has been judged: the whole answer is a message,
+    // with no `why` — `toEqual` rather than `toMatchObject` for exactly that.
+    expect(await verifyNarFile(path, "lz4")).toEqual({
+      ok: false,
+      message: "unsupported Compression: lz4",
+    });
     // ABSENT is not WRONG: the caller may have another way to prove the same
     // bytes (a twin object), and a file that is not there has not been judged.
     expect(await verifyNarFile(join(scratch, "absent"), "none")).toMatchObject({
       ok: false,
-      absent: true,
+      why: "absent",
     });
   });
 
@@ -368,28 +373,19 @@ describe("a readback whose window comes up short", () => {
     await gateway.stop();
   });
 
-  /** A `send` whose GETs from byte `from` answer 206 with their last ten bytes
-   *  dropped — the window shorter than the range it promised. */
-  const lyingFrom = (from: number) =>
-    (async (url: string | URL | Request, init?: RequestInit) => {
-      const response = await fetch(url, init);
-      const range = new Headers(init?.headers).get("range");
-      if (response.status !== 206 || range?.startsWith(`bytes=${from}-`) !== true) return response;
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      const headers = new Headers(response.headers);
-      headers.delete("content-length");
-      return new Response(bytes.subarray(0, bytes.length - 10), { status: 206, headers });
-    }) as typeof fetch;
-
-  /** The object, put honestly; read back through a store that lies. */
+  /** The object, put honestly; read back through a store whose window from
+   *  1 MiB comes up short (`@odu/objects/testing` owns that lie). */
   async function readbackOf(bytes: Uint8Array): Promise<{
     stream: ReadableStream<Uint8Array>;
     size: number;
   }> {
     const target = await gateway.bucket();
     const put = await s3ObjectStore({ target }).put("main/nar/readback", new Blob([bytes as BlobPart]));
-    expect(put.ok).toBe(true);
-    const object = await s3ObjectStore({ target, send: lyingFrom(1024 * 1024) }).get("main/nar/readback");
+    if (!put.ok) throw new Error(`this case could not put its object: ${JSON.stringify(put.refusal)}`);
+    const object = await s3ObjectStore({
+      target,
+      send: shortWindowFrom(1024 * 1024),
+    }).get("main/nar/readback");
     if (object === null) throw new Error("the object this case just put is not there");
     return object;
   }
@@ -404,14 +400,17 @@ describe("a readback whose window comes up short", () => {
   async function verified(
     object: { stream: ReadableStream<Uint8Array>; size: number },
     compression: string,
-  ): Promise<{ checked: NarCheck | "never settled"; loose: string[] }> {
+  ): Promise<{ checked: NarCheck; loose: string[] }> {
     const loose: string[] = [];
     const watch = (err: unknown): void => {
       loose.push(String(err));
     };
     process.on("unhandledRejection", watch);
-    const watchdog = Promise.withResolvers<"never settled">();
-    const timer = setTimeout(() => watchdog.resolve("never settled"), 10_000);
+    const watchdog = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => watchdog.reject(new Error("verifyNarStream never settled")),
+      10_000,
+    );
     try {
       const checked = await Promise.race([verifyNarStream(object, compression), watchdog.promise]);
       // A rejection nobody owns is reported at the END of a turn, so give the
@@ -431,8 +430,7 @@ describe("a readback whose window comes up short", () => {
     expect(loose).toEqual([]);
     expect(checked).toMatchObject({
       ok: false,
-      absent: false,
-      changed: true,
+      why: "changed",
       message: expect.stringContaining("changed while it was being read"),
     });
   }, 30_000);
@@ -446,8 +444,7 @@ describe("a readback whose window comes up short", () => {
     expect(loose).toEqual([]);
     expect(checked).toMatchObject({
       ok: false,
-      absent: false,
-      changed: true,
+      why: "changed",
       message: expect.stringContaining("changed while it was being read"),
     });
   }, 30_000);
