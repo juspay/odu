@@ -9,10 +9,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { objectStoreContract } from "../test/contract";
-import { type Gateway, startGateway } from "../test/versitygw";
+import { type Gateway, shortWindowFrom, startGateway } from "../test/testing";
 import { createHash } from "node:crypto";
 import { diskObjectStore } from "./diskStore";
-import { UnrecordedObject } from "./objectStore";
+import { ObjectChanged, UnrecordedObject } from "./objectStore";
 import { s3ObjectStore } from "./s3Store";
 import { s3Fetch, type S3Target } from "./s3sign";
 
@@ -367,31 +367,40 @@ describe("s3 object store: round trips", () => {
     expect(seen.every((one) => one.signal?.aborted === true)).toBe(true);
   });
 
-  /** A `send` whose GETs from byte `from` answer 206 with their last ten bytes
-   *  dropped — a window shorter than the range it promised. */
-  const lyingFrom = (from: number) =>
-    (async (url: string | URL | Request, init?: RequestInit) => {
-      const response = await fetch(url, init);
-      const range = new Headers(init?.headers).get("range");
-      if (response.status !== 206 || range?.startsWith(`bytes=${from}-`) !== true) return response;
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      const headers = new Headers(response.headers);
-      headers.delete("content-length");
-      return new Response(bytes.subarray(0, bytes.length - 10), { status: 206, headers });
-    }) as typeof fetch;
-
-  it("fails the read, naming the counts, when a window answers fewer bytes than its range", async () => {
+  // The short window comes from the package's own testing door, so this suite
+  // and a consumer's drive their readers with the same lie.
+  it("fails the read as a CHANGED OBJECT when a window answers fewer bytes than its range", async () => {
     const target = await gateway.bucket();
     const bytes = new Uint8Array(3 * 1024 * 1024).map((_, at) => at % 251);
     expect((await s3ObjectStore({ target, partSize: PART }).put("main/nar/s", once(bytes))).ok).toBe(true);
-    // A later window, and the first one — each is held to its own range.
+    // A later window, and the first one — each is held to its own range: a
+    // window that came up short is not the object this read was promised.
     for (const from of [1024 * 1024, 0]) {
-      const got = await s3ObjectStore({ target, partSize: PART, send: lyingFrom(from) }).get("main/nar/s");
+      const got = await s3ObjectStore({ target, partSize: PART, send: shortWindowFrom(from) }).get("main/nar/s");
       expect(got?.size).toBe(bytes.length);
-      await expect(new Response(got?.stream).arrayBuffer()).rejects.toThrow(
-        `GET main/nar/s (a window): 206 answered ${1024 * 1024 - 10} of the ${1024 * 1024} bytes asked for`,
+      const read = new Response(got?.stream).arrayBuffer();
+      await expect(read).rejects.toBeInstanceOf(ObjectChanged);
+      await expect(read).rejects.toThrow(
+        `main/nar/s changed while it was being read — a window of ${1024 * 1024} bytes answered ${1024 * 1024 - 10}`,
       );
     }
+  });
+
+  it("fails the read with the SAME sentence when a later window answers 412", async () => {
+    const target = await gateway.bucket();
+    const bytes = new Uint8Array(3 * 1024 * 1024).map((_, at) => at % 251);
+    expect((await s3ObjectStore({ target, partSize: PART }).put("main/nar/m", once(bytes))).ok).toBe(true);
+    // THE KEY REWRITTEN UNDER THE READ, as the service reports it: the
+    // `If-Match` on the first window's ETag no longer holds.
+    const refusing = (async (url: string | URL | Request, init?: RequestInit) => {
+      const range = new Headers(init?.headers).get("range");
+      if (range?.startsWith("bytes=1048576-") !== true) return fetch(url, init);
+      return new Response("<Error><Code>PreconditionFailed</Code></Error>", { status: 412 });
+    }) as typeof fetch;
+    const got = await s3ObjectStore({ target, partSize: PART, send: refusing }).get("main/nar/m");
+    const read = new Response(got?.stream).arrayBuffer();
+    await expect(read).rejects.toBeInstanceOf(ObjectChanged);
+    await expect(read).rejects.toThrow("main/nar/m changed while it was being read");
   });
 
   it("uploads parts in parallel, and one failing part aborts the rest and the upload", async () => {

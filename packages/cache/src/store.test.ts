@@ -9,6 +9,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -22,9 +23,18 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { s3ObjectStore } from "@odu/objects";
+import { type Gateway, shortWindowFrom, startGateway } from "@odu/objects/testing";
 import { fifoStream } from "./fifo";
-import { narHashModuloHasher, nixDump, parsePathInfoTable, verifyNarFile } from "./store";
+import {
+  type NarCheck,
+  narHashModuloHasher,
+  nixDump,
+  parsePathInfoTable,
+  verifyNarFile,
+  verifyNarStream,
+} from "./store";
 import { contentAddressOf } from "./storePath";
 
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
@@ -208,12 +218,17 @@ describe("an upload's bytes", () => {
     expect(checked.ok).toBe(true);
     if (checked.ok) expect(checked.narSize).toBe(5);
 
-    expect(await verifyNarFile(path, "lz4")).toMatchObject({ ok: false, absent: false });
+    // A FORMAT ODU CANNOT READ has been judged: the whole answer is a message,
+    // with no `why` — `toEqual` rather than `toMatchObject` for exactly that.
+    expect(await verifyNarFile(path, "lz4")).toEqual({
+      ok: false,
+      message: "unsupported Compression: lz4",
+    });
     // ABSENT is not WRONG: the caller may have another way to prove the same
     // bytes (a twin object), and a file that is not there has not been judged.
     expect(await verifyNarFile(join(scratch, "absent"), "none")).toMatchObject({
       ok: false,
-      absent: true,
+      why: "absent",
     });
   });
 
@@ -336,4 +351,101 @@ describe("an upload's bytes", () => {
       });
     }
   });
+});
+
+/**
+ * THE READBACK THAT KILLED A POD (issue #160). A direct upload is proved by
+ * streaming the temp object back out of the store, and the window GETs that
+ * stream it can answer SHORT — R2 answered 190 bytes of a 1 MiB range. The
+ * failure belongs to the upload, which is refused; it must never belong to the
+ * process, which went down with an uncaught `S3Failure` printed twenty times.
+ *
+ * Against versitygw, with a `send` that drops the last bytes of the window
+ * starting at 1 MiB: a real store, a real range request, and a lie of exactly
+ * the shape R2 told.
+ */
+describe("a readback whose window comes up short", () => {
+  let gateway: Gateway;
+  beforeAll(async () => {
+    gateway = await startGateway();
+  });
+  afterAll(async () => {
+    await gateway.stop();
+  });
+
+  /** The object, put honestly; read back through a store whose window from
+   *  1 MiB comes up short (`@odu/objects/testing` owns that lie). */
+  async function readbackOf(bytes: Uint8Array): Promise<{
+    stream: ReadableStream<Uint8Array>;
+    size: number;
+  }> {
+    const target = await gateway.bucket();
+    const put = await s3ObjectStore({ target }).put("main/nar/readback", new Blob([bytes as BlobPart]));
+    if (!put.ok) throw new Error(`this case could not put its object: ${JSON.stringify(put.refusal)}`);
+    const object = await s3ObjectStore({
+      target,
+      send: shortWindowFrom(1024 * 1024),
+    }).get("main/nar/readback");
+    if (object === null) throw new Error("the object this case just put is not there");
+    return object;
+  }
+
+  /** `verifyNarStream`, with the window's rejection caught by nobody watched
+   *  for: an unhandled rejection is the crash, and a verify that never settles
+   *  is the hang the same bug causes. Both are failures of this case.
+   *
+   *  A WALL-CLOCK WATCHDOG, deliberately: "never settles" has no event to
+   *  await — that is what it means — so the only way to assert it is to stop
+   *  waiting. It costs nothing on a green run, which settles at once. */
+  async function verified(
+    object: { stream: ReadableStream<Uint8Array>; size: number },
+    compression: string,
+  ): Promise<{ checked: NarCheck; loose: string[] }> {
+    const loose: string[] = [];
+    const watch = (err: unknown): void => {
+      loose.push(String(err));
+    };
+    process.on("unhandledRejection", watch);
+    const watchdog = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => watchdog.reject(new Error("verifyNarStream never settled")),
+      10_000,
+    );
+    try {
+      const checked = await Promise.race([verifyNarStream(object, compression), watchdog.promise]);
+      // A rejection nobody owns is reported at the END of a turn, so give the
+      // loop one before reading what came loose.
+      const turned = Promise.withResolvers<void>();
+      setImmediate(() => turned.resolve());
+      await turned.promise;
+      return { checked, loose };
+    } finally {
+      clearTimeout(timer);
+      process.off("unhandledRejection", watch);
+    }
+  }
+
+  it("refuses the upload and leaves no rejection loose — raw bytes", async () => {
+    const { checked, loose } = await verified(await readbackOf(randomBytes(3 << 20)), "none");
+    expect(loose).toEqual([]);
+    expect(checked).toMatchObject({
+      ok: false,
+      why: "changed",
+      message: expect.stringContaining("changed while it was being read"),
+    });
+  }, 30_000);
+
+  it("refuses the upload and leaves no rejection loose — through the decompressor", async () => {
+    // THE POD'S OWN PATH: a `.nar.zst`, so the failing stream is the one being
+    // piped INTO zstd rather than the one being hashed.
+    const compressed = spawnSync("zstd", ["-c"], { input: randomBytes(3 << 20), maxBuffer: 8 << 20 });
+    expect(compressed.status).toBe(0);
+    const { checked, loose } = await verified(await readbackOf(compressed.stdout), "zstd");
+    expect(loose).toEqual([]);
+    expect(checked).toMatchObject({
+      ok: false,
+      why: "changed",
+      message: expect.stringContaining("changed while it was being read"),
+    });
+  }, 30_000);
 });

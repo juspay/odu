@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { isTemp, s3Fetch, type S3Target } from "@odu/objects";
 import { type Gateway, startGateway } from "@odu/objects/testing";
 import {
   BIG,
@@ -53,6 +54,71 @@ let gateway: Gateway;
 /** The name that store is declared under — what `bucket_create { store }` says. */
 const GATEWAY_STORE = "gw";
 
+/**
+ * THE SAME S3 SERVICE, REACHED THROUGH A PROXY THIS SUITE CAN ARM — declared
+ * as a second store so one bucket's reads can be made to meet an object that
+ * MOVES while odu is reading it (issue #160).
+ *
+ * It forwards everything, signature and all: the `Host` header a request was
+ * signed against is passed through, so versitygw verifies what odu signed.
+ * `rewriteNextTempRead` arms it for exactly one event — the first window of a
+ * readback of a temp key — after which it rewrites that key SHORTER behind
+ * odu's back. That is FAULT INJECTION, not a story about who did it: the
+ * completion ended every URL odu signed for that key, so no client can be
+ * writing it, and what the pod met was R2 answering a 1 MiB range with 190
+ * bytes. The reader sees the same thing either way, and this is how to make
+ * it see it on demand.
+ */
+const RACE_STORE = "gw-racy";
+let storeProxy: { port: number; stop: () => void };
+let rewriteNextTempRead = false;
+/** The keys the proxy rewrote, in order — the witness that it fired. */
+const rewritten: string[] = [];
+let gatewayTarget: S3Target;
+
+/** The bytes a rewritten temp key is left holding: shorter than it was, and a
+ *  different object, so the read in flight meets both halves of "it changed". */
+const REWRITTEN_BYTES = new Uint8Array(512).fill(0x5a);
+
+function startStoreProxy(upstream: string): { port: number; stop: () => void } {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      url.port = upstream;
+      const body =
+        request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
+      const answer = await fetch(url, {
+        method: request.method,
+        headers: request.headers,
+        ...(body === undefined ? {} : { body }),
+        redirect: "manual",
+      });
+      // The key, as the service sees it: the path is `/<bucket>/<key>`. What
+      // makes a key TEMP is `@odu/objects`' to say, not this suite's.
+      const key = decodeURIComponent(url.pathname).split("/").slice(2).join("/");
+      const opening = request.headers.get("range")?.startsWith("bytes=0-") === true;
+      if (!rewriteNextTempRead || request.method !== "GET" || !opening || !isTemp(key)) {
+        return answer;
+      }
+      // ARMED, AND THIS IS THE EVENT. The window is read out whole before the
+      // key is rewritten, so the rewrite lands strictly between the GET that
+      // measured the object and the one that reads the next window — the race
+      // the pod lost, made an ordering.
+      rewriteNextTempRead = false;
+      const window = await answer.arrayBuffer();
+      const put = await s3Fetch(gatewayTarget, "PUT", key, { body: REWRITTEN_BYTES });
+      if (!put.ok) throw new Error(`rewriting ${key} answered ${put.status}`);
+      rewritten.push(key);
+      return new Response(window, { status: answer.status, headers: answer.headers });
+    },
+  });
+  const port = server.port;
+  if (port === undefined) throw new Error("the store proxy bound no port");
+  return { port, stop: () => void server.stop(true) };
+}
+
 const dirs: string[] = [];
 
 /** macOS cannot build into a diverted store; Linux can, and does. */
@@ -75,12 +141,20 @@ beforeAll(async () => {
     `AWS_ACCESS_KEY_ID=${target.accessKeyId}\nAWS_SECRET_ACCESS_KEY=${target.secretAccessKey}\n`,
     { mode: 0o600 },
   );
+  gatewayTarget = target;
+  storeProxy = startStoreProxy(gateway.endpoint.port);
   const stores = join(storeRoot, "object-stores.json");
+  const declared = {
+    kind: "s3",
+    bucket: target.bucket,
+    region: target.region,
+    credentialsFile: credentials,
+  };
   writeFileSync(
     stores,
     JSON.stringify({
       [GATEWAY_STORE]: {
-        kind: "s3",
+        ...declared,
         // `localhost`, SPELLED THAT WAY ON PURPOSE. The gateway listens on
         // 127.0.0.1 and so does odu, but the two hosts differ as STRINGS —
         // which is the whole of the redirect proof below: curl drops an
@@ -88,10 +162,9 @@ beforeAll(async () => {
         // still arrives proves the presigned URL carries its own authority and
         // that the bucket's token never reached the store.
         endpoint: `http://localhost:${gateway.endpoint.port}`,
-        bucket: target.bucket,
-        region: target.region,
-        credentialsFile: credentials,
       },
+      // THE SAME BUCKET, through the proxy this suite can arm.
+      [RACE_STORE]: { ...declared, endpoint: `http://127.0.0.1:${storeProxy.port}` },
     }),
   );
 
@@ -108,6 +181,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   world?.dispose();
+  storeProxy?.stop();
   await gateway?.stop();
   for (const dir of dirs.splice(0)) cleanup(dir);
 });
@@ -149,6 +223,24 @@ function cli(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
+/** THE SAME COMMAND WITHOUT BLOCKING THIS PROCESS. `spawnSync` holds the event
+ *  loop, which is fine for every case here except one: the store proxy above
+ *  runs in THIS process, so a push whose readback must reach it has to be
+ *  awaited rather than waited on. */
+async function cliAsync(argv: string[], env: NodeJS.ProcessEnv = {}): Promise<Ran> {
+  const child = Bun.spawn([odu, ...argv], {
+    env: { ...world.env, ODU_ROOT_TOKEN: ROOT_TOKEN, ...env } as Record<string, string>,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, status] = await Promise.all([
+    new Response(child.stdout as ReadableStream<Uint8Array>).text(),
+    new Response(child.stderr as ReadableStream<Uint8Array>).text(),
+    child.exited,
+  ]);
+  return { status, stdout, stderr };
+}
+
 /**
  * One administrative verb, through `odu surface` — the only face that
  * administers the cache now. The root token is a FIELD of the input, not an
@@ -160,6 +252,11 @@ function cli(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
 function surface(verb: string, input: unknown, env: NodeJS.ProcessEnv = {}): Ran {
   return cli(["surface", "cache", verb, "--input", JSON.stringify(input), "--json"], env);
 }
+
+/** The same verb, without blocking this process — see {@link cliAsync}. Any
+ *  verb that makes the daemon TALK TO THE PROXIED STORE must use it. */
+const surfaceAsync = (verb: string, input: unknown): Promise<Ran> =>
+  cliAsync(["surface", "cache", verb, "--input", JSON.stringify(input), "--json"]);
 
 /** `nix …` against the builder's store — the machine that built the paths. */
 function nix(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
@@ -340,6 +437,35 @@ function narUploaded(bucket: string): Uploaded[] {
     try {
       const entry = JSON.parse(line) as Uploaded & { msg?: string };
       if (entry.msg === "odu cache: cache.nar.uploaded" && entry.bucket === bucket) lines.push(entry);
+    } catch {
+      // A partial last line: the daemon is still writing it.
+    }
+  }
+  return lines;
+}
+
+/** One `cache.nar.verify_failed` line: an upload odu refused, and why. */
+interface VerifyFailed {
+  bucket: string;
+  mode: "direct" | "staged";
+  path: string;
+  reason: string;
+}
+
+/** Every `cache.nar.verify_failed` line for one bucket, in order. */
+function verifyFailed(bucket: string): VerifyFailed[] {
+  let text: string;
+  try {
+    text = readFileSync(world.logPath, "utf-8");
+  } catch {
+    return [];
+  }
+  const lines: VerifyFailed[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.includes("cache.nar.verify_failed")) continue;
+    try {
+      const entry = JSON.parse(line) as VerifyFailed & { msg?: string };
+      if (entry.msg === "odu cache: cache.nar.verify_failed" && entry.bucket === bucket) lines.push(entry);
     } catch {
       // A partial last line: the daemon is still writing it.
     }
@@ -937,6 +1063,78 @@ describe("odu serves a Nix binary cache", () => {
     expect(await narinfo.text()).toContain(`StorePath: ${offloaded}`);
   });
 
+  it("refuses a direct upload whose object changed under the readback, and keeps serving", async () => {
+    // ISSUE #160, END TO END. The pod's readback was answered 190 bytes of a
+    // 1 MiB range and the process exited 1. The proxy above reproduces what
+    // the READER saw — a later window that is not the object it was promised
+    // — on demand; what is proved here is that the upload is refused with the
+    // store's own sentence and the daemon is still answering afterwards.
+    // CREATED THROUGH THE ASYNC FACE: making a bucket writes `nix-cache-info`
+    // into its store, and this process is the proxy that store is reached
+    // through — a `spawnSync` here would hold the loop the daemon is waiting on.
+    const created = await surfaceAsync("bucket_create", {
+      rootToken: ROOT_TOKEN,
+      name: "racy",
+      public: false,
+      retentionDays: 90,
+      store: RACE_STORE,
+    });
+    expect({ status: created.status, stderr: created.stderr }).toMatchObject({ status: 0 });
+    const racy = JSON.parse(created.stdout) as Bucket;
+    const minted = await surfaceAsync("token_mint", {
+      rootToken: ROOT_TOKEN,
+      bucket: "racy",
+      scope: "write",
+    });
+    expect(minted.status).toBe(0);
+    const token = (JSON.parse(minted.stdout) as { token: string }).token;
+
+    // INCOMPRESSIBLE AND SEVERAL WINDOWS LONG (a window is 1 MiB), so the
+    // readback cannot finish inside the one GET the proxy lets through.
+    const racing = storeFile("odu-cache-e2e-racy", 4 << 20);
+    rewriteNextTempRead = true;
+    const pushed = await cliAsync(["cache", "push", "racy", racing, "-o", "json"], {
+      ODU_CACHE_TOKEN: token,
+      NIX_REMOTE: builderStore,
+    });
+    expect(rewritten).toHaveLength(1);
+    const summary = JSON.parse(pushed.stdout) as {
+      pushed: number;
+      failed: number;
+      failures: { message: string }[];
+    };
+    expect({ pushed: summary.pushed, failed: summary.failed }).toEqual({ pushed: 0, failed: 1 });
+    // THE STORE'S OWN SENTENCE, carried through the refusal to the client.
+    expect(summary.failures[0]?.message).toContain("answered 400");
+    expect(summary.failures[0]?.message).toContain("changed while it was being read");
+
+    // AND THE DAEMON'S VERDICT: a refusal named `short_read`, not a crash and
+    // not a NAR it could not read.
+    const refusals = await until(
+      "odu to log the upload it refused",
+      () => {
+        const lines = verifyFailed("racy");
+        return lines.length > 0 ? lines : null;
+      },
+      30_000,
+    );
+    expect(refusals.at(-1)).toMatchObject({ bucket: "racy", mode: "direct", reason: "short_read" });
+
+    // STILL SERVING — the same process, the next request. This is the whole
+    // point: a refused upload is not a process exit.
+    const alive = await fetch(`${racy.url}/nix-cache-info`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(alive.status).toBe(200);
+    expect(await alive.text()).toContain("StoreDir:");
+    // AND NOTHING WAS RECORDED: the path the readback could not prove is not
+    // one this bucket serves.
+    const narinfo = await fetch(`${racy.url}/${hashOf(racing)}.narinfo`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(narinfo.status).toBe(404);
+  }, 300_000);
+
   it("pushes a two-path closure in dependency order, and substitutes the top path cold", () => {
     const { parent, child } = buildPair("odu-cache-e2e-pair");
     expect(parent).not.toBe("");
@@ -1087,6 +1285,7 @@ describe("odu serves a Nix binary cache", () => {
       "fronted",
       "main",
       "private",
+      "racy",
       "thief",
     ]);
     expect(answer.objects).toBeGreaterThanOrEqual(2);

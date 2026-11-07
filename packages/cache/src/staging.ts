@@ -525,7 +525,21 @@ export function createStaging(deps: StagingDeps): Staging {
       // THE REASON IS A TOKEN, the message is the sentence: `reason` is what
       // an operator groups these lines by, and the decompressor's stderr has
       // a cardinality of one per upload.
-      if (!checked.ok) return await refuse(`${info.url}: ${checked.message}`, "unreadable");
+      //
+      // `short_read` IS NOT `unreadable`. The readback was promised a length
+      // and the store did not deliver it — a window answered fewer bytes than
+      // its range, or a later one answered `412`/`416`. WHY is not odu's to
+      // say: the completion ended every URL signed for this key (see the
+      // package README), so no client can be writing it, and R2 answered a
+      // 1 MiB range with 190 bytes on a key nothing was writing (issue #160).
+      // Odu refuses rather than guessing, and the sentence carries the key,
+      // the counts and the ETag the read was bound to.
+      if (!checked.ok) {
+        return await refuse(
+          `${info.url}: ${checked.message}`,
+          checked.why === "changed" ? "short_read" : "unreadable",
+        );
+      }
       if (checked.narHash !== info.narHash) {
         return await refuse(
           `${info.url} hashes to ${checked.narHash} but the narinfo says ` +

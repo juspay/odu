@@ -282,6 +282,42 @@ export class UnrecordedObject extends Error {
   }
 }
 
+/**
+ * A READ THE SERVICE DID NOT KEEP ITS PROMISE ON.
+ *
+ * A read of a large object is several requests, and S3 resolves each against
+ * the key AS IT IS THEN. Three answers say the same thing, and this error says
+ * it once: a `412`, when the `If-Match` on the first window's ETag no longer
+ * holds; a `416`, for a range the first window's `Content-Range` said was
+ * there; and a `206` carrying FEWER bytes than the range asked for.
+ *
+ * "CHANGED" IS THE READER'S VIEW, NOT A CULPRIT: the object answering now is
+ * not the object this read was promised. Whether a key was rewritten between
+ * two requests or a service cut a range body short is not knowable from here,
+ * and the sentence does not guess — it carries what was seen (the key, the
+ * counts, the ETag the read was bound to) and nothing inferred.
+ *
+ * It is an error rather than a refusal because it happens MID-STREAM, after
+ * `get` has answered; the caller learns of it on the stream it is reading.
+ * A caller that is proving bytes (`@odu/cache`'s readback) turns it into a
+ * refusal of the upload, never a failure of the process.
+ */
+export class ObjectChanged extends Error {
+  readonly _tag = "ObjectChanged";
+  constructor(
+    readonly key: string,
+    /** The version the read was bound to, when the first window named one. */
+    readonly etag: string | undefined,
+    /** What the service answered, in its own numbers. */
+    detail: string,
+  ) {
+    super(
+      `${key} changed while it was being read — ${detail}` +
+        (etag === undefined ? "" : ` (the read was bound to ETag ${etag})`),
+    );
+  }
+}
+
 /** A key is a relative path of plain segments: no `..`, no leading slash. */
 export function safeKey(key: string): string {
   const clean = key.replaceAll("\\", "/");

@@ -253,6 +253,14 @@ store they no longer do (PLAN 2.9, cache surface **4.2**).
     `UploadPartCopy`** — and it fails closed: a store that answers a read with
     no version at all refuses the push (`reason:"unversioned_source"`) rather
     than copying on trust.
+  - And a READ that does not deliver what it promised is the same refusal
+    (`reason:"short_read"`): a window answering fewer bytes than its range, or
+    a later window answering `412`/`416`, fails the stream with one sentence
+    naming the key, the counts and the ETag (`ObjectChanged`). It is not a
+    verdict on the NAR and it is nobody's fault that can be named from here —
+    R2 answered a 1 MiB range with 190 bytes on a key no client could write
+    (issue #160) — so the path is simply pushed again. What must never happen
+    is what did: the stream's failure reaching nobody and ending the process.
 - **The upload record is this daemon's, and in memory.** A handle from before
   a restart is a `404`, which the client answers by beginning the path again
   — as it does for any 4xx at the store, an expired presign included. One

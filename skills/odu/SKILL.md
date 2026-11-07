@@ -535,6 +535,9 @@ window. The numbers read from storage are gauges (`odu_cache_paths`,
 last one, which is why it is not a `_total`).
 `odu_cache_last_gc_timestamp_seconds` is `0` when there has been no collection
 since boot.
+`odu_unhandled_total` is the daemon's own: a counter labelled `kind`
+(`rejection`|`exception`) of the rejections and exceptions the daemon caught and
+kept serving through. Both labels are present from the first scrape, at zero.
 
 ### Signing in
 
