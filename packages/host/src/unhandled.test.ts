@@ -126,17 +126,19 @@ describe("installUnhandledGuard", () => {
     expect(lines).toHaveLength(0);
   });
 
-  it("keeps a real serving process alive through a real unhandled rejection", async () => {
+  it("keeps a real serving process alive through a real rejection and a real throw", async () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-unhandled-child-"));
     scratches.push(dir);
     const script = join(dir, "child.ts");
     // The child is the daemon in miniature: the guard installed, a listener
-    // bound, then a genuine rejection nobody awaits. It announces its port from
-    // INSIDE the guard's own log call rather than after a delay, so the fetch
-    // below is necessarily a fetch that happened after the fault was reported —
-    // the handshake carries the ordering, not a sleep. `/stop` stops the server
-    // gracefully; with nothing else holding the loop the child then ends on its
-    // own, which is what exit 0 is evidence of.
+    // bound, then BOTH faults for real — a rejection nobody awaits, and a
+    // `throw` out of a timer, which is the runtime's own `uncaughtException`
+    // dispatch rather than a `process.emit` standing in for it. It announces
+    // its port from INSIDE the guard's log call, once both have been counted,
+    // so the fetch below is necessarily a fetch that happened after both —
+    // the handshake carries the ordering, not a sleep. `/stop` stops the
+    // server gracefully; with nothing else holding the loop the child then
+    // ends on its own, which is what exit 0 is evidence of.
     writeFileSync(
       script,
       [
@@ -145,7 +147,10 @@ describe("installUnhandledGuard", () => {
         `  debug: () => {}, info: () => {}, warn: () => {},`,
         `  error: (fields, msg) => {`,
         `    process.stderr.write(JSON.stringify({ ...fields, msg }) + "\\n");`,
-        `    process.stdout.write("ready " + server.port + "\\n");`,
+        `    const seen = guard.counts();`,
+        `    if (seen.rejection > 0 && seen.exception > 0) {`,
+        `      process.stdout.write("ready " + server.port + "\\n");`,
+        `    }`,
         `  },`,
         `};`,
         `const server = Bun.serve({`,
@@ -155,11 +160,12 @@ describe("installUnhandledGuard", () => {
         `      queueMicrotask(() => server.stop(false));`,
         `      return new Response("stopping");`,
         `    }`,
-        `    return new Response("alive " + guard.counts().rejection);`,
+        `    return new Response("alive " + guard.counts().rejection + " " + guard.counts().exception);`,
         `  },`,
         `});`,
         `const guard = installUnhandledGuard({ log });`,
         `void Promise.reject(new Error("boom", { cause: new Error("inner") }));`,
+        `setTimeout(() => { throw new Error("thrown", { cause: new Error("inner-thrown") }); }, 0);`,
       ].join("\n"),
     );
 
@@ -180,10 +186,10 @@ describe("installUnhandledGuard", () => {
       })();
       const port = await announced.promise;
 
-      // STILL SERVING, after the rejection: the whole point of the guard.
+      // STILL SERVING, after both faults: the whole point of the guard.
       const answer = await fetch(`http://127.0.0.1:${port}/`);
       expect(answer.status).toBe(200);
-      expect(await answer.text()).toBe("alive 1");
+      expect(await answer.text()).toBe("alive 1 1");
       expect(child.killed).toBe(false);
 
       await fetch(`http://127.0.0.1:${port}/stop`);
@@ -193,6 +199,8 @@ describe("installUnhandledGuard", () => {
       expect(stderr).toContain("odu: unhandled");
       expect(stderr).toContain("boom");
       expect(stderr).toContain("inner");
+      expect(stderr).toContain("thrown");
+      expect(stderr).toContain("inner-thrown");
     } finally {
       child.kill();
     }

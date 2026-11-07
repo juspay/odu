@@ -526,11 +526,14 @@ export function createStaging(deps: StagingDeps): Staging {
       // an operator groups these lines by, and the decompressor's stderr has
       // a cardinality of one per upload.
       //
-      // `short_read` IS NOT `unreadable`. The temp key is one the client still
-      // holds a presigned PUT for, so a rewrite between the GET that measured
-      // the object and the GETs that read it leaves a window short — the
-      // bytes proved are gone, which is the client racing its own upload, not
-      // a NAR odu cannot read (issue #160).
+      // `short_read` IS NOT `unreadable`. The readback was promised a length
+      // and the store did not deliver it — a window answered fewer bytes than
+      // its range, or a later one answered `412`/`416`. WHY is not odu's to
+      // say: the completion ended every URL signed for this key (see the
+      // package README), so no client can be writing it, and R2 answered a
+      // 1 MiB range with 190 bytes on a key nothing was writing (issue #160).
+      // Odu refuses rather than guessing, and the sentence carries the key,
+      // the counts and the ETag the read was bound to.
       if (!checked.ok) {
         return await refuse(
           `${info.url}: ${checked.message}`,

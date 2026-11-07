@@ -283,15 +283,19 @@ export class UnrecordedObject extends Error {
 }
 
 /**
- * A READ WHOSE OBJECT MOVED UNDER IT.
+ * A READ THE SERVICE DID NOT KEEP ITS PROMISE ON.
  *
  * A read of a large object is several requests, and S3 resolves each against
- * the key AS IT IS THEN. Two answers say the same thing: a `412`, when the
- * `If-Match` on the first window's ETag no longer holds, and a `206` carrying
- * FEWER bytes than the range asked for, which is a window reaching past an
- * object that got shorter. Neither is truncation by the service and neither is
- * a corrupt upload — the bytes the reader was promised are simply gone — so
- * both fail the stream with this one error and this one sentence.
+ * the key AS IT IS THEN. Three answers say the same thing, and this error says
+ * it once: a `412`, when the `If-Match` on the first window's ETag no longer
+ * holds; a `416`, for a range the first window's `Content-Range` said was
+ * there; and a `206` carrying FEWER bytes than the range asked for.
+ *
+ * "CHANGED" IS THE READER'S VIEW, NOT A CULPRIT: the object answering now is
+ * not the object this read was promised. Whether a key was rewritten between
+ * two requests or a service cut a range body short is not knowable from here,
+ * and the sentence does not guess — it carries what was seen (the key, the
+ * counts, the ETag the read was bound to) and nothing inferred.
  *
  * It is an error rather than a refusal because it happens MID-STREAM, after
  * `get` has answered; the caller learns of it on the stream it is reading.

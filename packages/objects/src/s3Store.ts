@@ -623,11 +623,12 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * first carries `If-Match` on the first's ETag.
    *
    * THOSE ARE ONE CONDITION, NOT TWO, and the stream fails with one sentence
-   * for both ({@link ObjectChanged}): a `412` is a key whose bytes were
-   * replaced, and a short `206` is a key whose bytes got SHORTER between the
-   * GET that measured the object and the GET reading this window. A rewrite
-   * that kept the length is caught by the ETag, one that changed it by the
-   * count — and a reader that is proving bytes refuses them either way.
+   * for all of them ({@link ObjectChanged}): a `412` is the `If-Match` on the
+   * first window's ETag refused, a `416` is a range the first window's
+   * `Content-Range` said was there, and a short `206` is neither being
+   * honoured. What the reader knows is only that the bytes it was promised did
+   * not arrive — it names the counts and the ETag and infers no cause — and a
+   * reader that is proving bytes refuses them.
    *
    * THE REJECTION IS THE STREAM'S, NOT THE PULL'S: `controller.error` fails
    * the stream for whoever is reading it, where a `throw` out of `pull` is a
@@ -655,18 +656,16 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       const span = to - position + 1;
       const next = fetchWindow(key, position, to, control.signal, version).then(async (response) => {
         if (response.status !== 206) {
-          const body = await response.text().catch(() => "");
-          // THE THREE WAYS A SERVICE SAYS "NOT THOSE BYTES ANY MORE". `412` is
-          // the `If-Match` refused; `416` is a range this read already measured
-          // as present, so the object got shorter; and a short `206` is the
-          // same shrink on a service that honours neither (R2 answered one on
-          // a key a client re-PUT — issue #160).
+          // THE THREE WAYS A SERVICE SAYS "NOT THOSE BYTES ANY MORE" — see
+          // {@link ObjectChanged}. The body is read only for the failure that
+          // carries one: these two are decided by the status alone.
           if (response.status === 412) {
             throw new ObjectChanged(key, version, "a window answered 412, so the key holds other bytes now");
           }
           if (response.status === 416) {
             throw new ObjectChanged(key, version, "a window answered 416, so the object is shorter than it was");
           }
+          const body = await response.text().catch(() => "");
           throw new S3Failure(`GET ${key} (a window)`, response, body);
         }
         const window = await response.arrayBuffer();

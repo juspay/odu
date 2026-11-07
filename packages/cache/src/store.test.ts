@@ -351,7 +351,7 @@ describe("an upload's bytes", () => {
 /**
  * THE READBACK THAT KILLED A POD (issue #160). A direct upload is proved by
  * streaming the temp object back out of the store, and the window GETs that
- * stream it can answer SHORT — the object was rewritten under the read. The
+ * stream it can answer SHORT — R2 answered 190 bytes of a 1 MiB range. The
  * failure belongs to the upload, which is refused; it must never belong to the
  * process, which went down with an uncaught `S3Failure` printed twenty times.
  *

@@ -379,10 +379,10 @@ export type NarCheck =
       ok: false;
       absent: boolean;
       message: string;
-      /** THE BYTES MOVED WHILE THEY WERE BEING READ — a store answering an
+      /** THE READ DID NOT GET THE BYTES IT WAS PROMISED — a store answering an
        *  {@link ObjectChanged}, not a NAR that is wrong. The upload is refused
-       *  either way; the caller says which happened, because "the temp key was
-       *  rewritten under the readback" and "the client sent a bad NAR" are two
+       *  either way; the caller says which happened, because "the store did
+       *  not deliver the object" and "the client sent a bad NAR" are two
        *  different operator problems (issue #160). */
       changed?: true;
     };

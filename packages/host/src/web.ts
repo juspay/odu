@@ -449,8 +449,9 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // THE HOST'S OWN ONE. The rule above is about ROWS, not about the host's
     // process: these two counts are a property of this process and of no row,
     // so the host contributes them itself rather than inventing a row to hold
-    // them. Withdrawn on the way out like any other contributor, so a scrape
-    // can never land on a guard whose listeners are already gone.
+    // them. Withdrawn with the rest of `stopHandlers`; a scrape that lands
+    // after the listeners come off still reads — `counts()` closes over the
+    // tally, which outlives them.
     stopHandlers.push(
       metrics.add({ name: "host/unhandled", read: () => unhandledReading(unhandled) }),
     );

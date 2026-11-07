@@ -63,8 +63,11 @@ const GATEWAY_STORE = "gw";
  * signed against is passed through, so versitygw verifies what odu signed.
  * `rewriteNextTempRead` arms it for exactly one event — the first window of a
  * readback of a temp key — after which it rewrites that key SHORTER behind
- * odu's back, which is a client's retried PUT landing between the GET that
- * measured the object and the GETs that read it.
+ * odu's back. That is FAULT INJECTION, not a story about who did it: the
+ * completion ended every URL odu signed for that key, so no client can be
+ * writing it, and what the pod met was R2 answering a 1 MiB range with 190
+ * bytes. The reader sees the same thing either way, and this is how to make
+ * it see it on demand.
  */
 const RACE_STORE = "gw-racy";
 let storeProxy: { port: number; stop: () => void };
@@ -1060,12 +1063,11 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("refuses a direct upload whose object changed under the readback, and keeps serving", async () => {
-    // ISSUE #160, END TO END. The client still holds presigned PUTs for the
-    // temp key it uploaded to, so the object can be rewritten after `complete`
-    // and WHILE odu is reading it back — which is what the pod met and died
-    // of. The proxy makes that race an ordering; what is proved here is that
-    // the upload is refused with the store's own sentence and the daemon is
-    // still answering afterwards.
+    // ISSUE #160, END TO END. The pod's readback was answered 190 bytes of a
+    // 1 MiB range and the process exited 1. The proxy above reproduces what
+    // the READER saw — a later window that is not the object it was promised
+    // — on demand; what is proved here is that the upload is refused with the
+    // store's own sentence and the daemon is still answering afterwards.
     // CREATED THROUGH THE ASYNC FACE: making a bucket writes `nix-cache-info`
     // into its store, and this process is the proxy that store is reached
     // through — a `spawnSync` here would hold the loop the daemon is waiting on.
