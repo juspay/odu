@@ -93,7 +93,11 @@ const declaration = {
       // key and the composed faces' need are all derived.
       "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
-      "packages/execution/src/runner/workspace.ts": 22,
+      // The runner's object cache: the per-slug bare repo, and now the
+      // snapshot script's two reads of its path (the variable it assigns and
+      // the environment entry that carries it) — a git directory, not the
+      // cache row.
+      "packages/execution/src/runner/workspace.ts": 24,
       // `nix-cache-info` — Nix's protocol path, not odu's cache row. The probe
       // URL a tunnel's name is confirmed with is the protocol's own spelling.
       // The other three are the PURGE PORT: this row forgets the URLs a

@@ -261,6 +261,21 @@ function stderrTail(stream: Readable | null): () => string {
 export function nixDump(storePath: string, store: string | null): ReadableStream<Uint8Array> {
   const quote = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`;
   return fifoStream((fifo) => {
+    // THE SCRIPT IS CONSTANT; EVERY VALUE IS A PARAMETER. The pipeline and the
+    // redirection into the FIFO are the shell's work, so `bash -c` stays, but
+    // what it PARSES is fixed text: the path, the store and the FIFO are read
+    // as `"$…"` expansions from the environment. A store path containing a
+    // quote, a `$` or a newline is data here and cannot become syntax.
+    const script = [
+      "set -o pipefail;",
+      store === null
+        ? 'nix store dump-path "$ODU_NIX_DUMP_PATH"'
+        : 'nix store dump-path --store "$ODU_NIX_DUMP_STORE" "$ODU_NIX_DUMP_PATH"',
+      '| zstd -T0 -c > "$ODU_NIX_DUMP_FIFO"',
+    ].join(" ");
+    // The same pipeline as a human line, for a failure's sentence. It is the
+    // argv a reader would type, not the script above — the two name one
+    // command.
     const pipelineLine = [
       "nix store dump-path",
       ...storeArgsOf(store),
@@ -268,8 +283,13 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
       "| zstd -T0 -c >",
       quote(fifo),
     ].join(" ");
-    const child = spawn("bash", ["-c", `set -o pipefail; ${pipelineLine}`], {
-      env: Bun.env,
+    const child = spawn("bash", ["-c", script], {
+      env: {
+        ...Bun.env,
+        ODU_NIX_DUMP_PATH: storePath,
+        ODU_NIX_DUMP_FIFO: fifo,
+        ...(store === null ? {} : { ODU_NIX_DUMP_STORE: store }),
+      },
       detached: true,
       stdio: ["ignore", "ignore", "pipe"],
     });
