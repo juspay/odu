@@ -22,12 +22,11 @@ test: build
 lint:
     nix fmt -- --check .
 
-# `[linux]` SCHEDULES THIS RECIPE ON LINUX LANES ONLY, and odu drops the edges
-# it cannot honour on the others. Note that `just` itself hides an
-# OS-mismatched recipe, so the machine that reads this file (the coordinator)
-# must be one the attribute admits — odu's own `ci/mod.just` carries the same
-# note.
-[linux]
+# A SECOND OUT-LINK, a second closure in the cache. This example carries NO
+# `[linux]`/`[macos]` attribute on purpose: `just` hides an OS-mismatched
+# recipe from the machine that READS the file, so a `[linux]` recipe here
+# would make `just --dump` refuse this justfile on a Mac — the page's table
+# says which repositories can afford one.
 docs:
     nix build .#docs --out-link result-docs
 

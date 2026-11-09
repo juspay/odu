@@ -126,7 +126,9 @@ inputs:
       order to READ from that cache — and pushes to that URL by name, with
       your token. No flake, no odu cache there, or two, is this step's
       failure, naming them. Name `cache:` when the workflow builds for a cache
-      the flake does not list.
+      the flake does not list, or when the bucket is PRIVATE: the inference
+      probes anonymously, and a private bucket answers its nix-cache-info to
+      nobody.
     required: false
     default: ""
   token:

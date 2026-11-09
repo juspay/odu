@@ -14,7 +14,6 @@
  */
 
 import { expect, it } from "bun:test";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadJustPipeline } from "@odu/execution/just/ingest";
@@ -23,16 +22,7 @@ import { nixEvalFlakeConfig, readFlakeNixConfig } from "@odu/cache/push";
 const REPO = join(import.meta.dir, "..");
 const EXAMPLE = join(REPO, "examples", "consumer");
 
-// `just` ITSELF HIDES an OS-mismatched recipe — this is just's rule, not
-// odu's — so on a non-Linux host the `[linux] docs` recipe does not exist and
-// `default`'s dependency on it cannot resolve. odu's own `ci/mod.just` carries
-// the same note around `nixos-module` (lines 36–47), which is why that recipe
-// checks the OS at runtime instead of wearing `[linux]`. This suite runs on
-// macOS lanes too, so the DAG is asserted where the file is whole and the
-// REFUSAL is asserted where it is not.
-const onLinux = process.platform === "linux";
-
-(onLinux ? it : it.skip)(
+it(
   "resolves to the pipeline the page describes, metadata and all",
   () => {
     const spec = loadJustPipeline(EXAMPLE);
@@ -59,31 +49,20 @@ const onLinux = process.platform === "linux";
     expect(byId.get("docs")?.needs).toEqual([]);
     expect(byId.get("lint")?.needs).toEqual([]);
 
-    // `[linux]` SCHEDULES ONLY ON LINUX LANES — the attribute reaches the spec
-    // as `os`, which is what the lane slicer honours.
-    expect(byId.get("docs")?.os).toEqual(["linux"]);
-    expect(byId.get("build")?.os).toEqual([]);
+    // NO OS ATTRIBUTE ANYWHERE, and that is the assertion: `just` hides an
+    // OS-mismatched recipe from the machine that reads the file, so a
+    // `[linux]` recipe on a dependency of the root makes `just --dump` refuse
+    // this justfile on a Mac — odu's own `ci/mod.just` carries the same note
+    // around `nixos-module` (lines 36–47). An example a reader COPIES must
+    // load on every OS, so the page explains `[linux]` and this file wears
+    // none.
+    for (const task of spec.tasks) {
+      expect(task.os ?? [], `${task.id} carries an OS attribute`).toEqual([]);
+    }
 
     // `odu:shard=2` IS THE SHARD CEILING, and only a leaf may carry it.
     expect(byId.get("e2e")?.shards).toBe(2);
     expect(byId.get("test")?.shards).toBeUndefined();
-  },
-);
-
-(onLinux ? it.skip : it)(
-  "is refused by `just` itself off Linux, naming the OS-hidden recipe",
-  () => {
-    // Not a failure of the example and not odu's doing: `just` excludes the
-    // `[linux]` recipe on this host, so `default`'s dependency on it has
-    // nothing to resolve to and the whole dump is refused.
-    const dumped = spawnSync("just", ["--dump", "--dump-format", "json"], {
-      cwd: EXAMPLE,
-      encoding: "utf-8",
-    });
-    expect(dumped.status).not.toBe(0);
-    expect(dumped.stderr).toContain("recipe `default` has unknown dependency");
-    expect(dumped.stderr).toContain("docs");
-    expect(() => loadJustPipeline(EXAMPLE)).toThrow("just --dump failed");
   },
 );
 

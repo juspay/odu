@@ -27,6 +27,7 @@ import {
   oduCachesOf,
   readFlakeNixConfig,
 } from "./push";
+import { cacheCommand } from "./cli";
 
 /** A directory with a `flake.nix` in it. For the PARSE cases the file's
  *  content never matters — the evaluation is injected — and its existence is
@@ -319,4 +320,120 @@ describe("which substituters are odu caches", () => {
     // 8 KiB of 4 KiB chunks: a handful, not a gigabyte.
     expect(produced).toBeLessThan(8);
   });
+});
+
+/**
+ * `odu cache target` — THE SAME INFERENCE, PRINTED.
+ *
+ * The contract `.github/actions/push` depends on: the URL alone on stdout for
+ * `$(…)`, and `{cache, origin, bucket}` under `--output json`. A field renamed
+ * here is a push action that resolves nothing, so the shape is asserted rather
+ * than described.
+ *
+ * Against a real `nix` and a real HTTP server on loopback, because that is
+ * what the command does: evaluate this directory's `flake.nix`, then ask each
+ * substituter it names for its `nix-cache-info`.
+ */
+describe("the target a flake names, said out loud", () => {
+  /** `target` dials no daemon at all, so the one port the face is given must
+   *  never be reached. */
+  const ports = {
+    connect: () => {
+      throw new Error("odu cache target must not dial the service");
+    },
+  };
+
+  /** Run the verb in `dir`, with stdout captured. */
+  async function target(
+    dir: string,
+    args: string[],
+  ): Promise<{ code: number; out: string }> {
+    const was = process.cwd();
+    const written: string[] = [];
+    const stdout = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.chdir(dir);
+    try {
+      const code = await cacheCommand("target", args, ports);
+      return { code, out: written.join("") };
+    } finally {
+      process.stdout.write = stdout;
+      process.chdir(was);
+    }
+  }
+
+  /** A bucket that answers its `nix-cache-info` like odu's does. */
+  function bucketServer(buckets: readonly string[]): {
+    origin: string;
+    stop: () => void;
+  } {
+    // `origin` is read inside `fetch`, which only ever runs after `serve`
+    // returned — spelling it through a `let` is what keeps the handler from
+    // referring to the server it is part of.
+    let origin = "";
+    const server = Bun.serve({
+      port: 0,
+      fetch(request): Response {
+        const { pathname } = new URL(request.url);
+        const bucket = buckets.find(
+          (name) => pathname === `/cache/${name}/nix-cache-info`,
+        );
+        return bucket === undefined
+          ? new Response("no", { status: 404 })
+          : new Response(
+              `StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n` +
+                `Odu-Origin: ${origin}\nOdu-Bucket: ${bucket}\n`,
+            );
+      },
+    });
+    origin = `http://127.0.0.1:${server.port}`;
+    return { origin, stop: () => server.stop(true) };
+  }
+
+  it("answers {cache, origin, bucket} as json, and the URL alone otherwise", async () => {
+    const served = bucketServer(["main"]);
+    const cache = `${served.origin}/cache/main`;
+    const dir = withFlake(
+      `{ nixConfig = { extra-substituters = [ "${cache}" ]; }; }\n`,
+    );
+    try {
+      const asJson = await target(dir, ["--output", "json"]);
+      expect(asJson.code).toBe(0);
+      expect(JSON.parse(asJson.out)).toEqual({
+        cache,
+        origin: served.origin,
+        bucket: "main",
+      });
+
+      // The plain form is what `push.sh` reads with `$(…)`: one line, the URL,
+      // and nothing else on stdout — the narration goes to stderr.
+      const plain = await target(dir, []);
+      expect(plain.code).toBe(0);
+      expect(plain.out).toBe(`${cache}\n`);
+    } finally {
+      served.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("refuses two odu caches, naming both, and prints no target", async () => {
+    // The refusal the action turns into its own failure: a repository builds
+    // for one cache, so choosing would be this command inventing a policy.
+    const served = bucketServer(["main", "other"]);
+    const dir = withFlake(
+      `{ nixConfig = { extra-substituters = [ "${served.origin}/cache/main" ` +
+        `"${served.origin}/cache/other" ]; }; }\n`,
+    );
+    try {
+      const refused = await target(dir, ["--output", "json"]);
+      expect(refused.code).toBe(1);
+      expect(refused.out).toBe("");
+    } finally {
+      served.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

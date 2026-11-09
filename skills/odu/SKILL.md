@@ -491,8 +491,10 @@ credential odu minted for a run).
   the line the repository already keeps in order to READ from that bucket —
   and pushes to that URL BY NAME, so the token travels with it. A missing
   flake, no odu cache named there, or two, is this step's failure, naming
-  them. Name `cache:` only when the workflow builds for a cache the flake does
-  not list; given, it is the SUBSTITUTER URL the repository substitutes from,
+  them. Name `cache:` when the workflow builds for a cache the flake does
+  not list, or when the bucket is PRIVATE (the inference probes anonymously,
+  and a private bucket answers its `nix-cache-info` to nobody); given, it is
+  the SUBSTITUTER URL the repository substitutes from,
   and the push origin and the bucket are read off that cache's
   `nix-cache-info` (`Odu-Origin`, `Odu-Bucket`), never spelled in the
   workflow. It builds the `odu` it pushes with from the
