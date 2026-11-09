@@ -17,7 +17,7 @@
  * after fetching its origin prerequisites, then verify the materialized commit.
  */
 
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -100,17 +100,14 @@ export function narrateSnapshot(
   }
 }
 
-function run(
-  cmd: string,
-  args: string[],
-  opts: { cwd?: string },
+/** One child's streams as lines, and its exit code — the one place they are
+ *  drained, so every spawn in this file reports the same way. */
+function watch(
+  child: ChildProcess,
+  label: string,
   onOutput: (line: string) => void,
 ): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      cwd: opts.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
     const forward = (chunk: Buffer): void => {
       for (const line of chunk.toString("utf-8").split("\n")) {
         if (line.trim().length > 0) onOutput(line);
@@ -119,11 +116,24 @@ function run(
     child.stdout?.on("data", forward);
     child.stderr?.on("data", forward);
     child.on("error", (err) => {
-      onOutput(`spawn ${cmd} failed: ${err.message}`);
+      onOutput(`spawn ${label} failed: ${err.message}`);
       resolve(127);
     });
     child.on("close", (code) => resolve(code ?? 1));
   });
+}
+
+function run(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string },
+  onOutput: (line: string) => void,
+): Promise<number> {
+  const child = spawn(cmd, args, {
+    cwd: opts.cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return watch(child, cmd, onOutput);
 }
 
 /** Prepare a fresh writable checkout of `origin` at `sha`. Idempotent: every
@@ -178,16 +188,19 @@ export async function prepareWorkspace(
       ![snap.commit, ...snap.requires].every((id) => /^[0-9a-f]{40}$/.test(id))
     )
       return fail("invalid snapshot commit");
-    // One flock covers prerequisite fetch, verify and import. Arguments are
-    // positional shell parameters, never interpolated shell source.
+    // One flock covers prerequisite fetch, verify and import. THE SCRIPT IS
+    // CONSTANT; the cache, origin, commit, bundle and prerequisites are read
+    // as quoted `"$…"` parameters from the environment, so an origin or a
+    // path can never become shell syntax — and the argument array `sh -c`
+    // receives is the same four constants for every run.
     const script = `set -eu
-cache=$1; origin=$2; commit=$3; bundle=$4; shift 4
+cache=$ODU_SNAPSHOT_CACHE; origin=$ODU_SNAPSHOT_ORIGIN; commit=$ODU_SNAPSHOT_COMMIT; bundle=$ODU_SNAPSHOT_BUNDLE
 if ! git -C "$cache" rev-parse --git-dir >/dev/null 2>&1; then git init --bare "$cache"; fi
 has() { git -C "$cache" cat-file -e "$1^{commit}" 2>/dev/null; }
 if has "$commit"; then
   echo "[odu] snapshot $commit: already in object cache"
 else
-  for required in "$@"; do
+  for required in $ODU_SNAPSHOT_REQUIRES; do
     if ! has "$required"; then
       echo "[odu] fetching snapshot prerequisite $required from $origin (if stale, git fetch --prune origin)"
       git -C "$cache" fetch --no-tags "$origin" "$required"
@@ -202,23 +215,35 @@ else
   fi
 fi
 `;
-    const args = [
-      "-c",
-      script,
-      "odu-snapshot",
-      cache,
-      req.origin,
-      snap.commit,
-      snap.bundlePath ?? "",
-      ...snap.requires,
-    ];
-    code = await run(
+    // The prerequisites are validated 40-character hex SHAs above, so the
+    // space-separated list the loop splits is a list of SHAs and nothing else.
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ODU_SNAPSHOT_CACHE: cache,
+      ODU_SNAPSHOT_ORIGIN: req.origin,
+      ODU_SNAPSHOT_COMMIT: snap.commit,
+      ODU_SNAPSHOT_BUNDLE: snap.bundlePath ?? "",
+      ODU_SNAPSHOT_REQUIRES: snap.requires.join(" "),
+    };
+    // THE COMMAND IS A LITERAL AT EACH SPAWN, and only the argument array of
+    // a real shell is the script (constant). `flock` is not a shell, so its
+    // arguments — the lock path included — are data it hands to `sh`; the
+    // fallback spells `sh` directly.
+    code = await watch(
+      spawn("flock", [join(cache, "odu-fetch.lock"), "sh", "-c", script], {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
       "flock",
-      [join(cache, "odu-fetch.lock"), "sh", ...args],
-      {},
       onOutput,
     );
-    if (code === 127) code = await run("sh", args, {}, onOutput);
+    if (code === 127) {
+      code = await watch(
+        spawn("sh", ["-c", script], { env, stdio: ["ignore", "pipe", "pipe"] }),
+        "sh",
+        onOutput,
+      );
+    }
     if (snap.bundlePath !== null) {
       try {
         rmSync(snap.bundlePath, { force: true });

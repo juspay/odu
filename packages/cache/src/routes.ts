@@ -465,8 +465,18 @@ export interface ConsumerFacts extends Omit<CacheBucketIdentity, "readsFrom"> {
 
 /** The HTML a person reads; every block is text and is escaped here, once. */
 function consumerPage(facts: ConsumerFacts): string {
+  // THE QUOTES TOO. Most of this page is text between tags, where `&<>` is the
+  // whole of what can start markup — but the substituter is also written into
+  // an ATTRIBUTE (`href="…"`), and there a quote ends the value early and
+  // turns the rest of a URL into markup. One escaper serves both contexts, so
+  // it escapes what an attribute needs.
   const escape = (text: string): string =>
-    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   // ONE BLOCK PER THING A PERSON PASTES SOMEWHERE. netrc only when reading
   // needs a credential: a public bucket is read with no account at all.
   const blocks: ReadonlyArray<readonly [string, string]> = [
