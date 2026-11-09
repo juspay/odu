@@ -6,22 +6,45 @@ Live CI for `just` pipelines. Watch every run in a browser, attach from a termin
 
 ## Start
 
-Nix is the only supported way to run Odu. Tag your pipeline's root recipe:
+Nix is the only supported way to run Odu. Three files in your repository carry the whole declaration, and the first of them is the only one that is about Odu at all.
+
+**1. Name the cache your repo reads from** — in `flake.nix`, the two lines a bucket's page prints (`odu cache use <bucket>`):
+
+```nix
+nixConfig = {
+  extra-substituters = "https://cache.example.com/main";
+  extra-trusted-public-keys = "main-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=";
+};
+```
+
+**2. Tag the pipeline's root recipe** — its dependency graph is the pipeline, and every `result*` a recipe leaves behind is pushed to that cache when the recipe exits 0:
 
 ```just
 [metadata("ci")]
 default: build test lint
 ```
 
-From a clean checkout, explicitly select a host:
+**3. Run it** from a clean checkout:
 
 ```sh
-nix run github:juspay/odu -- ci run --host x86_64-linux=localhost --no-post
+nix run github:juspay/odu -- ci run                                       # the lanes, with GitHub statuses
+nix run github:juspay/odu -- ci run --host x86_64-linux=localhost --no-post   # this workstation, no GitHub writes
 ```
 
 Use your Nix system in place of `x86_64-linux`. `--no-post` disables GitHub writes; `--no-strict` snapshots your working tree (uncommitted edits and new files included, ignored files excluded) and ships it to remote lanes, with no GitHub writes. `--no-snapshot` runs in place on localhost only.
 
 Open **http://127.0.0.1:18440**. The command starts the shared service automatically and watches the run. Ctrl-C stops watching; CI continues.
+
+**4. Only for a system odu has no lane for**, one GitHub workflow step — and no `cache:`, because `flake.nix` already said it:
+
+```yaml
+- uses: juspay/odu/.github/actions/push@<rev>
+  with:
+    token: ${{ secrets.ODU_CACHE_TOKEN }}
+    pin: ${{ github.ref_name == github.event.repository.default_branch }}
+```
+
+[**Use odu from your repository**](https://odu.kolu.dev/docs/#use-odu-from-your-repository) is the rest of it — the rules on that `nixConfig`, platforms and shards, machines and leases, `ci protect`, agents, and what to ask your operator for. [`examples/consumer/`](examples/consumer/) is those files whole.
 
 To serve the web app explicitly:
 
@@ -38,7 +61,7 @@ Below, `odu` abbreviates `nix run github:juspay/odu --`. The whole CLI is:
 ```
 odu ci <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect>
 odu ci history <list|show|import|prune>
-odu cache <use|login|push>
+odu cache <use|login|push|target>
 odu auth login <origin> [--token T]
 odu web [--background] [--upgrade]
 odu surface <row> <verb…>
@@ -60,7 +83,7 @@ A live retry creates a new attempt; a finalized retry creates a linked replay. `
 
 **A node that pushes shows the push as its own step.** On the run's page it is a second segment under the node's bar — `pushed → <bucket> · N pushed · M present · X MiB · T`, what this node sent told apart from what the bucket already had (no `present` clause when there was none) — amber while the closure goes up, red if it does not land; the node's own duration stays the recipe's. The push's lines are a log of their own: **Recipe** and **Push** tabs on the page, `--stream push` on `odu ci logs`, `stream: "push"` on `log_read`.
 
-**The board and the API do everything the CLI does — and more.** The CLI keeps only what is shell-native: the `ci` commands, `cache push`/`login`/`use`, and `auth login`. Cache, people and tunnel administration is the board at **http://127.0.0.1:18440** or the API (`odu surface <row> <verb>`), never the CLI. Every `ci` command above has a control too — a run's page, **New run** (every option, and **Preview pipeline**), **Machines** (`ci hosts`/`ci lease`/`ci release`), **Maintenance** (`ci history import`/`prune`, `ci protect`), the Cache view, and an owner's **People**. The [docs](https://odu.kolu.dev/docs/#the-board-and-the-api-do-everything-the-cli-does) map each command to its control.
+**The board and the API do everything the CLI does — and more.** The CLI keeps only what is shell-native: the `ci` commands, `cache push`/`login`/`use`/`target`, and `auth login`. Cache, people and tunnel administration is the board at **http://127.0.0.1:18440** or the API (`odu surface <row> <verb>`), never the CLI. Every `ci` command above has a control too — a run's page, **New run** (every option, and **Preview pipeline**), **Machines** (`ci hosts`/`ci lease`/`ci release`), **Maintenance** (`ci history import`/`prune`, `ci protect`), the Cache view, and an owner's **People**. The [docs](https://odu.kolu.dev/docs/#the-board-and-the-api-do-everything-the-cli-does) map each command to its control.
 
 ## Serve a Nix binary cache
 
@@ -105,7 +128,8 @@ a checkout the operator handed it.
 | Print the substituter and key settings, a `nixConfig` block, and the netrc lines | `odu cache use <bucket>` | a bucket's page |
 | Scoped, expiring, revocable tokens; the plaintext is shown once | `odu surface cache token_mint\|token_list\|token_revoke` | a bucket's **Tokens** |
 | Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — |
-| Upload only the paths the bucket is missing; long NARs are chunked. `--cache <substituter>` reads the push origin and the bucket off the cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`, probed ANONYMOUSLY, and pushed to with only a credential SAVED for that origin — a repository named that URL, so `--token-file` and `$ODU_CACHE_TOKEN` are out of scope for it; a private bucket needs `--cache`. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…`, `odu cache push --cache <substituter> <path>…`, `odu cache push <path>…` | — |
+| Upload only the paths the bucket is missing; long NARs are chunked. `--cache <substituter>` reads the push origin and the bucket off the cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`, probed ANONYMOUSLY, and pushed to with only a credential SAVED for that origin — a repository named that URL, so `--token-file` and `$ODU_CACHE_TOKEN` are out of scope for it, and a caller that wants its token sent names the target instead (`odu cache target`, below); a private bucket needs `--cache`. `--pin NAME` re-points that pin at the closure it landed | `odu cache push <bucket> <path>…`, `odu cache push --cache <substituter> <path>…`, `odu cache push <path>…` | — |
+| Print the one odu substituter `./flake.nix` names — the same reading `push` makes with no `--cache`, said instead of acted on (`-o json` gives `{cache, origin, bucket}`). The push action resolves an omitted `cache:` with it, then pushes to that URL BY NAME so its token goes along | `odu cache target` | — |
 | Give a bucket a DNS name of its own through a Cloudflare tunnel | `odu surface cache bucket_domain` | bucket → **Domain** |
 | How long a path outlives the last time anything wanted it, in days | `odu surface cache bucket_retention` | a bucket's **Retention** |
 | Move a bucket's objects to another declared store, serving from the old one until the copy is done | `odu surface cache bucket_migrate` | a bucket's **Move to another store** |

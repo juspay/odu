@@ -484,11 +484,18 @@ credential odu minted for a run).
 - **`catalog_prune` never expires a run with a live owner** — it reports it in
   `kept` with a reason instead.
 
-- **A workflow pushes in ONE step.** `juspay/odu/.github/actions/push@<sha>`
-  takes `cache`, `token` and `paths` — `cache` is the SUBSTITUTER URL the
-  repository already substitutes from, and the push origin and the bucket are
-  read off that cache's `nix-cache-info` (`Odu-Origin`, `Odu-Bucket`), never
-  spelled in the workflow. It builds the `odu` it pushes with from the
+- **A workflow pushes in ONE step, and usually names no cache.**
+  `juspay/odu/.github/actions/push@<rev>` takes `cache`, `token`, `paths` and
+  `pin`. **Omit `cache:`** (#163): the step runs `odu cache target` in the
+  checkout, takes the one odu substituter `./flake.nix`'s `nixConfig` names —
+  the line the repository already keeps in order to READ from that bucket —
+  and pushes to that URL BY NAME, so the token travels with it. A missing
+  flake, no odu cache named there, or two, is this step's failure, naming
+  them. Name `cache:` only when the workflow builds for a cache the flake does
+  not list; given, it is the SUBSTITUTER URL the repository substitutes from,
+  and the push origin and the bucket are read off that cache's
+  `nix-cache-info` (`Odu-Origin`, `Odu-Bucket`), never spelled in the
+  workflow. It builds the `odu` it pushes with from the
   revision it is pinned to, and then proves the push where Nix asks: each
   served path's narinfo at the bucket's SUBSTITUTER URL (its domain
   when it has one), and the NAR that narinfo names at the `FileSize:` it
@@ -502,7 +509,7 @@ credential odu minted for a run).
   BOOLEAN; the workflow holds the policy and the action holds none:
 
   ```yaml
-      # one more line in the step's `with:`, beside cache/token
+      # one more line in the step's `with:`, beside token
       pin: ${{ github.ref_name == github.event.repository.default_branch }}
   ```
 
@@ -549,8 +556,8 @@ told because four things change for an agent.
   so a tokenless shell cannot mint it (and on loopback the principal is
   `local`, which is not signed in either). Store it with `odu auth login
   <origin>`, pasting the token on stdin — `--token` exists but puts it in
-  your shell history, and the CLI says so — or set `ODU_TOKEN`; then pass
-  `--origin` (or export `ODU_WEB_ORIGIN`). Every `odu` command and the MCP
+  your shell history, and the CLI says so — or set `ODU_TOKEN`; then NAME the
+  server with `--origin <url>`. Every `odu` command and the MCP
   bridge send it as `Authorization: Bearer` on the connection they open.
   Without one, the daemon answers only `auth_user_whoami`,
   `auth_user_grant` and its own identity — every other verb is refused.
@@ -567,8 +574,9 @@ told because four things change for an agent.
 
   ```sh
   # mint on the server's profile page (a browser), then:
-  export ODU_TOKEN=odu_… ODU_WEB_ORIGIN=https://odu.example.com
-  odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
+  export ODU_TOKEN=odu_…
+  odu ci run --origin https://odu.example.com \
+    --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
   ```
 
 - **A run records who started it.** `run_read` answers `actor` — the token's
@@ -608,6 +616,45 @@ are `run_start`'s inputs plus six of its own — `--checkout` with `--sha` (a
 checkout on a service you NAME instead of the one you stand in; see "Signing
 in"), `--no-wait` (start and return without observing), `--request-id`,
 `--origin` and `-o json`. Ctrl-C stops observing; the run keeps going.
+
+## Adopting odu in a repository
+
+**Three files are the whole contract**, and the third is rare. Nothing else in
+the repository mentions odu. `examples/consumer/` here shows them, and a
+`plugin.json`, whole.
+
+- **`flake.nix`: one `extra-substituters` line names the bucket** (with its
+  `extra-trusted-public-keys`; `odu cache use <bucket>` and the bucket's page
+  print both). That line is the CACHE DECLARATION — what every reader
+  substitutes from, and where the run pushes what it builds. Name ONE odu
+  cache; two is refused at start. A URL this daemon does not serve is left
+  alone: the run still runs, and says `not pushing`.
+- **`justfile`: `[metadata("ci")]` on the root recipe.** That recipe's
+  dependency graph IS the pipeline; odu runs each leaf with `just --no-deps`,
+  in dependency order, fanning platforms out to the lanes. `[linux]`/`[macos]`
+  schedule a recipe on that platform only; `[metadata("odu:shard=4")]` on a
+  leaf runs up to four copies (`ODU_SHARD_INDEX`, `ODU_SHARD_TOTAL`, one
+  GitHub context for all of them). **A recipe's `result*` out-links are what
+  gets pushed** — when it exits 0, closure and all; a recipe that leaves none
+  pushes nothing. No `odu cache push` step belongs in a justfile.
+- **One GitHub workflow — ONLY when odu has no lane for a system you ship.**
+  Its push is the one step above, with no `cache:`, a `token:` and a `pin:`.
+
+A repo-root `plugin.json` listing `github:juspay/odu/<rev>` under
+`asia.nixos.agent-distro` is not part of that contract, and is one line worth
+writing: every agent launched in the checkout then gets odu's MCP verbs and
+this skill.
+
+**Running it is `odu ci run`** (never `just ci`), from the checkout; `--origin
+<url>` names another service, and `--checkout <abs path> --sha <sha>` runs
+that server's own clone.
+
+**A consumer repository pins the revision it writes down**:
+`github:juspay/odu/<rev>`, a 40-character commit — the same one its push
+action and its `plugin.json` name; bump them together. A floating
+`github:juspay/odu` follows master, and master renames things on a major.
+(The BOOTSTRAP above is unpinned on purpose: that is the agent's own
+invocation, not a fact a repository records.)
 
 ## Refusals, and what to do about them
 
@@ -798,10 +845,14 @@ declares.
   the closure: the closure still holds the upstream-signed paths a bucket
   refuses by design.
 - The repository ships a GitHub Actions push step
-  (`juspay/odu/.github/actions/push@<sha>`), which verifies its own push. Its
-  `cache:` input is the substituter URL and is now OPTIONAL: omitted, the push
-  reads it out of `./flake.nix`'s `nixConfig`, the one declaration a repository
-  that reads from the cache already keeps.
+  (`juspay/odu/.github/actions/push@<rev>`), which verifies its own push. Its
+  `cache:` input is the substituter URL and is OPTIONAL FOR REAL (#163):
+  omitted, the step asks `odu cache target` for the one odu substituter
+  `./flake.nix`'s `nixConfig` names — the one declaration a repository that
+  reads from the cache already keeps — and pushes to it BY NAME, so the
+  token goes with it. Name `cache:` only when the workflow builds for a cache
+  the flake does not list. (Before this, an omitted `cache:` inferred the URL
+  and then pushed anonymously: a 401 on every run.)
 - `odu cache push --cache <substituter>` is the same discovery in a shell: it
   GETs `<substituter>/nix-cache-info`, requires `Odu-Origin` and `Odu-Bucket`,
   and pushes to them. It is exclusive with `<bucket> --origin <url>`, which
@@ -815,8 +866,10 @@ declares.
   `$ODU_CACHE_TOKEN` — which are credentials for wherever a push ends up — are
   out of scope, and a flake pointing at somebody else's host collects nothing.
   With none saved the push goes out anonymously and the bucket's 401 says so.
-  A PRIVATE bucket therefore cannot be inferred and must be named with
-  `--cache` or `<bucket> --origin`.
+  A caller that wants its own token sent NAMES the target: `odu cache target`
+  prints that same inferred URL, and `push --cache <that>` is then an address
+  the caller chose. A PRIVATE bucket therefore cannot be inferred and must be
+  named with `--cache` or `<bucket> --origin`.
 - `odu cache push --pin NAME` re-points a pin at the closure the push landed
   (nothing is pinned if a path was refused). The push action takes `pin: true`
   instead of a name and derives `<owner>/<repo>@<ref>/<system>`; when to pin is
@@ -825,7 +878,9 @@ declares.
 - **The admin CLI is retired.** The CLI is `odu ci <verb>` (every run command
   now carries the `ci` word: `odu ci run`, `odu ci wait`, `odu ci logs`,
   `odu ci history list`, `odu ci status`, `odu ci protect`, …), plus
-  `odu cache use|login|push`, `odu auth login`, `odu web`, `odu surface`,
+  `odu cache use|login|push|target` (`target` prints the one odu substituter
+  `./flake.nix` names, `-o json` for `{cache, origin, bucket}`),
+  `odu auth login`, `odu web`, `odu surface`,
   `odu mcp`. Cache, people and tunnel administration is the board or
   `odu surface <row> <verb>`; the old `odu cache create|list|domain|token|pin|gc|stats`,
   `odu auth whoami|grant|people|token` and `odu cloudflare status` are unknown

@@ -1,0 +1,44 @@
+# THE PIPELINE IS ONE TAGGED RECIPE'S DEPENDENCY GRAPH.
+#
+# `odu ci run` finds the recipe tagged `[metadata("ci")]`, walks what it
+# depends on, and runs every one of them with `just --no-deps <name>` in
+# dependency order, fanning platforms out to the lanes. Nothing else in this
+# file is odu's: it is a justfile, and `just build` still does what it says.
+
+[metadata("ci")]
+default: build test lint docs e2e
+
+# THE OUT-LINK IS THE PUSH. When a recipe exits 0, every `result*` in the
+# directory it ran in goes to the cache `flake.nix` names, closure and all.
+# A recipe that leaves none pushes nothing; a push that fails makes the node
+# red, so green means the cache is warm.
+build:
+    nix build .#default --out-link result-app
+
+test: build
+    nix flake check
+
+# A RECIPE THAT BUILDS NOTHING PUSHES NOTHING, and needs no opt-out to say so.
+lint:
+    nix fmt -- --check .
+
+# `[linux]` SCHEDULES THIS RECIPE ON LINUX LANES ONLY, and odu drops the edges
+# it cannot honour on the others. Note that `just` itself hides an
+# OS-mismatched recipe, so the machine that reads this file (the coordinator)
+# must be one the attribute admits — odu's own `ci/mod.just` carries the same
+# note.
+[linux]
+docs:
+    nix build .#docs --out-link result-docs
+
+# `odu:shard=N` RUNS UP TO N COPIES of a leaf with `ODU_SHARD_INDEX` (0-based)
+# and `ODU_SHARD_TOTAL` (the actual count, which may be below the ceiling when
+# capacity is short). The recipe divides its own work; all the shards report
+# as one GitHub context. Only a leaf may shard.
+[metadata("odu:shard=2")]
+e2e: build
+    just test-slice "$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL"
+
+[private]
+test-slice slice:
+    echo "running slice {{ slice }}"

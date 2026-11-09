@@ -1,0 +1,41 @@
+# ONLY FOR A SYSTEM ODU HAS NO LANE FOR.
+#
+# Everything odu's own lanes build is pushed by the run itself — no step, no
+# token, nothing in this file. What is left is the system you ship and odu
+# cannot reach: here, macOS. The push is ONE step.
+#
+# Pin `@<rev>` to a 40-character odu commit — the same one `nix run
+# github:juspay/odu/<rev>` and `plugin.json` name. Bump them together.
+name: cache
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  push:
+    runs-on: macos-14
+    steps:
+      # Nix must already be on PATH; the push action never installs one. The
+      # two settings are the bucket's own, from its page or `odu cache use`.
+      - uses: nixbuild/nix-quick-install-action@v30
+        with:
+          nix_conf: |
+            extra-substituters = https://cache.example.com/main
+            extra-trusted-public-keys = main-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=
+      - uses: actions/checkout@v4
+
+      # NO `cache:`. The step reads the same `extra-substituters` line out of
+      # ./flake.nix and pushes there, with this token. Name `cache:` only to
+      # push somewhere the flake does not list.
+      #
+      # NO `paths:` either: that pushes every packages/devShells/checks output
+      # for this runner's system, which is what a developer's machine
+      # substitutes.
+      - uses: juspay/odu/.github/actions/push@<rev>
+        with:
+          token: ${{ secrets.ODU_CACHE_TOKEN }}
+          # The action holds no policy about WHEN to pin; this line is it. The
+          # pin's name is derived: <owner>/<repo>@<ref>/<system>.
+          pin: ${{ github.ref_name == github.event.repository.default_branch }}
