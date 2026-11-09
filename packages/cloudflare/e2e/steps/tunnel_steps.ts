@@ -83,9 +83,21 @@ When("I clear the bucket's domain", async function (this: OduWorld) {
   // OPENING THE BUCKET AGAIN IS A FRESH PAGE, so the in-memory root token the
   // earlier step typed is gone on a daemon with no door; a person types it
   // again, and so does this step.
-  const token = this.page.getByLabel("root token", { exact: true });
-  if ((await token.count()) > 0) await token.fill(ROOT_TOKEN);
-  await this.page.getByRole("button", { name: "Clear domain", exact: true }).click();
+  //
+  // ONCE IS NOT ENOUGH, and that is a race this step used to lose: a box
+  // filled while the page is still booting comes back empty when the app
+  // draws over it, the admin column never arms, and the control this step is
+  // about never appears — 30 s of waiting for a button nobody was ever going
+  // to draw. So type until it is there.
+  const clear = this.page.getByRole("button", { name: "Clear domain", exact: true });
+  await until("the Clear domain control", async () => {
+    const token = this.page.getByLabel("root token", { exact: true });
+    if ((await token.count()) > 0 && (await token.inputValue()) === "") {
+      await token.fill(ROOT_TOKEN);
+    }
+    return (await clear.count()) > 0 ? true : null;
+  });
+  await clear.click();
   // The USE BLOCK goes back to the path form: the row accepted the clear.
   await until("the substituter block to drop the name", async () =>
     (await this.page.locator("pre.consume-block").innerText()).includes(`/cache/${name}`)

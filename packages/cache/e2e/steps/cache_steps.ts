@@ -20,7 +20,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { AfterAll, Given, Then, When } from "@cucumber/cucumber";
+import { After, AfterAll, Given, Then, When } from "@cucumber/cucumber";
 import type { Locator } from "playwright";
 import { type Gateway, startGateway } from "@odu/objects/testing";
 import {
@@ -596,9 +596,19 @@ When("I name the bucket {string}", async function (this: OduWorld, domain: strin
   await this.page.getByRole("button", { name: "Set domain", exact: true }).click();
   // The USE BLOCK is the proof the row accepted it: it is redrawn from the
   // published bucket row, not from the field that was typed.
-  await until(`the substituter block to name ${domain}`, async () =>
-    (await this.page.locator("pre.consume-block").innerText()).includes(domain) ? true : null,
-  );
+  //
+  // A REFUSAL IS AN ANSWER, and this step reads it. The row refuses a name
+  // another bucket already holds, and a step that watched only the block
+  // turned that sentence into a two-minute timeout naming nothing — which is
+  // the whole of what issue #170 looked like from a lane log.
+  const refusal = this.page
+    .getByRole("region", { name: "domain" })
+    .locator("p.receipt-bad .receipt-text");
+  await until(`the substituter block to name ${domain}`, async () => {
+    if ((await this.page.locator("pre.consume-block").innerText()).includes(domain)) return true;
+    if ((await refusal.count()) === 0) return null;
+    throw new Error(`the row refused "${domain}": ${(await refusal.first().innerText()).trim()}`);
+  });
 });
 
 Then("the domain answer says {string}", async function (this: OduWorld, text: string) {
@@ -1298,6 +1308,46 @@ AfterAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
   if (gateway !== undefined) {
     await gateway.stop();
     gateway = undefined;
+  }
+});
+
+/**
+ * A `@tunnel` SCENARIO GIVES ITS BUCKET'S NAME BACK.
+ *
+ * A domain is daemon-global — one name, one bucket — and the tunnel world is
+ * one daemon per cucumber worker, shared by every `@tunnel` scenario that
+ * worker runs. A scenario that left `cache.tunnel.test` bound made the next
+ * one's "Set domain" a refusal, and which scenarios share a worker is
+ * cucumber's own scheduling, so that read as a lane-only flake (issue #170).
+ *
+ * It is also what makes "the tunnel panel shows <name> as live" the
+ * scenario's OWN fact: a route of that name the previous scenario left live
+ * satisfies the assertion without this one having wired anything.
+ *
+ * The world is READ rather than the steps trusted: a scenario names two
+ * buckets, and one that failed half way named whatever it reached. A verb
+ * that refuses is written to stderr rather than raised — a teardown's own
+ * failure would replace the scenario's verdict — and a leak that survives it
+ * is caught by `I name the bucket`, which reads the refusal.
+ */
+After({ tags: "@tunnel", timeout: RUN_SETUP_TIMEOUT }, function (this: OduWorld) {
+  const listed = cacheVerb(this, "bucket_list", { rootToken: ROOT_TOKEN });
+  if (listed.status !== 0) {
+    process.stderr.write(`web-acceptance: could not list the tunnel world's buckets: ${listed.stderr}\n`);
+    return;
+  }
+  const answer = JSON.parse(listed.stdout) as {
+    buckets?: { name: string; domain: string | null }[];
+  };
+  for (const bucket of answer.buckets ?? []) {
+    if (bucket.domain === null) continue;
+    // No `domain` field is how the verb spells "take the name away".
+    const cleared = cacheVerb(this, "bucket_domain", { rootToken: ROOT_TOKEN, bucket: bucket.name });
+    if (cleared.status !== 0) {
+      process.stderr.write(
+        `web-acceptance: could not clear ${bucket.domain} from ${bucket.name}: ${cleared.stderr}\n`,
+      );
+    }
   }
 });
 
