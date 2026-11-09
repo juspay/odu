@@ -632,7 +632,7 @@ the repository mentions odu. `examples/consumer/` here shows them, and a
   cache; two is refused at start. A URL this daemon does not serve is left
   alone: the run still runs, and says `not pushing`.
 - **`justfile`: `[metadata("ci")]` on the root recipe.** That recipe's
-  dependency graph IS the pipeline; odu runs each leaf with `just --no-deps`,
+  dependency graph IS the pipeline; each leaf is run with `just --no-deps`,
   in dependency order, fanning platforms out to the lanes. `[linux]`/`[macos]`
   schedule a recipe on that platform only; `[metadata("odu:shard=4")]` on a
   leaf runs up to four copies (`ODU_SHARD_INDEX`, `ODU_SHARD_TOTAL`, one
