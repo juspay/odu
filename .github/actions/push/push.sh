@@ -10,11 +10,33 @@
 #       token: ${{ secrets.ODU_CACHE_TOKEN }}
 #       pin: ${{ github.ref_name == github.event.repository.default_branch }}
 #
-# `cache:` is OPTIONAL (PLAN 4.1). Omit it and `odu cache push` reads the
-# substituter out of `./flake.nix`'s `nixConfig` — the same
-# `extra-substituters` line the repository already keeps in order to READ from
-# that cache. The inference has one implementation, odu's; this script only
-# decides whether to pass `--cache`.
+# `cache:` is OPTIONAL (PLAN 4.1), and this is where that is made true (#163).
+# Omitted, this script asks THIS checkout what it reads from — `odu cache
+# target`, the one odu substituter in `./flake.nix`'s `nixConfig` — and then
+# pushes to that URL BY NAME, `--cache <url>`, with the token. The inference
+# has one implementation, odu's; this script only decides whether to ask for
+# it.
+#
+# ## Why the token may go to a URL the repository chose, HERE
+#
+# `odu cache push` will not do this on its own, and must not: given no
+# `--cache` it withholds `--token-file` and `$ODU_CACHE_TOKEN` and sends only
+# a credential SAVED for that origin (#159, SEC-5). At a terminal, the person
+# holding a write token and the person who wrote `extra-substituters` are not
+# the same person, and a flake that names somebody else's host would collect
+# the token of everyone who ran a push inside it.
+#
+# IN GITHUB ACTIONS THEY ARE ONE TRUST BOUNDARY. The secret is present only on
+# a workflow this repository already admits, and anyone who can change
+# `flake.nix` with that secret in reach can change `.github/workflows` in the
+# same commit — where they could simply write a `cache:` of their own. The
+# flake is therefore not a less trusted source than the workflow that reads
+# it; it is the same source. Withholding the token bought nothing and made the
+# documented spelling 401 on every run (#163).
+#
+# The CLI's rule is untouched. `odu cache target` only READS, and the push
+# below is the operator-named spelling — this script names the target, having
+# decided to trust the one place a workflow's own author controls.
 #
 # ## The pusher is this checkout's odu
 #
@@ -124,28 +146,23 @@ trim() {
 # (`repo_root` below) and the two helpers beside it are addressed from here.
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# THE ONE FACT THIS ACTION IS GIVEN, and now an OPTIONAL one (PLAN 4.1): the
+# THE ONE FACT THIS ACTION IS GIVEN, and an OPTIONAL one (PLAN 4.1): the
 # substituter URL. Where a push is TAKEN and which bucket it lands in are the
 # cache's to state — `odu cache push --cache` reads them off its
 # `nix-cache-info` — because reads come from the store now and a read address
 # is no longer a push address.
 #
-# EMPTY MEANS "ASK THE FLAKE". `odu cache push` with no `--cache` reads
-# `./flake.nix`'s `nixConfig` and pushes to the one odu cache named there —
-# the same `extra-substituters` line the repository already keeps in order to
-# READ from that cache. So the inference lives in ONE implementation, odu's,
-# and this script never learns to evaluate a flake.
+# EMPTY MEANS "ASK THE FLAKE", below, once the pusher exists: `odu cache
+# target` reads `./flake.nix`'s `nixConfig` and prints the one odu cache named
+# there — the same `extra-substituters` line the repository already keeps in
+# order to READ from that cache. So the inference lives in ONE implementation,
+# odu's, and this script never learns to evaluate a flake.
 cache=$(trim "${ODU_PUSH_CACHE:-}")
 cache=${cache%/}
 token=$(trim "${ODU_PUSH_TOKEN:-}")
 pin=$(trim "${ODU_PUSH_PIN:-}")
 requested=$(printf '%s' "${ODU_PUSH_PATHS:-}" | tr -s '[:space:]' '\n' | sed '/^$/d')
 event=${GITHUB_EVENT_NAME:-local}
-
-cache_args=()
-if [ -n "$cache" ]; then
-  cache_args=(--cache "$cache")
-fi
 
 command -v nix >/dev/null 2>&1 ||
   fail "odu push: \`nix\` is not on PATH, and this action never installs it. Install Nix in an earlier step — with the bucket's \"GitHub Actions\" block as its \`nix_conf\` — and run this action after it."
@@ -306,6 +323,28 @@ pusher_out=$(nix build -L --no-link --print-out-paths --accept-flake-config \
 odu="$pusher_out/bin/odu"
 [ -x "$odu" ] || fail "odu push: the pusher build at $repo_root produced no executable at $odu."
 
+# ── the target, when the workflow named none ────────────────────────────────
+
+# ASKED OF THE PUSHER ITSELF, now that it exists. `odu cache target` prints
+# the one odu substituter `./flake.nix`'s `nixConfig` names, and refuses —
+# naming the URLs — when there is no flake, no odu cache in it, or two. Those
+# refusals are this step's failure, said in odu's own sentences, instead of a
+# push that goes out aimed at nothing.
+#
+# AND THEN THE URL IS PASSED BACK AS `--cache`, which is what makes the token
+# travel: see the trust-boundary argument at the top of this file. A push with
+# NO `--cache` withholds `$ODU_CACHE_TOKEN` by design and would 401 here
+# (#163).
+if [ -z "$cache" ]; then
+  say "odu push: no \`cache:\` input — asking ./flake.nix through \`odu cache target\`"
+  cache=$("$odu" cache target) ||
+    fail "odu push: \`cache:\` was omitted and \`odu cache target\` could not name one odu cache in ./flake.nix — its sentence is above. Name the bucket's substituter URL in \`cache:\`, or fix the \`extra-substituters\` line."
+  cache=${cache%/}
+  [ -n "$cache" ] ||
+    fail "odu push: \`odu cache target\` succeeded and printed nothing, which it cannot do — the pusher at $odu is not the odu this action expects."
+  say "odu push: ./flake.nix names $cache"
+fi
+
 # ── the push ────────────────────────────────────────────────────────────────
 
 result="$work/push.json"
@@ -316,7 +355,7 @@ set +e
 # `${pin_args[@]+…}` and not `"${pin_args[@]}"`: a macOS runner's bash is 3.2,
 # where an empty array expanded under `set -u` is an unbound variable. The pin
 # NAME is argv's business — it is not a secret; the token is still never there.
-ODU_CACHE_TOKEN="$token" "$odu" cache push ${cache_args[@]+"${cache_args[@]}"} --output json \
+ODU_CACHE_TOKEN="$token" "$odu" cache push --cache "$cache" --output json \
   ${pin_args[@]+"${pin_args[@]}"} \
   "${targets[@]}" > "$result"
 status=$?
@@ -340,7 +379,7 @@ substituter=$(jq -r '.substituter' "$result")
 pinned_name=$(jq -r '.pinned.name // empty' "$result")
 pinned_paths=$(jq -r '.pinned.rootPaths // empty' "$result")
 
-summary "### Cache push — \`${cache:-$substituter}\`
+summary "### Cache push — \`$cache\`
 
 | pushed | already present | skipped (upstream) | failed |
 | ---: | ---: | ---: | ---: |

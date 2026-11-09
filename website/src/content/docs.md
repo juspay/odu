@@ -16,18 +16,79 @@ Open **http://127.0.0.1:18440**. The command starts the shared service automatic
 
 Examples below use `odu` as shorthand for `nix run github:juspay/odu --`.
 
-## Configure your repo
+## Use odu from your repository
 
-Tag one root recipe. Its dependency graph is the pipeline:
+Your repository declares **one URL**: the Nix cache it reads from. From that:
+
+- `odu ci run` runs your `just` pipeline on the lane machines, posts one GitHub status per recipe and platform, and **pushes what every recipe built to that cache**. No push step, no token in your repository.
+- Every developer and every CI machine substitutes from that cache. The paths your default branch built stay there; everything else ages out.
+- The board shows each run, each node's log, and — on the bucket — which run and commit built a path.
+- Agents reach the same run verbs over MCP.
+
+Three files carry the whole declaration: `flake.nix`, `justfile`, and, if you have a system odu has no lane for, one GitHub workflow. Those three — and the `plugin.json` of section 6 — are shown whole in [`examples/consumer/`](https://github.com/juspay/odu/tree/master/examples/consumer); the snippets below are excerpts of them.
+
+### 1. Declare the cache once
+
+```nix
+# flake.nix
+nixConfig = {
+  extra-substituters = "https://cache.example.com/main";
+  extra-trusted-public-keys = "main-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=";
+};
+```
+
+Both lines come from the bucket's page on the board (**Use this bucket**), or from `odu cache use main`. This is the same `nixConfig` a reader of your flake already needs, so it is not an odu setting — it is the fact odu reads.
+
+Rules odu applies to it:
+
+- The substituter must be a bucket **your** odu serves. A URL it does not serve is left alone: the run still runs, and its page says `not pushing`.
+- Name **one** odu cache. Two is refused at start, because a repository builds for one cache.
+- The key you list must be the bucket's current key, else the run warns.
+- A private bucket works the same way. Reading it needs a token in each reader's netrc (`odu cache use` prints the lines); pushing from a run needs nothing from you.
+
+### 2. Tag the pipeline
 
 ```just
 [metadata("ci")]
-default: build test lint
+default: build test lint docs e2e
 ```
 
-Commit the justfile before a strict run. Each recipe should declare the dependencies it needs; Odu schedules the graph.
+The tagged recipe's dependency graph is the pipeline. odu runs each leaf with `just --no-deps`, in dependency order, fanning platforms out to the lanes. Everything else about `just` keeps working:
 
-### Choose hosts
+| You write | odu does |
+| --- | --- |
+| `[linux]` / `[macos]` on a recipe | Schedules it on that platform only, and drops the edges it cannot honour. `odu ci protect` requires the same filtered set. Mind what `just` does first: it HIDES an OS-mismatched recipe from the machine that reads the file, so a `[linux]` recipe the root depends on makes `just --dump` refuse your justfile on a Mac. Wear one only where the coordinator runs on a platform the attribute admits; otherwise check the OS inside the recipe. (`examples/consumer/` wears none for this reason.) |
+| `[metadata("odu:shard=4")]` on a leaf | Runs up to four copies with `ODU_SHARD_INDEX` (0-based) and `ODU_SHARD_TOTAL` (actual), one GitHub context for all of them. |
+| `[metadata("odu:pin=<ref>")]` on a recipe | Pins that recipe's closure in the cache under `<owner>/<repo>@<ref>/<system>` — the attribute names the ref whose runs pin, e.g. `odu:pin=main` — so it outlives retention. Put it on the recipes whose outputs your default branch must always serve. (4.2, in progress.) |
+| `nix build … --out-link result-foo` inside a recipe | **The out-link is the push.** When a recipe exits 0, every `result*` in the directory it ran in is pushed, closure and all. A recipe that leaves none pushes nothing. |
+
+A recipe that builds but wants nothing pushed simply leaves no `result*` behind. A push that fails makes the node red: green means warmed.
+
+Only a **leaf** may shard, and the recipe divides its own work:
+
+```just
+[metadata("odu:shard=2")]
+e2e: build
+    just test-slice "$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL"
+```
+
+`ODU_SHARD_TOTAL` may be below the ceiling you asked for when capacity is short, which is why the recipe reads it rather than the number in the attribute.
+
+### 3. Run it
+
+From a clean checkout:
+
+```sh
+nix run github:juspay/odu/<rev> -- ci run                   # all platforms the lanes offer
+nix run github:juspay/odu/<rev> -- ci run --platform x86_64-linux
+nix run github:juspay/odu/<rev> -- ci run test@aarch64-darwin
+```
+
+`ci run` starts a run, posts statuses as nodes settle, pushes as recipes finish, and watches. Ctrl-C stops watching; the run continues. The board at the service's origin shows it live.
+
+**Pin the revision.** `github:juspay/odu/<rev>` — a 40-character commit, the same one your push action (below) and your `plugin.json` name. Bump them together. A floating `github:juspay/odu` follows master, and master renames things on a major.
+
+#### The machines it runs on
 
 Pass `--host SYSTEM=localhost` for an explicit local run, or create `~/.config/odu/hosts.json`:
 
@@ -45,32 +106,87 @@ Hosts are read from the first existing file: `$ODU_HOSTS`, `~/.config/odu/hosts.
 On the board: **Machines** shows the service's last probe of the same inventory and its age — opening the page dials nothing — and **Probe machines** takes a fresh one, narrowed by platform if you name one.
 
 ```sh
-odu ci hosts
-odu ci run --platform x86_64-linux
-odu ci run test@aarch64-darwin
-```
-
-The CLI forwards your shell's `$ODU_HOSTS`. A browser or MCP caller can supply `hostsFile`; omitted uses the service's configuration, while `""` bypasses its override. Retries preserve the parent's recorded inventory choice and host pins.
-
-### Hold a machine across runs
-
-```sh
-odu ci lease x86_64-linux
-odu ci run
+odu ci hosts                    # what each platform has, and who holds it
+odu ci lease x86_64-linux       # hold one across several runs
 odu ci release x86_64-linux
 ```
 
-On the board: **Machines** → **Hold** / **Release**, for a checkout's absolute path. A lease belongs to the checkout and survives the calling shell. `lease` reports `held`, `already`, or `waiting`; use `hosts` to inspect capacity. Release it when finished.
+A lease belongs to the **checkout** and survives the calling shell, so release it when you are finished; `lease` reports `held`, `already` or `waiting`. The CLI forwards your shell's `$ODU_HOSTS`. A browser or MCP caller can supply `hostsFile`; omitted uses the service's configuration, while `""` bypasses its override. Retries preserve the parent's recorded inventory choice and host pins.
 
-### Shard a slow check
+#### Running the server's checkout
 
-```just
-[metadata("odu:shard=4")]
-e2e: install
-    CUCUMBER_SHARD="$((ODU_SHARD_INDEX + 1))/$ODU_SHARD_TOTAL" just test-e2e
+Every `odu ci` command talks to the odu service for the machine you are on unless you name another with `--origin`. To run the **server's** clone of your repository from any shell — no checkout of your own — name the server, hand it a personal token from your profile page, and say which commit:
+
+```sh
+export ODU_TOKEN=odu_…
+nix run github:juspay/odu/<rev> -- ci run --origin https://odu.example.com \
+  --checkout /data/checkouts/<repo> --sha <sha>
 ```
 
-Only leaf recipes can be sharded. Odu supplies a zero-based `ODU_SHARD_INDEX` and the actual `ODU_SHARD_TOTAL`, which may be below the ceiling if capacity is unavailable. The recipe must divide its own work. Shards aggregate into one GitHub context per recipe/platform.
+Other verbs: `ci status`, `ci wait`, `ci attach`, `ci rerun`, `ci cancel`, `ci hosts`, `ci lease`/`ci release`, `ci protect`. Every one is also a control on the board and a verb on the API; nothing is CLI-only.
+
+### 4. When you still need a GitHub workflow
+
+Only when odu has no lane for a system you ship, or you want GitHub Actions' builders for some other reason. The push is **one step**:
+
+```yaml
+- uses: juspay/odu/.github/actions/push@<rev>
+  with:
+    token: ${{ secrets.ODU_CACHE_TOKEN }}
+    pin: ${{ github.ref_name == github.event.repository.default_branch }}
+```
+
+- **No `cache:`.** The step asks `odu cache target` for the `extra-substituters` line in your `flake.nix` and pushes to that URL by name, with your token. Name `cache:` when the workflow builds for a cache the flake does not list, **or when the bucket is private** — the inference probes anonymously, and a private bucket answers its `nix-cache-info` to nobody, so it cannot be found this way. A flake that names no odu cache, or two, fails the step with the URLs it found.
+- **`token`** is a write token for that bucket, minted on the bucket's page (**Tokens → Mint**, scope *write*). A pull request from a fork has no secret and pushes nothing; a push to a branch with no secret fails.
+- **`pin`** holds the closure under `<owner>/<repo>@<ref>/<system>`, the same pin a `[metadata("odu:pin=<ref>")]` recipe takes, so a run and a workflow for two systems hold two pins of one name shape.
+- It pushes every `result*` in the working directory, or the `paths:` you list. Every path is verified at the substituter afterwards; a path the cache does not answer makes the step red. The results are a table in the step summary.
+
+### 5. Require it
+
+```sh
+nix run github:juspay/odu/<rev> -- ci protect            # the default branch
+nix run github:juspay/odu/<rev> -- ci protect --dry-run  # print the contexts
+```
+
+Sets the branch's required status checks to **exactly** the contexts odu posts — `<recipe>@<system>` for every node the pipeline schedules. Run it after renaming a recipe. A workflow's own contexts (section 4) are yours to add; the board's **Maintenance → Protect** does the same thing from a browser.
+
+### 6. Agents
+
+Put odu in the repository's `plugin.json` — the Agent Plugin file at the repo root that agent-distro reads when any agent (Claude Code, Codex, omp, Pi, OpenCode) is launched in the checkout — and every one of them gets odu's MCP server and skill with no setup:
+
+```json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "<your repo>",
+  "extensions": { "asia.nixos.agent-distro": { "plugins": ["github:juspay/odu/<rev>"] } }
+}
+```
+
+The verbs are the same as the CLI's and the board's: `run_start`, `run_wait`, `run_read`, `log_read`, `run_retry`, `pipeline_read`, `venue_probe`, and the cache's. The odu skill that ships with it tells the agent how to use them.
+
+### 7. What you see afterwards
+
+- **A run's page**: the DAG, each node's log, and a push step per recipe naming the bucket and every path it warmed.
+- **A bucket's page**: paths grouped by the run and commit that pushed them, pins by name, what the next collection would take, storage and reads.
+- **A path**: who built it — run, commit, recipe, system — and which pin holds it, if any.
+- **GitHub**: one status per `<recipe>@<system>`, linking to the node's log.
+
+### 8. What odu promises you
+
+- **The three files are the whole contract.** `flake.nix` names the cache, `justfile` names the work, and a workflow — if you have one — names a token. Nothing else in your repository mentions odu.
+- **Majors rename; minors add.** Within a major, every verb, flag, input and metadata key above keeps working. A client is told, by name, when the server it reaches is a major ahead.
+- **A push is verified or red.** Nothing is "pushed" that the cache does not then serve.
+- **Your default branch stays substitutable.** Pinned closures are never collected; everything else lives 90 days past the last push (per bucket).
+- **Lanes hold no credentials of yours.** The run's token is odu's, scoped to that bucket, dead when the run is.
+
+### 9. What to ask your operator for
+
+The person running odu does these once per repository; nothing here is in your tree.
+
+- A bucket, its write token for your workflow (if any), and the two `nixConfig` lines.
+- Your repository linked to the org that owns the bucket, so runs of it may push there.
+- Your checkout handed to the server, until odu keeps its own clones.
+- The lanes trusting the bucket's key — the same two lines, on their side.
 
 ## Every run at once: the web service
 
@@ -89,7 +205,7 @@ The board lists runs across repositories. Open a run to inspect nodes, follow lo
 
 ### The board and the API do everything the CLI does
 
-The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`login`/`use`, and `odu auth login`. **Cache, people and tunnel administration is the board or the API, not the CLI.** An admin creates a bucket from the Cache view — with the upstream switch that `"upstreamKeys": []` spells on the API — mints, lists and revokes its tokens, sets retention, pins and unpins a closure, reads what the next collection would take and runs GC without a terminal; an owner opens a people page, sees who is in, and grants or changes a role. Anything the board does, `odu surface <row> <verb> --input '{…}' --json` does from a shell.
+The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`login`/`use`/`target`, and `odu auth login`. **Cache, people and tunnel administration is the board or the API, not the CLI.** An admin creates a bucket from the Cache view — with the upstream switch that `"upstreamKeys": []` spells on the API — mints, lists and revokes its tokens, sets retention, pins and unpins a closure, reads what the next collection would take and runs GC without a terminal; an owner opens a people page, sees who is in, and grants or changes a role. Anything the board does, `odu surface <row> <verb> --input '{…}' --json` does from a shell.
 
 | You want | CLI | API verb | On the board |
 | --- | --- | --- | --- |
@@ -573,12 +689,12 @@ The same rename reaches argv: `odu surface cache_create …` is `odu surface cac
 
 ## CLI reference
 
-The CLI is `ci`, three cache commands, `auth login`, and the three faces of the service:
+The CLI is `ci`, four cache commands, `auth login`, and the three faces of the service:
 
 ```
 odu ci <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect>
 odu ci history <list|show|import|prune>
-odu cache <use|login|push>
+odu cache <use|login|push|target>
 odu auth login <origin> [--token T]
 odu web [--background] [--upgrade]
 odu surface <row> <verb…>
@@ -599,7 +715,8 @@ odu mcp
 | `ci protect` | Configure GitHub required checks; preview with `--dry-run` | **Maintenance** → **Apply protection** |
 | `cache use <bucket>` | Print the nix.conf settings, a `nixConfig` block and netrc for a bucket | **Cache** |
 | `cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — (a machine's disk) |
-| `cache push <bucket> <path>…`, `cache push --cache <substituter> <path>…`, `cache push <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--cache` reads the push origin and the bucket off that cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`, probed ANONYMOUSLY, and pushed to with only a credential SAVED for that origin (`odu cache login`) — a repository named that URL, so the origin-agnostic `--token-file` and `$ODU_CACHE_TOKEN` are out of scope for it, and a 401 says so; a private bucket must be named with `--cache` (two odu caches there is a refusal). `--pin NAME` re-points that pin at the closure it landed | — (a build box's job) |
+| `cache push <bucket> <path>…`, `cache push --cache <substituter> <path>…`, `cache push <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--cache` reads the push origin and the bucket off that cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`, probed ANONYMOUSLY, and pushed to with only a credential SAVED for that origin (`odu cache login`) — a repository named that URL, so the origin-agnostic `--token-file` and `$ODU_CACHE_TOKEN` stay out of scope for it, and a caller that wants its token sent names the target instead: `odu cache target` prints that URL, and `push --cache <that>` is a named one; a private bucket must be named with `--cache` (two odu caches there is a refusal). `--pin NAME` re-points that pin at the closure it landed | — (a build box's job) |
+| `cache target` | Print the one odu substituter `./flake.nix`'s `nixConfig` names, with the same refusals `push` has (no flake, none, two). `-o json` gives `{cache, origin, bucket}`. This is how the push action resolves an omitted `cache:` | — (reads this checkout) |
 | `auth login <origin>` | Save a personal access token in `~/.config/odu/auth/credentials` | — (a machine's disk) |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport | — |
 

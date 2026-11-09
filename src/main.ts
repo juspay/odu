@@ -27,7 +27,8 @@
  * remote client read, and the service itself.
  *
  *   odu ci <run|wait|rerun|…>   the runs (@odu/cli/ciCli)
- *   odu cache <use|login|push>  the cache's shell-native verbs (@odu/cache/cli)
+ *   odu cache <use|login|push|target>
+ *                             the cache's shell-native verbs (@odu/cache/cli)
  *   odu auth login              this machine's token for a server (@odu/auth/cli)
  *   odu web [--background]      the service itself
  *   odu surface <verb>          the service, projected as argv
@@ -71,7 +72,7 @@ board, or \`odu surface <row> <verb>\` for a terminal and \`odu mcp\` for an age
 ci <run|wait|rerun|cancel|logs|history|status|attach|hosts|lease|release|dump|graph|protect>
                               # the runs: start one in this checkout, watch it,
                               # read a log, retry, cancel (odu ci --help)
-cache <use|login|push>        # a bucket's nix.conf and netrc lines, this
+cache <use|login|push|target> # a bucket's nix.conf and netrc lines, this
                               # machine's token for a cache, and a push from
                               # HERE (odu cache --help). Buckets, tokens, pins
                               # and GC are the board, or \`odu surface cache …\`

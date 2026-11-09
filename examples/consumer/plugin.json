@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "consumer",
+  "description": "This repository's agent tooling. odu ships its MCP server and its skill together, so any agent launched in this checkout can drive CI with no setup of its own.",
+  "extensions": {
+    "asia.nixos.agent-distro": {
+      "plugins": ["github:juspay/odu/<rev>"]
+    }
+  }
+}

@@ -13,7 +13,7 @@
 #   - uses: actions/checkout@<sha>
 #   - uses: juspay/odu/.github/actions/push@<sha>
 #     with:
-#       cache: <your bucket's substituter URL — the SAME line as above>
+#       # cache: OMITTED — ./flake.nix's extra-substituters line above is it
 #       token: <your ODU_CACHE_TOKEN secret, as a workflow expression>
 #       pin: <true on the ref you want held — the README spells the one-line
 #             GitHub expression; it cannot be written in this file>
@@ -25,6 +25,16 @@
 # (PLAN 2.8), so `https://cache.kolu.dev/kolu-r2` is an R2 domain that answers
 # GET and takes no push at all. A cache that does not state them refuses this
 # step with a sentence naming the URL it asked.
+#
+# **AND WITH NO `cache:` AT ALL, the flake states it.** The step runs `odu
+# cache target` in your checkout, takes the one odu substituter
+# `./flake.nix`'s `nixConfig` names, and pushes to that URL by name — so the
+# token goes with it. A repository that reads from its cache has already
+# declared it once; this is that one declaration doing the work (#163). In a
+# workflow the flake and the workflow are ONE trust boundary — whoever can
+# edit `flake.nix` with a secret in reach can edit the workflow beside it —
+# which is why the Action may do what `odu cache push` on a laptop must not
+# (`push.sh` carries the argument in full).
 #
 # **The pusher is this action's own `odu`.** It is built from the checkout the
 # action itself runs out of — `$GITHUB_ACTION_PATH/../../..` — so pinning the
@@ -110,11 +120,15 @@ inputs:
       the push origin (Odu-Origin) and the bucket (Odu-Bucket), so neither is
       spelled here and neither can drift. A cache that states neither is
       refused, naming the URL.
-      OMIT IT when your flake.nix already names the cache: with no value,
-      `odu cache push` reads ./flake.nix's nixConfig — the same
-      extra-substituters line you keep in order to READ from that cache — and
-      pushes to the one odu cache it finds there. Two is a refusal naming
-      both, because a repository builds for one cache.
+      OMIT IT when your flake.nix already names the cache: with no value, this
+      step asks `odu cache target` for the one odu substituter in
+      ./flake.nix's nixConfig — the same extra-substituters line you keep in
+      order to READ from that cache — and pushes to that URL by name, with
+      your token. No flake, no odu cache there, or two, is this step's
+      failure, naming them. Name `cache:` when the workflow builds for a cache
+      the flake does not list, or when the bucket is PRIVATE: the inference
+      probes anonymously, and a private bucket answers its nix-cache-info to
+      nobody.
     required: false
     default: ""
   token:
