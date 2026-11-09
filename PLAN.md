@@ -681,7 +681,10 @@ Commits and PR bodies use the earlier names.
     kept out of the recipe's own environment, and revoked when the projection
     sees nothing serving the run any more — not at first settle, which would
     meet a `--linger` rerun with a dead credential. The GitHub Action gains the
-    same inference, so its `cache:` input becomes optional.
+    same inference, so its `cache:` input becomes optional — made real in #168
+    via `odu cache target` (#163), because the inference alone withheld the
+    token (SEC-5) and the push 401'd: the Action resolves the URL and then
+    NAMES it, which a workflow may do where a laptop may not.
 
 [^pins]: The catalog records path ↔ run ↔ commit at push time; the bucket
     page's grouped Paths table shows it per group. `odu:pin` pins through the
