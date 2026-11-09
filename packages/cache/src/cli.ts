@@ -2,7 +2,7 @@
  * `odu cache` — the cache's SHELL-NATIVE verbs, in the package that owns the
  * buckets.
  *
- * Three commands are left, and what they have in common is a machine:
+ * Four commands, and what they have in common is a machine:
  *
  *   - **`push`** is a client of the cache's HTTP API, run from the machine
  *     that holds the store paths. It imports `./push` and nothing else — no
@@ -15,6 +15,11 @@
  *   - **`use`** prints the nix.conf, flake `nixConfig` and netrc lines for a
  *     bucket, for pasting into this machine's configuration. It needs no
  *     token: a bucket's URL and public key are what it publishes.
+ *   - **`target`** prints the one odu substituter `./flake.nix` names — the
+ *     same reading `push` makes with no `--cache`, said instead of acted on.
+ *     It reads THIS checkout, which no daemon has a copy of, and it is what
+ *     lets a caller holding a token NAME the address the repository chose
+ *     (`.github/actions/push`, #163).
  *
  * ADMINISTRATION IS NOT HERE ANY MORE. Creating a bucket, minting and revoking
  * tokens, naming a domain, pinning a closure, collecting garbage and reading
@@ -89,7 +94,7 @@ export interface CacheCliPorts {
   }>;
 }
 
-export const CACHE_USAGE = `usage: odu cache <use|login|push> [args]
+export const CACHE_USAGE = `usage: odu cache <use|login|push|target> [args]
 
 use <bucket>                  the nix.conf settings, the nixConfig block and the
                               netrc lines for a bucket. Needs NO token: a
@@ -124,6 +129,13 @@ push <path>…                  with neither, the substituter is read from
                               this push landed, so garbage collection keeps it.
                               The write token is the authority; nothing is
                               pinned if any path was refused
+target [-o json]              print the one odu substituter ./flake.nix's
+                              nixConfig names — the same reading \`push\` makes
+                              with no --cache, said out loud instead of acted
+                              on. The URL on stdout; -o json gives
+                              {cache, origin, bucket}. A caller that names it
+                              back (\`push --cache <that>\`) is naming the
+                              target itself, so its own token goes with it
 
 Buckets, tokens, domains, pins, GC and stats are the bucket page on the board,
 or the API: \`odu surface cache bucket_create --input '{…}' --json\`,
@@ -241,6 +253,8 @@ export async function cacheCommand(
       return loginCommand(rest);
     case "push":
       return pushCommand(rest);
+    case "target":
+      return targetCommand(rest);
     case undefined:
     case "help":
     case "--help":
@@ -581,6 +595,60 @@ async function pushCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * `odu cache target` — THE INFERENCE, SAID OUT LOUD.
+ *
+ * Exactly the reading `push` makes with no `--cache` and no bucket, printed
+ * instead of acted on: one odu substituter out of `./flake.nix`'s `nixConfig`,
+ * with the same three refusals (no flake, none, two).
+ *
+ * **Shell-native for the reason `push` is:** it reads THIS checkout. A verb on
+ * the board could not — the daemon has no copy of the caller's working
+ * directory, and PLAN 2.10's rule is that a CLI verb must earn its place by
+ * needing the machine it runs on.
+ *
+ * It answers the caller that has a token and cannot send it. `push`'s
+ * inference withholds `--token-file` and `$ODU_CACHE_TOKEN` by design (#159,
+ * SEC-5): a URL a REPOSITORY named must not collect an operator's credential.
+ * A caller that reads the URL here and hands it back as `push --cache <that>`
+ * has NAMED the target — the address is its own choice now — so its token
+ * goes with it. That is the whole of what `.github/actions/push` does with
+ * this (#163), on the argument that a workflow and the flake beside it are
+ * one trust boundary.
+ */
+async function targetCommand(rest: string[]): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: rest,
+    allowPositionals: true,
+    options: { output: outputOption },
+  });
+  if (positionals.length > 0) {
+    process.stderr.write(
+      `odu: cache target takes no arguments — it reads ./flake.nix\n${CACHE_USAGE}`,
+    );
+    return 1;
+  }
+  const json = values.output === "json";
+  const inferred = await inferredCache(json);
+  if ("error" in inferred) {
+    process.stderr.write(`odu: ${inferred.error}\n`);
+    return 1;
+  }
+  // `{ cache, origin, bucket }` BY SHORTHAND, from a local named for the
+  // field: a face may not retype the row's own word as a key
+  // (`packages/host/src/fence.test.ts`), and the substituter is `cache` here
+  // because that is what the Action's own `cache` input calls it.
+  const { substituter: cache, origin, bucket } = inferred;
+  if (json) {
+    emitJson({ cache, origin, bucket });
+  } else {
+    // THE URL ALONE ON STDOUT, because a shell reads this with `$(…)`. What
+    // it resolved to is on stderr already, where the narration goes.
+    process.stdout.write(`${cache}\n`);
+  }
+  return 0;
+}
+
+/**
  * THE CACHE `./flake.nix` ALREADY NAMES (PLAN 4.1) — `odu cache push` with no
  * `--cache` and no bucket.
  *
@@ -598,10 +666,15 @@ async function pushCommand(rest: string[]): Promise<number> {
  * points at, including `cache.nixos.org`, which most of them do. The cost is
  * that a PRIVATE bucket cannot be inferred — its `nix-cache-info` is a 404 to
  * an anonymous reader — and the refusal says to pass `--cache`.
+ *
+ * The SUBSTITUTER comes back beside the bucket and the origin: it is the one
+ * fact a repository actually wrote, and `target` prints it.
  */
 async function inferredCache(
   json: boolean,
-): Promise<{ bucket: string; origin: string } | { error: string }> {
+): Promise<
+  { substituter: string; bucket: string; origin: string } | { error: string }
+> {
   const config = await readFlakeNixConfig(
     process.cwd(),
     nixEvalFlakeConfig(process.env),
@@ -637,6 +710,6 @@ async function inferredCache(
         `on ${one.origin}\n`,
     );
   }
-  return { bucket: one.bucket, origin: one.origin };
+  return { substituter: one.substituter, bucket: one.bucket, origin: one.origin };
 }
 
