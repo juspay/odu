@@ -97,15 +97,21 @@ it(
   120_000,
 );
 
-/** The keys spelled directly under the mapping opened at `headerIndex`: the
- *  first deeper indent is the mapping's own depth, and only lines at exactly
- *  that depth are its keys. A NARROW reader on purpose — this repo depends on
- *  no YAML parser (`yaml` is in the lockfile only as cucumber's transitive
- *  dependency), and two facts out of two files do not buy one. */
-function keysUnder(lines: readonly string[], headerIndex: number): string[] {
+/** The keys spelled directly under the mapping opened at `headerIndex`, with
+ *  the line each sits on: the first deeper indent is the mapping's own depth,
+ *  and only lines at exactly that depth are its keys. A NARROW reader on
+ *  purpose — this repo depends on no YAML parser (`yaml` is in the lockfile
+ *  only as cucumber's transitive dependency), and three facts out of two
+ *  files do not buy one. The INDEX is what lets a nested mapping be found by
+ *  the same walk that reads a flat one, instead of a second copy of this
+ *  rule. */
+function keysUnder(
+  lines: readonly string[],
+  headerIndex: number,
+): { name: string; index: number }[] {
   const header = lines[headerIndex] ?? "";
   const headerIndent = header.length - header.trimStart().length;
-  const keys: string[] = [];
+  const keys: { name: string; index: number }[] = [];
   let depth: number | null = null;
   for (let i = headerIndex + 1; i < lines.length; i += 1) {
     const line = lines[i] ?? "";
@@ -115,7 +121,7 @@ function keysUnder(lines: readonly string[], headerIndex: number): string[] {
     if (depth === null) depth = indent;
     if (indent !== depth) continue; // a value's own lines, not a key here
     const key = /^([A-Za-z][A-Za-z0-9_-]*):/.exec(line.trim());
-    if (key?.[1] !== undefined) keys.push(key[1]);
+    if (key?.[1] !== undefined) keys.push({ name: key[1], index: i });
   }
   return keys;
 }
@@ -136,19 +142,11 @@ it("pushes with THIS repository's action, and only inputs it declares", () => {
   // pinned to odu, and the `@<rev>` is the one line a consumer bumps.
   expect(uses.startsWith("juspay/odu/.github/actions/push@")).toBe(true);
 
-  const stepIndent = (workflow[stepIndex] ?? "").indexOf("-");
-  let withIndex = -1;
-  for (let i = stepIndex + 1; i < workflow.length; i += 1) {
-    const line = workflow[i] ?? "";
-    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
-    if (line.length - line.trimStart().length <= stepIndent) break;
-    if (line.trim() === "with:") {
-      withIndex = i;
-      break;
-    }
-  }
+  // The step's own `with:`, found by the same walk that then reads its keys.
+  const withIndex =
+    keysUnder(workflow, stepIndex).find((key) => key.name === "with")?.index ?? -1;
   expect(withIndex).toBeGreaterThanOrEqual(0);
-  const given = keysUnder(workflow, withIndex);
+  const given = keysUnder(workflow, withIndex).map((key) => key.name);
 
   // THE EXAMPLE CANNOT DRIFT FROM THE ACTION'S REAL INPUT NAMES: every key it
   // passes is one `action.yml` declares, so renaming an input breaks this
@@ -159,8 +157,11 @@ it("pushes with THIS repository's action, and only inputs it declares", () => {
   ).split("\n");
   const inputsIndex = action.findIndex((line) => line.trimEnd() === "inputs:");
   expect(inputsIndex).toBeGreaterThanOrEqual(0);
-  const declared = keysUnder(action, inputsIndex);
-  expect(declared.sort()).toEqual(["cache", "paths", "pin", "token"]);
+  const declared = keysUnder(action, inputsIndex).map((key) => key.name);
+  // Non-vacuity, and the one input this example's thesis needs to EXIST:
+  // `cache:` is declared and deliberately not passed. What else the action
+  // declares is the action's business and may grow without touching a page.
+  expect(declared).toContain("cache");
   expect(given.filter((key) => !declared.includes(key))).toEqual([]);
 
   // AND IT PASSES EXACTLY TWO, which is the page's claim about this step. No

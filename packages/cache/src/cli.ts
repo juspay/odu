@@ -506,10 +506,19 @@ async function pushCommand(rest: string[]): Promise<number> {
         );
         return 1;
       }
-      const inferred = await inferredCache(json);
+      const inferred = await inferredCache();
       if ("error" in inferred) {
         process.stderr.write(`odu: ${inferred.error}\n`);
         return 1;
+      }
+      // SAID OUT LOUD, where the `--cache` branch above says the same thing
+      // about the URL IT was given: a push that resolved an address out of a
+      // file should be readable in the log of the job that ran it.
+      if (!json) {
+        process.stderr.write(
+          `./flake.nix reads from ${inferred.substituter}, which is bucket ` +
+            `"${inferred.bucket}" on ${inferred.origin}\n`,
+        );
       }
       bucket = inferred.bucket;
       origin = inferred.origin;
@@ -628,7 +637,7 @@ async function targetCommand(rest: string[]): Promise<number> {
     return 1;
   }
   const json = values.output === "json";
-  const inferred = await inferredCache(json);
+  const inferred = await inferredCache();
   if ("error" in inferred) {
     process.stderr.write(`odu: ${inferred.error}\n`);
     return 1;
@@ -641,8 +650,9 @@ async function targetCommand(rest: string[]): Promise<number> {
   if (json) {
     emitJson({ cache, origin, bucket });
   } else {
-    // THE URL ALONE ON STDOUT, because a shell reads this with `$(…)`. What
-    // it resolved to is on stderr already, where the narration goes.
+    // THE URL ALONE, because a shell reads this with `$(…)`. This command
+    // SAYS the target rather than acting on it, so the answer is the whole of
+    // its output and there is nothing to narrate beside it.
     process.stdout.write(`${cache}\n`);
   }
   return 0;
@@ -669,10 +679,13 @@ async function targetCommand(rest: string[]): Promise<number> {
  *
  * The SUBSTITUTER comes back beside the bucket and the origin: it is the one
  * fact a repository actually wrote, and `target` prints it.
+ *
+ * IT ANSWERS AND SAYS NOTHING. Whether a resolution is narrated is the
+ * COMMAND's business — `push` says it on the human path, beside where its
+ * `--cache` branch says the same of the URL it was handed, and `target` has
+ * no need to because the answer IS its output.
  */
-async function inferredCache(
-  json: boolean,
-): Promise<
+async function inferredCache(): Promise<
   { substituter: string; bucket: string; origin: string } | { error: string }
 > {
   const config = await readFlakeNixConfig(
@@ -703,12 +716,6 @@ async function inferredCache(
         `(${found.map((cache) => cache.substituter).join(", ")}) — a repository pushes ` +
         "to one, so name it with `--cache <substituter>`",
     };
-  }
-  if (!json) {
-    process.stderr.write(
-      `./flake.nix reads from ${one.substituter}, which is bucket "${one.bucket}" ` +
-        `on ${one.origin}\n`,
-    );
   }
   return { substituter: one.substituter, bucket: one.bucket, origin: one.origin };
 }
