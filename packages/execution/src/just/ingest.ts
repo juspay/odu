@@ -102,15 +102,24 @@ function hasCiMetadata(recipe: DumpRecipe): boolean {
   );
 }
 
-function shardCount(recipe: DumpRecipe): number | undefined {
-  const values = recipe.attributes.flatMap((attr): string[] => {
+/** Every `[metadata("…")]` string a recipe declares, flattened across its
+ *  attributes. ONE reader for every `odu:` marker: two copies of this walk is
+ *  two places for "where does `just` put metadata" to be answered differently
+ *  the day the dump's shape changes. */
+function metadataValues(recipe: DumpRecipe): string[] {
+  return recipe.attributes.flatMap((attr): string[] => {
     if (typeof attr !== "object" || attr === null) return [];
     const metadata = (attr as Record<string, unknown>).metadata;
     return Array.isArray(metadata)
       ? metadata.filter((value): value is string => typeof value === "string")
       : [];
   });
-  const shardMetadata = values.filter((value) => value.startsWith("odu:shard="));
+}
+
+function shardCount(recipe: DumpRecipe): number | undefined {
+  const shardMetadata = metadataValues(recipe).filter((value) =>
+    value.startsWith("odu:shard="),
+  );
   if (shardMetadata.length === 0) return undefined;
   if (shardMetadata.length > 1) {
     throw new Error(
@@ -125,6 +134,41 @@ function shardCount(recipe: DumpRecipe): number | undefined {
     );
   }
   return count;
+}
+
+/**
+ * The git REF this recipe's pushed closure is pinned under — `[metadata("odu:pin=main")]`.
+ *
+ * A ref rather than a boolean because a pin is only wanted on the branch the
+ * repository treats as its trunk: pinning every feature branch's closure would
+ * hold a bucket's whole history open, and the recipe is the only place that
+ * knows which ref its output is worth keeping for. WHETHER this run is on that
+ * ref is the coordinator's to answer (`coordinator/run.ts`), not the dump's.
+ *
+ * A BARE `odu:pin` is refused rather than read as "pin on whatever is checked
+ * out": the whole point of the value is that the author named the ref, and a
+ * silently-accepted bare marker would pin a feature branch's closure forever
+ * under master's name.
+ */
+function pinRef(recipe: DumpRecipe): string | undefined {
+  const pinMetadata = metadataValues(recipe).filter(
+    (value) => value === "odu:pin" || value.startsWith("odu:pin="),
+  );
+  if (pinMetadata.length === 0) return undefined;
+  if (pinMetadata.length > 1) {
+    throw new Error(
+      `odu: recipe "${recipe.namepath}" declares odu:pin more than once`,
+    );
+  }
+  const raw = pinMetadata[0]!.startsWith("odu:pin=")
+    ? pinMetadata[0]!.slice("odu:pin=".length)
+    : "";
+  if (raw === "") {
+    throw new Error(
+      `odu: recipe "${recipe.namepath}" metadata must be odu:pin=<ref> naming the ref to pin on`,
+    );
+  }
+  return raw;
 }
 
 /**
@@ -350,6 +394,7 @@ export function pipelineFromDump(
   const tasks: TaskSpec[] = [...reachable.values()].map(
     ({ recipe, module }) => {
       const shards = shardCount(recipe);
+      const pin = pinRef(recipe);
       // THE ROOT'S OWN `source`, whose directory is the workspace root every
       // module's directory is expressed against.
       const workdir = workdirOf(module, recipe, (dump as DumpModule).source);
@@ -363,6 +408,7 @@ export function pipelineFromDump(
         os: osAttributes(recipe),
         ...(workdir === null ? {} : { workdir }),
         ...(shards === undefined ? {} : { shards }),
+        ...(pin === undefined ? {} : { pin }),
       };
     },
   );

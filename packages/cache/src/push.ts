@@ -47,9 +47,11 @@ import {
 } from "./narinfo";
 import {
   CACHE_MOUNT,
+  COMMIT_HEADER,
   ODU_BUCKET_FIELD,
   ODU_ORIGIN_FIELD,
   PARTS_HEADER,
+  RUN_HEADER,
   UPLOAD_SESSION_HEADER,
   type UploadMode,
   type UploadPlan,
@@ -887,6 +889,19 @@ export interface PushOptions {
    * why write, not admin.
    */
   pin?: string;
+  /**
+   * WHAT BUILT THESE PATHS — the run that produced them and the commit they
+   * were built from, both OPAQUE to the cache: it stores the two strings on
+   * each path's row and never learns what a run is.
+   *
+   * Optional and OMITTED when unknown, never spelled `undefined`: a developer
+   * pushing from a laptop states neither, a GitHub action states only the
+   * commit, and a re-push that states nothing must not erase what a run
+   * stated — which the cache can only tell apart if "not said" never arrives
+   * as a key at all.
+   */
+  run?: string;
+  commit?: string;
   onLine?: (line: string) => void;
   platform?: PushPlatform;
 }
@@ -926,6 +941,18 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const base = `${resolved.origin}${CACHE_MOUNT}/${resolved.name}`;
   const headers: Record<string, string> =
     token === null ? {} : { authorization: `Bearer ${token}` };
+  // WHAT BUILT THESE PATHS, as the headers the narinfo PUT carries. Built
+  // once, here: an empty string is the same as nothing said — a workflow
+  // expanding `${{ github.sha }}` on a dispatch that has none would otherwise
+  // write a row claiming it was built from "".
+  const provenance: Record<string, string> = {
+    ...(options.run === undefined || options.run.trim() === ""
+      ? {}
+      : { [RUN_HEADER]: options.run.trim() }),
+    ...(options.commit === undefined || options.commit.trim() === ""
+      ? {}
+      : { [COMMIT_HEADER]: options.commit.trim() }),
+  };
 
   const platform: PushPlatform = options.platform ?? {
     closure: (paths) => nixClosure(paths, null),
@@ -985,6 +1012,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         if (entry === undefined) continue;
         const outcome = await uploadOne(base, headers, entry, platform, attempts, say, {
           partSize,
+          provenance,
         });
         if (outcome.ok) {
           pushed += 1;
@@ -1787,7 +1815,12 @@ async function uploadOne(
   platform: PushPlatform,
   attempts: number,
   say: (line: string) => void,
-  options: { partSize: number },
+  options: {
+    partSize: number;
+    /** {@link RUN_HEADER} and {@link COMMIT_HEADER}, already resolved to the
+     *  headers they are — empty when the caller stated neither. */
+    provenance: Record<string, string>;
+  },
 ): Promise<UploadOutcome> {
   /** Every attempt's reason, in order — the whole of what is reported when
    *  the budget runs out. */
@@ -1839,7 +1872,14 @@ async function uploadOne(
     const infoUrl = `${base}/${storePathHash(entry.storePath)}.narinfo`;
     const dialed = await dial(infoUrl, {
       method: "PUT",
-      headers: { ...headers, "content-type": "text/x-nix-narinfo" },
+      // THE NARINFO PUT IS THE REQUEST THAT WRITES THE ROW, so it is the one
+      // that carries what built the path. The body stays the Nix format
+      // every client parses; odu's own facts ride above it.
+      headers: {
+        ...headers,
+        ...options.provenance,
+        "content-type": "text/x-nix-narinfo",
+      },
       body: formatPushNarinfo(entry, narName),
     });
     if (!dialed.ok) {

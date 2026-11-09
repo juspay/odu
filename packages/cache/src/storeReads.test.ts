@@ -457,6 +457,7 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
             "",
           ].join("\n"),
         ).body as ReadableStream<Uint8Array>,
+        { run: null, commit: null },
       );
       if (!outcome.ok) throw new Error(`push ${storePath}: ${outcome.message}`);
     }
@@ -613,6 +614,7 @@ describe("a re-push purges the narinfo it rewrote", () => {
         bucket,
         storePathHash(PATH),
         new Response(narinfo(sigs)).body as ReadableStream<Uint8Array>,
+        { run: null, commit: null },
       );
       if (!outcome.ok) throw new Error(outcome.message);
     };

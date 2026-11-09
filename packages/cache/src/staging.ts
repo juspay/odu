@@ -53,7 +53,7 @@ import { type DirectStore, directUploads, type ObjectStore, TEMP, type UploadedP
 import { type KeptFile, keptFileOf, objectFactsOf } from "./fileHash";
 import { writeAll } from "./sink";
 import { verifyNarFile, verifyNarStream } from "./store";
-import type { BucketRow } from "./db";
+import type { BucketRow, Provenance } from "./db";
 import { ODU_BUCKET_FIELD, ODU_ORIGIN_FIELD, type UploadMode, type UploadPlan } from "./paths";
 import {
   narFileName,
@@ -297,6 +297,7 @@ export interface StagingDeps {
     info: NarInfo,
     file: KeptFile,
     selfHash: string | null,
+    provenance: Provenance,
   ) => Promise<boolean>;
   /** One line per operational fact; the cache's logger. */
   log?: (event: string, fields: Record<string, unknown>) => void;
@@ -351,10 +352,13 @@ export interface Staging {
     total: number,
     session?: string | null,
   ): Promise<CompleteUpload>;
+  /** `provenance` is the PUSHER's claim about what built this path, carried
+   *  on the narinfo request (PLAN 4.2) and written with the row it records. */
   acceptNarinfo(
     bucket: BucketRow,
     hash: string,
     body: ReadableStream<Uint8Array>,
+    provenance: Provenance,
   ): Promise<NarinfoOutcome>;
 }
 
@@ -499,6 +503,7 @@ export function createStaging(deps: StagingDeps): Staging {
     hash: string,
     info: NarInfo,
     direct: DirectUpload,
+    provenance: Provenance,
   ): Promise<NarinfoOutcome> {
     const refuse = async (message: string, reason: string): Promise<Refusal> => {
       log?.("cache.nar.verify_failed", {
@@ -551,7 +556,7 @@ export function createStaging(deps: StagingDeps): Staging {
       // presigned PUT for this temp key, so the copy below is bound to the
       // VERSION this verify read: a rewrite between the two is refused, not
       // copied under the facts of bytes that are gone.
-      return await recordSerially(bucket, info, checked.selfHash, (current) =>
+      return await recordSerially(bucket, info, checked.selfHash, provenance, (current) =>
         keepCopied(
           current,
           info,
@@ -576,6 +581,7 @@ export function createStaging(deps: StagingDeps): Staging {
     info: NarInfo,
     dirForBucket: string,
     name: string,
+    provenance: Provenance,
   ): Promise<NarinfoOutcome> {
     const refuse = async (
       message: string,
@@ -591,7 +597,7 @@ export function createStaging(deps: StagingDeps): Staging {
       // THE SECOND PROOF OF POSSESSION. Two store paths with identical content
       // share a NarHash, and the first to be recorded took the staged NAR with
       // it; so did an earlier push of this same path. The object is the proof.
-      return recordSerially(bucket, info, null, async (current) =>
+      return recordSerially(bucket, info, null, provenance, async (current) =>
         (await keptFacts(current, info.narHash, info.compression)) ??
         refuse(`the narinfo names ${info.url}, which was never uploaded to this bucket`),
       );
@@ -609,7 +615,7 @@ export function createStaging(deps: StagingDeps): Staging {
           claimed,
         );
       }
-      return await recordSerially(bucket, info, checked.selfHash, (current) =>
+      return await recordSerially(bucket, info, checked.selfHash, provenance, (current) =>
         keep(current, info, claimed.path, { fileHash: checked.fileHash, fileSize: checked.fileSize }),
       );
     } finally {
@@ -1005,6 +1011,7 @@ export function createStaging(deps: StagingDeps): Staging {
     bucket: BucketRow,
     info: NarInfo,
     selfHash: string | null,
+    provenance: Provenance,
     keep: (bucket: BucketRow) => Promise<KeptFile | Refusal>,
   ): Promise<NarinfoOutcome> {
     return withWriteLock(async () => {
@@ -1028,7 +1035,7 @@ export function createStaging(deps: StagingDeps): Staging {
       }
       const file = await keep(current);
       if ("ok" in file) return file;
-      await record(current, info, file, selfHash);
+      await record(current, info, file, selfHash, provenance);
       log?.("cache.import.recorded", {
         bucket: current.name,
         path: info.storePath,
@@ -1195,7 +1202,7 @@ export function createStaging(deps: StagingDeps): Staging {
       return serial(chain, () => completeNow(bucket, file, total, session));
     },
 
-    async acceptNarinfo(bucket, hash, body) {
+    async acceptNarinfo(bucket, hash, body, provenance) {
       if (!isStorePathHash(hash)) {
         return { ok: false, status: 400, message: `"${hash}" is not a store path hash` };
       }
@@ -1272,8 +1279,8 @@ export function createStaging(deps: StagingDeps): Staging {
         // the first one kept.
         const direct = landed.get(key);
         return direct === undefined
-          ? prove(bucket, hash, info, dirForBucket, name)
-          : proveDirect(bucket, hash, info, direct);
+          ? prove(bucket, hash, info, dirForBucket, name, provenance)
+          : proveDirect(bucket, hash, info, direct, provenance);
       });
       const tail = chain.tail;
       try {

@@ -69,6 +69,8 @@ const object: ObjectRow = {
   hits: 3,
   created: NOW,
   lastWanted: NOW,
+  run: null,
+  commit: null,
 };
 
 describe("migrations", () => {
@@ -320,6 +322,10 @@ describe("a bucket's paths, by package", () => {
         pushed: NOW + 20,
         wanted: NOW + 50,
         storePath: `/nix/store/${"c".repeat(32)}-widget-1.0`,
+        // The newest version's own, read off the same row the path is: this
+        // seed states no provenance, so both are null.
+        run: null,
+        commit: null,
       },
       {
         name: "zlib-1.3",
@@ -329,6 +335,8 @@ describe("a bucket's paths, by package", () => {
         pushed: NOW + 15,
         wanted: NOW + 15,
         storePath: `/nix/store/${"d".repeat(32)}-zlib-1.3`,
+        run: null,
+        commit: null,
       },
     ]);
   });

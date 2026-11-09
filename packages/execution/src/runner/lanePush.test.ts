@@ -236,6 +236,43 @@ describe("a lane node that pushes what it built", () => {
     expect(await l.logOf("build", "push")).toContain(PUSH_LINE);
   });
 
+  it("hands the pusher the pin and the provenance the coordinator stated, derived from nothing", async () => {
+    // THE LANE DERIVES NO PIN (PLAN 4.2). It reads no git, resolves no
+    // remote and compares no refs: the name arrives on the task's
+    // environment already shaped, beside the run and the commit it belongs
+    // to, or it does not arrive at all. This asserts the WIRE — that every
+    // one of those facts survives `run.configure` into the pusher's config.
+    const pusher = stubPusher(async (hooks) => {
+      announce(hooks);
+      return { stored: 1, present: 0, bytes: 4_096 };
+    });
+    const l = await lane(pusher);
+    await l.configure([
+      {
+        id: "build",
+        command: "echo built",
+        needs: [],
+        env: {
+          ...PUSH_ENV,
+          ODU_CACHE_PIN: "acme/widget@main/x86_64-linux",
+          ODU_CACHE_RUN: "0000000f-0001",
+          ODU_CACHE_COMMIT: "c0ffee",
+        },
+      },
+    ]);
+    await until(() => last(l).nodes.build?.status === "ok");
+    expect(pusher.calls).toEqual([
+      {
+        origin: PUSH_ENV.ODU_CACHE_ORIGIN,
+        bucket: PUSH_ENV.ODU_CACHE_BUCKET,
+        token: PUSH_ENV.ODU_CACHE_TOKEN,
+        pin: "acme/widget@main/x86_64-linux",
+        run: "0000000f-0001",
+        commit: "c0ffee",
+      },
+    ]);
+  });
+
   it("opens `pushing` while it uploads, and the node is not green until it lands", async () => {
     // THE STEP HAS A BEGINNING, and a minute-long upload must look like one.
     // A push that appeared only in its finished form would paint a node that

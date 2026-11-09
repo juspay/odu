@@ -63,6 +63,12 @@ it(
     // `odu:shard=2` IS THE SHARD CEILING, and only a leaf may carry it.
     expect(byId.get("e2e")?.shards).toBe(2);
     expect(byId.get("test")?.shards).toBeUndefined();
+
+    // `odu:pin=main` NAMES THE REF, and the page's table says so: a run on
+    // another ref pushes this closure and pins nothing. It sits on `build`,
+    // which two recipes depend on — a pin, unlike a shard, has no leaf rule.
+    expect(byId.get("build")?.pin).toBe("main");
+    expect(byId.get("docs")?.pin).toBeUndefined();
   },
 );
 

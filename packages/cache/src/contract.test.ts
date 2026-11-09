@@ -42,6 +42,11 @@ const LEDGER: ContractLedger = {
   // say `run <id>` for a credential odu minted for a run rather than leaving
   // an operator to wonder who issued it. An optional output field; additive.
   "4.6": "fe3f87418079d1b7",
+  // 4.7 — PLAN 4.2: `run` and `commit` on a path and on a package's newest
+  // version, so a bucket page can say which run put a path there and which
+  // commit it was built from. Two optional output fields, opaque to the
+  // cache; additive.
+  "4.7": "a318983ddb5cebdb",
 };
 
 describe("the cache row's contract", () => {

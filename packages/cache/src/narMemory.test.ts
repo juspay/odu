@@ -148,6 +148,8 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
       hits: 0,
       created: 0,
       lastWanted: 0,
+      run: null,
+      commit: null,
     });
     repo.close();
     await cache.close();

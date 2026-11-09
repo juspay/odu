@@ -27,6 +27,23 @@ export const CACHE_MOUNT = "/cache";
 export const PARTS_HEADER = "x-odu-parts";
 export const UPLOAD_SESSION_HEADER = "x-odu-upload";
 
+/**
+ * WHAT BUILT A PATH, carried beside the narinfo rather than inside it.
+ *
+ * A narinfo's BODY is a format Nix itself parses, and a cache that grew odu
+ * fields in it would be handing every `nix copy` reader lines it has to
+ * ignore — and would have to keep ignoring them forever. The provenance is
+ * odu's own fact about the push, so it rides as request headers on the one
+ * request that writes the row, and a server that does not know them records
+ * a path with no provenance rather than refusing the push.
+ *
+ * Both are OPAQUE to the cache: it never learns what a run is, only that a
+ * row can name one. Spelled here beside the mount so the SERVER (`./routes`)
+ * and the CLIENT (`./push`) read the same two words.
+ */
+export const RUN_HEADER = "x-odu-run";
+export const COMMIT_HEADER = "x-odu-commit";
+
 /** Where the push API lives — odu's own, beside the Nix protocol's mount. */
 export const PUSH_API = "/_odu/v1";
 

@@ -164,6 +164,17 @@ pin=$(trim "${ODU_PUSH_PIN:-}")
 requested=$(printf '%s' "${ODU_PUSH_PATHS:-}" | tr -s '[:space:]' '\n' | sed '/^$/d')
 event=${GITHUB_EVENT_NAME:-local}
 
+# WHAT BUILT THESE PATHS — the commit, and NOT a run: a run id is a thing only
+# an odu run has, and this action is a workflow step that may be nobody's run.
+# The bucket keeps it on every row this push stores, so a path on the bucket
+# page can be traced to the commit it came out of. Empty outside Actions,
+# which the pusher reads as "said nothing" and leaves alone — a developer's
+# later bare push must not erase it either.
+commit_args=()
+if [ -n "${GITHUB_SHA:-}" ]; then
+  commit_args=(--commit "$GITHUB_SHA")
+fi
+
 command -v nix >/dev/null 2>&1 ||
   fail "odu push: \`nix\` is not on PATH, and this action never installs it. Install Nix in an earlier step — with the bucket's \"GitHub Actions\" block as its \`nix_conf\` — and run this action after it."
 command -v jq >/dev/null 2>&1 ||
@@ -354,9 +365,11 @@ set +e
 # would read it.
 # `${pin_args[@]+…}` and not `"${pin_args[@]}"`: a macOS runner's bash is 3.2,
 # where an empty array expanded under `set -u` is an unbound variable. The pin
-# NAME is argv's business — it is not a secret; the token is still never there.
+# NAME and the commit are argv's business — neither is a secret; the token is
+# still never there.
 ODU_CACHE_TOKEN="$token" "$odu" cache push --cache "$cache" --output json \
   ${pin_args[@]+"${pin_args[@]}"} \
+  ${commit_args[@]+"${commit_args[@]}"} \
   "${targets[@]}" > "$result"
 status=$?
 set -e

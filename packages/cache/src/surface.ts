@@ -209,6 +209,12 @@ export const CachePathSchema = Schema.Struct({
    *  it. Retention counts from here, and a read never moves it — reads are
    *  leaving odu, so the busiest paths would be the first to look idle. */
   lastWanted: Schema.Number,
+  /** WHAT BUILT IT (PLAN 4.2) — the run that pushed it and the commit it was
+   *  built from, both as the pusher stated them and null where nothing was
+   *  said. `optionalKey` so a daemon older than this field still decodes
+   *  here, spelled as `label` was for the same reason. */
+  run: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  commit: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type CachePath = typeof CachePathSchema.Type;
 
@@ -577,6 +583,10 @@ export const CachePathGroupSchema = Schema.Struct({
   wanted: Schema.Number,
   /** The newest version's store path: the hash a reader compares by. */
   storePath: Schema.String,
+  /** And the newest version's PROVENANCE — read off that same row, so a
+   *  package never shows one build's hash beside another's commit. */
+  run: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  commit: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type CachePathGroup = typeof CachePathGroupSchema.Type;
 
@@ -1079,8 +1089,13 @@ export const CACHE_KEY = "cache";
  * 4.6: WHO MINTED A TOKEN (PLAN 4.1). Additive: `label` on a token's public
  * half, so the bucket page's Tokens list says `run <id>` for a credential odu
  * minted for a run rather than leaving an operator to wonder who issued it.
+ *
+ * 4.7: WHAT BUILT A PATH (PLAN 4.2). Additive: `run` and `commit` on a path
+ * and on a package's newest version, stated by the pusher and kept opaque, so
+ * a bucket page can say which run put a path there and which commit it was
+ * built from. Optional output fields; a reader that ignores them sees 4.6.
  */
-export const CACHE_CONTRACT_VERSION = "4.6";
+export const CACHE_CONTRACT_VERSION = "4.7";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

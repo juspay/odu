@@ -59,7 +59,7 @@ The tagged recipe's dependency graph is the pipeline. odu runs each leaf with `j
 | --- | --- |
 | `[linux]` / `[macos]` on a recipe | Schedules it on that platform only, and drops the edges it cannot honour. `odu ci protect` requires the same filtered set. Mind what `just` does first: it HIDES an OS-mismatched recipe from the machine that reads the file, so a `[linux]` recipe the root depends on makes `just --dump` refuse your justfile on a Mac. Wear one only where the coordinator runs on a platform the attribute admits; otherwise check the OS inside the recipe. (`examples/consumer/` wears none for this reason.) |
 | `[metadata("odu:shard=4")]` on a leaf | Runs up to four copies with `ODU_SHARD_INDEX` (0-based) and `ODU_SHARD_TOTAL` (actual), one GitHub context for all of them. |
-| `[metadata("odu:pin=<ref>")]` on a recipe | Pins that recipe's closure in the cache under `<owner>/<repo>@<ref>/<system>` — the attribute names the ref whose runs pin, e.g. `odu:pin=main` — so it outlives retention. Put it on the recipes whose outputs your default branch must always serve. (4.2, in progress.) |
+| `[metadata("odu:pin=<ref>")]` on a recipe | Pins that recipe's closure in the cache under `<owner>/<repo>@<ref>/<system>` — the attribute names the ref whose runs pin, e.g. `odu:pin=main` — so it outlives retention. Put it on the recipes whose outputs your default branch must always serve. A run on another ref pushes and pins nothing; one on no ref at all says a line on its push log why; a recipe that had a path refused is not pinned. |
 | `nix build … --out-link result-foo` inside a recipe | **The out-link is the push.** When a recipe exits 0, every `result*` in the directory it ran in is pushed, closure and all. A recipe that leaves none pushes nothing. |
 
 A recipe that builds but wants nothing pushed simply leaves no `result*` behind. A push that fails makes the node red: green means warmed.
@@ -139,7 +139,7 @@ Only when odu has no lane for a system you ship, or you want GitHub Actions' bui
 - **No `cache:`.** The step asks `odu cache target` for the `extra-substituters` line in your `flake.nix` and pushes to that URL by name, with your token. Name `cache:` when the workflow builds for a cache the flake does not list, **or when the bucket is private** — the inference probes anonymously, and a private bucket answers its `nix-cache-info` to nobody, so it cannot be found this way. A flake that names no odu cache, or two, fails the step with the URLs it found.
 - **`token`** is a write token for that bucket, minted on the bucket's page (**Tokens → Mint**, scope *write*). A pull request from a fork has no secret and pushes nothing; a push to a branch with no secret fails.
 - **`pin`** holds the closure under `<owner>/<repo>@<ref>/<system>`, the same pin a `[metadata("odu:pin=<ref>")]` recipe takes, so a run and a workflow for two systems hold two pins of one name shape.
-- It pushes every `result*` in the working directory, or the `paths:` you list. Every path is verified at the substituter afterwards; a path the cache does not answer makes the step red. The results are a table in the step summary.
+- It pushes every `result*` in the working directory, or the `paths:` you list. Every path is verified at the substituter afterwards; a path the cache does not answer makes the step red. The results are a table in the step summary. Each row it stores records `$GITHUB_SHA` as the commit that built it — a workflow is nobody's run, so it states no run id.
 
 ### 5. Require it
 
@@ -167,8 +167,8 @@ The verbs are the same as the CLI's and the board's: `run_start`, `run_wait`, `r
 ### 7. What you see afterwards
 
 - **A run's page**: the DAG, each node's log, and a push step per recipe naming the bucket and every path it warmed.
-- **A bucket's page**: paths grouped by the run and commit that pushed them, pins by name, what the next collection would take, storage and reads.
-- **A path**: who built it — run, commit, recipe, system — and which pin holds it, if any.
+- **A bucket's page**: paths grouped by package, pins by name, what the next collection would take, storage and reads.
+- **A path**: the commit it was built from, short, and the run that pushed it, as a link to that run's page — where the push said so. A path somebody pushed by hand says neither.
 - **GitHub**: one status per `<recipe>@<system>`, linking to the node's log.
 
 ### 8. What odu promises you
@@ -326,6 +326,16 @@ the page offers **Recipe** and **Push** tabs, and `log_read` takes
 reads what it always read) against the same log key. A push that fails makes
 the node RED, because green means warmed.
 
+**What a run pushes says where it came from, and may be held.** Every narinfo
+a run writes carries the run's id and the commit it was built from, and the
+bucket page draws them beside the path — the commit short, the run as a link
+to its own page. A recipe marked `[metadata("odu:pin=<ref>")]` additionally
+pins its closure under `<owner>/<repo>@<ref>/<system>` on a run that is
+actually on that ref, which is the same name the push action derives, so a run
+and a workflow never collide and a matrix's two systems never evict each
+other. On another ref the run pushes and says nothing; on no ref at all it
+says one line on the push log why nothing was pinned.
+
 Until organisations land, the bound on all of this is the operator's: there is
 no row saying which repository owns which bucket, so any checkout this daemon
 runs may push to any bucket it serves. `run.start` only ever reaches a
@@ -402,12 +412,12 @@ Each row versions its own surface. The daemon publishes the host's version and e
 | --- | --- | --- |
 | host (control, identity cell, admission) | 2.5 | every client |
 | `ci` (runs) | **2.6** | `odu ci run`/`ci wait`/`ci logs`, MCP, the board, kolu |
-| `cache` | **4.6** | `odu cache`, `odu surface cache`, the board |
+| `cache` | **4.7** | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board when there is a door |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
 | `metrics` (the host's own fragment) | **1.0** | `odu surface metrics`, a Prometheus at `/metrics` |
 
-Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource; **4.0** runs retention on `lastWanted` and drops the last-access field a path and `cache_stats_read` used to carry, and adds `cache_bucket_retention`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan` and `orphans` on the GC report (`retentionDays` at creation is now optional, defaulting to 90 days); **4.1** adds `readsFrom` on a bucket row and on `cache_bucket_describe`, `publicUrl` on a declared store, `migration` on a bucket row, and `cache_bucket_migrate`, which moves a bucket's objects between stores; **4.2** adds `writesTo` on a bucket row — `"store"` when `odu cache push` uploads straight into the bucket's store through presigned URLs and odu reads the object back to verify it, `"odu"` when the bytes cross the daemon — and the upload negotiation the push client speaks to learn it; **4.3** adds `cache_bucket_delete`, which takes a bucket's objects out of its store and then deletes the bucket with its paths, pins and its own tokens; **4.4** adds an optional `retentionDays` to `cache_gc_plan` alone, so a dry run can ask what another retention would take without writing one — `cache_gc_run` does not take it; **4.5** adds `group`, `name`, `sort` and `descending` to `cache_bucket_paths`, so a bucket is grouped by package and ordered by the row — counted over the whole bucket rather than over whichever page a reader holds. **4.6** adds a token's `label`, so the bucket page's Tokens list says `run <id>` for a credential odu minted for a run. Runs **2.5** adds a run's `push` — where it pushes and what it warmed — on a board row and on `run_read`/`run_wait`, and `pushed` on a node; **2.6** adds a run's `actor` — who started it, a login or `local` — on a board row and on `run_read`/`run_wait`. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
+Cache **3.0** removed the deprecated `held` list, its `/held` route and `odu cache push --wait`; **3.1** adds a bucket's `store`, `store` on `cache_bucket_create`, and the `stores` resource; **4.0** runs retention on `lastWanted` and drops the last-access field a path and `cache_stats_read` used to carry, and adds `cache_bucket_retention`, `cache_pin_list`, `cache_pin_delete`, `cache_gc_plan` and `orphans` on the GC report (`retentionDays` at creation is now optional, defaulting to 90 days); **4.1** adds `readsFrom` on a bucket row and on `cache_bucket_describe`, `publicUrl` on a declared store, `migration` on a bucket row, and `cache_bucket_migrate`, which moves a bucket's objects between stores; **4.2** adds `writesTo` on a bucket row — `"store"` when `odu cache push` uploads straight into the bucket's store through presigned URLs and odu reads the object back to verify it, `"odu"` when the bytes cross the daemon — and the upload negotiation the push client speaks to learn it; **4.3** adds `cache_bucket_delete`, which takes a bucket's objects out of its store and then deletes the bucket with its paths, pins and its own tokens; **4.4** adds an optional `retentionDays` to `cache_gc_plan` alone, so a dry run can ask what another retention would take without writing one — `cache_gc_run` does not take it; **4.5** adds `group`, `name`, `sort` and `descending` to `cache_bucket_paths`, so a bucket is grouped by package and ordered by the row — counted over the whole bucket rather than over whichever page a reader holds. **4.6** adds a token's `label`, so the bucket page's Tokens list says `run <id>` for a credential odu minted for a run; **4.7** adds `run` and `commit` to a path and to a package's newest version on `cache_bucket_paths` — what the push said built it, two opaque strings the cache keeps and never resolves. Runs **2.5** adds a run's `push` — where it pushes and what it warmed — on a board row and on `run_read`/`run_wait`, and `pushed` on a node; **2.6** adds a run's `actor` — who started it, a login or `local` — on a board row and on `run_read`/`run_wait`. A minor version adds members; a major changes something a reader already uses. Each version is pinned to a fingerprint of its surface, so a change to a surface without a bump fails the tests.
 
 
 ## Server mode
@@ -715,7 +725,7 @@ odu mcp
 | `ci protect` | Configure GitHub required checks; preview with `--dry-run` | **Maintenance** → **Apply protection** |
 | `cache use <bucket>` | Print the nix.conf settings, a `nixConfig` block and netrc for a bucket | **Cache** |
 | `cache login <origin>` | Save a token for an origin in `~/.config/odu/cache/credentials` | — (a machine's disk) |
-| `cache push <bucket> <path>…`, `cache push --cache <substituter> <path>…`, `cache push <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--cache` reads the push origin and the bucket off that cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`, probed ANONYMOUSLY, and pushed to with only a credential SAVED for that origin (`odu cache login`) — a repository named that URL, so the origin-agnostic `--token-file` and `$ODU_CACHE_TOKEN` stay out of scope for it, and a caller that wants its token sent names the target instead: `odu cache target` prints that URL, and `push --cache <that>` is a named one; a private bucket must be named with `--cache` (two odu caches there is a refusal). `--pin NAME` re-points that pin at the closure it landed | — (a build box's job) |
+| `cache push <bucket> <path>…`, `cache push --cache <substituter> <path>…`, `cache push <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--cache` reads the push origin and the bucket off that cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`, probed ANONYMOUSLY, and pushed to with only a credential SAVED for that origin (`odu cache login`) — a repository named that URL, so the origin-agnostic `--token-file` and `$ODU_CACHE_TOKEN` stay out of scope for it, and a caller that wants its token sent names the target instead: `odu cache target` prints that URL, and `push --cache <that>` is a named one; a private bucket must be named with `--cache` (two odu caches there is a refusal). `--pin NAME` re-points that pin at the closure it landed. `--run ID` and `--commit SHA` state what built the paths, kept on every row this push stores and drawn on the bucket page; a push that states neither leaves what a run already stated alone | — (a build box's job) |
 | `cache target` | Print the one odu substituter `./flake.nix`'s `nixConfig` names, with the same refusals `push` has (no flake, none, two). `-o json` gives `{cache, origin, bucket}`. This is how the push action resolves an omitted `cache:` | — (reads this checkout) |
 | `auth login <origin>` | Save a personal access token in `~/.config/odu/auth/credentials` | — (a machine's disk) |
 | `web`, `surface`, `mcp` | Browser server, generated CLI, agent transport | — |

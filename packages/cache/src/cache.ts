@@ -29,6 +29,7 @@ import type {
   MigrationRow,
   ObjectRow,
   PinAuthor,
+  Provenance,
   Scope,
   TokenRow,
   PathSort,
@@ -420,6 +421,10 @@ export interface PathPageRow {
   hits: number;
   /** When a push or a `missing` query last said somebody wants it. */
   lastWanted: number;
+  /** WHAT BUILT IT, as the pusher stated it — a run id and a commit sha, or
+   *  null where nothing was said. */
+  run: string | null;
+  commit: string | null;
 }
 
 /** One PACKAGE, as a grouped `paths` lists it: every version of one store
@@ -431,8 +436,11 @@ export interface PathGroupPageRow {
   hits: number;
   pushed: number;
   wanted: number;
-  /** The newest version's path — the hash a reader compares by. */
+  /** The newest version's path — the hash a reader compares by — and the
+   *  provenance of THAT version, never a mixture of two builds. */
   storePath: string;
+  run: string | null;
+  commit: string | null;
 }
 
 /** The verdict on a presented credential. `status` is what the route answers
@@ -570,7 +578,15 @@ export interface Cache {
     total: number,
     session?: string | null,
   ): Promise<CompleteUpload>;
-  acceptNarinfo(bucket: BucketRow, hash: string, body: ReadableStream<Uint8Array>): Promise<NarinfoOutcome>;
+  /** `provenance` is what the PUSHER said built this path (PLAN 4.2) — kept
+   *  on the row, understood by nobody here. A push that states nothing
+   *  leaves whatever an earlier one stated alone. */
+  acceptNarinfo(
+    bucket: BucketRow,
+    hash: string,
+    body: ReadableStream<Uint8Array>,
+    provenance: Provenance,
+  ): Promise<NarinfoOutcome>;
   /** Which of `paths` the bucket needs. `skipped` is the subset it will never
    *  take because an upstream key signed it — reported separately so `odu cache
    *  push` can say "upstream" rather than "already there". */
@@ -1138,6 +1154,7 @@ export function createCache(options: CacheOptions): Cache {
     info: NarInfo,
     file: KeptFile,
     selfHash: string | null,
+    provenance: Provenance,
   ): Promise<boolean> {
     const existing = repo.object(bucket.name, info.storePath);
     const at = now();
@@ -1187,6 +1204,11 @@ export function createCache(options: CacheOptions): Cache {
       // A STORED PUSH IS A WANT, and the clock retention reads: the pusher
       // has just said this path matters to it.
       lastWanted: at,
+      // WHAT THE PUSHER SAID BUILT IT, written as stated — including the
+      // nulls. The upsert COALESCEs, so a push that states nothing keeps
+      // what a run stated and does not have to read the old row to know it.
+      run: provenance.run,
+      commit: provenance.commit,
     });
     // THE STORE'S COPY OF THE NARINFO, rewritten from the row that has just
     // landed (PLAN 2.8): a re-push that added a signature must not leave the
@@ -1807,6 +1829,8 @@ export function createCache(options: CacheOptions): Cache {
             created: row.created,
             hits: row.hits,
             lastWanted: row.lastWanted,
+            run: row.run,
+            commit: row.commit,
           })),
           groups: null,
           next: listed.next,
@@ -2464,8 +2488,8 @@ export function createCache(options: CacheOptions): Cache {
       staging.beginPart(bucket, file, index, limit, session),
     completeUpload: (bucket, file, total, session) =>
       staging.completeUpload(bucket, file, total, session),
-    async acceptNarinfo(bucket, hash, body) {
-      const outcome = await staging.acceptNarinfo(bucket, hash, body);
+    async acceptNarinfo(bucket, hash, body, provenance) {
+      const outcome = await staging.acceptNarinfo(bucket, hash, body, provenance);
       // A PUSH LANDED OR WAS REFUSED — the changes nobody outside the cache
       // can see, and the reason this listener exists at all. The publisher
       // diffs, so a refusal that changed nothing costs one comparison.

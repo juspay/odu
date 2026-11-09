@@ -122,6 +122,37 @@ describe("pipelineFromDump", () => {
     expect(() => pipelineFromDump(nonLeaf)).toThrow(/must be a leaf/);
   });
 
+  it("reads the ref a recipe pins its closure on", () => {
+    const fixture = dump() as any;
+    fixture.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin=main"] }];
+    expect(
+      pipelineFromDump(fixture).tasks.find((task) => task.id === "ci::e2e")?.pin,
+    ).toBe("main");
+    // WHETHER this run is on that ref is nobody's business here — ingest
+    // reads what the recipe said and the coordinator decides.
+    expect(
+      pipelineFromDump(dump()).tasks.find((task) => task.id === "ci::e2e")?.pin,
+    ).toBeUndefined();
+  });
+
+  it("refuses a pin that names no ref, and a recipe that pins twice", () => {
+    // A BARE MARKER IS NOT "pin whatever is checked out": accepted silently it
+    // would hold a feature branch's closure forever under trunk's name.
+    const bare = dump() as any;
+    bare.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin"] }];
+    expect(() => pipelineFromDump(bare)).toThrow(/odu:pin=<ref>/);
+
+    const empty = dump() as any;
+    empty.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin="] }];
+    expect(() => pipelineFromDump(empty)).toThrow(/odu:pin=<ref>/);
+
+    const twice = dump() as any;
+    twice.modules.ci.recipes.e2e.attributes = [
+      { metadata: ["odu:pin=main", "odu:pin=release"] },
+    ];
+    expect(() => pipelineFromDump(twice)).toThrow(/more than once/);
+  });
+
   it("includes a --root override's own body-bearing recipe as a node", () => {
     const spec = pipelineFromDump(dump(), { root: "ci::e2e" });
     expect(spec.tasks.map((t) => t.id).sort()).toEqual([

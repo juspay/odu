@@ -669,6 +669,11 @@ type BucketTab = (typeof BUCKET_TABS)[number];
  *  short enough that the names beside them line up. */
 export const HASH_SHOWN = 8;
 
+/** How much of a COMMIT a column shows. Seven hex characters is what git
+ *  itself abbreviates to and what a person has in their terminal scrollback,
+ *  so the cell matches what they would compare it against. */
+const SHA_SHOWN = 7;
+
 /** What the table can be ordered by — the CONTRACT's word, because the order
  *  is the row's to apply. The hash is not among them: it is a random string,
  *  so sorting by it is sorting by nothing, and `wanted` moves under the
@@ -699,6 +704,11 @@ export interface PathRow {
   readonly hits: number;
   readonly pushed: number;
   readonly wanted: number;
+  /** WHAT BUILT IT, as the push stated it: the run that put it there and the
+   *  commit it was built from, or null where nothing was said. A group's are
+   *  the NEWEST version's, read off the same row the hash is. */
+  readonly run: string | null;
+  readonly commit: string | null;
 }
 
 /**
@@ -718,6 +728,10 @@ const pathRow = (path: CachePath, name: string): PathRow => ({
   hits: path.hits,
   pushed: path.created,
   wanted: path.lastWanted,
+  // A DAEMON OLDER THAN 4.7 ANSWERS NEITHER FIELD, and a path pushed before
+  // this said nothing: both read as "unknown", which the cells draw as empty.
+  run: path.run ?? null,
+  commit: path.commit ?? null,
 });
 
 /**
@@ -737,6 +751,8 @@ export function pathRows(page: CachePaths): readonly PathRow[] {
       hits: group.hits,
       pushed: group.pushed,
       wanted: group.wanted,
+      run: group.run ?? null,
+      commit: group.commit ?? null,
     }));
   }
   return page.paths.map((path) => pathRow(path, storePathParts(path.storePath).name));
@@ -1087,7 +1103,7 @@ function BucketPaths(props: {
   };
 
   /**
-   * THE TABLE, AS DATA — six columns, their widths, and what each cell is.
+   * THE TABLE, AS DATA — eight columns, their widths, and what each cell is.
    *
    * Every width but the name's is fixed, so the name takes what is left and
    * nothing in a cell can widen the page; the `Table` primitive owns the
@@ -1144,6 +1160,44 @@ function BucketPaths(props: {
       width: "4rem",
       sortable: true,
       cell: (row) => row.hits,
+    },
+    /**
+     * WHAT BUILT IT (cache 4.7). Two cells rather than one: a commit is a
+     * fact a reader compares against their own checkout, and a run is a place
+     * they go.
+     *
+     * A SHORT SHA for the same reason the hash cell is short — seven
+     * characters is what a person recognises a commit by, and the whole one
+     * is the `title`. A path whose push said nothing renders NOTHING here,
+     * not a dash: an empty cell reads as "this bucket does not know", while a
+     * placeholder reads as a value.
+     */
+    {
+      key: "commit",
+      label: "commit",
+      width: "5rem",
+      cell: (row) =>
+        row.commit === null ? null : <span title={row.commit}>{row.commit.slice(0, SHA_SHOWN)}</span>,
+    },
+    {
+      key: "run",
+      label: "run",
+      width: "6rem",
+      /*
+       * THE RUN PAGE IS A HASH ROUTE, and the link is spelled LITERALLY
+       * rather than through `runHash()`: this package may not import
+       * `@odu/service-client` (`closure.test.ts` holds the fence, because the
+       * cache row's client is what `odu cache push` carries and it must not
+       * drag the board's client in). The board routes `#/run/<id>`; a bare
+       * `/runs/<id>` pathname has no server route and falls through to the
+       * board, so the fragment is the whole address.
+       */
+      cell: (row) =>
+        row.run === null ? null : (
+          <a class="link" href={`#/run/${encodeURIComponent(row.run)}`} title={row.run}>
+            {row.run}
+          </a>
+        ),
     },
     {
       key: "wanted",

@@ -146,6 +146,7 @@ async function push(cache: Cache, bucket: string, storePath: string, text: strin
     row,
     hashOf(storePath),
     stream(narinfoText(storePath, payload)),
+    { run: null, commit: null },
   );
   if (!outcome.ok) throw new Error(`push was refused: ${outcome.message}`);
 }
@@ -388,6 +389,7 @@ describe("a delete and the writer it races", () => {
       admitted,
       hashOf(path),
       stream(narinfoText(path, payload)),
+      { run: null, commit: null },
     );
     // 404, which is what `admit` would have answered the same request one
     // moment later — not a 200 with nothing reachable behind it.

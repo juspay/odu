@@ -402,7 +402,7 @@ docs, "Set up an R2 bucket"):
   "auto"; credentialsFile; publicUrl?; }` — `publicUrl` being the custom domain
   bound to that bucket, an origin with no path, which public buckets on the
   store are then advertised at.
-The cache row is at contract 4.6 (3.0 removed `held` and `--wait`; 3.1 added
+The cache row is at contract 4.7 (3.0 removed `held` and `--wait`; 3.1 added
 `store` and the `stores` resource; 4.0 moved retention onto `lastWanted` — the
 old last-access field is gone from a path and from `stats_read` — and added
 `bucket_retention`, `pin_list`, `pin_delete`, `gc_plan` and `orphans`; 4.1 added
@@ -413,7 +413,8 @@ upload negotiation; 4.3 added `bucket_delete`; 4.4 added `gc_plan`'s
 added `bucket_paths`' `group`, `name`, `sort` and `descending` — a bucket
 counted and ordered by the row rather than by whoever holds one page; 4.6 added
 `label` on a token's public half, so the Tokens list says `run <id>` for a
-credential odu minted for a run).
+credential odu minted for a run; 4.7 added `run` and `commit` on a path and on
+a package's newest version — what the push said built it, kept opaque).
 
 - **WRITES LEAVE ODU TOO, on an S3 store.** `odu cache push` asks the bucket
   where a NAR's bytes go before it sends any. A bucket whose store takes its
@@ -797,9 +798,16 @@ declares.
   page's Tokens list, cache 4.6); the recipe's own environment never has it; a
   push that fails reddens its node. A repository naming TWO caches this daemon
   serves is refused at start, except on a replay, which runs without pushing.
-  `run_read` answers `push`, and a node answers `pushed`. The interim bound is
-  the operator's: with no org row saying which repository owns which bucket,
-  any checkout this daemon runs may push to any bucket it serves.
+  `run_read` answers `push`, and a node answers `pushed`. Every narinfo a run
+  writes carries the run's id and its commit (cache 4.7), which the bucket
+  page draws beside the path — the commit short, the run as a link. A recipe
+  marked `[metadata("odu:pin=<ref>")]` also PINS its closure under
+  `<owner>/<repo>@<ref>/<system>` — the push action's own name shape — but
+  only on a run that is actually on that ref; another ref pushes silently, and
+  a run on no ref says one line on its push log why it pinned nothing. The
+  interim bound is the operator's: with no org row saying which repository
+  owns which bucket, any checkout this daemon runs may push to any bucket it
+  serves.
 - **The daemon can be scraped** (`metrics` 1.0, PLAN 6.2): `GET /metrics` is a
   Prometheus exposition of the cache row's hit rates and storage, the runs'
   durations and lane use. It needs the root token or a `metrics` token
@@ -835,7 +843,7 @@ declares.
   answered by `run_read` and shown as `started by <login>` on the board and
   in `odu ci history list --all`. It is provenance, not
   authority: a revoked token stops the next call, not a launched run.
-- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.6, `cache` at 4.6,
+- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.6, `cache` at 4.7,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
   major of a row **it reads** differs. The refusal names that row
   (`serves the cache row at 4.0; this build reads cache 3.1`): run `odu web --upgrade`.
@@ -875,7 +883,13 @@ declares.
 - `odu cache push --pin NAME` re-points a pin at the closure the push landed
   (nothing is pinned if a path was refused). The push action takes `pin: true`
   instead of a name and derives `<owner>/<repo>@<ref>/<system>`; when to pin is
-  the workflow's own `${{ github.ref_name == … }}` line.
+  the workflow's own `${{ github.ref_name == … }}` line, and a run derives the
+  same name from `[metadata("odu:pin=<ref>")]`.
+- `odu cache push --run ID --commit SHA` states what built the paths (cache
+  4.7). Two opaque strings kept on every row the push stores and drawn on the
+  bucket page; a push that states neither leaves what a run already stated
+  alone, which is why the push action states `--commit` only. Do NOT add these
+  to a justfile recipe to get provenance on a run: a run states both itself.
 
 - **The admin CLI is retired.** The CLI is `odu ci <verb>` (every run command
   now carries the `ci` word: `odu ci run`, `odu ci wait`, `odu ci logs`,

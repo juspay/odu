@@ -75,8 +75,15 @@ afterEach(() => {
 
 /** A throwaway checkout with ONE recipe: this is about one node's push, and a
  *  second node would only add frames to drive. The pool names a REMOTE host so
- *  the platform enters the venue claim — which is injected, like the lane. */
-function fixture(): string {
+ *  the platform enters the venue claim — which is injected, like the lane.
+ *
+ *  The three knobs are the PIN decision's whole input (PLAN 4.2): what the
+ *  recipe asked for, which ref the checkout is on, and whether the origin
+ *  names an `owner/repo`. Defaults are the journal tests' world — no pin, a
+ *  non-GitHub origin — so the push assertions below read unchanged. */
+function fixture(
+  options: { pin?: string; branch?: string | null; remote?: string } = {},
+): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-push-journal-"));
   const git = (...args: string[]): void => {
     const r = spawnSync("git", args, { cwd: dir, encoding: "utf-8" });
@@ -84,7 +91,15 @@ function fixture(): string {
   };
   writeFileSync(
     join(dir, "justfile"),
-    ['[metadata("ci")]', "default: alpha", "", "alpha:", "    true", ""].join("\n"),
+    [
+      '[metadata("ci")]',
+      "default: alpha",
+      "",
+      ...(options.pin === undefined ? [] : [`[metadata("odu:pin=${options.pin}")]`]),
+      "alpha:",
+      "    true",
+      "",
+    ].join("\n"),
   );
   writeFileSync(join(dir, "hosts.json"), JSON.stringify({ [PLATFORM]: HOST }));
   writeFileSync(join(dir, ".gitignore"), ".ci/\n");
@@ -93,7 +108,11 @@ function fixture(): string {
   git("config", "user.name", "test");
   git("add", "-A");
   git("commit", "-qm", "fixture");
-  git("remote", "add", "origin", "file:///nonexistent/origin.git");
+  git("remote", "add", "origin", options.remote ?? "file:///nonexistent/origin.git");
+  // `null` is a DETACHED HEAD — a run on no ref at all, which is the one case
+  // a pinning recipe cannot be answered for.
+  if (options.branch === null) git("checkout", "-q", "--detach");
+  else if (options.branch !== undefined) git("checkout", "-q", "-b", options.branch);
 
   const prevCwd = process.cwd();
   const env: Record<string, string> = {
@@ -327,5 +346,99 @@ describe.if(hasJust)("the journal of a node that pushed", () => {
       await outcome;
       rmSync(join(dir, ".ci"), { recursive: true, force: true });
     }
+  }, 60_000);
+});
+
+/**
+ * WHO DECIDES A PIN (PLAN 4.2) — the coordinator, and nothing downstream.
+ *
+ * The lane is handed a finished name on `TaskSpec.env` or it is handed
+ * nothing; it compares no refs and resolves no remote. That is asserted from
+ * the only seam where it is visible: the tasks a lane is configured with.
+ * A lane that derived the name itself would derive it on a COPY of the
+ * checkout, on a machine that may have fetched since — and a wrong pin name
+ * does not fail, it holds the wrong closure open while the right one is let
+ * go.
+ */
+describe.if(hasJust)("the pin a task's environment carries", () => {
+  /** Start a run, read the one lane's task environment, and let the run end.
+   *  Driving the node to `ok` matters: an abandoned coordinator would hold
+   *  the checkout's run lock against the next case in this file. */
+  async function laneEnv(
+    options: Parameters<typeof fixture>[0],
+  ): Promise<Record<string, string>> {
+    const dir = fixture(options);
+    plantPushToken();
+    const { lanes, deps } = harness();
+    const run = runCommand(runArgs(), deps);
+    const outcome = run.catch((err: unknown) => err);
+    try {
+      await waitForLive(outcome, () => lanes.length === 1);
+      const lane = lanes[0]!;
+      const alpha = lane.opts.tasks.find((task) => task.id === "alpha");
+      expect(alpha).toBeDefined();
+      lane.opts.onNodes(laneState("ok", { durationMs: 1 }));
+      lane.opts.onLogFrame("alpha", { kind: "end" }, "push");
+      lane.opts.onLogFrame("alpha", { kind: "end" }, "recipe");
+      return { ...(alpha?.env ?? {}) };
+    } finally {
+      await outcome;
+      rmSync(join(dir, ".ci"), { recursive: true, force: true });
+    }
+  }
+
+  it("names the pin when the run is on the ref the recipe asked for", async () => {
+    const env = await laneEnv({
+      pin: "main",
+      branch: "main",
+      remote: "https://github.com/acme/widget.git",
+    });
+    // THE SAME SHAPE `.github/actions/push/pin-name.sh` derives, system and
+    // all: a run and a workflow pushing the same commit must re-point ONE
+    // pin, and a matrix's second job must not evict the first's closure.
+    expect(env.ODU_CACHE_PIN).toBe(`acme/widget@main/${PLATFORM}`);
+    expect(env.ODU_CACHE_PIN_SKIPPED).toBeUndefined();
+    // Provenance rides the same wire, from the facts the coordinator already
+    // holds — the lane reads git for neither.
+    expect(env.ODU_CACHE_RUN).toBe(RUN_ID);
+    expect(env.ODU_CACHE_COMMIT).toMatch(/^[0-9a-f]{40}$/);
+  }, 60_000);
+
+  it("says nothing at all on another ref", async () => {
+    const env = await laneEnv({
+      pin: "main",
+      branch: "feature/x",
+      remote: "https://github.com/acme/widget.git",
+    });
+    // Not a skip, not a sentence: the pin belongs to the other ref, and a
+    // feature branch reporting "not pinning" every run would train a reader
+    // to ignore the line that matters.
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(env.ODU_CACHE_PIN_SKIPPED).toBeUndefined();
+  }, 60_000);
+
+  it("explains itself when the run is on no ref", async () => {
+    const env = await laneEnv({
+      pin: "main",
+      branch: null,
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(env.ODU_CACHE_PIN_SKIPPED).toContain("detached HEAD");
+  }, 60_000);
+
+  it("explains itself when no origin names an owner/repo", async () => {
+    const env = await laneEnv({ pin: "main", branch: "main" });
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(env.ODU_CACHE_PIN_SKIPPED).toContain("github.com origin");
+  }, 60_000);
+
+  it("puts nothing pin-shaped on a recipe that asked for none", async () => {
+    const env = await laneEnv({
+      branch: "main",
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(env.ODU_CACHE_PIN_SKIPPED).toBeUndefined();
   }, 60_000);
 });

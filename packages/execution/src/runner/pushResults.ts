@@ -66,23 +66,46 @@ export interface PushConfig {
   /** The run's write token, scoped to that one bucket and expiring with the
    *  run. */
   readonly token: string;
+  /** The pin name this node's closure is re-pointed to, when the coordinator
+   *  decided this run is on the ref the recipe asked for. ABSENT otherwise —
+   *  the lane compares no refs and reads no git; a pin it was not handed is a
+   *  pin it does not make. */
+  readonly pin?: string;
+  /** Why a recipe that ASKED for a pin gets none — one sentence, said once on
+   *  the node's push log. Mirrors the run-level `push`/`pushSkipped` pair:
+   *  silence about a pin that was configured and not made is how a bucket's
+   *  trunk closure quietly falls out of the next collection. */
+  readonly pinSkipped?: string;
+  /** The run this push belongs to, and the commit it was built from — carried
+   *  to the cache as provenance on every narinfo. Decided by the coordinator,
+   *  which HAS both facts; a lane that derived them would be reading git in
+   *  the one place where the checkout may already have moved. */
+  readonly run?: string;
+  readonly commit?: string;
 }
 
-/** The three variables a coordinator puts on a task so this module can act. */
+/** The variables a coordinator puts on a task so this module can act. */
 export const PUSH_ORIGIN_ENV = "ODU_CACHE_ORIGIN";
 export const PUSH_BUCKET_ENV = "ODU_CACHE_BUCKET";
 export const PUSH_TOKEN_ENV = "ODU_CACHE_TOKEN";
+export const PUSH_PIN_ENV = "ODU_CACHE_PIN";
+export const PUSH_PIN_SKIPPED_ENV = "ODU_CACHE_PIN_SKIPPED";
+export const PUSH_RUN_ENV = "ODU_CACHE_RUN";
+export const PUSH_COMMIT_ENV = "ODU_CACHE_COMMIT";
 
 /**
  * The task environment that carries a push to a lane — the WRITING half of
  * {@link pushConfigOf}, here beside it.
  *
  * Both halves of a wire belong to one module. The coordinator spelled these
- * three names itself, which made the strip that keeps the token out of a
- * recipe's own environment (`PUSH_TOKEN_ENV`, in the runner) correct only
- * while two files agreed about a literal — and a rename that moved one and
- * not the other would leak a live credential into every recipe's log in
- * silence. 4.2 adds a pin name to this same wire.
+ * names itself, which made the strip that keeps the token out of a recipe's
+ * own environment (`PUSH_TOKEN_ENV`, in the runner) correct only while two
+ * files agreed about a literal — and a rename that moved one and not the
+ * other would leak a live credential into every recipe's log in silence. The
+ * pin, the skip sentence and the run/commit provenance ride the same wire for
+ * the same reason: every one of them is a COORDINATOR's decision, and a lane
+ * that re-derived any of them would be answering from a checkout that has
+ * already moved on.
  */
 export function pushEnvFor(
   config: PushConfig | null,
@@ -93,11 +116,21 @@ export function pushEnvFor(
         [PUSH_ORIGIN_ENV]: config.origin,
         [PUSH_BUCKET_ENV]: config.bucket,
         [PUSH_TOKEN_ENV]: config.token,
+        ...(config.pin === undefined ? {} : { [PUSH_PIN_ENV]: config.pin }),
+        ...(config.pinSkipped === undefined
+          ? {}
+          : { [PUSH_PIN_SKIPPED_ENV]: config.pinSkipped }),
+        ...(config.run === undefined ? {} : { [PUSH_RUN_ENV]: config.run }),
+        ...(config.commit === undefined
+          ? {}
+          : { [PUSH_COMMIT_ENV]: config.commit }),
       };
 }
 
 /** The push configuration a task's environment states, or `null` when it
- *  states none — which is every task of a run with no cache target. */
+ *  states none — which is every task of a run with no cache target. The pin
+ *  and provenance keys are read only once the three required ones are there:
+ *  a pin without a bucket to push to is not a push. */
 export function pushConfigOf(
   env: Readonly<Record<string, string>> | undefined,
 ): PushConfig | null {
@@ -107,7 +140,19 @@ export function pushConfigOf(
   if (origin === undefined || origin === "") return null;
   if (bucket === undefined || bucket === "") return null;
   if (token === undefined || token === "") return null;
-  return { origin, bucket, token };
+  const pin = env?.[PUSH_PIN_ENV];
+  const pinSkipped = env?.[PUSH_PIN_SKIPPED_ENV];
+  const run = env?.[PUSH_RUN_ENV];
+  const commit = env?.[PUSH_COMMIT_ENV];
+  return {
+    origin,
+    bucket,
+    token,
+    ...(pin === undefined || pin === "" ? {} : { pin }),
+    ...(pinSkipped === undefined || pinSkipped === "" ? {} : { pinSkipped }),
+    ...(run === undefined || run === "" ? {} : { run }),
+    ...(commit === undefined || commit === "" ? {} : { commit }),
+  };
 }
 
 /** What one node's push came to. `null` from {@link LanePusher.push} means
@@ -262,29 +307,52 @@ export function createLanePusher(
         return null;
       }
       const fresh = found.filter((path) => !sent.has(path));
-      if (fresh.length === 0) return null;
-      // THE STEP EXISTS FROM HERE. `fresh` being non-empty is the first moment
-      // it is certain this node has a push to show — everything above it can
-      // still end in "there was nothing to send", which is not a step and must
-      // not open one. Everything below it ends in a fact or a throw, so the
+      // A PINNING NODE SUBTRACTS NOTHING. `fresh` exists so one store path is
+      // uploaded once per run — but a pin names ROOTS, and the bucket resolves
+      // the closure it holds from exactly the roots this call names. A root
+      // dropped because an earlier node already sent it is a root this pin
+      // would stop holding, and a node whose every path was already sent would
+      // return below and never pin at all. So a pinning node names its whole
+      // `result*` set and the bucket answers `alreadyPresent` for the bytes it
+      // already has; every other node sends the subtracted set, which is what
+      // keeps one closure from being re-uploaded by every recipe in the DAG.
+      const sending = config.pin === undefined ? fresh : found;
+      if (sending.length === 0) return null;
+      // THE STEP EXISTS FROM HERE. A non-empty send is the first moment it is
+      // certain this node has a push to show — everything above it can still
+      // end in "there was nothing to send", which is not a step and must not
+      // open one. Everything below it ends in a fact or a throw, so the
       // runner may start a clock on this call and know an ending is coming.
       hooks.begin();
       hooks.say(
-        `[odu] pushing ${fresh.length} result path${fresh.length === 1 ? "" : "s"} ` +
+        `[odu] pushing ${sending.length} result path${sending.length === 1 ? "" : "s"} ` +
           `to bucket ${config.bucket} at ${config.origin}`,
       );
+      if (config.pinSkipped !== undefined) {
+        // ONE LINE, and on the PUSH log: a pin that was asked for and not made
+        // is otherwise invisible — the recipe passes, the closure lands, and
+        // the next collection takes it. A node that pushes nothing opens no
+        // step and says nothing, which is right: it holds nothing either.
+        hooks.say(`[odu] not pinning: ${config.pinSkipped}`);
+      }
       let summary: PushSummary;
       try {
         summary = await send({
           bucket: config.bucket,
           origin: config.origin,
-          paths: fresh,
+          paths: sending,
           // THE TOKEN, AS A TOKEN. Not through the client's discovery
           // environment: that describes a MACHINE (its `HOME`, its saved
           // logins), and a lane passing a one-key object would also be
           // asserting it has neither. This lane holds the credential outright
           // and says so.
           credential: config.token,
+          // PIN AND PROVENANCE, exactly as handed down. `pushToCache` pins
+          // only when every path landed (its own rule, not re-implemented
+          // here), and the run/commit are opaque to the cache.
+          ...(config.pin === undefined ? {} : { pin: config.pin }),
+          ...(config.run === undefined ? {} : { run: config.run }),
+          ...(config.commit === undefined ? {} : { commit: config.commit }),
           env: {},
           onLine: (line) => hooks.say(`[odu] ${line}`),
         });
@@ -305,7 +373,7 @@ export function createLanePusher(
         // have destroyed the `code`/`errno`/`hostname` the bottom of that
         // chain carries.
         throw new Error(
-          `odu: push of ${fresh.length} path${fresh.length === 1 ? "" : "s"} ` +
+          `odu: push of ${sending.length} path${sending.length === 1 ? "" : "s"} ` +
             `to bucket ${config.bucket} at ${config.origin} failed`,
           { cause: err },
         );

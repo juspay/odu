@@ -231,6 +231,61 @@ build:
   return dir;
 }
 
+/** The ref the pinning fixture's recipe names, and the owner/repo its origin
+ *  does — the two halves of `<owner>/<repo>@<ref>/<system>` that come out of
+ *  the checkout rather than off the lane. */
+const PIN_REF = "trunk";
+const PIN_REPO = "odu-e2e/pinned";
+
+/**
+ * The same fixture on a BRANCH, with a GitHub origin, and a recipe that asks
+ * for a pin on that branch (PLAN 4.2).
+ *
+ * Three facts make a pin name and no unit test holds all three at once: the
+ * ref a checkout is on, the `owner/repo` its origin names, and the system the
+ * lane is. The remote is never dialled — `--no-strict` turns posting off, and
+ * the coordinator only parses the URL — so this costs no network and still
+ * exercises the one path where a name is derived.
+ */
+function pinnedFixture(substituter: string, publicKey: string): string {
+  const dir = fixture(substituter, publicKey);
+  writeFileSync(
+    join(dir, "justfile"),
+    `[metadata("ci")]
+default: build
+
+[metadata("odu:pin=${PIN_REF}")]
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash=$(readlink -f "$(command -v bash)")
+    export ODU_E2E_BASH=\${bash%/bin/bash}
+    nix build --impure --file build.nix --out-link result
+    readlink -f result
+`,
+  );
+  const git = (...args: string[]): void => {
+    execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
+  };
+  git("remote", "add", "origin", `https://github.com/${PIN_REPO}.git`);
+  // THE BRANCH IS NAMED HERE rather than taken from `git init`'s default,
+  // which is a machine's `init.defaultBranch` and would put a different name
+  // in the pin on a different developer's laptop.
+  git("checkout", "-q", "-B", PIN_REF);
+  git("add", "-A");
+  git(
+    "-c",
+    "user.email=e2e@odu.test",
+    "-c",
+    "user.name=odu e2e",
+    "commit",
+    "-q",
+    "-m",
+    "pinned",
+  );
+  return dir;
+}
+
 /** The hash part a narinfo is named for. */
 const hashOf = (storePath: string): string =>
   storePath.slice(storePath.lastIndexOf("/") + 1).slice(0, 32);
@@ -374,6 +429,59 @@ describe("a run whose repository reads from this daemon's cache", () => {
       JSON.stringify(read),
     ];
     for (const text of surfaces) expect(text).not.toMatch(plaintext);
+  }, 1_800_000);
+});
+
+/**
+ * WHAT BUILT A PATH, AND WHAT HOLDS IT (PLAN 4.2) — every real part of it.
+ *
+ * A checkout on a branch with a GitHub origin, a coordinator that compares
+ * the ref it is on with the one the recipe named, a lane handed a finished
+ * name on its task environment and reading git for nothing, the narinfo
+ * headers that carry the run and the commit, and the bucket's own pin row at
+ * the end. The unit suites hold each of those; only this holds that the five
+ * of them agree about one name.
+ */
+describe("a recipe that pins what its branch builds", () => {
+  it("pins under the name the Action derives, and the path says what built it", async () => {
+    const held = bucket(home, ROOT, "held");
+    const dir = pinnedFixture(held.url, held.publicKey);
+
+    const ran = run(home, ["ci", "run", "--no-strict"], { cwd: dir });
+    expect({ status: ran.status, stderr: ran.stderr }).toMatchObject({ status: 0 });
+
+    const listed = surface(home, ["run_list"], { checkout: dir, limit: 1 }) as {
+      rows: { runId: string }[];
+    };
+    const runId = listed.rows[0]?.runId as string;
+    const head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf-8",
+    }).trim();
+
+    // THE PROVENANCE, off the bucket's own row rather than the run's account:
+    // the two strings travelled as headers on the narinfo PUT, and this is
+    // the only place that says the cache kept them.
+    const paths = surface(home, ["cache", "bucket_paths"], {
+      bucket: "held",
+      limit: 10,
+    }) as { paths: { storePath: string; run: string | null; commit: string | null }[] };
+    expect(paths.paths).toHaveLength(1);
+    expect(paths.paths[0]).toMatchObject({ run: runId, commit: head });
+
+    // AND THE PIN, under the name `.github/actions/push/pin-name.sh` derives
+    // for a workflow — so a repository that moves a job onto `odu ci run`
+    // re-points the pin it already had instead of growing a second one.
+    // `createdBy: "write"` because the run's own write token made it.
+    const pins = surface(home, ["cache", "pin_list"], {
+      rootToken: ROOT,
+      bucket: "held",
+    }) as { pins: { name: string; createdBy: string; rootPaths: string[] }[] };
+    expect(pins.pins.map((pin) => pin.name)).toEqual([
+      `${PIN_REPO}@${PIN_REF}/${currentNixSystem()}`,
+    ]);
+    expect(pins.pins[0]?.createdBy).toBe("write");
+    expect(pins.pins[0]?.rootPaths).toEqual([paths.paths[0]?.storePath as string]);
   }, 1_800_000);
 });
 

@@ -43,6 +43,12 @@ export const TaskSpecSchema = Schema.Struct({
   shards: Schema.optionalKey(
     Schema.Int.check(Schema.isGreaterThan(1)),
   ),
+  /** The git REF whose runs pin this recipe's pushed closure
+   *  (`[metadata("odu:pin=main")]`). A NAME OF A REF, not a decision: the
+   *  coordinator compares it to the ref the run is actually on and only then
+   *  derives the pin name the lane is handed (`runner/pushResults.ts`'s
+   *  `ODU_CACHE_PIN`). Absent for a recipe whose output nothing holds open. */
+  pin: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1))),
   /** Coordinator-injected task environment. Kept generic on the wire; shard
    *  lanes currently use it for ODU_SHARD_INDEX / ODU_SHARD_TOTAL. */
   env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),

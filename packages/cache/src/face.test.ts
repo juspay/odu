@@ -219,13 +219,24 @@ describe("the paths table draws what the row answered", () => {
   const path = (
     name: string,
     hash: string,
-    over: { narSize?: number; created?: number; hits?: number; lastWanted?: number } = {},
+    over: {
+      narSize?: number;
+      created?: number;
+      hits?: number;
+      lastWanted?: number;
+      run?: string;
+      commit?: string;
+    } = {},
   ) => ({
     storePath: `/nix/store/${hash}-${name}`,
     narSize: over.narSize ?? 1_000,
     created: over.created ?? 1_000,
     hits: over.hits ?? 0,
     lastWanted: over.lastWanted ?? 1_000,
+    // OMITTED, not `undefined`: the fields are optional on the wire, so a
+    // case that states neither is answering as a 4.6 daemon does.
+    ...(over.run === undefined ? {} : { run: over.run }),
+    ...(over.commit === undefined ? {} : { commit: over.commit }),
   });
 
   it("draws a group as the row counted it, newest version's path and all", async () => {
@@ -242,6 +253,8 @@ describe("the paths table draws what the row answered", () => {
             pushed: 30,
             wanted: 50,
             storePath: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-odu-base-0.1.0",
+            run: "run-9",
+            commit: "f".repeat(40),
           },
         ],
       }),
@@ -254,6 +267,10 @@ describe("the paths table draws what the row answered", () => {
         hits: 7,
         pushed: 30,
         wanted: 50,
+        // The newest version's, carried straight through — the row decided
+        // which version that is.
+        run: "run-9",
+        commit: "f".repeat(40),
       },
     ]);
   });
@@ -272,6 +289,22 @@ describe("the paths table draws what the row answered", () => {
     expect(rows.every((row) => row.versions === 1)).toBe(true);
     expect(rows.map((row) => row.bytes)).toEqual([900, 100]);
     expect(rows[0]?.pushed).toBe(1_000);
+    // A DAEMON OLDER THAN 4.7 ANSWERS NEITHER FIELD, and the table draws
+    // "nothing known" rather than carrying `undefined` into a cell.
+    expect(rows[0]).toMatchObject({ run: null, commit: null });
+  });
+
+  it("carries a path's own run and commit through to its row", async () => {
+    const { pathRows } = await import("./face");
+    const rows = pathRows({
+      paths: [
+        path("odu-base-0.1.0", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {
+          run: "run-3",
+          commit: "9".repeat(40),
+        }),
+      ],
+    });
+    expect(rows[0]).toMatchObject({ run: "run-3", commit: "9".repeat(40) });
   });
 
   it("splits a store path into the hash a person compares and the name they read", async () => {

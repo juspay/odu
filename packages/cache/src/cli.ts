@@ -101,7 +101,7 @@ use <bucket>                  the nix.conf settings, the nixConfig block and the
                               bucket's URL and public key are public
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
-push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [-o json]
+push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA] [-o json]
 push --cache <substituter> <path>…
 push <path>…                  with neither, the substituter is read from
                               ./flake.nix's nixConfig — the one declaration a
@@ -129,6 +129,14 @@ push <path>…                  with neither, the substituter is read from
                               this push landed, so garbage collection keeps it.
                               The write token is the authority; nothing is
                               pinned if any path was refused
+                              --run and --commit state WHAT BUILT the paths:
+                              the bucket keeps both on every row this push
+                              stores and shows them on its page, so a path
+                              nobody recognises can be traced to the run and
+                              the commit that made it. Two opaque strings —
+                              the cache never learns what a run is. A push
+                              that states neither leaves whatever a run
+                              already stated about these paths alone
 target [-o json]              print the one odu substituter ./flake.nix's
                               nixConfig names — the same reading \`push\` makes
                               with no --cache, said out loud instead of acted
@@ -393,6 +401,8 @@ async function pushCommand(rest: string[]): Promise<number> {
       concurrency: { type: "string" },
       "part-size": { type: "string" },
       pin: { type: "string" },
+      run: { type: "string" },
+      commit: { type: "string" },
       cache: { type: "string" },
       origin: originOption,
       output: outputOption,
@@ -565,6 +575,13 @@ async function pushCommand(rest: string[]): Promise<number> {
       // the push rather than a verb of its own: the pin names what THIS push
       // put there, and the write token is already in hand.
       ...(values.pin === undefined ? {} : { pin: values.pin }),
+      // WHAT BUILT THESE PATHS, when the caller knows: a run id and the
+      // commit it ran on, kept on every row this push stores. OMITTED rather
+      // than passed as `undefined`, because the cache reads "said nothing"
+      // as "leave what is there" — a laptop's bare `odu cache push` must not
+      // erase the provenance a run wrote.
+      ...(values.run === undefined ? {} : { run: values.run }),
+      ...(values.commit === undefined ? {} : { commit: values.commit }),
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
       },

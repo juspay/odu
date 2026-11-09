@@ -36,6 +36,7 @@ import {
   createLanePusher,
   type LanePusher,
   pushConfigOf,
+  pushEnvFor,
   resultPathsIn,
 } from "./pushResults";
 
@@ -199,6 +200,32 @@ describe("what a lane finds to push", () => {
         ODU_CACHE_TOKEN: "t",
       }),
     ).toEqual({ origin: "https://a", bucket: "m", token: "t" });
+  });
+
+  it("round-trips the pin and the provenance, and omits what the coordinator did not state", () => {
+    const full = {
+      origin: "https://a",
+      bucket: "m",
+      token: "t",
+      pin: "acme/widget@main/x86_64-linux",
+      pinSkipped: "no owner/repo",
+      run: "0000000f-0001",
+      commit: "c0ffee",
+    };
+    expect(pushConfigOf(pushEnvFor(full))).toEqual(full);
+    // A RUN THAT PUSHES NOTHING GIVES A TASK NO KEY AT ALL — the one property
+    // that keeps `withPushEnv` from rewriting every task of every local run.
+    expect(pushEnvFor(null)).toEqual({});
+    // And the optional four are ABSENT, not blank: a `pin: undefined` reaching
+    // the environment would spell the key with an empty value, and the lane
+    // would then be holding a pin named "".
+    expect(
+      pushEnvFor({ origin: "https://a", bucket: "m", token: "t" }),
+    ).toEqual({
+      ODU_CACHE_ORIGIN: "https://a",
+      ODU_CACHE_BUCKET: "m",
+      ODU_CACHE_TOKEN: "t",
+    });
   });
 });
 
@@ -406,6 +433,154 @@ describe("a lane that pushes", () => {
       refuse = false;
       expect(await lane.push(w.workspace, CONFIG, sinks().hooks)).toBeNull();
       expect(sent).toHaveLength(1);
+    } finally {
+      w.dispose();
+    }
+  });
+});
+
+/**
+ * THE PIN AND THE PROVENANCE A LANE WAS HANDED (PLAN 4.2).
+ *
+ * The lane decides nothing here: it is given a pin name on the environment or
+ * it is not. What it DOES decide is which paths the pin names — and that is
+ * the one place `fresh` is wrong, because a root subtracted as "already sent"
+ * is a root the pin would stop holding.
+ */
+describe("a lane that was handed a pin", () => {
+  /** A client that applies `pushToCache`'s OWN rule — pin last, and only when
+   *  nothing was refused (`push.ts`'s `options.pin … || failures.length > 0`)
+   *  — so these tests show the lane deferring to it rather than copying it. */
+  const client =
+    (sent: PushOptions[], over: Partial<PushSummary> = {}) =>
+    async (options: PushOptions): Promise<PushSummary> => {
+      sent.push(options);
+      const failures = over.failures ?? [];
+      return summary({
+        served: [...options.paths],
+        ...over,
+        pinned:
+          options.pin === undefined || failures.length > 0
+            ? null
+            : { name: options.pin, rootPaths: options.paths.length },
+      });
+    };
+
+  it("pins, and carries the run and the commit, when every path landed", async () => {
+    const w = world();
+    try {
+      const one = w.build("result", "aaa-one");
+      const sent: PushOptions[] = [];
+      const lane = laneWith(w.storeDir, client(sent));
+      const s = sinks();
+      await lane.push(
+        w.workspace,
+        { ...CONFIG, pin: "acme/widget@main/x86_64-linux", run: "0000000f-0001", commit: "c0ffee" },
+        s.hooks,
+      );
+      expect(sent[0]?.paths).toEqual([one]);
+      expect(sent[0]?.pin).toBe("acme/widget@main/x86_64-linux");
+      expect(sent[0]?.run).toBe("0000000f-0001");
+      expect(sent[0]?.commit).toBe("c0ffee");
+      // NOTHING SAID ABOUT NOT PINNING, because it pinned.
+      expect(s.said.join("\n")).not.toContain("not pinning");
+    } finally {
+      w.dispose();
+    }
+  });
+
+  it("leaves the pin unmade when a path was refused — the client's rule, not the lane's", async () => {
+    const w = world();
+    try {
+      w.build("result", "aaa-one");
+      const sent: PushOptions[] = [];
+      const refusal = {
+        path: "/store/zzz-dep",
+        message: "413 too large",
+        attempts: [{ message: "413 too large", url: null, status: null, body: null }],
+      };
+      const lane = laneWith(
+        w.storeDir,
+        client(sent, { failed: 1, failures: [refusal], served: [] }),
+      );
+      const thrown = await lane
+        .push(w.workspace, { ...CONFIG, pin: "acme/widget@main/x86_64-linux" }, sinks().hooks)
+        .then(() => null)
+        .catch((err: unknown) => err);
+      // The node is RED, which is the whole answer: a pin over a half-pushed
+      // closure would promise to hold paths the bucket does not have.
+      expect(thrown).toBeInstanceOf(Error);
+      expect(sent[0]?.pin).toBe("acme/widget@main/x86_64-linux");
+    } finally {
+      w.dispose();
+    }
+  });
+
+  it("names its WHOLE result set, even paths an earlier node already sent", async () => {
+    // THE DEFECT THIS PINS. `fresh` keeps one store path from being uploaded
+    // twice in a run — but a pin names ROOTS, and the bucket holds the closure
+    // of exactly the roots named. Subtracting the shared `./result` an earlier
+    // node pushed would hand the pin a smaller closure than the recipe built,
+    // and a node whose every path was already sent would return before the
+    // step opened and never pin at all.
+    const w = world();
+    try {
+      const one = w.build("result", "aaa-one");
+      const sent: PushOptions[] = [];
+      const lane = laneWith(w.storeDir, client(sent));
+      await lane.push(w.workspace, CONFIG, sinks().hooks);
+      expect(sent).toHaveLength(1);
+
+      const s = sinks();
+      const pinned = await lane.push(
+        w.workspace,
+        { ...CONFIG, pin: "acme/widget@main/x86_64-linux" },
+        s.hooks,
+      );
+      expect(sent).toHaveLength(2);
+      expect(sent[1]?.paths).toEqual([one]);
+      expect(s.begins()).toBe(1);
+      // The bytes were not re-uploaded: the bucket answers `alreadyPresent`
+      // for what it holds, which is what makes sending the full set cheap.
+      expect(pinned).not.toBeNull();
+    } finally {
+      w.dispose();
+    }
+  });
+
+  it("says the one `not pinning` line when the coordinator explained a skip", async () => {
+    const w = world();
+    try {
+      w.build("result", "aaa-one");
+      const sent: PushOptions[] = [];
+      const lane = laneWith(w.storeDir, client(sent));
+      const s = sinks();
+      await lane.push(
+        w.workspace,
+        { ...CONFIG, pinSkipped: "this run is on a detached HEAD" },
+        s.hooks,
+      );
+      const lines = s.said.filter((line) => line.includes("not pinning"));
+      expect(lines).toEqual(["[odu] not pinning: this run is on a detached HEAD"]);
+      // ON THE PUSH LOG, not the recipe's: it is the push step explaining what
+      // it did and did not do with what it sent.
+      expect(s.notes).toEqual([]);
+      expect(sent[0]?.pin).toBeUndefined();
+    } finally {
+      w.dispose();
+    }
+  });
+
+  it("says nothing when the recipe asked for no pin", async () => {
+    const w = world();
+    try {
+      w.build("result", "aaa-one");
+      const s = sinks();
+      const lane = laneWith(w.storeDir, async (options) =>
+        summary({ served: [...options.paths] }),
+      );
+      await lane.push(w.workspace, CONFIG, s.hooks);
+      expect(s.said.join("\n")).not.toContain("not pinning");
     } finally {
       w.dispose();
     }
