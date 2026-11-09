@@ -53,8 +53,14 @@ import { type DirectStore, directUploads, type ObjectStore, TEMP, type UploadedP
 import { type KeptFile, keptFileOf, objectFactsOf } from "./fileHash";
 import { writeAll } from "./sink";
 import { verifyNarFile, verifyNarStream } from "./store";
-import type { BucketRow, Provenance } from "./db";
-import { ODU_BUCKET_FIELD, ODU_ORIGIN_FIELD, type UploadMode, type UploadPlan } from "./paths";
+import type { BucketRow } from "./db";
+import {
+  ODU_BUCKET_FIELD,
+  ODU_ORIGIN_FIELD,
+  type Provenance,
+  type UploadMode,
+  type UploadPlan,
+} from "./paths";
 import {
   narFileName,
   isDerivationPath,

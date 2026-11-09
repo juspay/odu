@@ -29,7 +29,6 @@ import type {
   MigrationRow,
   ObjectRow,
   PinAuthor,
-  Provenance,
   Scope,
   TokenRow,
   PathSort,
@@ -64,7 +63,7 @@ import {
   storePathHash,
 } from "./narinfo";
 import { newChain, serial } from "./serial";
-import { CACHE_MOUNT } from "./paths";
+import { CACHE_MOUNT, type Provenance } from "./paths";
 import { LOCAL_STORE, PATH_PAGE_SIZE, PRESIGN_SECONDS } from "./surface";
 import {
   cacheInfoKey,

@@ -310,8 +310,9 @@ What each step delivers:
   `<owner>/<repo>@<ref>/<system>` — the same name the Action derives, so a run
   and a workflow re-point one pin rather than two — on a run that is actually
   on that ref; another ref pushes silently, and a run on no ref says one line
-  on its push log why. The ref is the one `gitBranch` the coordinator already
-  read for the manifest, so a board and a pin cannot disagree.[^pins]
+  on its `_ci-setup` node why, beside the line naming where it pushes. The
+  ref is the one `gitBranch` the coordinator already read for the manifest,
+  so a board and a pin cannot disagree.[^pins]
 - **4.3 The hook.** For hosts whose every build should land in one org bucket:
   the host owner installs it, lanes still hold no repo credentials, and a cache
   outage only queues paths. Deferred until a lane's own store stops being

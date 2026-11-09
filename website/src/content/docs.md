@@ -59,7 +59,7 @@ The tagged recipe's dependency graph is the pipeline. odu runs each leaf with `j
 | --- | --- |
 | `[linux]` / `[macos]` on a recipe | Schedules it on that platform only, and drops the edges it cannot honour. `odu ci protect` requires the same filtered set. Mind what `just` does first: it HIDES an OS-mismatched recipe from the machine that reads the file, so a `[linux]` recipe the root depends on makes `just --dump` refuse your justfile on a Mac. Wear one only where the coordinator runs on a platform the attribute admits; otherwise check the OS inside the recipe. (`examples/consumer/` wears none for this reason.) |
 | `[metadata("odu:shard=4")]` on a leaf | Runs up to four copies with `ODU_SHARD_INDEX` (0-based) and `ODU_SHARD_TOTAL` (actual), one GitHub context for all of them. |
-| `[metadata("odu:pin=<ref>")]` on a recipe | Pins that recipe's closure in the cache under `<owner>/<repo>@<ref>/<system>` — the attribute names the ref whose runs pin, e.g. `odu:pin=main` — so it outlives retention. Put it on the recipes whose outputs your default branch must always serve. A run on another ref pushes and pins nothing; one on no ref at all says a line on its push log why; a recipe that had a path refused is not pinned. |
+| `[metadata("odu:pin=<ref>")]` on a recipe | Pins that recipe's closure in the cache under `<owner>/<repo>@<ref>/<system>` — the attribute names the ref whose runs pin, e.g. `odu:pin=main` — so it outlives retention. Put it on the recipes whose outputs your default branch must always serve. A run on another ref pushes and pins nothing; one on no ref at all says a line on its `_ci-setup` node why; a recipe that had a path refused is not pinned. |
 | `nix build … --out-link result-foo` inside a recipe | **The out-link is the push.** When a recipe exits 0, every `result*` in the directory it ran in is pushed, closure and all. A recipe that leaves none pushes nothing. |
 
 A recipe that builds but wants nothing pushed simply leaves no `result*` behind. A push that fails makes the node red: green means warmed.
@@ -334,7 +334,8 @@ pins its closure under `<owner>/<repo>@<ref>/<system>` on a run that is
 actually on that ref, which is the same name the push action derives, so a run
 and a workflow never collide and a matrix's two systems never evict each
 other. On another ref the run pushes and says nothing; on no ref at all it
-says one line on the push log why nothing was pinned.
+says one line on its `_ci-setup` node why nothing was pinned, beside the line
+naming where it pushes.
 
 Until organisations land, the bound on all of this is the operator's: there is
 no row saying which repository owns which bucket, so any checkout this daemon

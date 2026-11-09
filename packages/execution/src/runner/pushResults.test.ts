@@ -208,15 +208,14 @@ describe("what a lane finds to push", () => {
       bucket: "m",
       token: "t",
       pin: "acme/widget@main/x86_64-linux",
-      pinSkipped: "no owner/repo",
       run: "0000000f-0001",
       commit: "c0ffee",
     };
     expect(pushConfigOf(pushEnvFor(full))).toEqual(full);
-    // A RUN THAT PUSHES NOTHING GIVES A TASK NO KEY AT ALL — the one property
-    // that keeps `withPushEnv` from rewriting every task of every local run.
+    // NO CONFIGURATION, NO KEYS AT ALL — what every task of a run that pushes
+    // nowhere carries, so such a task keeps exactly the environment it had.
     expect(pushEnvFor(null)).toEqual({});
-    // And the optional four are ABSENT, not blank: a `pin: undefined` reaching
+    // And the optional three are ABSENT, not blank: a `pin: undefined` reaching
     // the environment would spell the key with an empty value, and the lane
     // would then be holding a pin named "".
     expect(
@@ -482,8 +481,6 @@ describe("a lane that was handed a pin", () => {
       expect(sent[0]?.pin).toBe("acme/widget@main/x86_64-linux");
       expect(sent[0]?.run).toBe("0000000f-0001");
       expect(sent[0]?.commit).toBe("c0ffee");
-      // NOTHING SAID ABOUT NOT PINNING, because it pinned.
-      expect(s.said.join("\n")).not.toContain("not pinning");
     } finally {
       w.dispose();
     }
@@ -543,44 +540,6 @@ describe("a lane that was handed a pin", () => {
       // The bytes were not re-uploaded: the bucket answers `alreadyPresent`
       // for what it holds, which is what makes sending the full set cheap.
       expect(pinned).not.toBeNull();
-    } finally {
-      w.dispose();
-    }
-  });
-
-  it("says the one `not pinning` line when the coordinator explained a skip", async () => {
-    const w = world();
-    try {
-      w.build("result", "aaa-one");
-      const sent: PushOptions[] = [];
-      const lane = laneWith(w.storeDir, client(sent));
-      const s = sinks();
-      await lane.push(
-        w.workspace,
-        { ...CONFIG, pinSkipped: "this run is on a detached HEAD" },
-        s.hooks,
-      );
-      const lines = s.said.filter((line) => line.includes("not pinning"));
-      expect(lines).toEqual(["[odu] not pinning: this run is on a detached HEAD"]);
-      // ON THE PUSH LOG, not the recipe's: it is the push step explaining what
-      // it did and did not do with what it sent.
-      expect(s.notes).toEqual([]);
-      expect(sent[0]?.pin).toBeUndefined();
-    } finally {
-      w.dispose();
-    }
-  });
-
-  it("says nothing when the recipe asked for no pin", async () => {
-    const w = world();
-    try {
-      w.build("result", "aaa-one");
-      const s = sinks();
-      const lane = laneWith(w.storeDir, async (options) =>
-        summary({ served: [...options.paths] }),
-      );
-      await lane.push(w.workspace, CONFIG, s.hooks);
-      expect(s.said.join("\n")).not.toContain("not pinning");
     } finally {
       w.dispose();
     }

@@ -39,10 +39,72 @@ export const UPLOAD_SESSION_HEADER = "x-odu-upload";
  *
  * Both are OPAQUE to the cache: it never learns what a run is, only that a
  * row can name one. Spelled here beside the mount so the SERVER (`./routes`)
- * and the CLIENT (`./push`) read the same two words.
+ * and the CLIENT (`./push`) read the same two words — and, below, so they
+ * obey the same RULE about them: one writer of the headers, one reader, and
+ * the bound that protects the row in the reader.
  */
 export const RUN_HEADER = "x-odu-run";
 export const COMMIT_HEADER = "x-odu-commit";
+
+/** The pair as a row holds it: `null` for a fact nobody stated, which is the
+ *  ordinary value and not a gap — a developer pushing from a laptop states
+ *  neither, and the GitHub action states only the commit. */
+export interface Provenance {
+  run: string | null;
+  commit: string | null;
+}
+
+/**
+ * THE HEADERS A PUSH SENDS — a key per fact STATED, and no key at all for
+ * one that was not.
+ *
+ * AN EMPTY STRING IS NOTHING SAID, which is the whole distinction: a workflow
+ * expanding `${{ github.sha }}` on a dispatch that has none hands the pusher
+ * `""`, and a row claiming it was built from `""` is worse than a row
+ * claiming nothing. Callers pass what they have, empty or not, and never
+ * guard — which is why neither the CLI nor the Action repeats this test.
+ */
+export function provenanceHeaders(stated: {
+  run?: string;
+  commit?: string;
+}): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const run = (stated.run ?? "").trim();
+  if (run !== "") headers[RUN_HEADER] = run;
+  const commit = (stated.commit ?? "").trim();
+  if (commit !== "") headers[COMMIT_HEADER] = commit;
+  return headers;
+}
+
+/** A commit sha is 40 characters, a run id a handful more; 200 is room for
+ *  every spelling either will ever take and still a bound. */
+const MAX_PROVENANCE = 200;
+
+/**
+ * AND THE READING OF THEM, where the bound lives — on the ROW's side, not the
+ * router's: whatever reads these headers is about to write `object.run` and
+ * `object.commit_sha`.
+ *
+ * TRIMMED AND TRUNCATED, NOT REFUSED. These headers are attacker-controlled
+ * on a public bucket — anyone who may write to it may send a megabyte of
+ * them — and the row must not grow a column of whatever arrives. Truncating
+ * rather than refusing is deliberate: the provenance is a LABEL, and a push
+ * whose bytes are good is not worth rejecting over a decoration that is too
+ * long. What lands is visibly clipped, which is the honest reading of an
+ * over-long claim; nothing downstream parses it.
+ *
+ * An absent or empty header is `null` — nothing said, which the row reads as
+ * "leave what is there".
+ */
+export function provenanceStated(
+  headers: Record<string, string | undefined>,
+): Provenance {
+  const stated = (header: string): string | null => {
+    const value = (headers[header] ?? "").trim();
+    return value === "" ? null : value.slice(0, MAX_PROVENANCE);
+  };
+  return { run: stated(RUN_HEADER), commit: stated(COMMIT_HEADER) };
+}
 
 /** Where the push API lives — odu's own, beside the Nix protocol's mount. */
 export const PUSH_API = "/_odu/v1";

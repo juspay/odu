@@ -384,6 +384,45 @@ describe("a bucket's paths, by package", () => {
     ).toEqual(["zlib-1.3"]);
   });
 
+  it("reads a FILTERED group's provenance off the newest version the filter matched", () => {
+    const repo = openCacheRepo(":memory:");
+    // Two of one package's three builds share a hash prefix the third does
+    // not, so the newest MATCHING version is not the newest version — and
+    // the provenance columns have to come from the former.
+    repo.putObject(
+      build("widget-1.0", `prg${"a".repeat(29)}`, {
+        created: NOW,
+        run: "run-a",
+        commit: "a".repeat(40),
+      }),
+    );
+    repo.putObject(
+      build("widget-1.0", `prg${"b".repeat(29)}`, {
+        created: NOW + 10,
+        run: "run-b",
+        commit: "b".repeat(40),
+      }),
+    );
+    repo.putObject(
+      build("widget-1.0", `zzz${"c".repeat(29)}`, {
+        created: NOW + 20,
+        run: "run-c",
+        commit: "c".repeat(40),
+      }),
+    );
+    const { rows } = repo.objectGroupsPage("main", { ...page, filter: "prg" });
+    expect(rows).toHaveLength(1);
+    // THE ASSERTION A MIS-BINDING FAILS: every per-version subquery carries
+    // its own filter `?`, so a select list and a binding list that drifted
+    // apart would answer run-c's row — or no row at all.
+    expect(rows[0]).toMatchObject({
+      versions: 2,
+      storePath: `/nix/store/prg${"b".repeat(29)}-widget-1.0`,
+      run: "run-b",
+      commit: "b".repeat(40),
+    });
+  });
+
   it("orders paths themselves by the same columns", () => {
     const repo = openCacheRepo(":memory:");
     seed(repo);

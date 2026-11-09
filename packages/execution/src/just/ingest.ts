@@ -116,19 +116,34 @@ function metadataValues(recipe: DumpRecipe): string[] {
   });
 }
 
-function shardCount(recipe: DumpRecipe): number | undefined {
-  const shardMetadata = metadataValues(recipe).filter((value) =>
-    value.startsWith("odu:shard="),
+/** The value one `odu:` marker declares on a recipe, or `undefined` when it
+ *  declares none: presence, UNIQUENESS and the text after `=` — the empty
+ *  string for a bare marker — which is all every marker has in common.
+ *
+ *  WHAT A VALUE MAY SAY STAYS WITH THE CALLER: `odu:shard` wants an integer,
+ *  `odu:pin` wants a ref, and folding both rules in here would make each
+ *  marker's value form a case in one function — so the day one grows a richer
+ *  value the other has to be re-read to change it. */
+function markerValue(recipe: DumpRecipe, marker: string): string | undefined {
+  const prefix = `${marker}=`;
+  const declared = metadataValues(recipe).filter(
+    (value) => value === marker || value.startsWith(prefix),
   );
-  if (shardMetadata.length === 0) return undefined;
-  if (shardMetadata.length > 1) {
+  if (declared.length === 0) return undefined;
+  if (declared.length > 1) {
     throw new Error(
-      `odu: recipe "${recipe.namepath}" declares odu:shard more than once`,
+      `odu: recipe "${recipe.namepath}" declares ${marker} more than once`,
     );
   }
-  const raw = shardMetadata[0]!.slice("odu:shard=".length);
+  const value = declared[0]!;
+  return value.startsWith(prefix) ? value.slice(prefix.length) : "";
+}
+
+function shardCount(recipe: DumpRecipe): number | undefined {
+  const raw = markerValue(recipe, "odu:shard");
+  if (raw === undefined) return undefined;
   const count = Number(raw);
-  if (!Number.isInteger(count) || count < 2) {
+  if (raw === "" || !Number.isInteger(count) || count < 2) {
     throw new Error(
       `odu: recipe "${recipe.namepath}" metadata must be odu:shard=N with integer N >= 2`,
     );
@@ -151,18 +166,8 @@ function shardCount(recipe: DumpRecipe): number | undefined {
  * under master's name.
  */
 function pinRef(recipe: DumpRecipe): string | undefined {
-  const pinMetadata = metadataValues(recipe).filter(
-    (value) => value === "odu:pin" || value.startsWith("odu:pin="),
-  );
-  if (pinMetadata.length === 0) return undefined;
-  if (pinMetadata.length > 1) {
-    throw new Error(
-      `odu: recipe "${recipe.namepath}" declares odu:pin more than once`,
-    );
-  }
-  const raw = pinMetadata[0]!.startsWith("odu:pin=")
-    ? pinMetadata[0]!.slice("odu:pin=".length)
-    : "";
+  const raw = markerValue(recipe, "odu:pin");
+  if (raw === undefined) return undefined;
   if (raw === "") {
     throw new Error(
       `odu: recipe "${recipe.namepath}" metadata must be odu:pin=<ref> naming the ref to pin on`,

@@ -699,58 +699,75 @@ async function orchestrate(
    *   - the recipe asked and this run cannot answer — a detached HEAD, or a
    *     checkout with no github.com origin to name an owner → a sentence,
    *     because a pin configured and not made is invisible otherwise.
+   *
+   * ONE FUNCTION, TWO READERS: `withPushEnv` turns a `named` into the one key
+   * a lane is handed, and `startSetup` turns a `skipped` into a line on this
+   * run's own node. The sentence stays on THIS side of the process boundary —
+   * shipping it to a lane to be printed back put prose in a push
+   * configuration, and went silent exactly when it mattered, because a node
+   * whose paths an earlier recipe already sent pushes nothing and says
+   * nothing.
    */
-  const pinKeysFor = (
-    task: TaskSpec,
-    platform: string,
-  ): { pin: string } | { pinSkipped: string } | Record<never, never> => {
-    if (task.pin === undefined) return {};
+  type PinDecision =
+    | { kind: "named"; name: string }
+    | { kind: "skipped"; why: string }
+    | { kind: "none" };
+  const pinDecisionFor = (task: TaskSpec, platform: string): PinDecision => {
+    if (task.pin === undefined) return { kind: "none" };
     if (ref === null) {
       return {
-        pinSkipped:
+        kind: "skipped",
+        why:
           `this run is on a detached HEAD, and recipe "${task.id}" ` +
           `pins only on ref "${task.pin}"`,
       };
     }
-    if (ref !== task.pin) return {};
+    if (ref !== task.pin) return { kind: "none" };
     if (repo === null) {
       return {
-        pinSkipped:
+        kind: "skipped",
+        why:
           `this checkout has no github.com origin remote, so there is no ` +
           `owner/repo to name recipe "${task.id}"'s pin with`,
       };
     }
-    return { pin: `${repo}@${ref}/${platform}` };
+    return { kind: "named", name: `${repo}@${ref}/${platform}` };
   };
-  /** Every task of one lane, with its push environment on it: the RESOLVED
-   *  origin and bucket, the run's token, this run's provenance, and the pin
-   *  name for a recipe that asked to be pinned on the ref this run is on.
-   *  Spelled by the module that PARSES them, so the two halves of that wire
-   *  cannot drift apart. Applied HERE, once, where a lane's task list is first
-   *  built — so a shard lane, an extend and a resurrection all carry it
-   *  without a second place remembering to. Empty for a run that pushes
-   *  nothing, so no task gains a key. */
+  /** WHAT EVERY TASK OF THIS RUN PUSHES WITH — resolved origin and bucket, the
+   *  run's write token, and this run's provenance. All five are facts about the
+   *  RUN, so they are read once here and not rebuilt per task; `null` is a run
+   *  that pushes nothing, and then no task gains a key at all. */
+  const pushFacts =
+    pushing === null || pushToken === null
+      ? null
+      : {
+          origin: pushing.origin,
+          bucket: pushing.bucket,
+          token: pushToken,
+          run: args.runId,
+          commit: sha,
+        };
+  /** Every task of one lane, with its push environment on it: the run-wide
+   *  facts above plus the one PER-TASK fact, the pin name for a recipe that
+   *  asked to be pinned on the ref this run is on. Spelled by the module that
+   *  PARSES them, so the two halves of that wire cannot drift apart. Applied
+   *  HERE, once, where a lane's task list is first built — so a shard lane, an
+   *  extend and a resurrection all carry it without a second place
+   *  remembering to. */
   const withPushEnv = (
     tasks: readonly TaskSpec[],
     platform: string,
-  ): TaskSpec[] =>
-    tasks.map((task) => {
-      const env = pushEnvFor(
-        pushing === null || pushToken === null
-          ? null
-          : {
-              origin: pushing.origin,
-              bucket: pushing.bucket,
-              token: pushToken,
-              run: args.runId,
-              commit: sha,
-              ...pinKeysFor(task, platform),
-            },
-      );
-      return Object.keys(env).length === 0
-        ? task
-        : { ...task, env: { ...(task.env ?? {}), ...env } };
+  ): TaskSpec[] => {
+    if (pushFacts === null) return [...tasks];
+    return tasks.map((task) => {
+      const pin = pinDecisionFor(task, platform);
+      const env = pushEnvFor({
+        ...pushFacts,
+        ...(pin.kind === "named" ? { pin: pin.name } : {}),
+      });
+      return { ...task, env: { ...(task.env ?? {}), ...env } };
     });
+  };
   const platforms = Object.keys(poolsByPlatform).sort();
   const tasksByPlatform = new Map<string, TaskSpec[]>();
   for (const platform of platforms) {
@@ -2245,6 +2262,17 @@ async function orchestrate(
       );
       if (args.pushKeyWarning !== undefined) {
         appendLocal(id, `[odu] ${args.pushKeyWarning}\n`);
+      }
+      // AND WHICH RECIPES ASKED TO BE PINNED AND CANNOT BE — one line each,
+      // beside the push line, because a pin is this same policy one level
+      // down and this is the node a reader asking "what did this run warm"
+      // already has open. No lane could say it: a pin a lane was not handed
+      // is a pin it knows nothing about.
+      for (const task of tasksByPlatform.get(platform) ?? []) {
+        const pin = pinDecisionFor(task, platform);
+        if (pin.kind === "skipped") {
+          appendLocal(id, `[odu] not pinning: ${pin.why}\n`);
+        }
       }
     } else {
       // THE REASON, read off the field that holds exactly it. A resolved

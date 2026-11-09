@@ -804,7 +804,8 @@ declares.
   marked `[metadata("odu:pin=<ref>")]` also PINS its closure under
   `<owner>/<repo>@<ref>/<system>` — the push action's own name shape — but
   only on a run that is actually on that ref; another ref pushes silently, and
-  a run on no ref says one line on its push log why it pinned nothing. The
+  a run on no ref says one line on its `_ci-setup` node why it pinned
+  nothing, beside the line naming where it pushes. The
   interim bound is the operator's: with no org row saying which repository
   owns which bucket, any checkout this daemon runs may push to any bucket it
   serves.

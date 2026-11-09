@@ -155,6 +155,12 @@ export interface CacheFaceProps {
    *  the runs' client and so the cell; this face holds the cache's and cannot
    *  reach it. `null` for a build that baked none. */
   pushActionRef: () => string | null;
+  /** WHERE A RUN LIVES, as the shell's router spells it — minted by
+   *  `@odu/service-client`'s `runHash`, which this package may not import
+   *  (`closure.test.ts` holds that fence) and whose spelling it must not
+   *  guess: a hand-copied `#/run/` here goes stale silently the day the
+   *  board's address changes. */
+  runHref: (runId: string) => string;
   /** One clock for the page, read once a second by the shell. */
   now: number;
   /** MAY THIS PERSON ADMINISTER BUCKETS? The ROW's floor is `admin`, and the
@@ -246,6 +252,7 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
           local={props.local}
           tunnelRow={props.tunnelRow}
           pushActionRef={props.pushActionRef}
+          runHref={props.runHref}
         />
       )}
     </Show>
@@ -821,6 +828,8 @@ function BucketPaths(props: {
   bucket: string;
   /** The page's clock, stopped while this panel's tab is away. */
   now: number;
+  /** The board's address for a run, for the `run` column. {@link CacheFaceProps.runHref} */
+  runHref: (runId: string) => string;
 }): JSX.Element {
   /** What the person typed, and what the query is allowed to see. Two signals:
    *  the box must track every keystroke, and the request must not. */
@@ -1183,18 +1192,11 @@ function BucketPaths(props: {
       key: "run",
       label: "run",
       width: "6rem",
-      /*
-       * THE RUN PAGE IS A HASH ROUTE, and the link is spelled LITERALLY
-       * rather than through `runHash()`: this package may not import
-       * `@odu/service-client` (`closure.test.ts` holds the fence, because the
-       * cache row's client is what `odu cache push` carries and it must not
-       * drag the board's client in). The board routes `#/run/<id>`; a bare
-       * `/runs/<id>` pathname has no server route and falls through to the
-       * board, so the fragment is the whole address.
-       */
+      // THE SHELL SPELLS THE ADDRESS ({@link CacheFaceProps.runHref}): a run
+      // id goes in and the board's own router hands back where it lives.
       cell: (row) =>
         row.run === null ? null : (
-          <a class="link" href={`#/run/${encodeURIComponent(row.run)}`} title={row.run}>
+          <a class="link" href={props.runHref(row.run)} title={row.run}>
             {row.run}
           </a>
         ),
@@ -1364,6 +1366,7 @@ function BucketPage(
       local: boolean;
       tunnelRow: boolean;
       pushActionRef: () => string | null;
+      runHref: (runId: string) => string;
     },
 ): JSX.Element {
   /** THE REF THE PUSH BLOCK OFFERS — the daemon's own commit when it baked one,
@@ -1566,6 +1569,7 @@ function BucketPage(
                   client={props.client}
                   call={props.call}
                   bucket={props.name}
+                  runHref={props.runHref}
                   now={pathsClock()}
                 />
               </div>

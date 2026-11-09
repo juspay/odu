@@ -139,12 +139,12 @@ const declaration = {
       // once, in the module that both writes and parses them — never the
       // cache row.
       "packages/execution/src/coordinator/run.ts": 1,
-      // 4.2 grew that set from three variables to seven: the pin name, the
-      // sentence saying why a pin was not made, and the run and the commit a
-      // push states as provenance. Every one is a COORDINATOR's decision
-      // carried to a lane, and the module that writes them is the module that
-      // parses them — which is what keeps the count in one file and not two.
-      "packages/execution/src/runner/pushResults.ts": 7,
+      // 4.2 grew that set from three variables to six: the pin name, and the
+      // run and the commit a push states as provenance. Every one is a
+      // COORDINATOR's decision carried to a lane, and the module that writes
+      // them is the module that parses them — which is what keeps the count in
+      // one file and not two.
+      "packages/execution/src/runner/pushResults.ts": 6,
       // The service's own sentence for a run that pushes nowhere.
       "packages/service/src/start.ts": 1,
       // THE RUNS' OWN WORDS ABOUT WHERE A RUN PUSHES (PLAN 4.1): one line of

@@ -31,11 +31,12 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { handleFor, readJournal } from "@odu/run-history/store";
+import { fanId, logPathFor, shortSha } from "@odu/run-client/nodeId";
 import { RUN_FILES } from "@odu/run-history/paths";
 import type { RunEvent } from "@odu/run-history/schema";
 import {
@@ -359,14 +360,29 @@ describe.if(hasJust)("the journal of a node that pushed", () => {
  * checkout, on a machine that may have fetched since — and a wrong pin name
  * does not fail, it holds the wrong closure open while the right one is let
  * go.
+ *
+ * And when there is no name to hand down, the REASON stays here too — on
+ * `_ci-setup`'s log beside this run's push line, not as prose shipped to a
+ * lane to be printed back.
  */
 describe.if(hasJust)("the pin a task's environment carries", () => {
-  /** Start a run, read the one lane's task environment, and let the run end.
-   *  Driving the node to `ok` matters: an abandoned coordinator would hold
-   *  the checkout's run lock against the next case in this file. */
-  async function laneEnv(
+  /** Start a run and read the pin decision from BOTH its readers: the task
+   *  environment a lane is configured with (the name), and `_ci-setup`'s
+   *  durable log (the sentence, when this run cannot answer a recipe's pin).
+   *
+   *  The node is driven to `ok` with NO push state at all — the shape a node
+   *  publishes when its `result*` paths were already sent by an earlier
+   *  recipe, which is the typical shape of a DAG and the case where a
+   *  lane-side sentence went silent. Driving it to a terminal also matters for
+   *  the lock: an abandoned coordinator would hold the checkout's run lock
+   *  against the next case in this file. */
+  async function pinDecision(
     options: Parameters<typeof fixture>[0],
-  ): Promise<Record<string, string>> {
+  ): Promise<{
+    env: Record<string, string>;
+    setup: string;
+    events: RunEvent[];
+  }> {
     const dir = fixture(options);
     plantPushToken();
     const { lanes, deps } = harness();
@@ -377,10 +393,24 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
       const lane = lanes[0]!;
       const alpha = lane.opts.tasks.find((task) => task.id === "alpha");
       expect(alpha).toBeDefined();
+      // The setup node's durable log, where this run states its push policy.
+      // Written when provisioning opens — before the lane exists — so it is
+      // already on disk by the time the lane shows up here.
+      const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: dir,
+        encoding: "utf-8",
+      }).stdout.trim();
+      const setup = readFileSync(
+        join(dir, logPathFor(shortSha(sha), fanId("_ci-setup", PLATFORM))),
+        "utf-8",
+      );
       lane.opts.onNodes(laneState("ok", { durationMs: 1 }));
       lane.opts.onLogFrame("alpha", { kind: "end" }, "push");
       lane.opts.onLogFrame("alpha", { kind: "end" }, "recipe");
-      return { ...(alpha?.env ?? {}) };
+      await outcome;
+      // Read while the journal still exists: the cleanup below takes `.ci`,
+      // and this run's state dir is inside it.
+      return { env: { ...(alpha?.env ?? {}) }, setup, events: eventsOf() };
     } finally {
       await outcome;
       rmSync(join(dir, ".ci"), { recursive: true, force: true });
@@ -388,7 +418,7 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
   }
 
   it("names the pin when the run is on the ref the recipe asked for", async () => {
-    const env = await laneEnv({
+    const { env, setup } = await pinDecision({
       pin: "main",
       branch: "main",
       remote: "https://github.com/acme/widget.git",
@@ -397,7 +427,7 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
     // all: a run and a workflow pushing the same commit must re-point ONE
     // pin, and a matrix's second job must not evict the first's closure.
     expect(env.ODU_CACHE_PIN).toBe(`acme/widget@main/${PLATFORM}`);
-    expect(env.ODU_CACHE_PIN_SKIPPED).toBeUndefined();
+    expect(setup).not.toContain("not pinning");
     // Provenance rides the same wire, from the facts the coordinator already
     // holds — the lane reads git for neither.
     expect(env.ODU_CACHE_RUN).toBe(RUN_ID);
@@ -405,7 +435,7 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
   }, 60_000);
 
   it("says nothing at all on another ref", async () => {
-    const env = await laneEnv({
+    const { env, setup } = await pinDecision({
       pin: "main",
       branch: "feature/x",
       remote: "https://github.com/acme/widget.git",
@@ -414,31 +444,51 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
     // feature branch reporting "not pinning" every run would train a reader
     // to ignore the line that matters.
     expect(env.ODU_CACHE_PIN).toBeUndefined();
-    expect(env.ODU_CACHE_PIN_SKIPPED).toBeUndefined();
+    expect(setup).not.toContain("not pinning");
   }, 60_000);
 
-  it("explains itself when the run is on no ref", async () => {
-    const env = await laneEnv({
+  it("explains itself on the setup log when the run is on no ref", async () => {
+    const { env, setup } = await pinDecision({
       pin: "main",
       branch: null,
       remote: "https://github.com/acme/widget.git",
     });
     expect(env.ODU_CACHE_PIN).toBeUndefined();
-    expect(env.ODU_CACHE_PIN_SKIPPED).toContain("detached HEAD");
+    // ON THE RUN'S OWN NODE, beside its push line — and naming the recipe,
+    // because a run with twenty of them must say WHICH one asked.
+    expect(setup).toContain("[odu] not pinning: ");
+    expect(setup).toContain("detached HEAD");
+    expect(setup).toContain('recipe "alpha"');
   }, 60_000);
 
-  it("explains itself when no origin names an owner/repo", async () => {
-    const env = await laneEnv({ pin: "main", branch: "main" });
+  it("explains itself on the setup log when no origin names an owner/repo", async () => {
+    const { env, setup } = await pinDecision({ pin: "main", branch: "main" });
     expect(env.ODU_CACHE_PIN).toBeUndefined();
-    expect(env.ODU_CACHE_PIN_SKIPPED).toContain("github.com origin");
+    expect(setup).toContain("[odu] not pinning: ");
+    expect(setup).toContain("github.com origin");
+  }, 60_000);
+
+  it("says why even when the node had nothing to push", async () => {
+    // THE DEFECT THIS PINS. The sentence used to ride to the lane and be said
+    // by the push step — so a node whose `result*` paths an earlier recipe
+    // already sent (nothing to send, no step, no line) explained nothing,
+    // which is the ordinary shape of a DAG. This node publishes NO push at
+    // all and the run still says why it pinned nothing.
+    const { setup, events } = await pinDecision({
+      pin: "main",
+      branch: null,
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(events.some((e) => e.kind === "pushing")).toBe(false);
+    expect(setup).toContain("not pinning");
   }, 60_000);
 
   it("puts nothing pin-shaped on a recipe that asked for none", async () => {
-    const env = await laneEnv({
+    const { env, setup } = await pinDecision({
       branch: "main",
       remote: "https://github.com/acme/widget.git",
     });
     expect(env.ODU_CACHE_PIN).toBeUndefined();
-    expect(env.ODU_CACHE_PIN_SKIPPED).toBeUndefined();
+    expect(setup).not.toContain("not pinning");
   }, 60_000);
 });

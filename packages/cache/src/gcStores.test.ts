@@ -25,7 +25,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { diskObjectStore, s3ObjectStore, type ObjectStore } from "@odu/objects";
 import { type Gateway, startGateway } from "@odu/objects/testing";
 import { type Cache, createCache } from "./cache";
-import type { Provenance } from "./db";
+import type { Provenance } from "./paths";
 import { base32 } from "./narinfo";
 import { cacheInfoKey, narinfoKey, objectKey } from "./staging";
 import { storePathHash } from "./narinfo";

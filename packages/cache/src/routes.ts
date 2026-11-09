@@ -48,16 +48,15 @@ import type { ByteRange, UploadedPart } from "@odu/objects";
 import {
   CACHE_MOUNT,
   CACHE_ROUTE_PATHS,
-  COMMIT_HEADER,
   HASH_PATTERN,
   NARINFO_SUFFIX,
   PARTS_HEADER,
   PUSH_API,
-  RUN_HEADER,
+  provenanceStated,
   UPLOAD_SESSION_HEADER,
 } from "./paths";
 import { isUploadSession } from "./staging";
-import type { BucketRow, Provenance, Scope } from "./db";
+import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
 import {
   actionsBlock,
@@ -373,36 +372,6 @@ function uploadSession(request: HttpServerRequest.HttpServerRequest): string | n
 }
 
 const BAD_SESSION = `${UPLOAD_SESSION_HEADER} must be 1–64 letters, digits, '-' or '_'`;
-
-/**
- * HOW LONG A STATED RUN OR COMMIT MAY BE. A commit sha is 40 characters, a
- * run id a handful more; 200 is room for every spelling either will ever take
- * and still a bound.
- */
-const MAX_PROVENANCE = 200;
-
-/**
- * WHAT THE PUSHER SAYS BUILT THESE PATHS (PLAN 4.2), read off the one request
- * that writes the row.
- *
- * TRIMMED AND TRUNCATED, NOT REFUSED. These headers are attacker-controlled
- * on a public bucket — anyone who may write to it may send a megabyte of
- * them — and the row must not grow a column of whatever arrives. Truncating
- * rather than refusing is deliberate: the provenance is a LABEL, and a push
- * whose bytes are good is not worth rejecting over a decoration that is too
- * long. What lands is visibly clipped, which is the honest reading of an
- * over-long claim; nothing downstream parses it.
- *
- * An absent or empty header is `null` — nothing said, which the row reads as
- * "leave what is there".
- */
-function provenanceOf(request: HttpServerRequest.HttpServerRequest): Provenance {
-  const stated = (header: string): string | null => {
-    const value = (request.headers[header] ?? "").trim();
-    return value === "" ? null : value.slice(0, MAX_PROVENANCE);
-  };
-  return { run: stated(RUN_HEADER), commit: stated(COMMIT_HEADER) };
-}
 
 /**
  * THE PARTS A DIRECT UPLOAD SAYS IT WROTE (PLAN 2.9) — `{"parts":[{"index",
@@ -895,7 +864,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
             admitted.bucket,
             hash,
             Stream.toReadableStream(request.stream),
-            provenanceOf(request),
+            provenanceStated(request.headers),
           ),
         );
         if (outcome.ok) return HttpServerResponse.empty({ status: 200 });
@@ -980,7 +949,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
             admitted.bucket,
             hash,
             Stream.toReadableStream(request.stream),
-            provenanceOf(request),
+            provenanceStated(request.headers),
           ),
         );
         if (outcome.ok) return HttpServerResponse.empty({ status: 200 });

@@ -47,11 +47,10 @@ import {
 } from "./narinfo";
 import {
   CACHE_MOUNT,
-  COMMIT_HEADER,
   ODU_BUCKET_FIELD,
   ODU_ORIGIN_FIELD,
   PARTS_HEADER,
-  RUN_HEADER,
+  provenanceHeaders,
   UPLOAD_SESSION_HEADER,
   type UploadMode,
   type UploadPlan,
@@ -891,14 +890,9 @@ export interface PushOptions {
   pin?: string;
   /**
    * WHAT BUILT THESE PATHS — the run that produced them and the commit they
-   * were built from, both OPAQUE to the cache: it stores the two strings on
-   * each path's row and never learns what a run is.
-   *
-   * Optional and OMITTED when unknown, never spelled `undefined`: a developer
-   * pushing from a laptop states neither, a GitHub action states only the
-   * commit, and a re-push that states nothing must not erase what a run
-   * stated — which the cache can only tell apart if "not said" never arrives
-   * as a key at all.
+   * were built from. Pass what the caller has, empty or absent included:
+   * {@link provenanceHeaders} is what decides which of them was STATED, and a
+   * re-push that states nothing must not erase what a run stated.
    */
   run?: string;
   commit?: string;
@@ -941,18 +935,10 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const base = `${resolved.origin}${CACHE_MOUNT}/${resolved.name}`;
   const headers: Record<string, string> =
     token === null ? {} : { authorization: `Bearer ${token}` };
-  // WHAT BUILT THESE PATHS, as the headers the narinfo PUT carries. Built
-  // once, here: an empty string is the same as nothing said — a workflow
-  // expanding `${{ github.sha }}` on a dispatch that has none would otherwise
-  // write a row claiming it was built from "".
-  const provenance: Record<string, string> = {
-    ...(options.run === undefined || options.run.trim() === ""
-      ? {}
-      : { [RUN_HEADER]: options.run.trim() }),
-    ...(options.commit === undefined || options.commit.trim() === ""
-      ? {}
-      : { [COMMIT_HEADER]: options.commit.trim() }),
-  };
+  // WHAT BUILT THESE PATHS, as the headers the narinfo PUT carries — built
+  // once, by the module that owns the wire. Nothing is tested here: a value
+  // that is empty is a value nobody stated, which `provenanceHeaders` knows.
+  const provenance = provenanceHeaders({ run: options.run, commit: options.commit });
 
   const platform: PushPlatform = options.platform ?? {
     closure: (paths) => nixClosure(paths, null),
@@ -1817,8 +1803,8 @@ async function uploadOne(
   say: (line: string) => void,
   options: {
     partSize: number;
-    /** {@link RUN_HEADER} and {@link COMMIT_HEADER}, already resolved to the
-     *  headers they are — empty when the caller stated neither. */
+    /** What {@link provenanceHeaders} made of the caller's stated run and
+     *  commit — empty when it stated neither. */
     provenance: Record<string, string>;
   },
 ): Promise<UploadOutcome> {

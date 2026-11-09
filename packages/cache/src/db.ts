@@ -99,20 +99,6 @@ export interface TokenRow {
   created: number;
 }
 
-/**
- * WHAT BUILT A PATH (PLAN 4.2) — stated by the pusher, kept by the cache,
- * understood by neither.
- *
- * A run id and a commit sha, both OPAQUE: the cache never resolves a run, it
- * only answers which one said it pushed this. `null` is the ordinary value
- * and not a gap — a developer pushing from a laptop knows neither, and the
- * GitHub action knows only the commit.
- */
-export interface Provenance {
-  run: string | null;
-  commit: string | null;
-}
-
 /** One store path as this bucket knows it. The bytes are the store's. */
 export interface ObjectRow {
   bucket: string;
@@ -1135,6 +1121,14 @@ export function openCacheRepo(path: string): CacheRepo {
       // and that order is TOTAL — `store_path` is unique within a bucket's
       // name — so all three resolve to the same row and a group can never
       // show one build's hash beside another's provenance.
+      //
+      // NAMED ONCE, so the select list and the bindings cannot be counted
+      // apart. Each subquery carries a `?` when there is a filter, and those
+      // `?`s are read before the WHERE's; a column added to the list below
+      // without its binding would not be an error SQLite reports — every
+      // parameter after the select list would simply shift, and the page
+      // would be wrong rather than refused.
+      const perVersion = ["store_path", "run", "commit_sha"];
       const newest = (column: string): string =>
         `(SELECT inner.${column} FROM object AS inner ` +
         "WHERE inner.bucket = object.bucket AND inner.name = object.name " +
@@ -1145,17 +1139,15 @@ export function openCacheRepo(path: string): CacheRepo {
           "SELECT name, COUNT(*) AS versions, " +
             "COALESCE(SUM(nar_size), 0) AS bytes, COALESCE(SUM(hits), 0) AS hits, " +
             "MAX(created) AS pushed, MAX(last_wanted) AS wanted, " +
-            `${newest("store_path")}, ${newest("run")}, ${newest("commit_sha")} ` +
+            `${perVersion.map(newest).join(", ")} ` +
             `FROM object WHERE ${where.join(" AND ")} GROUP BY name ` +
             (having.length === 0 ? "" : `HAVING ${having.join(" AND ")} `) +
             `ORDER BY ${order.group} ${way}, name ${way} LIMIT ?`,
         )
-        // One filter binding per subquery, ahead of the statement's own: the
-        // three `?`s inside the select list are read before the WHERE's.
         .all(
           ...((filter === null
             ? params
-            : [filter, filter, filter, ...params]) as never[]),
+            : [...perVersion.map(() => filter), ...params]) as never[]),
         ) as Row[];
       const more = found.length > page.limit;
       const rows = (more ? found.slice(0, page.limit) : found).map((row) => ({
