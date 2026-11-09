@@ -105,6 +105,7 @@ pins.test.ts              the playwright pin is exact and matches nixpkgs
 ../cache/e2e/             the cache's five scenarios, and its CLI test
 ../ci/e2e/                the run views' six features
 ../auth/e2e/              the door's scenarios, and its CLI/MCP test
+../cloudflare/e2e/        the tunnel row's five scenarios
 ```
 
 **Scenarios declare their world by tag.** No tag is today's loopback daemon;
@@ -112,6 +113,17 @@ pins.test.ts              the playwright pin is exact and matches nixpkgs
 worker, configured against the GitHub stub, with the role granted and the sign-in
 completed through the stub as a person would. Two services per worker because a
 daemon with a door cannot also be the daemon without one.
+
+`@tunnel` is a THIRD daemon per worker, with the cloudflare row pointed at a
+stub Cloudflare and a `cloudflared` that reports a connection.
+
+**A world is shared, so a scenario gives back what it took.** The daemon
+outlives the scenario, and a domain is daemon-global — one name, one bucket —
+so a `@tunnel` scenario that left `cache.tunnel.test` bound made the next one's
+"Set domain" a refusal. Which scenarios share a worker is cucumber's own
+scheduling, so that read as a lane-only flake (issue #170). `hooks.ts` clears
+every bound name in the tunnel world after each scenario, beside the run
+cancellations and the stub-mode reset that are there for the same reason.
 
 Failure screenshots land in `reports/screenshots/` (git-ignored). Set
 `ODU_WA_SHOTS=1` to capture the passing scenarios too, and `HEADLESS=false` to

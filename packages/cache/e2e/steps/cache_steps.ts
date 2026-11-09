@@ -596,9 +596,19 @@ When("I name the bucket {string}", async function (this: OduWorld, domain: strin
   await this.page.getByRole("button", { name: "Set domain", exact: true }).click();
   // The USE BLOCK is the proof the row accepted it: it is redrawn from the
   // published bucket row, not from the field that was typed.
-  await until(`the substituter block to name ${domain}`, async () =>
-    (await this.page.locator("pre.consume-block").innerText()).includes(domain) ? true : null,
-  );
+  //
+  // A REFUSAL IS AN ANSWER, and this step reads it. The row refuses a name
+  // another bucket already holds, and a step that watched only the block
+  // turned that sentence into a two-minute timeout naming nothing — which is
+  // the whole of what issue #170 looked like from a lane log.
+  const refusal = this.page
+    .getByRole("region", { name: "domain" })
+    .locator("p.receipt-bad .receipt-text");
+  await until(`the substituter block to name ${domain}`, async () => {
+    if ((await this.page.locator("pre.consume-block").innerText()).includes(domain)) return true;
+    if ((await refusal.count()) === 0) return null;
+    throw new Error(`the row refused "${domain}": ${(await refusal.first().innerText()).trim()}`);
+  });
 });
 
 Then("the domain answer says {string}", async function (this: OduWorld, text: string) {

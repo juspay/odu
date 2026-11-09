@@ -151,6 +151,11 @@ const declaration = {
       "packages/launch/src/webDaemonLaunch.ts": 1,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,
+      // THE TUNNEL WORLD'S NAMES, GIVEN BACK between scenarios: the harness
+      // clears a bucket's domain through the row's own argv face, the way it
+      // already grants a role through the door's. Two verb words in a
+      // teardown — no package, no database, no contract.
+      "packages/web-acceptance/support/hooks.ts": 2,
       // THE SCREENSHOT HARNESS composes all three worlds the way `hooks.ts`
       // does — a loopback daemon, a door daemon and a tunnel daemon — because
       // the evidence it takes is every screen of every row.
