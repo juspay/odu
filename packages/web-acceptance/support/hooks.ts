@@ -60,7 +60,6 @@ import {
   startService,
   stopService,
   stubPort,
-  surfaceCall,
   reserveWorldPorts,
   verb,
   tunnelPort,
@@ -140,69 +139,6 @@ async function tunnelService(odu: string): Promise<Service> {
     PATH: `${cloudflare.binDir}:${process.env.PATH ?? ""}`,
   });
   return tunnel;
-}
-
-/**
- * THE NAMES A `@tunnel` SCENARIO BOUND, GIVEN BACK.
- *
- * A DOMAIN IS DAEMON-GLOBAL — one name, one bucket — and the tunnel world is
- * one daemon per worker, shared by every `@tunnel` scenario that worker runs.
- * So a scenario that leaves `cache.tunnel.test` bound makes the NEXT one's
- * "Set domain" a refusal (`"cache.tunnel.test" already names the bucket …`),
- * and which scenarios share a worker is cucumber's own scheduling: the same
- * suite passed on one machine and failed on another, at whichever scenario
- * drew the loser's ticket (issue #170).
- *
- * Clearing is also what makes "the tunnel panel shows <name> as live" the
- * scenario's OWN fact. A route of that name left live by the previous
- * scenario satisfies the assertion without this one having wired anything.
- *
- * Every bound name goes, not just the one a step wrote down: a scenario names
- * two buckets, and a scenario that FAILED half way names whatever it reached.
- * The teardown reads the world rather than trusting the steps.
- */
-function clearTunnelNames(world: Service): void {
-  // NEVER A THROW. A teardown that failed would replace the scenario's own
-  // verdict with a housekeeping one; a leak that survives this is caught by
-  // the next scenario's "I name the bucket", which reads the refusal.
-  try {
-    const listed = surfaceCall(world, [
-      "cache",
-      "bucket_list",
-      "--input",
-      JSON.stringify({ rootToken: ROOT_TOKEN }),
-      "--json",
-    ]);
-    if (listed.status !== 0) {
-      process.stderr.write(
-        `web-acceptance: could not list the tunnel world's buckets: ${listed.stderr}\n`,
-      );
-      return;
-    }
-    const answer = JSON.parse(listed.stdout) as {
-      buckets?: { name: string; domain: string | null }[];
-    };
-    for (const bucket of answer.buckets ?? []) {
-      if (bucket.domain === null) continue;
-      // No `domain` field is how the verb spells "take the name away".
-      const cleared = surfaceCall(world, [
-        "cache",
-        "bucket_domain",
-        "--input",
-        JSON.stringify({ rootToken: ROOT_TOKEN, bucket: bucket.name }),
-        "--json",
-      ]);
-      if (cleared.status !== 0) {
-        process.stderr.write(
-          `web-acceptance: could not clear ${bucket.domain} from ${bucket.name}: ${cleared.stderr}\n`,
-        );
-      }
-    }
-  } catch (cause) {
-    process.stderr.write(
-      `web-acceptance: could not return the tunnel world's names: ${String(cause)}\n`,
-    );
-  }
 }
 
 /** THE OPERATOR'S PERSONAL TOKEN, minted once per worker.
@@ -456,10 +392,6 @@ After({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario) 
   // left standing it refuses the NEXT scenario's sign-in, including the
   // harness's own operator mint. Reset to what a plain GitHub says.
   if (github !== undefined) github.mode = { ...DEFAULT_STUB_MODE };
-
-  // AND A TUNNEL SCENARIO'S NAMES ARE THAT SCENARIO'S, for the same reason the
-  // stub mode is: the daemon outlives it. See `clearTunnelNames`.
-  if (this.identity.kind === "tunnel") clearTunnelNames(this.service);
 
   // A private run goes down before its checkout does: `SLOW` and `FAST_RED` both
   // sleep for minutes, and a coordinator left running holds a core and a lock on

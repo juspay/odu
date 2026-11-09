@@ -121,9 +121,9 @@ stub Cloudflare and a `cloudflared` that reports a connection.
 outlives the scenario, and a domain is daemon-global — one name, one bucket —
 so a `@tunnel` scenario that left `cache.tunnel.test` bound made the next one's
 "Set domain" a refusal. Which scenarios share a worker is cucumber's own
-scheduling, so that read as a lane-only flake (issue #170). `hooks.ts` clears
-every bound name in the tunnel world after each scenario, beside the run
-cancellations and the stub-mode reset that are there for the same reason.
+scheduling, so that read as a lane-only flake (issue #170). A tagged `After` in
+the cache row's own steps clears every bound name, because the name is that
+row's state — the way `hooks.ts` resets the stub mode that is the door's.
 
 Failure screenshots land in `reports/screenshots/` (git-ignored). Set
 `ODU_WA_SHOTS=1` to capture the passing scenarios too, and `HEADLESS=false` to
