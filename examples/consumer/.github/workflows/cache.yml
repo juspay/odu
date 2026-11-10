@@ -33,9 +33,10 @@ jobs:
       # NO `paths:` either: that pushes every packages/devShells/checks output
       # for this runner's system, which is what a developer's machine
       # substitutes.
+      #
+      # NO `pin:` either. The step pins the default branch by default, under a
+      # derived name: <owner>/<repo>@<ref>/<system>. Say `pin: true`/`false`
+      # only to overrule that.
       - uses: juspay/odu/.github/actions/push@<rev>
         with:
           token: ${{ secrets.ODU_CACHE_TOKEN }}
-          # The action holds no policy about WHEN to pin; this line is it. The
-          # pin's name is derived: <owner>/<repo>@<ref>/<system>.
-          pin: ${{ github.ref_name == github.event.repository.default_branch }}

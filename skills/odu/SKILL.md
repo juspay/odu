@@ -801,11 +801,12 @@ declares.
   `run_read` answers `push`, and a node answers `pushed`. Every narinfo a run
   writes carries the run's id and its commit (cache 4.7), which the bucket
   page draws beside the path — the commit short, the run as a link. A recipe
-  marked `[metadata("odu:pin=<ref>")]` also PINS its closure under
+  marked `[metadata("odu:pin")]` also PINS its closure under
   `<owner>/<repo>@<ref>/<system>` — the push action's own name shape — but
-  only on a run that is actually on that ref; another ref pushes silently, and
-  a run on no ref says one line on its `_ci-setup` node why it pinned
-  nothing, beside the line naming where it pushes. The
+  only on a run on the repository's default branch, `odu:pin=<ref>` naming
+  another ref and the attribute repeated naming more; another ref pushes
+  silently, and a run on no ref says one line on its `_ci-setup` node why it
+  pinned nothing, beside the line naming where it pushes. The
   interim bound is the operator's: with no org row saying which repository
   owns which bucket, any checkout this daemon runs may push to any bucket it
   serves.
@@ -883,9 +884,10 @@ declares.
   named with `--cache` or `<bucket> --origin`.
 - `odu cache push --pin NAME` re-points a pin at the closure the push landed
   (nothing is pinned if a path was refused). The push action takes `pin: true`
-  instead of a name and derives `<owner>/<repo>@<ref>/<system>`; when to pin is
-  the workflow's own `${{ github.ref_name == … }}` line, and a run derives the
-  same name from `[metadata("odu:pin=<ref>")]`.
+  instead of a name and derives `<owner>/<repo>@<ref>/<system>`; left empty it
+  pins on the default branch, and a run derives the same name from
+  `[metadata("odu:pin")]` — bare for the default branch, `odu:pin=<ref>` for
+  another, repeated for more.
 - `odu cache push --run ID --commit SHA` states what built the paths (cache
   4.7). Two opaque strings kept on every row the push stores and drawn on the
   bucket page; a push that states neither leaves what a run already stated

@@ -72,7 +72,7 @@ import {
   progressEvent,
   SILENT_FACE,
 } from "../common/presentation";
-import { gitBranch, gitTopLevel } from "../common/git";
+import { gitBranch, gitDefaultBranch, gitTopLevel } from "../common/git";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 import { createVerdictGate } from "./verdictGate";
 import { maxLaneResurrections } from "./laneResurrection";
@@ -665,6 +665,13 @@ async function orchestrate(
   /** The ref this run is on — `null` on a detached HEAD, which is a run no
    *  pin can belong to because no branch names what it built. */
   const ref = gitBranch(repoRoot);
+  /** What `origin` calls its default branch, for the recipes that pin on it
+   *  without naming it (a bare `[metadata("odu:pin")]`). Read HERE, with the
+   *  ref and the forge coordinates above and for the same reason — one read,
+   *  so a board, a pin and a sentence cannot name three different refs — and
+   *  from `.git` alone, so no run's pins wait on a remote. `null` when this
+   *  checkout never learned one. */
+  const defaultBranch = gitDefaultBranch(repoRoot);
 
   // ── WHERE THIS RUN PUSHES (PLAN 4.1) ──
   //
@@ -686,19 +693,27 @@ async function orchestrate(
    * machine that may have fetched since — and a wrong pin name does not fail,
    * it silently holds the wrong closure open while the right one is collected.
    *
-   * A recipe names the ref its output is worth keeping for. Three endings:
+   * A recipe names the refs its output is worth keeping for — spelled, or
+   * left as `null` for "this repository's default branch". Four endings:
    *
-   *   - the run is on that ref and the checkout has an `owner/repo` → the
+   *   - the run is on ONE of them and the checkout has an `owner/repo` → the
    *     name, shaped exactly as `.github/actions/push/pin-name.sh` shapes it,
    *     because a run and a workflow pushing the same commit must re-point
-   *     ONE pin and not two. The platform key IS the nix system, and the
-   *     system is in the name because a matrix's second job would otherwise
-   *     evict the first job's closure every push.
+   *     ONE pin and not two. The name carries the ref the run is ACTUALLY
+   *     on, so two recipes pinning different refs each keep their own. The
+   *     platform key IS the nix system, and the system is in the name
+   *     because a matrix's second job would otherwise evict the first job's
+   *     closure every push.
    *   - the run is on some OTHER ref → nothing, and nothing said. The pin
-   *     belongs to the other ref; a feature branch is not a failure.
+   *     belongs to one of the refs this run is not on; a feature branch is
+   *     not a failure.
    *   - the recipe asked and this run cannot answer — a detached HEAD, or a
    *     checkout with no github.com origin to name an owner → a sentence,
    *     because a pin configured and not made is invisible otherwise.
+   *   - the recipe's only unmatched hope was the default branch and this
+   *     checkout has no `origin/HEAD` to name it → a sentence too, with the
+   *     fix in it. Guessing `main` here would pin a `master` repository's
+   *     closure under a branch nothing is ever on.
    *
    * ONE FUNCTION, TWO READERS: `withPushEnv` turns a `named` into the one key
    * a lane is handed, and `startSetup` turns a `skipped` into a line on this
@@ -713,16 +728,42 @@ async function orchestrate(
     | { kind: "skipped"; why: string }
     | { kind: "none" };
   const pinDecisionFor = (task: TaskSpec, platform: string): PinDecision => {
-    if (task.pin === undefined) return { kind: "none" };
+    const declared = task.pin;
+    if (declared === undefined) return { kind: "none" };
+    /** The refs as a reader would say them — `null` is the concept, not a
+     *  ref name, so it is spelled out rather than printed. */
+    const said = declared
+      .map((pin) => (pin === null ? "its default branch" : `"${pin}"`))
+      .join(", ");
     if (ref === null) {
       return {
         kind: "skipped",
         why:
           `this run is on a detached HEAD, and recipe "${task.id}" ` +
-          `pins only on ref "${task.pin}"`,
+          `pins only on ${said}`,
       };
     }
-    if (ref !== task.pin) return { kind: "none" };
+    const matched = declared.some((pin) =>
+      pin === null ? defaultBranch !== null && defaultBranch === ref : pin === ref,
+    );
+    if (!matched) {
+      // SILENCE, UNLESS THE SILENCE IS A MISCONFIGURATION. A ref that simply
+      // is not this one is the ordinary case and says nothing; but a recipe
+      // whose last unmatched hope was a default branch this checkout cannot
+      // name would be silent forever on every branch, which is the shape of
+      // a pin nobody notices is missing.
+      if (declared.includes(null) && defaultBranch === null) {
+        return {
+          kind: "skipped",
+          why:
+            `this checkout's origin has no HEAD, so there is no default ` +
+            `branch to pin recipe "${task.id}" on; set it ` +
+            "(`git remote set-head origin -a`) or name the ref: " +
+            "`odu:pin=<ref>`",
+        };
+      }
+      return { kind: "none" };
+    }
     if (repo === null) {
       return {
         kind: "skipped",

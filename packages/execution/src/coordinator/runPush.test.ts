@@ -78,12 +78,25 @@ afterEach(() => {
  *  second node would only add frames to drive. The pool names a REMOTE host so
  *  the platform enters the venue claim — which is injected, like the lane.
  *
- *  The three knobs are the PIN decision's whole input (PLAN 4.2): what the
- *  recipe asked for, which ref the checkout is on, and whether the origin
- *  names an `owner/repo`. Defaults are the journal tests' world — no pin, a
+ *  The four knobs are the PIN decision's whole input (PLAN 4.2): what the
+ *  recipe asked for, which ref the checkout is on, what `origin/HEAD` calls
+ *  the default branch, and whether the origin names an `owner/repo`.
+ *  Defaults are the journal tests' world — no pin, no `origin/HEAD`, a
  *  non-GitHub origin — so the push assertions below read unchanged. */
 function fixture(
-  options: { pin?: string; branch?: string | null; remote?: string } = {},
+  options: {
+    /** ONE `[metadata(…)]` attribute per entry, in order: a ref name, or
+     *  `null` for the bare `odu:pin` that names the default branch. */
+    pins?: readonly (string | null)[];
+    branch?: string | null;
+    remote?: string;
+    /** What `origin/HEAD` is made to point at, set with git's own
+     *  `remote set-head` over a remote-tracking ref — the pair a real clone
+     *  leaves behind. Absent is the checkout that never learned one (a hand
+     *  `git remote add`), which is a real and common state, not a broken
+     *  fixture. */
+    defaultBranch?: string;
+  } = {},
 ): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-push-journal-"));
   const git = (...args: string[]): void => {
@@ -96,7 +109,9 @@ function fixture(
       '[metadata("ci")]',
       "default: alpha",
       "",
-      ...(options.pin === undefined ? [] : [`[metadata("odu:pin=${options.pin}")]`]),
+      ...(options.pins ?? []).map((pin) =>
+        pin === null ? '[metadata("odu:pin")]' : `[metadata("odu:pin=${pin}")]`,
+      ),
       "alpha:",
       "    true",
       "",
@@ -114,6 +129,14 @@ function fixture(
   // a pinning recipe cannot be answered for.
   if (options.branch === null) git("checkout", "-q", "--detach");
   else if (options.branch !== undefined) git("checkout", "-q", "-b", options.branch);
+  if (options.defaultBranch !== undefined) {
+    // A remote-tracking ref first: `remote set-head` refuses to point at one
+    // that does not exist, and a clone has both. No fetch — the origin URL
+    // above is deliberately unreachable, and the coordinator's probe is
+    // local too.
+    git("update-ref", `refs/remotes/origin/${options.defaultBranch}`, "HEAD");
+    git("remote", "set-head", "origin", options.defaultBranch);
+  }
 
   const prevCwd = process.cwd();
   const env: Record<string, string> = {
@@ -419,7 +442,7 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
 
   it("names the pin when the run is on the ref the recipe asked for", async () => {
     const { env, setup } = await pinDecision({
-      pin: "main",
+      pins: ["main"],
       branch: "main",
       remote: "https://github.com/acme/widget.git",
     });
@@ -434,9 +457,22 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
     expect(env.ODU_CACHE_COMMIT).toMatch(/^[0-9a-f]{40}$/);
   }, 60_000);
 
+  it("names the pin for a BARE marker when the run is on the default branch", async () => {
+    // The recipe never spells the ref: `origin/HEAD` does, and the
+    // COORDINATOR reads it — from this checkout's `.git`, with no network.
+    const { env, setup } = await pinDecision({
+      pins: [null],
+      branch: "trunk",
+      defaultBranch: "trunk",
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBe(`acme/widget@trunk/${PLATFORM}`);
+    expect(setup).not.toContain("not pinning");
+  }, 60_000);
+
   it("says nothing at all on another ref", async () => {
     const { env, setup } = await pinDecision({
-      pin: "main",
+      pins: ["main"],
       branch: "feature/x",
       remote: "https://github.com/acme/widget.git",
     });
@@ -447,9 +483,37 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
     expect(setup).not.toContain("not pinning");
   }, 60_000);
 
+  it("says nothing for a BARE marker on a branch that is not the default", async () => {
+    const { env, setup } = await pinDecision({
+      pins: [null],
+      branch: "feature/x",
+      defaultBranch: "trunk",
+      remote: "https://github.com/acme/widget.git",
+    });
+    // The default branch IS known here and this is not it — the ordinary
+    // feature-branch silence, not a misconfiguration.
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(setup).not.toContain("not pinning");
+  }, 60_000);
+
+  it("names the pin with the run's OWN ref when the recipe declared several", async () => {
+    // TWO ATTRIBUTES, TWO REFS — and the run is on the second. The name
+    // carries the ref this run is actually on, so a sibling recipe pinning
+    // the other ref keeps its own pin rather than being overwritten by this
+    // one's.
+    const { env, setup } = await pinDecision({
+      pins: ["main", "release-1.x"],
+      branch: "release-1.x",
+      defaultBranch: "main",
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBe(`acme/widget@release-1.x/${PLATFORM}`);
+    expect(setup).not.toContain("not pinning");
+  }, 60_000);
+
   it("explains itself on the setup log when the run is on no ref", async () => {
     const { env, setup } = await pinDecision({
-      pin: "main",
+      pins: ["main"],
       branch: null,
       remote: "https://github.com/acme/widget.git",
     });
@@ -461,8 +525,25 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
     expect(setup).toContain('recipe "alpha"');
   }, 60_000);
 
+  it("explains itself when a BARE marker's checkout has no origin/HEAD", async () => {
+    // The one silence worth a sentence: nothing matched, and the only
+    // unmatched hope was a default branch this checkout cannot name. Guessing
+    // `main` would pin a `master` repository's closure under a branch nothing
+    // is ever on, so the run says what to do instead.
+    const { env, setup } = await pinDecision({
+      pins: [null],
+      branch: "trunk",
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(setup).toContain("[odu] not pinning: ");
+    expect(setup).toContain("origin has no HEAD");
+    expect(setup).toContain("git remote set-head origin -a");
+    expect(setup).toContain('recipe "alpha"');
+  }, 60_000);
+
   it("explains itself on the setup log when no origin names an owner/repo", async () => {
-    const { env, setup } = await pinDecision({ pin: "main", branch: "main" });
+    const { env, setup } = await pinDecision({ pins: ["main"], branch: "main" });
     expect(env.ODU_CACHE_PIN).toBeUndefined();
     expect(setup).toContain("[odu] not pinning: ");
     expect(setup).toContain("github.com origin");
@@ -475,7 +556,7 @@ describe.if(hasJust)("the pin a task's environment carries", () => {
     // which is the ordinary shape of a DAG. This node publishes NO push at
     // all and the run still says why it pinned nothing.
     const { setup, events } = await pinDecision({
-      pin: "main",
+      pins: ["main"],
       branch: null,
       remote: "https://github.com/acme/widget.git",
     });

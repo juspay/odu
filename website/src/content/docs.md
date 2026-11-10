@@ -59,7 +59,7 @@ The tagged recipe's dependency graph is the pipeline. odu runs each leaf with `j
 | --- | --- |
 | `[linux]` / `[macos]` on a recipe | Schedules it on that platform only, and drops the edges it cannot honour. `odu ci protect` requires the same filtered set. Mind what `just` does first: it HIDES an OS-mismatched recipe from the machine that reads the file, so a `[linux]` recipe the root depends on makes `just --dump` refuse your justfile on a Mac. Wear one only where the coordinator runs on a platform the attribute admits; otherwise check the OS inside the recipe. (`examples/consumer/` wears none for this reason.) |
 | `[metadata("odu:shard=4")]` on a leaf | Runs up to four copies with `ODU_SHARD_INDEX` (0-based) and `ODU_SHARD_TOTAL` (actual), one GitHub context for all of them. |
-| `[metadata("odu:pin=<ref>")]` on a recipe | Pins that recipe's closure in the cache under `<owner>/<repo>@<ref>/<system>` — the attribute names the ref whose runs pin, e.g. `odu:pin=main` — so it outlives retention. Put it on the recipes whose outputs your default branch must always serve. A run on another ref pushes and pins nothing; one on no ref at all says a line on its `_ci-setup` node why; a recipe that had a path refused is not pinned. |
+| `[metadata("odu:pin")]` on a recipe | Pins that recipe's closure in the cache under `<owner>/<repo>@<ref>/<system>`, so it outlives retention. Bare, it means your repository's **default branch**, read from the checkout's own git. `[metadata("odu:pin=release-1.x")]` names a ref instead, and repeating the attribute names more refs — `[metadata("odu:pin")] [metadata("odu:pin=release-1.x")]` — one ref each, the way `just`'s own `[group(…)]` repeats. A run on another ref pushes and pins nothing; one on no ref at all says a line on its `_ci-setup` node why; a recipe that had a path refused is not pinned. |
 | `nix build … --out-link result-foo` inside a recipe | **The out-link is the push.** When a recipe exits 0, every `result*` in the directory it ran in is pushed, closure and all. A recipe that leaves none pushes nothing. |
 
 A recipe that builds but wants nothing pushed simply leaves no `result*` behind. A push that fails makes the node red: green means warmed.
@@ -133,12 +133,11 @@ Only when odu has no lane for a system you ship, or you want GitHub Actions' bui
 - uses: juspay/odu/.github/actions/push@<rev>
   with:
     token: ${{ secrets.ODU_CACHE_TOKEN }}
-    pin: ${{ github.ref_name == github.event.repository.default_branch }}
 ```
 
 - **No `cache:`.** The step asks `odu cache target` for the `extra-substituters` line in your `flake.nix` and pushes to that URL by name, with your token. Name `cache:` when the workflow builds for a cache the flake does not list, **or when the bucket is private** — the inference probes anonymously, and a private bucket answers its `nix-cache-info` to nobody, so it cannot be found this way. A flake that names no odu cache, or two, fails the step with the URLs it found.
 - **`token`** is a write token for that bucket, minted on the bucket's page (**Tokens → Mint**, scope *write*). A pull request from a fork has no secret and pushes nothing; a push to a branch with no secret fails.
-- **`pin`** holds the closure under `<owner>/<repo>@<ref>/<system>`, the same pin a `[metadata("odu:pin=<ref>")]` recipe takes, so a run and a workflow for two systems hold two pins of one name shape.
+- **`pin`** holds the closure under `<owner>/<repo>@<ref>/<system>`, the same pin a `[metadata("odu:pin")]` recipe takes, so a run and a workflow for two systems hold two pins of one name shape. Left out, the step pins when the run is on the repository's default branch; an explicit `true` or `false` is obeyed exactly.
 - It pushes every `result*` in the working directory, or the `paths:` you list. Every path is verified at the substituter afterwards; a path the cache does not answer makes the step red. The results are a table in the step summary. Each row it stores records `$GITHUB_SHA` as the commit that built it — a workflow is nobody's run, so it states no run id.
 
 ### 5. Require it
@@ -329,13 +328,14 @@ the node RED, because green means warmed.
 **What a run pushes says where it came from, and may be held.** Every narinfo
 a run writes carries the run's id and the commit it was built from, and the
 bucket page draws them beside the path — the commit short, the run as a link
-to its own page. A recipe marked `[metadata("odu:pin=<ref>")]` additionally
-pins its closure under `<owner>/<repo>@<ref>/<system>` on a run that is
-actually on that ref, which is the same name the push action derives, so a run
-and a workflow never collide and a matrix's two systems never evict each
-other. On another ref the run pushes and says nothing; on no ref at all it
-says one line on its `_ci-setup` node why nothing was pinned, beside the line
-naming where it pushes.
+to its own page. A recipe marked `[metadata("odu:pin")]` additionally pins its
+closure under `<owner>/<repo>@<ref>/<system>` on a run that is on the
+repository's default branch — `odu:pin=<ref>` names another ref instead, and
+repeating the attribute names more — which is the same name the push action
+derives, so a run and a workflow never collide and a matrix's two systems
+never evict each other. On another ref the run pushes and says nothing; on no
+ref at all it says one line on its `_ci-setup` node why nothing was pinned,
+beside the line naming where it pushes.
 
 Until organisations land, the bound on all of this is the operator's: there is
 no row saying which repository owns which bucket, so any checkout this daemon

@@ -8,7 +8,7 @@
 #     with:
 #       cache: https://cache.kolu.dev/kolu-r2    # optional: see below
 #       token: ${{ secrets.ODU_CACHE_TOKEN }}
-#       pin: ${{ github.ref_name == github.event.repository.default_branch }}
+#       # pin: omitted — the default branch pins itself ("The pin", below)
 #
 # `cache:` is OPTIONAL (PLAN 4.1), and this is where that is made true (#163).
 # Omitted, this script asks THIS checkout what it reads from — `odu cache
@@ -79,11 +79,19 @@
 #
 # ## The pin
 #
-# `pin:` is a BOOLEAN and this script decides nothing about when a pin may
-# move: the workflow does, with `${{ github.ref_name ==
-# github.event.repository.default_branch }}` or whatever rule it holds. A
-# policy baked in here is a policy the one repository whose branch is called
-# something else cannot see.
+# `pin:` IS A BOOLEAN WITH A DEFAULT, and the default is the line every
+# caller was writing by hand: EMPTY pins when this run is on the
+# repository's own default branch — `$GITHUB_REF` equal to
+# `refs/heads/<default branch>`, the branch read off the event payload
+# (`.repository.default_branch`), exactly where the head sha is read from a
+# few lines down. An explicit `true` or `false` is obeyed as given and
+# nothing is inferred from it, so a workflow holding some other rule still
+# writes the expression itself and hands over the answer.
+#
+# OUTSIDE ACTIONS — no payload, no `$GITHUB_REF` — an empty `pin:` pins
+# NOTHING. A laptop's run of this script is on nobody's default branch, and a
+# pin it moved would re-point, from a working copy, the name the repository's
+# own pushes hold.
 #
 # THE NAME IS DERIVED (`pin-name.sh`): `<owner>/<repo>@<ref>/<system>`. Four
 # repositories share one bucket and each matrix job pushes a different
@@ -196,7 +204,7 @@ trap 'rm -rf "$work"' EXIT
 #
 # That is the set a developer's machine actually substitutes — the dev shell
 # is most of what a fresh checkout waits for, and the checks are what CI is
-# about to build anyway — and it is what makes `pin: true` worth having: a
+# about to build anyway — and it is what makes a pin worth having: a
 # pin over three named packages holds three packages, while a pin over this
 # holds the tree.
 #
@@ -272,39 +280,64 @@ summary() {
 
 # ── the pin ─────────────────────────────────────────────────────────────────
 
-# `pin:` IS A BOOLEAN, and the action holds no policy of its own about when a
-# pin may move. The workflow decides — `${{ github.ref_name ==
-# github.event.repository.default_branch }}` is the line odu's own uses — and
-# a step that carries a policy its caller cannot see is a step that surprises
-# the one repository whose branch is called something else.
+# `pin:` IS A BOOLEAN WITH A DEFAULT. Empty — the default — pins when this
+# run is on the repository's OWN default branch, which is the comparison
+# every caller was pasting into its workflow and the one rule that is right
+# for a repository whose branch is called something else. An explicit `true`
+# or `false` is obeyed exactly: a workflow that holds another rule writes the
+# expression and hands over the answer, and this script infers nothing from a
+# value somebody stated.
+#
+# THE DEFAULT BRANCH IS THE EVENT PAYLOAD'S (`.repository.default_branch`),
+# read with `jq` exactly as the head sha is read above — never guessed, never
+# asked of the network. `$GITHUB_REF` and not `$GITHUB_REF_NAME` is what it
+# is compared against, because `refs/heads/<branch>` says BRANCH: a tag
+# called `master` has the same `ref_name` as the branch and holds no pin.
+# OUTSIDE ACTIONS there is neither payload nor ref, so an empty `pin:` pins
+# nothing — a working copy must not re-point the name the repository's own
+# pushes hold.
 #
 # THE NAME IS DERIVED (`pin-name.sh`), never typed: four repositories share
 # one bucket and each matrix job pushes a different system's closure, so a
 # name a person writes is a name two jobs eventually collide on.
 pin_args=()
 pin_requested=""
+pins=no
 case "$pin" in
-  "" | false | False | FALSE | 0 | no)
+  "")
+    default_branch=""
+    if [ -s "${GITHUB_EVENT_PATH:-}" ]; then
+      default_branch=$(jq -r '.repository.default_branch // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || true)
+    fi
+    if [ -n "$default_branch" ] && [ "${GITHUB_REF:-}" = "refs/heads/$default_branch" ]; then
+      pins=yes
+    fi
+    ;;
+  false | False | FALSE | 0 | no)
     ;;
   true | True | TRUE | 1 | yes)
-    # THE REF THAT WAS PUSHED. A pull request's `GITHUB_REF_NAME` is
-    # `<n>/merge`, a synthetic ref nobody substitutes, so the head branch is
-    # what a pin over that build should be called.
-    ref_name=${GITHUB_HEAD_REF:-}
-    [ -n "$ref_name" ] || ref_name=${GITHUB_REF_NAME:-}
-    system=$(nix eval --impure --raw --expr 'builtins.currentSystem' < /dev/null) ||
-      fail "odu push: could not ask Nix what system this runner is, and a pin's name carries it."
-    [ -n "${GITHUB_REPOSITORY:-}" ] ||
-      fail "odu push: \`pin: true\` needs \$GITHUB_REPOSITORY — a pin's name is <owner>/<repo>@<ref>/<system>, and outside Actions there is no repository to name."
-    [ -n "$ref_name" ] ||
-      fail "odu push: \`pin: true\` needs \$GITHUB_REF_NAME (or \$GITHUB_HEAD_REF) — a pin's name says which ref it holds."
-    pin_requested=$("$here/pin-name.sh" "$GITHUB_REPOSITORY" "$ref_name" "$system")
-    pin_args=(--pin "$pin_requested")
+    pins=yes
     ;;
   *)
-    fail "odu push: \`pin:\` is a boolean — \`true\` pins this push's closure, anything falsy pins nothing (got \"$pin\"). The NAME is derived; to pin only on your default branch, write \`pin: \${{ github.ref_name == github.event.repository.default_branch }}\`."
+    fail "odu push: \`pin:\` is a boolean — \`true\` pins this push's closure, \`false\` never pins, and EMPTY (the default) pins on your repository's default branch (got \"$pin\"). The NAME is derived; a different rule is an expression your workflow writes, e.g. \`pin: \${{ github.ref_name == 'release' }}\`."
     ;;
 esac
+
+if [ "$pins" = yes ]; then
+  # THE REF THAT WAS PUSHED. A pull request's `GITHUB_REF_NAME` is
+  # `<n>/merge`, a synthetic ref nobody substitutes, so the head branch is
+  # what a pin over that build should be called.
+  ref_name=${GITHUB_HEAD_REF:-}
+  [ -n "$ref_name" ] || ref_name=${GITHUB_REF_NAME:-}
+  system=$(nix eval --impure --raw --expr 'builtins.currentSystem' < /dev/null) ||
+    fail "odu push: could not ask Nix what system this runner is, and a pin's name carries it."
+  [ -n "${GITHUB_REPOSITORY:-}" ] ||
+    fail "odu push: pinning needs \$GITHUB_REPOSITORY — a pin's name is <owner>/<repo>@<ref>/<system>, and outside Actions there is no repository to name."
+  [ -n "$ref_name" ] ||
+    fail "odu push: pinning needs \$GITHUB_REF_NAME (or \$GITHUB_HEAD_REF) — a pin's name says which ref it holds."
+  pin_requested=$("$here/pin-name.sh" "$GITHUB_REPOSITORY" "$ref_name" "$system")
+  pin_args=(--pin "$pin_requested")
+fi
 
 # ── the token, before anything expensive ────────────────────────────────────
 

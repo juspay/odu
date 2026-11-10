@@ -106,14 +106,15 @@ jobs:
           # read address now that reads are served by R2.
           cache: https://cache.kolu.dev/kolu-r2
           token: ${{ secrets.ODU_CACHE_TOKEN }}
-          # ODU'S MASTER CLOSURE, HELD — and the WHEN is this workflow's, not
-          # the action's: a push to master re-points the pin at what it just
-          # pushed, so collection takes yesterday's build and never the one
-          # every lane and every developer substitutes from, while a pull
-          # request pushes and moves nothing. The name is derived
-          # (`juspay/odu@master/<system>`), so the Linux and macOS jobs hold
-          # their own closures instead of evicting each other.
-          pin: ${{ github.ref_name == github.event.repository.default_branch }}
+          # ODU'S MASTER CLOSURE, HELD — and NO `pin:` line, because holding
+          # the default branch is now the step's own default: a push to
+          # master re-points the pin at what it just pushed, so collection
+          # takes yesterday's build and never the one every lane and every
+          # developer substitutes from, while a pull request pushes and moves
+          # nothing. This used to be the expression every caller pasted; the
+          # one repository whose rule is different still writes it. The name
+          # is derived (`juspay/odu@master/<system>`), so the Linux and macOS
+          # jobs hold their own closures instead of evicting each other.
           # NO `paths:` — the whole flake for this runner's system: every
           # package, dev shell and check. It covers `.#odu`, `.#odu-runner`
           # and `.#web-ui` as before, and adds the dev shell a fresh checkout

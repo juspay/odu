@@ -306,13 +306,16 @@ What each step delivers:
 - **4.2 ✅ Provenance and pins** (#169). Every narinfo a run writes carries the
   run's id and the commit it was built from (cache 4.7), and the bucket page's
   Paths table draws the commit short and the run as a link to its own page.
-  `[metadata("odu:pin=<ref>")]` on a recipe keeps its closure out of GC under
+  `[metadata("odu:pin")]` on a recipe keeps its closure out of GC under
   `<owner>/<repo>@<ref>/<system>` — the same name the Action derives, so a run
-  and a workflow re-point one pin rather than two — on a run that is actually
-  on that ref; another ref pushes silently, and a run on no ref says one line
-  on its `_ci-setup` node why, beside the line naming where it pushes. The
-  ref is the one `gitBranch` the coordinator already read for the manifest,
-  so a board and a pin cannot disagree.[^pins]
+  and a workflow re-point one pin rather than two. Bare is the repository's
+  default branch, read from `origin/HEAD` in the checkout; `odu:pin=<ref>`
+  names a ref instead, and repeating the attribute names more. A run on none
+  of them pushes silently; a run that cannot answer — a detached HEAD, no
+  github.com origin, no `origin/HEAD` — says one line on its `_ci-setup` node
+  why, beside the line naming where it pushes. The ref is the one `gitBranch`
+  the coordinator already read for the manifest, so a board and a pin cannot
+  disagree.[^pins]
 - **4.3 The hook.** For hosts whose every build should land in one org bucket:
   the host owner installs it, lanes still hold no repo credentials, and a cache
   outage only queues paths. Deferred until a lane's own store stops being

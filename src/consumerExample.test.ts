@@ -64,10 +64,12 @@ it(
     expect(byId.get("e2e")?.shards).toBe(2);
     expect(byId.get("test")?.shards).toBeUndefined();
 
-    // `odu:pin=main` NAMES THE REF, and the page's table says so: a run on
+    // A BARE `odu:pin` IS THE DEFAULT BRANCH, and the page's table says so:
+    // the field is the list of refs this recipe pins on, `null` meaning the
+    // repository's default branch, which the coordinator resolves. A run on
     // another ref pushes this closure and pins nothing. It sits on `build`,
     // which two recipes depend on — a pin, unlike a shard, has no leaf rule.
-    expect(byId.get("build")?.pin).toBe("main");
+    expect(byId.get("build")?.pin).toEqual([null]);
     expect(byId.get("docs")?.pin).toBeUndefined();
   },
 );
@@ -170,10 +172,11 @@ it("pushes with THIS repository's action, and only inputs it declares", () => {
   expect(declared).toContain("cache");
   expect(given.filter((key) => !declared.includes(key))).toEqual([]);
 
-  // AND IT PASSES EXACTLY TWO, which is the page's claim about this step. No
+  // AND IT PASSES EXACTLY ONE, which is the page's claim about this step. No
   // `cache:` — the whole point is that `./flake.nix` already named it and the
   // step asks `odu cache target` for it. No `paths:` — the default pushes the
-  // whole flake for this runner's system. Either one appearing here makes the
+  // whole flake for this runner's system. No `pin:` either — the action pins
+  // on the default branch by default. Any of them appearing here makes the
   // page say one thing and the example do another.
-  expect(given).toEqual(["token", "pin"]);
+  expect(given).toEqual(["token"]);
 });

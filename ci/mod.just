@@ -67,14 +67,17 @@ fmt:
 # builds for its own by the same rule, with nothing in this file naming a
 # bucket or holding a token.
 #
-# `odu:pin=master` KEEPS THAT CLOSURE past retention, and only on master: a run
-# on master re-points `juspay/odu@master/<system>` at what this recipe just
-# pushed, so the odu a developer substitutes is held however long nobody asks
-# for it, while a run on a branch pushes exactly the same paths and pins
-# nothing. The same name shape `.github/actions/push/pin-name.sh` derives for
+# `odu:pin` KEEPS THAT CLOSURE past retention, and only on the repository's
+# DEFAULT branch: the bare attribute names no ref, so the coordinator reads
+# `origin/HEAD` out of the checkout and a run on master re-points
+# `juspay/odu@master/<system>` at what this recipe just pushed. The odu a
+# developer substitutes is held however long nobody asks for it, while a run
+# on a branch pushes exactly the same paths and pins nothing — and the day
+# this repository renames its trunk the attribute follows rather than going
+# stale. The same name shape `.github/actions/push/pin-name.sh` derives for
 # the workflow, so the run and the workflow re-point one pin per system rather
 # than two.
-[metadata("odu:pin=master")]
+[metadata("odu:pin")]
 nix:
     nix build .#odu --out-link result-odu
     nix build .#odu-runner --out-link result-odu-runner
