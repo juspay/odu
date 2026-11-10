@@ -50,6 +50,7 @@ import {
   ODU_BUCKET_FIELD,
   ODU_ORIGIN_FIELD,
   PARTS_HEADER,
+  provenanceHeaders,
   UPLOAD_SESSION_HEADER,
   type UploadMode,
   type UploadPlan,
@@ -887,6 +888,14 @@ export interface PushOptions {
    * why write, not admin.
    */
   pin?: string;
+  /**
+   * WHAT BUILT THESE PATHS — the run that produced them and the commit they
+   * were built from. Pass what the caller has, empty or absent included:
+   * {@link provenanceHeaders} is what decides which of them was STATED, and a
+   * re-push that states nothing must not erase what a run stated.
+   */
+  run?: string;
+  commit?: string;
   onLine?: (line: string) => void;
   platform?: PushPlatform;
 }
@@ -926,6 +935,10 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
   const base = `${resolved.origin}${CACHE_MOUNT}/${resolved.name}`;
   const headers: Record<string, string> =
     token === null ? {} : { authorization: `Bearer ${token}` };
+  // WHAT BUILT THESE PATHS, as the headers the narinfo PUT carries — built
+  // once, by the module that owns the wire. Nothing is tested here: a value
+  // that is empty is a value nobody stated, which `provenanceHeaders` knows.
+  const provenance = provenanceHeaders({ run: options.run, commit: options.commit });
 
   const platform: PushPlatform = options.platform ?? {
     closure: (paths) => nixClosure(paths, null),
@@ -949,7 +962,11 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
           skippedUpstream: [] as readonly string[],
           substituter: null,
         }
-      : await askMissing(resolved, headers, closure);
+      : // THE PROVENANCE RIDES HERE TOO, not only on the narinfo PUT: the
+        // paths this answer calls present get no PUT at all, and this is the
+        // one request that touches their rows. The bucket fills a null column
+        // and overwrites none.
+        await askMissing(resolved, { ...headers, ...provenance }, closure);
   const present = closure.size - answer.missing.length;
   const alreadyPresent = present - answer.skippedUpstream.length;
   // ONE PREAMBLE, then a line per path: what the closure is, what the bucket
@@ -985,6 +1002,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         if (entry === undefined) continue;
         const outcome = await uploadOne(base, headers, entry, platform, attempts, say, {
           partSize,
+          provenance,
         });
         if (outcome.ok) {
           pushed += 1;
@@ -1787,7 +1805,12 @@ async function uploadOne(
   platform: PushPlatform,
   attempts: number,
   say: (line: string) => void,
-  options: { partSize: number },
+  options: {
+    partSize: number;
+    /** What {@link provenanceHeaders} made of the caller's stated run and
+     *  commit — empty when it stated neither. */
+    provenance: Record<string, string>;
+  },
 ): Promise<UploadOutcome> {
   /** Every attempt's reason, in order — the whole of what is reported when
    *  the budget runs out. */
@@ -1839,7 +1862,14 @@ async function uploadOne(
     const infoUrl = `${base}/${storePathHash(entry.storePath)}.narinfo`;
     const dialed = await dial(infoUrl, {
       method: "PUT",
-      headers: { ...headers, "content-type": "text/x-nix-narinfo" },
+      // THE NARINFO PUT IS THE REQUEST THAT WRITES THE ROW, so it is the one
+      // that carries what built the path. The body stays the Nix format
+      // every client parses; odu's own facts ride above it.
+      headers: {
+        ...headers,
+        ...options.provenance,
+        "content-type": "text/x-nix-narinfo",
+      },
       body: formatPushNarinfo(entry, narName),
     });
     if (!dialed.ok) {

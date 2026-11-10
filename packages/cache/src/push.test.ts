@@ -65,6 +65,11 @@ interface Seen {
   path: string;
   authorization: string | null;
   upload: string | null;
+  /** What the request said built these paths (cache 4.7) — read off every
+   *  request, so a case can prove the headers ride on the narinfo PUT and
+   *  nowhere else. */
+  run: string | null;
+  commit: string | null;
   body: string;
 }
 
@@ -158,6 +163,8 @@ function startServer(): Server {
         path: url.pathname,
         authorization: request.headers.get("authorization"),
         upload: request.headers.get("x-odu-upload"),
+        run: request.headers.get("x-odu-run"),
+        commit: request.headers.get("x-odu-commit"),
         body,
       });
 
@@ -348,6 +355,76 @@ describe("pushing a closure", () => {
       ]);
       expect(uploads[0]).toEndWith(".nar.zst");
       expect(uploads[1]).toEndWith(".narinfo");
+    } finally {
+      server.stop();
+    }
+  });
+
+  /**
+   * WHAT BUILT THESE PATHS RIDES ON THE TWO REQUESTS THAT REACH A ROW (cache
+   * 4.7): the narinfo PUT, which writes the row for a path this push uploads,
+   * and the `missing` query, which is the ONLY request a path the bucket
+   * already holds ever gets. The narinfo BODY stays the format a Nix client
+   * parses, and the NAR upload — which writes no row — carries neither.
+   */
+  it("states the run and the commit on the narinfo and on the missing query", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        run: "run-17",
+        commit: "a".repeat(40),
+      });
+      const narinfo = server.seen.filter(
+        (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
+      );
+      expect(narinfo).toHaveLength(1);
+      expect(narinfo[0]).toMatchObject({ run: "run-17", commit: "a".repeat(40) });
+      // NOT IN THE BODY: a narinfo is Nix's format, and an odu field in it is
+      // a line every other reader of this cache has to learn to ignore.
+      expect(narinfo[0]?.body).not.toContain("run-17");
+      // THE QUERY CARRIES IT TOO. This push uploads one path of three, and
+      // without the headers here the two the bucket already holds would learn
+      // nothing from the run that wanted them — they get no other request.
+      const asked = server.seen.filter((seen) => seen.path.endsWith("/missing"));
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toMatchObject({ run: "run-17", commit: "a".repeat(40) });
+      // AND NOT ON THE NAR UPLOAD, which writes no row: a header there would
+      // be provenance the cache can do nothing with.
+      const nars = server.seen.filter(
+        (seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"),
+      );
+      expect(nars.map((seen) => seen.run)).toEqual([null]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("sends neither header when the push states neither", async () => {
+    const server = startServer();
+    try {
+      server.missing = [LIBC];
+      await pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+      });
+      const narinfo = server.seen.find(
+        (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
+      );
+      // ABSENT, not empty: the cache reads a header it did not get as "said
+      // nothing", which is what keeps a bare push from erasing what a run
+      // stated about the same path — on either request.
+      expect(narinfo).toMatchObject({ run: null, commit: null });
+      expect(server.seen.find((seen) => seen.path.endsWith("/missing"))).toMatchObject({
+        run: null,
+        commit: null,
+      });
     } finally {
       server.stop();
     }

@@ -27,6 +27,7 @@
 import { Database } from "bun:sqlite";
 import { dirname } from "node:path";
 import { chmodSync, mkdirSync } from "node:fs";
+import type { Provenance } from "./paths";
 import { type PathSort, storePathParts } from "./surface";
 
 /** A bucket: one cache, one substituter URL, one signing keypair. */
@@ -142,6 +143,11 @@ export interface ObjectRow {
    * retention rests on.
    */
   lastWanted: number;
+  /** WHAT BUILT IT, as the last push that stated anything said. The two
+   *  fields are independent: a bare re-push states neither and changes
+   *  neither, and the GitHub action states only the commit. */
+  run: string | null;
+  commit: string | null;
 }
 
 /** What one bucket's SQL totals say: the row a subscriber sees, minus the
@@ -230,6 +236,10 @@ export interface ObjectGroupRow {
   pushed: number;
   wanted: number;
   storePath: string;
+  /** The NEWEST version's provenance — the same row `storePath` names, never
+   *  a mixture of two builds. */
+  run: string | null;
+  commit: string | null;
 }
 
 export interface CacheRepo {
@@ -276,10 +286,19 @@ export interface CacheRepo {
   /** ONE READ, counted. The hit count moves; `last_wanted` does not — see
    *  {@link ObjectRow.lastWanted}. */
   countRead(bucket: string, storePath: string): void;
-  /** SOMEBODY WANTS THESE PATHS: renew their retention clock. One statement
-   *  for the batch, because the `missing` query asks about a whole closure and
-   *  a row write per path would be a thousand of them per push. */
-  want(bucket: string, storePaths: readonly string[], at: number): void;
+  /** SOMEBODY WANTS THESE PATHS: renew their retention clock, and claim the
+   *  ones that have no provenance yet. One statement for the batch, because
+   *  the `missing` query asks about a whole closure and a row write per path
+   *  would be a thousand of them per push.
+   *
+   *  `COALESCE`, exactly as the narinfo write does: a column already set is
+   *  never overwritten, so the FIRST builder to state a fact keeps it. */
+  want(
+    bucket: string,
+    storePaths: readonly string[],
+    at: number,
+    provenance: Provenance,
+  ): void;
   deleteObject(bucket: string, storePath: string): void;
 
   putPin(row: PinRow): void;
@@ -540,6 +559,20 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE token ADD COLUMN label TEXT;
   `,
+  // Migration 18 — WHAT BUILT A PATH (PLAN 4.2). A push may now state the run
+  // that produced its paths and the commit they were built from, so a path a
+  // reader does not recognise can be traced to the build that made it. Null
+  // for every row that predates this, and null for every push that states
+  // nothing — which is most of them, and not a gap.
+  //
+  // `commit` is SQL's OWN WORD (a transaction ends with it), so the column is
+  // `commit_sha` and `objectOf` maps it to the row's `commit`. Quoting the
+  // keyword would work and would then have to be remembered in every
+  // statement that ever touches it.
+  `
+  ALTER TABLE object ADD COLUMN run TEXT;
+  ALTER TABLE object ADD COLUMN commit_sha TEXT;
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
@@ -691,6 +724,9 @@ const objectOf = (row: Row): ObjectRow => ({
   hits: integer(row, "hits"),
   created: integer(row, "created"),
   lastWanted: integer(row, "last_wanted"),
+  run: maybeText(row, "run"),
+  // `commit_sha`, because `COMMIT` is SQL's own word (migration 18).
+  commit: maybeText(row, "commit_sha"),
 });
 
 const pinOf = (row: Row): PinRow => ({
@@ -861,15 +897,25 @@ export function openCacheRepo(path: string): CacheRepo {
     putObject(row) {
       db.run(
         `INSERT INTO object (bucket, store_path, name, hash, nar_hash, nar_size, refs,
-           deriver, ca, ca_proof, compression, file_hash, file_size, sigs, hits, created, last_wanted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           deriver, ca, ca_proof, compression, file_hash, file_size, sigs, hits, created,
+           last_wanted, run, commit_sha)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket, store_path) DO UPDATE SET hash = excluded.hash,
            nar_hash = excluded.nar_hash, nar_size = excluded.nar_size,
            refs = excluded.refs, deriver = excluded.deriver,
            ca = excluded.ca, ca_proof = excluded.ca_proof,
            compression = excluded.compression,
            file_hash = excluded.file_hash,
-           file_size = excluded.file_size, sigs = excluded.sigs`,
+           file_size = excluded.file_size, sigs = excluded.sigs,
+           -- WHAT BUILT IT SURVIVES A RE-PUSH THAT SAYS NOTHING. A developer
+           -- running a bare "odu cache push" over a path a run already stored
+           -- knows no run and no commit, and overwriting with null would
+           -- throw away the only record of where the bytes came from. The
+           -- two coalesce INDEPENDENTLY: the GitHub action states the commit
+           -- and never a run, so one stated field must not carry the other's
+           -- absence into the row.
+           run = COALESCE(excluded.run, run),
+           commit_sha = COALESCE(excluded.commit_sha, commit_sha)`,
         [
           row.bucket,
           row.storePath,
@@ -893,6 +939,8 @@ export function openCacheRepo(path: string): CacheRepo {
           row.hits,
           row.created,
           row.lastWanted,
+          row.run,
+          row.commit,
         ],
       );
     },
@@ -932,14 +980,26 @@ export function openCacheRepo(path: string): CacheRepo {
         storePath,
       ]);
     },
-    want(bucket, storePaths, at) {
+    want(bucket, storePaths, at, provenance) {
       if (storePaths.length === 0) return;
       // ONE statement for the batch: a push asks about its whole closure, and
       // a thousand-path closure must not be a thousand writes.
+      //
+      // AND THE PROVENANCE RIDES ON IT. A path the bucket already holds gets
+      // no narinfo PUT — that is the whole point of asking what is missing —
+      // so without this a run that warmed a path somebody else uploaded would
+      // leave the row saying nothing about where its bytes came from, which
+      // is the common case for a repository whose workflow pushes the same
+      // closure. `COALESCE` and never an overwrite: the first builder to
+      // state a fact keeps it, a run may claim a path its own workflow
+      // uploaded at the same commit, and a later unrelated run changes
+      // nothing.
       const holes = storePaths.map(() => "?").join(", ");
       db.run(
-        `UPDATE object SET last_wanted = ? WHERE bucket = ? AND store_path IN (${holes})`,
-        [at, bucket, ...storePaths],
+        `UPDATE object SET last_wanted = ?, run = COALESCE(run, ?), ` +
+          `commit_sha = COALESCE(commit_sha, ?) ` +
+          `WHERE bucket = ? AND store_path IN (${holes})`,
+        [at, provenance.run, provenance.commit, bucket, ...storePaths],
       );
     },
     deleteObject(bucket, storePath) {
@@ -1070,26 +1130,47 @@ export function openCacheRepo(path: string): CacheRepo {
       }
       params.push(page.limit + 1);
       const way = page.descending ? "DESC" : "ASC";
+      // THE NEWEST VERSION'S OWN COLUMNS, one correlated subquery each. A
+      // bare column gets the max row's value only when the select holds
+      // exactly ONE min/max, and this one holds two — so the newest version
+      // is named by a subquery that reads the same span of `object_name` the
+      // grouping does, and carries the FILTER so a filtered group answers a
+      // path the filter matched rather than one it hid.
+      //
+      // THREE SUBQUERIES, NOT ONE, because a SQLite scalar subquery yields a
+      // single COLUMN: the path, the run and the commit cannot come out of
+      // one of them. They are built from one expression with one ORDER BY,
+      // and that order is TOTAL — `store_path` is unique within a bucket's
+      // name — so all three resolve to the same row and a group can never
+      // show one build's hash beside another's provenance.
+      //
+      // NAMED ONCE, so the select list and the bindings cannot be counted
+      // apart. Each subquery carries a `?` when there is a filter, and those
+      // `?`s are read before the WHERE's; a column added to the list below
+      // without its binding would not be an error SQLite reports — every
+      // parameter after the select list would simply shift, and the page
+      // would be wrong rather than refused.
+      const perVersion = ["store_path", "run", "commit_sha"];
+      const newest = (column: string): string =>
+        `(SELECT inner.${column} FROM object AS inner ` +
+        "WHERE inner.bucket = object.bucket AND inner.name = object.name " +
+        (filter === null ? "" : "AND instr(inner.store_path, ?) > 0 ") +
+        `ORDER BY inner.created DESC, inner.store_path DESC LIMIT 1) AS ${column}`;
       const found = db
         .query(
           "SELECT name, COUNT(*) AS versions, " +
             "COALESCE(SUM(nar_size), 0) AS bytes, COALESCE(SUM(hits), 0) AS hits, " +
             "MAX(created) AS pushed, MAX(last_wanted) AS wanted, " +
-            // THE NEWEST VERSION'S OWN PATH, by a subquery rather than a bare
-            // column: SQLite hands a bare column the max row's value only when
-            // there is exactly ONE min/max in the select, and there are two.
-            // It reads the same span of `object_name` the grouping does, and
-            // it carries the FILTER, so a filtered group's hash is a path the
-            // filter matched rather than one it hid.
-            "(SELECT inner.store_path FROM object AS inner " +
-            "WHERE inner.bucket = object.bucket AND inner.name = object.name " +
-            (filter === null ? "" : "AND instr(inner.store_path, ?) > 0 ") +
-            "ORDER BY inner.created DESC, inner.store_path DESC LIMIT 1) AS store_path " +
+            `${perVersion.map(newest).join(", ")} ` +
             `FROM object WHERE ${where.join(" AND ")} GROUP BY name ` +
             (having.length === 0 ? "" : `HAVING ${having.join(" AND ")} `) +
             `ORDER BY ${order.group} ${way}, name ${way} LIMIT ?`,
         )
-        .all(...((filter === null ? params : [filter, ...params]) as never[])) as Row[];
+        .all(
+          ...((filter === null
+            ? params
+            : [...perVersion.map(() => filter), ...params]) as never[]),
+        ) as Row[];
       const more = found.length > page.limit;
       const rows = (more ? found.slice(0, page.limit) : found).map((row) => ({
         name: text(row, "name"),
@@ -1099,6 +1180,8 @@ export function openCacheRepo(path: string): CacheRepo {
         pushed: integer(row, "pushed"),
         wanted: integer(row, "wanted"),
         storePath: text(row, "store_path"),
+        run: maybeText(row, "run"),
+        commit: maybeText(row, "commit_sha"),
       }));
       const last = rows.at(-1);
       return {

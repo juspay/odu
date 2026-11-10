@@ -69,6 +69,8 @@ const object: ObjectRow = {
   hits: 3,
   created: NOW,
   lastWanted: NOW,
+  run: null,
+  commit: null,
 };
 
 describe("migrations", () => {
@@ -204,7 +206,10 @@ describe("objects", () => {
     const other = { ...object, storePath: `${object.storePath}-two`, hash: "b".repeat(32) };
     const untouched = { ...object, storePath: `${object.storePath}-three`, hash: "c".repeat(32) };
     for (const row of [object, other, untouched]) repo.putObject(row);
-    repo.want("main", [object.storePath, other.storePath], NOW + 1_000);
+    repo.want("main", [object.storePath, other.storePath], NOW + 1_000, {
+      run: null,
+      commit: null,
+    });
     expect(repo.object("main", object.storePath)?.lastWanted).toBe(NOW + 1_000);
     expect(repo.object("main", other.storePath)?.lastWanted).toBe(NOW + 1_000);
     expect(repo.object("main", untouched.storePath)?.lastWanted).toBe(NOW);
@@ -320,6 +325,10 @@ describe("a bucket's paths, by package", () => {
         pushed: NOW + 20,
         wanted: NOW + 50,
         storePath: `/nix/store/${"c".repeat(32)}-widget-1.0`,
+        // The newest version's own, read off the same row the path is: this
+        // seed states no provenance, so both are null.
+        run: null,
+        commit: null,
       },
       {
         name: "zlib-1.3",
@@ -329,6 +338,8 @@ describe("a bucket's paths, by package", () => {
         pushed: NOW + 15,
         wanted: NOW + 15,
         storePath: `/nix/store/${"d".repeat(32)}-zlib-1.3`,
+        run: null,
+        commit: null,
       },
     ]);
   });
@@ -374,6 +385,45 @@ describe("a bucket's paths, by package", () => {
     expect(
       repo.objectGroupsPage("main", { ...page, filter: "zlib" }).rows.map((row) => row.name),
     ).toEqual(["zlib-1.3"]);
+  });
+
+  it("reads a FILTERED group's provenance off the newest version the filter matched", () => {
+    const repo = openCacheRepo(":memory:");
+    // Two of one package's three builds share a hash prefix the third does
+    // not, so the newest MATCHING version is not the newest version — and
+    // the provenance columns have to come from the former.
+    repo.putObject(
+      build("widget-1.0", `prg${"a".repeat(29)}`, {
+        created: NOW,
+        run: "run-a",
+        commit: "a".repeat(40),
+      }),
+    );
+    repo.putObject(
+      build("widget-1.0", `prg${"b".repeat(29)}`, {
+        created: NOW + 10,
+        run: "run-b",
+        commit: "b".repeat(40),
+      }),
+    );
+    repo.putObject(
+      build("widget-1.0", `zzz${"c".repeat(29)}`, {
+        created: NOW + 20,
+        run: "run-c",
+        commit: "c".repeat(40),
+      }),
+    );
+    const { rows } = repo.objectGroupsPage("main", { ...page, filter: "prg" });
+    expect(rows).toHaveLength(1);
+    // THE ASSERTION A MIS-BINDING FAILS: every per-version subquery carries
+    // its own filter `?`, so a select list and a binding list that drifted
+    // apart would answer run-c's row — or no row at all.
+    expect(rows[0]).toMatchObject({
+      versions: 2,
+      storePath: `/nix/store/prg${"b".repeat(29)}-widget-1.0`,
+      run: "run-b",
+      commit: "b".repeat(40),
+    });
   });
 
   it("orders paths themselves by the same columns", () => {

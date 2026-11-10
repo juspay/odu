@@ -72,7 +72,7 @@ import {
   progressEvent,
   SILENT_FACE,
 } from "../common/presentation";
-import { gitBranch, gitTopLevel } from "../common/git";
+import { gitBranch, gitDefaultBranch, gitTopLevel } from "../common/git";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
 import { createVerdictGate } from "./verdictGate";
 import { maxLaneResurrections } from "./laneResurrection";
@@ -646,6 +646,33 @@ async function orchestrate(
     }
   }
 
+  // ── forge coordinates, and the ref this run is on ──
+  //
+  // ABOVE the push environment, not beside the run identity it also feeds:
+  // a pin's name is `<owner>/<repo>@<ref>/<system>`, so both facts have to
+  // exist before the first lane's task list is built. Read once here and used
+  // by the durable record further down — a second `gitBranch` would be a
+  // second chance for a board and a pin to name different refs.
+  const originUrl = tryGit(repoRoot, ["remote", "get-url", "origin"]);
+  const github = originUrl !== null ? parseGithubRemote(originUrl) : null;
+  if (ctx.posting && github === null) {
+    throw new Error(
+      "odu: posting commit statuses needs a github.com origin remote " +
+        "(pass --no-post for non-GitHub strict runs)",
+    );
+  }
+  const repo = github !== null ? repoSlug(github) : null;
+  /** The ref this run is on — `null` on a detached HEAD, which is a run no
+   *  pin can belong to because no branch names what it built. */
+  const ref = gitBranch(repoRoot);
+  /** What `origin` calls its default branch, for the recipes that pin on it
+   *  without naming it (a bare `[metadata("odu:pin")]`). Read HERE, with the
+   *  ref and the forge coordinates above and for the same reason — one read,
+   *  so a board, a pin and a sentence cannot name three different refs — and
+   *  from `.git` alone, so no run's pins wait on a remote. `null` when this
+   *  checkout never learned one. */
+  const defaultBranch = gitDefaultBranch(repoRoot);
+
   // ── WHERE THIS RUN PUSHES (PLAN 4.1) ──
   //
   // The token the launcher left beside this run's own log, read ONCE and
@@ -656,26 +683,139 @@ async function orchestrate(
   // same answer as a checkout that names no cache.
   const pushToken = args.push === undefined ? null : takePushToken(args.runId);
   const pushing = args.push !== undefined && pushToken !== null ? args.push : null;
-  /** The variables a lane's recipe node carries so the runner can push what it
-   *  built: the RESOLVED origin and bucket, and the run's token. Composed by
-   *  the module that PARSES them, so the two halves of that wire cannot drift
-   *  apart. Empty for a run that pushes nothing, so no task gains a key. */
-  const pushEnv = pushEnvFor(
+  /**
+   * WHETHER THIS TASK'S CLOSURE IS PINNED, and if not, whether that silence
+   * is worth a sentence.
+   *
+   * THE DECISION IS THE COORDINATOR'S. The lane compares no refs, reads no git
+   * and resolves no remote: it is handed a name or it is handed nothing. A
+   * lane deriving a pin would derive it from a checkout that is a COPY, on a
+   * machine that may have fetched since — and a wrong pin name does not fail,
+   * it silently holds the wrong closure open while the right one is collected.
+   *
+   * A recipe names the refs its output is worth keeping for — spelled, or
+   * left as `null` for "this repository's default branch". Four endings:
+   *
+   *   - the run is on ONE of them and the checkout has an `owner/repo` → the
+   *     name, shaped exactly as `.github/actions/push/pin-name.sh` shapes it,
+   *     because a run and a workflow pushing the same commit must re-point
+   *     ONE pin and not two. The name carries the ref the run is ACTUALLY
+   *     on, so two recipes pinning different refs each keep their own. The
+   *     platform key IS the nix system, and the system is in the name
+   *     because a matrix's second job would otherwise evict the first job's
+   *     closure every push.
+   *   - the run is on some OTHER ref → nothing, and nothing said. The pin
+   *     belongs to one of the refs this run is not on; a feature branch is
+   *     not a failure.
+   *   - the recipe asked and this run cannot answer — a detached HEAD, or a
+   *     checkout with no github.com origin to name an owner → a sentence,
+   *     because a pin configured and not made is invisible otherwise.
+   *   - the recipe's only unmatched hope was the default branch and this
+   *     checkout has no `origin/HEAD` to name it → a sentence too, with the
+   *     fix in it. Guessing `main` here would pin a `master` repository's
+   *     closure under a branch nothing is ever on.
+   *
+   * ONE FUNCTION, TWO READERS: `withPushEnv` turns a `named` into the one key
+   * a lane is handed, and `startSetup` turns a `skipped` into a line on this
+   * run's own node. The sentence stays on THIS side of the process boundary —
+   * shipping it to a lane to be printed back put prose in a push
+   * configuration, and went silent exactly when it mattered, because a node
+   * whose paths an earlier recipe already sent pushes nothing and says
+   * nothing.
+   */
+  type PinDecision =
+    | { kind: "named"; name: string }
+    | { kind: "skipped"; why: string }
+    | { kind: "none" };
+  const pinDecisionFor = (task: TaskSpec, platform: string): PinDecision => {
+    const declared = task.pin;
+    if (declared === undefined) return { kind: "none" };
+    /** The refs as a reader would say them — `null` is the concept, not a
+     *  ref name, so it is spelled out rather than printed. */
+    const said = declared
+      .map((pin) => (pin === null ? "its default branch" : `"${pin}"`))
+      .join(", ");
+    if (ref === null) {
+      return {
+        kind: "skipped",
+        why:
+          `this run is on a detached HEAD, and recipe "${task.id}" ` +
+          `pins only on ${said}`,
+      };
+    }
+    const matched = declared.some((pin) =>
+      pin === null ? defaultBranch !== null && defaultBranch === ref : pin === ref,
+    );
+    if (!matched) {
+      // SILENCE, UNLESS THE SILENCE IS A MISCONFIGURATION. A ref that simply
+      // is not this one is the ordinary case and says nothing; but a recipe
+      // whose last unmatched hope was a default branch this checkout cannot
+      // name would be silent forever on every branch, which is the shape of
+      // a pin nobody notices is missing.
+      if (declared.includes(null) && defaultBranch === null) {
+        return {
+          kind: "skipped",
+          why:
+            `this checkout's origin has no HEAD, so there is no default ` +
+            `branch to pin recipe "${task.id}" on; set it ` +
+            "(`git remote set-head origin -a`) or name the ref: " +
+            "`odu:pin=<ref>`",
+        };
+      }
+      return { kind: "none" };
+    }
+    if (repo === null) {
+      return {
+        kind: "skipped",
+        why:
+          `this checkout has no github.com origin remote, so there is no ` +
+          `owner/repo to name recipe "${task.id}"'s pin with`,
+      };
+    }
+    return { kind: "named", name: `${repo}@${ref}/${platform}` };
+  };
+  /** WHAT EVERY TASK OF THIS RUN PUSHES WITH — resolved origin and bucket, the
+   *  run's write token, and this run's provenance. All five are facts about the
+   *  RUN, so they are read once here and not rebuilt per task; `null` is a run
+   *  that pushes nothing, and then no task gains a key at all. */
+  const pushFacts =
     pushing === null || pushToken === null
       ? null
-      : { origin: pushing.origin, bucket: pushing.bucket, token: pushToken },
-  );
-  /** Every task, with the push environment on it. Applied HERE, once, where a
-   *  lane's task list is first built — so a shard lane, an extend and a
-   *  resurrection all carry it without a second place remembering to. */
-  const withPushEnv = (tasks: readonly TaskSpec[]): TaskSpec[] =>
-    Object.keys(pushEnv).length === 0
-      ? [...tasks]
-      : tasks.map((task) => ({ ...task, env: { ...(task.env ?? {}), ...pushEnv } }));
+      : {
+          origin: pushing.origin,
+          bucket: pushing.bucket,
+          token: pushToken,
+          run: args.runId,
+          commit: sha,
+        };
+  /** Every task of one lane, with its push environment on it: the run-wide
+   *  facts above plus the one PER-TASK fact, the pin name for a recipe that
+   *  asked to be pinned on the ref this run is on. Spelled by the module that
+   *  PARSES them, so the two halves of that wire cannot drift apart. Applied
+   *  HERE, once, where a lane's task list is first built — so a shard lane, an
+   *  extend and a resurrection all carry it without a second place
+   *  remembering to. */
+  const withPushEnv = (
+    tasks: readonly TaskSpec[],
+    platform: string,
+  ): TaskSpec[] => {
+    if (pushFacts === null) return [...tasks];
+    return tasks.map((task) => {
+      const pin = pinDecisionFor(task, platform);
+      const env = pushEnvFor({
+        ...pushFacts,
+        ...(pin.kind === "named" ? { pin: pin.name } : {}),
+      });
+      return { ...task, env: { ...(task.env ?? {}), ...env } };
+    });
+  };
   const platforms = Object.keys(poolsByPlatform).sort();
   const tasksByPlatform = new Map<string, TaskSpec[]>();
   for (const platform of platforms) {
-    const tasks = withPushEnv(laneTasks(spec, platform, selectors, args.noDeps));
+    const tasks = withPushEnv(
+      laneTasks(spec, platform, selectors, args.noDeps),
+      platform,
+    );
     if (tasks.length > 0) {
       const sharded = tasks.filter((task) => task.shards !== undefined);
       if (args.linger && sharded.length > 0) {
@@ -688,15 +828,6 @@ async function orchestrate(
     throw new Error("odu: nothing to run (no lane has a matching recipe)");
   }
 
-  // ── forge coordinates ──
-  const originUrl = tryGit(repoRoot, ["remote", "get-url", "origin"]);
-  const github = originUrl !== null ? parseGithubRemote(originUrl) : null;
-  if (ctx.posting && github === null) {
-    throw new Error(
-      "odu: posting commit statuses needs a github.com origin remote " +
-        "(pass --no-post for non-GitHub strict runs)",
-    );
-  }
   // Pool-level prechecks (before lease): a pool that can only land on a remote
   // needs an origin; in-place runs refuse any pool with a remote candidate.
   for (const platform of tasksByPlatform.keys()) {
@@ -768,8 +899,9 @@ async function orchestrate(
   // that record is on disk and the exclusive reservation advances past it.
   // Also *before* the venue lease so the holder label can carry `sha7#seq`
   // (and so a setup failure after claim still leaves a claimed seq to reclaim).
-  // `repo` is the GitHub owner/repo or null for a local-only checkout.
-  const repo = github !== null ? repoSlug(github) : null;
+  // `repo` — the GitHub owner/repo, null for a local-only checkout — was
+  // resolved with the forge coordinates above, where the push environment
+  // already needed it to name a pin.
   // Atomically SELECT-and-RESERVE the seq durably BEFORE the socket serves, so
   // the seq is on disk the instant it can become observable via the surface, and
   // is claimed with an exclusive create so no two runs ever hold the same slot
@@ -803,11 +935,14 @@ async function orchestrate(
   const history = openRunHistory({
     repoRoot,
     repo,
-    // Read HERE, where the run begins, because it is a fact about this run and
-    // not about the checkout: by the time a board asks, the developer has moved
-    // on and the checkout would answer with today's branch under last week's
-    // commit. A detached HEAD has no branch and says so by omission.
-    branch: gitBranch(repoRoot),
+    // Read ONCE, up with the forge coordinates, because it is a fact about
+    // this run and not about the checkout: by the time a board asks, the
+    // developer has moved on and the checkout would answer with today's
+    // branch under last week's commit. The pin decision reads the same
+    // value — one `git` answer, so a board and a pin can never disagree
+    // about which ref this run was on. A detached HEAD has no branch and
+    // says so by omission.
+    branch: ref,
     sha,
     seq,
     pipeline: spec.name,
@@ -2168,6 +2303,17 @@ async function orchestrate(
       );
       if (args.pushKeyWarning !== undefined) {
         appendLocal(id, `[odu] ${args.pushKeyWarning}\n`);
+      }
+      // AND WHICH RECIPES ASKED TO BE PINNED AND CANNOT BE — one line each,
+      // beside the push line, because a pin is this same policy one level
+      // down and this is the node a reader asking "what did this run warm"
+      // already has open. No lane could say it: a pin a lane was not handed
+      // is a pin it knows nothing about.
+      for (const task of tasksByPlatform.get(platform) ?? []) {
+        const pin = pinDecisionFor(task, platform);
+        if (pin.kind === "skipped") {
+          appendLocal(id, `[odu] not pinning: ${pin.why}\n`);
+        }
       }
     } else {
       // THE REASON, read off the field that holds exactly it. A resolved

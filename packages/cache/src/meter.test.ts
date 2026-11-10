@@ -250,6 +250,7 @@ describe("the gauges, from a real database", () => {
           controller.close();
         },
       }),
+      { run: null, commit: null },
     );
     expect(accepted).toMatchObject({ ok: true });
     expect(await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "keep", paths: [path] })).toMatchObject({ ok: true });

@@ -64,7 +64,12 @@ async function pushAs(cache: Cache, bucket: BucketRow, storePath: string): Promi
   const upload = await cache.beginUpload(bucket, `${payload.narHash.slice("sha256:".length)}.nar.zst`);
   await upload.write(payload.bytes);
   await upload.commit();
-  const outcome = await cache.acceptNarinfo(bucket, storePathHash(storePath), stream(narinfoText(storePath, payload)));
+  const outcome = await cache.acceptNarinfo(
+    bucket,
+    storePathHash(storePath),
+    stream(narinfoText(storePath, payload)),
+    { run: null, commit: null },
+  );
   if (!outcome.ok) throw new Error(`push ${storePath}: ${outcome.message}`);
 }
 

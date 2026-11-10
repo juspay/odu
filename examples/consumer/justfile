@@ -12,6 +12,16 @@ default: build test lint docs e2e
 # directory it ran in goes to the cache `flake.nix` names, closure and all.
 # A recipe that leaves none pushes nothing; a push that fails makes the node
 # red, so green means the cache is warm.
+#
+# `odu:pin` KEEPS THIS ONE PAST RETENTION, on the repository's DEFAULT branch
+# and no other: bare, it names no ref, so a run on your trunk re-points
+# `<owner>/<repo>@<trunk>/<system>` at what this recipe just pushed while a run
+# on a feature branch pushes exactly as before and pins nothing. You do not
+# have to spell your default branch here; name one — `odu:pin=release-1.x`,
+# repeated for each — only for a ref you ALSO want held. Unlike `odu:shard` it
+# does not have to be a leaf: `test` and `e2e` depend on this recipe, and what
+# it builds is what a developer's machine substitutes.
+[metadata("odu:pin")]
 build:
     nix build .#default --out-link result-app
 

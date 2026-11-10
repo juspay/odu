@@ -67,6 +67,8 @@ function obj(
     hits: 0,
     created: wanted,
     lastWanted: wanted,
+    run: null,
+    commit: null,
   };
 }
 

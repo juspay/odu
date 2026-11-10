@@ -66,6 +66,11 @@ const stream = (text: string): ReadableStream<Uint8Array> =>
     },
   });
 
+/** A push that said nothing about what built the path — what every case here
+ *  is about, since none of them is testing provenance (`gcStores.test.ts`
+ *  is). */
+const NOTHING_SAID = { run: null, commit: null };
+
 /** Bytes, and the NAR hash a narinfo has to claim for them. */
 const bytesStream = (bytes: Uint8Array): ReadableStream<Uint8Array> =>
   new ReadableStream({
@@ -377,6 +382,7 @@ describe("pin", () => {
         cache.bucket("main") as never,
         hashOf(path),
         stream(narinfoText(path, payload, refs)),
+        NOTHING_SAID,
       );
     }
 
@@ -417,6 +423,7 @@ describe("a restart", () => {
       first.bucket("main") as never,
       hashOf(path),
       stream(narinfoText(path, payload)),
+      NOTHING_SAID,
     );
     first.close();
 
@@ -536,7 +543,12 @@ describe("gc and a concurrent push", () => {
     const payload = nar(path);
     const push = async (): Promise<NarinfoOutcome> => {
       await putNar(cache, "main", payload);
-      return cache.acceptNarinfo(cache.bucket("main") as never, hashOf(path), stream(narinfoText(path, payload)));
+      return cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(path),
+        stream(narinfoText(path, payload)),
+        NOTHING_SAID,
+      );
     };
     expect(await push()).toMatchObject({ ok: true });
     const db = new Database(join(scratch, "cache", "cache.sqlite"));
@@ -572,6 +584,7 @@ describe("gc and pin", () => {
         cache.bucket("main") as never,
         hashOf(path),
         stream(narinfoText(path, payload)),
+        NOTHING_SAID,
       );
     }
     expect(await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "keep", paths: [kept] })).toMatchObject({ ok: true });
@@ -602,6 +615,7 @@ describe("gc and pin", () => {
         cache.bucket("main") as never,
         hashOf(path),
         stream(narinfoText(path, payload, path === root ? [child] : [])),
+        NOTHING_SAID,
       );
     }
     await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "release", paths: [root] });
@@ -680,10 +694,14 @@ describe("missing", () => {
     await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
     const bucket = cache.bucket("main");
     if (bucket === null) throw new Error("no bucket");
-    const answer = cache.missing(bucket, [
-      { path: "/nix/store/11111111111111111111111111111111-a", sigs: ["no-colon-here"] },
-      { path: "/nix/store/22222222222222222222222222222222-b", sigs: ["cache.nixos.org-1:AAAA"] },
-    ]);
+    const answer = cache.missing(
+      bucket,
+      [
+        { path: "/nix/store/11111111111111111111111111111111-a", sigs: ["no-colon-here"] },
+        { path: "/nix/store/22222222222222222222222222222222-b", sigs: ["cache.nixos.org-1:AAAA"] },
+      ],
+      { run: null, commit: null },
+    );
     expect(answer).toEqual({
       missing: ["/nix/store/11111111111111111111111111111111-a"],
       skipped: ["/nix/store/22222222222222222222222222222222-b"],
@@ -727,6 +745,7 @@ describe("a reference that is a derivation", () => {
       cache.bucket("main") as never,
       hashOf(parent),
       stream(narinfoText(parent, payload, [drv])),
+      NOTHING_SAID,
     );
     expect(outcome).toMatchObject({ ok: false, status: 400 });
     if (!outcome.ok) {
@@ -750,6 +769,7 @@ describe("CA is proved from the path", () => {
       cache.bucket("main") as never,
       hashOf(path),
       stream(narinfoText(path, payload, [])),
+      NOTHING_SAID,
     );
     expect(accepted).toMatchObject({ ok: true, status: 200 });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
@@ -816,6 +836,7 @@ describe("CA is proved from the path", () => {
         cache.bucket("main") as never,
         hashOf(path),
         stream(narinfoText(path, payload, facts.references)),
+        NOTHING_SAID,
       );
       expect(accepted).toMatchObject({ ok: true, status: 200 });
       expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
@@ -828,6 +849,7 @@ describe("CA is proved from the path", () => {
         cache.bucket("main") as never,
         hashOf(path),
         stream(narinfoText(path, payload, facts.references)),
+        NOTHING_SAID,
       );
       expect(retried).toMatchObject({ ok: true, status: 200 });
       expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
@@ -863,6 +885,7 @@ describe("CA is proved from the path", () => {
       first.bucket("main") as never,
       hashOf(path),
       stream(narinfoText(path, payload)),
+      NOTHING_SAID,
     );
     first.close();
     const objectPath = join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar.zst`);
@@ -908,6 +931,7 @@ describe("CA is proved from the path", () => {
       first.bucket("main") as never,
       hashOf(path),
       stream(narinfoText(path, payload)),
+      NOTHING_SAID,
     );
     first.close();
     rmSync(join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar`), { force: true });
@@ -971,6 +995,8 @@ describe("CA is proved from the path", () => {
         hits: 0,
         created: 0,
         lastWanted: 0,
+        run: null,
+        commit: null,
       });
     }
     repo.close();
@@ -1008,6 +1034,7 @@ describe("CA is proved from the path", () => {
       first.bucket("main") as never,
       hashOf(path),
       stream(narinfoText(path, payload)),
+      NOTHING_SAID,
     );
     first.close();
     rmSync(join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar`), { force: true });
@@ -1046,6 +1073,7 @@ describe("CA is proved from the path", () => {
       first.bucket("main") as never,
       hashOf(path),
       stream(narinfoText(path, payload)),
+      NOTHING_SAID,
     );
     first.close();
     rmSync(join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar`), { force: true });
@@ -1086,6 +1114,7 @@ describe("CA is proved from the path", () => {
       first.bucket("main") as never,
       hashOf(path),
       stream(narinfoText(path, payload)),
+      NOTHING_SAID,
     );
     first.close();
     rmSync(join(scratch, "cache", "objects", "main", "nar", `${payload.narHash.slice(7)}.nar.zst`), { force: true });

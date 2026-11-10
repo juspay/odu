@@ -52,6 +52,7 @@ import {
   NARINFO_SUFFIX,
   PARTS_HEADER,
   PUSH_API,
+  provenanceStated,
   UPLOAD_SESSION_HEADER,
 } from "./paths";
 import { isUploadSession } from "./staging";
@@ -873,6 +874,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
             admitted.bucket,
             hash,
             Stream.toReadableStream(request.stream),
+            provenanceStated(request.headers),
           ),
         );
         if (outcome.ok) return HttpServerResponse.empty({ status: 200 });
@@ -953,7 +955,12 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
         const admitted = admitByHost(cache, request, "write");
         if (!admitted.ok) return admitted.response;
         const outcome = yield* Effect.promise(() =>
-          cache.acceptNarinfo(admitted.bucket, hash, Stream.toReadableStream(request.stream)),
+          cache.acceptNarinfo(
+            admitted.bucket,
+            hash,
+            Stream.toReadableStream(request.stream),
+            provenanceStated(request.headers),
+          ),
         );
         if (outcome.ok) return HttpServerResponse.empty({ status: 200 });
         return refused(cache, request, outcome.message, outcome.status, outcome.detail);
@@ -1033,7 +1040,11 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
         if (paths === null) {
           return refused(cache, request, 'expected {"paths": [{"path": "/nix/store/…", "sigs": […]}]}');
         }
-        const answer = cache.missing(admitted.bucket, paths);
+        // WHAT THE ASKER SAYS BUILT THEM, on the same request: a path the
+        // bucket already holds gets no narinfo PUT, so this is where its row
+        // learns where its bytes came from — filling a null column, never
+        // overwriting one.
+        const answer = cache.missing(admitted.bucket, paths, provenanceStated(request.headers));
         return HttpServerResponse.jsonUnsafe({
           missing: answer.missing,
           // Additive, and the reason `odu cache push` can print "skipped

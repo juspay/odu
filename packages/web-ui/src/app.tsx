@@ -587,6 +587,7 @@ export function App(props: {
                 client={props.cache}
                 bucket={openBucket()}
                 pushActionRef={() => service.value()?.build.commit ?? null}
+                runHref={runHash}
                 canAdminister={holdsFloor("admin")}
                 local={principal()?.kind === "local"}
                 tunnelRow={tunnelRow()}

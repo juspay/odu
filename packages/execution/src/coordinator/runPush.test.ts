@@ -31,11 +31,12 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { handleFor, readJournal } from "@odu/run-history/store";
+import { fanId, logPathFor, shortSha } from "@odu/run-client/nodeId";
 import { RUN_FILES } from "@odu/run-history/paths";
 import type { RunEvent } from "@odu/run-history/schema";
 import {
@@ -75,8 +76,28 @@ afterEach(() => {
 
 /** A throwaway checkout with ONE recipe: this is about one node's push, and a
  *  second node would only add frames to drive. The pool names a REMOTE host so
- *  the platform enters the venue claim — which is injected, like the lane. */
-function fixture(): string {
+ *  the platform enters the venue claim — which is injected, like the lane.
+ *
+ *  The four knobs are the PIN decision's whole input (PLAN 4.2): what the
+ *  recipe asked for, which ref the checkout is on, what `origin/HEAD` calls
+ *  the default branch, and whether the origin names an `owner/repo`.
+ *  Defaults are the journal tests' world — no pin, no `origin/HEAD`, a
+ *  non-GitHub origin — so the push assertions below read unchanged. */
+function fixture(
+  options: {
+    /** ONE `[metadata(…)]` attribute per entry, in order: a ref name, or
+     *  `null` for the bare `odu:pin` that names the default branch. */
+    pins?: readonly (string | null)[];
+    branch?: string | null;
+    remote?: string;
+    /** What `origin/HEAD` is made to point at, set with git's own
+     *  `remote set-head` over a remote-tracking ref — the pair a real clone
+     *  leaves behind. Absent is the checkout that never learned one (a hand
+     *  `git remote add`), which is a real and common state, not a broken
+     *  fixture. */
+    defaultBranch?: string;
+  } = {},
+): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-push-journal-"));
   const git = (...args: string[]): void => {
     const r = spawnSync("git", args, { cwd: dir, encoding: "utf-8" });
@@ -84,7 +105,17 @@ function fixture(): string {
   };
   writeFileSync(
     join(dir, "justfile"),
-    ['[metadata("ci")]', "default: alpha", "", "alpha:", "    true", ""].join("\n"),
+    [
+      '[metadata("ci")]',
+      "default: alpha",
+      "",
+      ...(options.pins ?? []).map((pin) =>
+        pin === null ? '[metadata("odu:pin")]' : `[metadata("odu:pin=${pin}")]`,
+      ),
+      "alpha:",
+      "    true",
+      "",
+    ].join("\n"),
   );
   writeFileSync(join(dir, "hosts.json"), JSON.stringify({ [PLATFORM]: HOST }));
   writeFileSync(join(dir, ".gitignore"), ".ci/\n");
@@ -93,7 +124,19 @@ function fixture(): string {
   git("config", "user.name", "test");
   git("add", "-A");
   git("commit", "-qm", "fixture");
-  git("remote", "add", "origin", "file:///nonexistent/origin.git");
+  git("remote", "add", "origin", options.remote ?? "file:///nonexistent/origin.git");
+  // `null` is a DETACHED HEAD — a run on no ref at all, which is the one case
+  // a pinning recipe cannot be answered for.
+  if (options.branch === null) git("checkout", "-q", "--detach");
+  else if (options.branch !== undefined) git("checkout", "-q", "-b", options.branch);
+  if (options.defaultBranch !== undefined) {
+    // A remote-tracking ref first: `remote set-head` refuses to point at one
+    // that does not exist, and a clone has both. No fetch — the origin URL
+    // above is deliberately unreachable, and the coordinator's probe is
+    // local too.
+    git("update-ref", `refs/remotes/origin/${options.defaultBranch}`, "HEAD");
+    git("remote", "set-head", "origin", options.defaultBranch);
+  }
 
   const prevCwd = process.cwd();
   const env: Record<string, string> = {
@@ -327,5 +370,206 @@ describe.if(hasJust)("the journal of a node that pushed", () => {
       await outcome;
       rmSync(join(dir, ".ci"), { recursive: true, force: true });
     }
+  }, 60_000);
+});
+
+/**
+ * WHO DECIDES A PIN (PLAN 4.2) — the coordinator, and nothing downstream.
+ *
+ * The lane is handed a finished name on `TaskSpec.env` or it is handed
+ * nothing; it compares no refs and resolves no remote. That is asserted from
+ * the only seam where it is visible: the tasks a lane is configured with.
+ * A lane that derived the name itself would derive it on a COPY of the
+ * checkout, on a machine that may have fetched since — and a wrong pin name
+ * does not fail, it holds the wrong closure open while the right one is let
+ * go.
+ *
+ * And when there is no name to hand down, the REASON stays here too — on
+ * `_ci-setup`'s log beside this run's push line, not as prose shipped to a
+ * lane to be printed back.
+ */
+describe.if(hasJust)("the pin a task's environment carries", () => {
+  /** Start a run and read the pin decision from BOTH its readers: the task
+   *  environment a lane is configured with (the name), and `_ci-setup`'s
+   *  durable log (the sentence, when this run cannot answer a recipe's pin).
+   *
+   *  The node is driven to `ok` with NO push state at all — the shape a node
+   *  publishes when its `result*` paths were already sent by an earlier
+   *  recipe, which is the typical shape of a DAG and the case where a
+   *  lane-side sentence went silent. Driving it to a terminal also matters for
+   *  the lock: an abandoned coordinator would hold the checkout's run lock
+   *  against the next case in this file. */
+  async function pinDecision(
+    options: Parameters<typeof fixture>[0],
+  ): Promise<{
+    env: Record<string, string>;
+    setup: string;
+    events: RunEvent[];
+  }> {
+    const dir = fixture(options);
+    plantPushToken();
+    const { lanes, deps } = harness();
+    const run = runCommand(runArgs(), deps);
+    const outcome = run.catch((err: unknown) => err);
+    try {
+      await waitForLive(outcome, () => lanes.length === 1);
+      const lane = lanes[0]!;
+      const alpha = lane.opts.tasks.find((task) => task.id === "alpha");
+      expect(alpha).toBeDefined();
+      // The setup node's durable log, where this run states its push policy.
+      // Written when provisioning opens — before the lane exists — so it is
+      // already on disk by the time the lane shows up here.
+      const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: dir,
+        encoding: "utf-8",
+      }).stdout.trim();
+      const setup = readFileSync(
+        join(dir, logPathFor(shortSha(sha), fanId("_ci-setup", PLATFORM))),
+        "utf-8",
+      );
+      lane.opts.onNodes(laneState("ok", { durationMs: 1 }));
+      lane.opts.onLogFrame("alpha", { kind: "end" }, "push");
+      lane.opts.onLogFrame("alpha", { kind: "end" }, "recipe");
+      await outcome;
+      // Read while the journal still exists: the cleanup below takes `.ci`,
+      // and this run's state dir is inside it.
+      return { env: { ...(alpha?.env ?? {}) }, setup, events: eventsOf() };
+    } finally {
+      await outcome;
+      rmSync(join(dir, ".ci"), { recursive: true, force: true });
+    }
+  }
+
+  it("names the pin when the run is on the ref the recipe asked for", async () => {
+    const { env, setup } = await pinDecision({
+      pins: ["main"],
+      branch: "main",
+      remote: "https://github.com/acme/widget.git",
+    });
+    // THE SAME SHAPE `.github/actions/push/pin-name.sh` derives, system and
+    // all: a run and a workflow pushing the same commit must re-point ONE
+    // pin, and a matrix's second job must not evict the first's closure.
+    expect(env.ODU_CACHE_PIN).toBe(`acme/widget@main/${PLATFORM}`);
+    expect(setup).not.toContain("not pinning");
+    // Provenance rides the same wire, from the facts the coordinator already
+    // holds — the lane reads git for neither.
+    expect(env.ODU_CACHE_RUN).toBe(RUN_ID);
+    expect(env.ODU_CACHE_COMMIT).toMatch(/^[0-9a-f]{40}$/);
+  }, 60_000);
+
+  it("names the pin for a BARE marker when the run is on the default branch", async () => {
+    // The recipe never spells the ref: `origin/HEAD` does, and the
+    // COORDINATOR reads it — from this checkout's `.git`, with no network.
+    const { env, setup } = await pinDecision({
+      pins: [null],
+      branch: "trunk",
+      defaultBranch: "trunk",
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBe(`acme/widget@trunk/${PLATFORM}`);
+    expect(setup).not.toContain("not pinning");
+  }, 60_000);
+
+  it("says nothing at all on another ref", async () => {
+    const { env, setup } = await pinDecision({
+      pins: ["main"],
+      branch: "feature/x",
+      remote: "https://github.com/acme/widget.git",
+    });
+    // Not a skip, not a sentence: the pin belongs to the other ref, and a
+    // feature branch reporting "not pinning" every run would train a reader
+    // to ignore the line that matters.
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(setup).not.toContain("not pinning");
+  }, 60_000);
+
+  it("says nothing for a BARE marker on a branch that is not the default", async () => {
+    const { env, setup } = await pinDecision({
+      pins: [null],
+      branch: "feature/x",
+      defaultBranch: "trunk",
+      remote: "https://github.com/acme/widget.git",
+    });
+    // The default branch IS known here and this is not it — the ordinary
+    // feature-branch silence, not a misconfiguration.
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(setup).not.toContain("not pinning");
+  }, 60_000);
+
+  it("names the pin with the run's OWN ref when the recipe declared several", async () => {
+    // TWO ATTRIBUTES, TWO REFS — and the run is on the second. The name
+    // carries the ref this run is actually on, so a sibling recipe pinning
+    // the other ref keeps its own pin rather than being overwritten by this
+    // one's.
+    const { env, setup } = await pinDecision({
+      pins: ["main", "release-1.x"],
+      branch: "release-1.x",
+      defaultBranch: "main",
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBe(`acme/widget@release-1.x/${PLATFORM}`);
+    expect(setup).not.toContain("not pinning");
+  }, 60_000);
+
+  it("explains itself on the setup log when the run is on no ref", async () => {
+    const { env, setup } = await pinDecision({
+      pins: ["main"],
+      branch: null,
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    // ON THE RUN'S OWN NODE, beside its push line — and naming the recipe,
+    // because a run with twenty of them must say WHICH one asked.
+    expect(setup).toContain("[odu] not pinning: ");
+    expect(setup).toContain("detached HEAD");
+    expect(setup).toContain('recipe "alpha"');
+  }, 60_000);
+
+  it("explains itself when a BARE marker's checkout has no origin/HEAD", async () => {
+    // The one silence worth a sentence: nothing matched, and the only
+    // unmatched hope was a default branch this checkout cannot name. Guessing
+    // `main` would pin a `master` repository's closure under a branch nothing
+    // is ever on, so the run says what to do instead.
+    const { env, setup } = await pinDecision({
+      pins: [null],
+      branch: "trunk",
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(setup).toContain("[odu] not pinning: ");
+    expect(setup).toContain("origin has no HEAD");
+    expect(setup).toContain("git remote set-head origin -a");
+    expect(setup).toContain('recipe "alpha"');
+  }, 60_000);
+
+  it("explains itself on the setup log when no origin names an owner/repo", async () => {
+    const { env, setup } = await pinDecision({ pins: ["main"], branch: "main" });
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(setup).toContain("[odu] not pinning: ");
+    expect(setup).toContain("github.com origin");
+  }, 60_000);
+
+  it("says why even when the node had nothing to push", async () => {
+    // THE DEFECT THIS PINS. The sentence used to ride to the lane and be said
+    // by the push step — so a node whose `result*` paths an earlier recipe
+    // already sent (nothing to send, no step, no line) explained nothing,
+    // which is the ordinary shape of a DAG. This node publishes NO push at
+    // all and the run still says why it pinned nothing.
+    const { setup, events } = await pinDecision({
+      pins: ["main"],
+      branch: null,
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(events.some((e) => e.kind === "pushing")).toBe(false);
+    expect(setup).toContain("not pinning");
+  }, 60_000);
+
+  it("puts nothing pin-shaped on a recipe that asked for none", async () => {
+    const { env, setup } = await pinDecision({
+      branch: "main",
+      remote: "https://github.com/acme/widget.git",
+    });
+    expect(env.ODU_CACHE_PIN).toBeUndefined();
+    expect(setup).not.toContain("not pinning");
   }, 60_000);
 });

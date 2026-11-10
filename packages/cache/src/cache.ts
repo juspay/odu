@@ -63,7 +63,7 @@ import {
   storePathHash,
 } from "./narinfo";
 import { newChain, serial } from "./serial";
-import { CACHE_MOUNT } from "./paths";
+import { CACHE_MOUNT, type Provenance } from "./paths";
 import { LOCAL_STORE, PATH_PAGE_SIZE, PRESIGN_SECONDS } from "./surface";
 import {
   cacheInfoKey,
@@ -420,6 +420,10 @@ export interface PathPageRow {
   hits: number;
   /** When a push or a `missing` query last said somebody wants it. */
   lastWanted: number;
+  /** WHAT BUILT IT, as the pusher stated it — a run id and a commit sha, or
+   *  null where nothing was said. */
+  run: string | null;
+  commit: string | null;
 }
 
 /** One PACKAGE, as a grouped `paths` lists it: every version of one store
@@ -431,8 +435,11 @@ export interface PathGroupPageRow {
   hits: number;
   pushed: number;
   wanted: number;
-  /** The newest version's path — the hash a reader compares by. */
+  /** The newest version's path — the hash a reader compares by — and the
+   *  provenance of THAT version, never a mixture of two builds. */
   storePath: string;
+  run: string | null;
+  commit: string | null;
 }
 
 /** The verdict on a presented credential. `status` is what the route answers
@@ -570,13 +577,28 @@ export interface Cache {
     total: number,
     session?: string | null,
   ): Promise<CompleteUpload>;
-  acceptNarinfo(bucket: BucketRow, hash: string, body: ReadableStream<Uint8Array>): Promise<NarinfoOutcome>;
+  /** `provenance` is what the PUSHER said built this path (PLAN 4.2) — kept
+   *  on the row, understood by nobody here. A push that states nothing
+   *  leaves whatever an earlier one stated alone. */
+  acceptNarinfo(
+    bucket: BucketRow,
+    hash: string,
+    body: ReadableStream<Uint8Array>,
+    provenance: Provenance,
+  ): Promise<NarinfoOutcome>;
   /** Which of `paths` the bucket needs. `skipped` is the subset it will never
    *  take because an upstream key signed it — reported separately so `odu cache
-   *  push` can say "upstream" rather than "already there". */
+   *  push` can say "upstream" rather than "already there".
+   *
+   *  `provenance` is what the asker says built them, and it lands on the paths
+   *  the bucket ALREADY holds — the ones that get no narinfo PUT. Only a null
+   *  column is filled and none is ever overwritten, so the first builder to
+   *  state a fact keeps it, a run may claim a path its own workflow uploaded
+   *  at the same commit, and a later unrelated run changes nothing. */
   missing(
     bucket: BucketRow,
     paths: readonly { path: string; sigs?: readonly string[] }[],
+    provenance: Provenance,
   ): { missing: readonly string[]; skipped: readonly string[] };
   /**
    * EVERY BUCKET'S ROW, without a credential — what a SUBSCRIBER reads.
@@ -1138,6 +1160,7 @@ export function createCache(options: CacheOptions): Cache {
     info: NarInfo,
     file: KeptFile,
     selfHash: string | null,
+    provenance: Provenance,
   ): Promise<boolean> {
     const existing = repo.object(bucket.name, info.storePath);
     const at = now();
@@ -1187,6 +1210,11 @@ export function createCache(options: CacheOptions): Cache {
       // A STORED PUSH IS A WANT, and the clock retention reads: the pusher
       // has just said this path matters to it.
       lastWanted: at,
+      // WHAT THE PUSHER SAID BUILT IT, written as stated — including the
+      // nulls. The upsert COALESCEs, so a push that states nothing keeps
+      // what a run stated and does not have to read the old row to know it.
+      run: provenance.run,
+      commit: provenance.commit,
     });
     // THE STORE'S COPY OF THE NARINFO, rewritten from the row that has just
     // landed (PLAN 2.8): a re-push that added a signature must not leave the
@@ -1807,6 +1835,8 @@ export function createCache(options: CacheOptions): Cache {
             created: row.created,
             hits: row.hits,
             lastWanted: row.lastWanted,
+            run: row.run,
+            commit: row.commit,
           })),
           groups: null,
           next: listed.next,
@@ -2464,8 +2494,8 @@ export function createCache(options: CacheOptions): Cache {
       staging.beginPart(bucket, file, index, limit, session),
     completeUpload: (bucket, file, total, session) =>
       staging.completeUpload(bucket, file, total, session),
-    async acceptNarinfo(bucket, hash, body) {
-      const outcome = await staging.acceptNarinfo(bucket, hash, body);
+    async acceptNarinfo(bucket, hash, body, provenance) {
+      const outcome = await staging.acceptNarinfo(bucket, hash, body, provenance);
       // A PUSH LANDED OR WAS REFUSED — the changes nobody outside the cache
       // can see, and the reason this listener exists at all. The publisher
       // diffs, so a refusal that changed nothing costs one comparison.
@@ -2473,7 +2503,7 @@ export function createCache(options: CacheOptions): Cache {
       return outcome;
     },
 
-    missing(bucket, paths) {
+    missing(bucket, paths, provenance) {
       const missing: string[] = [];
       const skipped: string[] = [];
       /** The paths this bucket HAS and the asker wants. */
@@ -2489,13 +2519,21 @@ export function createCache(options: CacheOptions): Cache {
         });
         (upstream ? skipped : missing).push(path);
       }
-      // THE QUESTION IS THE RENEWAL. A pusher asking "do you have these"
-      // is a build that wants them: the paths it is about to push arrive as
-      // rows with a fresh clock, and the ones already here — the whole point
-      // of a cache hit — have theirs renewed by the asking. Without this, the
-      // paths a CI job hits every day would expire while it kept hitting them,
-      // because the hit is a `missing` answer and never a read.
-      repo.want(bucket.name, wanted, now());
+      // THE QUESTION IS THE RENEWAL, AND THE CLAIM. A pusher asking "do you
+      // have these" is a build that wants them: the paths it is about to push
+      // arrive as rows with a fresh clock, and the ones already here — the
+      // whole point of a cache hit — have theirs renewed by the asking.
+      // Without this, the paths a CI job hits every day would expire while it
+      // kept hitting them, because the hit is a `missing` answer and never a
+      // read.
+      //
+      // IT IS ALSO THE ONLY MOMENT those paths are touched by this push, so
+      // what the asker says built them lands here: only a null `run` or
+      // `commit` is filled and neither is ever overwritten, so the first
+      // builder to state a fact keeps it, a run may claim a path its own
+      // workflow uploaded at the same commit, and a later unrelated run
+      // changes nothing.
+      repo.want(bucket.name, wanted, now(), provenance);
       return { missing, skipped };
     },
 

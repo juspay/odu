@@ -56,8 +56,33 @@ nixos-module:
 fmt:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix
 
+# THE FLAKE'S OUTPUTS — and odu's own dogfood of what 4.1 and 4.2 ship.
+#
+# `--out-link result-<output>` rather than `--no-link`, one build per output so
+# each link says what it holds. THE OUT-LINK IS THE PUSH: when this recipe
+# exits 0 the lane globs `result*` in the directory it ran in — the workspace
+# root, since this module sets `working-directory := '..'` — and sends each
+# closure to the odu cache `flake.nix` already reads from (`kolu-r2`). Odu
+# asked every other repository to declare one line and build for its cache; it
+# builds for its own by the same rule, with nothing in this file naming a
+# bucket or holding a token.
+#
+# `odu:pin` KEEPS THAT CLOSURE past retention, and only on the repository's
+# DEFAULT branch: the bare attribute names no ref, so the coordinator reads
+# `origin/HEAD` out of the checkout and a run on master re-points
+# `juspay/odu@master/<system>` at what this recipe just pushed. The odu a
+# developer substitutes is held however long nobody asks for it, while a run
+# on a branch pushes exactly the same paths and pins nothing — and the day
+# this repository renames its trunk the attribute follows rather than going
+# stale. The same name shape `.github/actions/push/pin-name.sh` derives for
+# the workflow, so the run and the workflow re-point one pin per system rather
+# than two.
+[metadata("odu:pin")]
 nix:
-    nix build .#odu .#odu-runner .#web-ui .#agent-flake-source --no-link
+    nix build .#odu --out-link result-odu
+    nix build .#odu-runner --out-link result-odu-runner
+    nix build .#web-ui --out-link result-web-ui
+    nix build .#agent-flake-source --out-link result-agent-flake-source
 
 # The AGENT SOURCE a remote dial resolves `odu-runner` from, evaluated exactly
 # the way `@kolu/surface-remote` evaluates it.

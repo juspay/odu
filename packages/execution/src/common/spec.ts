@@ -43,6 +43,24 @@ export const TaskSpecSchema = Schema.Struct({
   shards: Schema.optionalKey(
     Schema.Int.check(Schema.isGreaterThan(1)),
   ),
+  /** The git REFS whose runs pin this recipe's pushed closure
+   *  (`[metadata("odu:pin=main")]`, repeated to name more than one) — with
+   *  `null` for a bare `[metadata("odu:pin")]`, meaning the REPOSITORY'S
+   *  DEFAULT BRANCH, which the recipe names without spelling. A set, carried
+   *  as an array because the wire has no set: the decision is a membership
+   *  test and the order carries no meaning.
+   *
+   *  NAMES, not a decision, and not a resolution either: the COORDINATOR
+   *  resolves `null` against the checkout's `origin/HEAD`, compares the set
+   *  to the ref the run is actually on, and only then derives the single pin
+   *  name the lane is handed (`runner/pushResults.ts`'s `ODU_CACHE_PIN`).
+   *  Neither the dump nor the lane may resolve it: the dump is read wherever
+   *  `just` ran, and a lane answers from a COPY of the checkout that may have
+   *  fetched since — and a wrong pin name does not fail, it holds the wrong
+   *  closure open. Absent for a recipe whose output nothing holds open. */
+  pin: Schema.optionalKey(
+    Schema.Array(Schema.NullOr(Schema.String)).check(Schema.isMinLength(1)),
+  ),
   /** Coordinator-injected task environment. Kept generic on the wire; shard
    *  lanes currently use it for ODU_SHARD_INDEX / ODU_SHARD_TOTAL. */
   env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),

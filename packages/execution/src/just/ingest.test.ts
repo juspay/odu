@@ -122,6 +122,77 @@ describe("pipelineFromDump", () => {
     expect(() => pipelineFromDump(nonLeaf)).toThrow(/must be a leaf/);
   });
 
+  it("reads the refs a recipe pins its closure on, bare for the default branch", () => {
+    const named = dump() as any;
+    named.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin=main"] }];
+    expect(
+      pipelineFromDump(named).tasks.find((task) => task.id === "ci::e2e")?.pin,
+    ).toEqual(["main"]);
+
+    // A BARE MARKER IS THE REPOSITORY'S DEFAULT BRANCH, carried as `null`:
+    // ingest is read wherever `just` ran and has no business resolving it —
+    // the coordinator asks the checkout's own git.
+    const bare = dump() as any;
+    bare.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin"] }];
+    expect(
+      pipelineFromDump(bare).tasks.find((task) => task.id === "ci::e2e")?.pin,
+    ).toEqual([null]);
+
+    // REPEATING THE ATTRIBUTE NAMES MORE REFS, in declaration order — the way
+    // `just`'s own `[group(…)]` repeats.
+    const several = dump() as any;
+    several.modules.ci.recipes.e2e.attributes = [
+      { metadata: ["odu:pin=release-1.x"] },
+      { metadata: ["odu:pin"] },
+    ];
+    expect(
+      pipelineFromDump(several).tasks.find((task) => task.id === "ci::e2e")
+        ?.pin,
+    ).toEqual(["release-1.x", null]);
+
+    // WHETHER this run is on any of them is nobody's business here — ingest
+    // reads what the recipe said and the coordinator decides.
+    expect(
+      pipelineFromDump(dump()).tasks.find((task) => task.id === "ci::e2e")?.pin,
+    ).toBeUndefined();
+  });
+
+  it("refuses a pin that names no ref, and the same ref declared twice", () => {
+    const empty = dump() as any;
+    empty.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin="] }];
+    expect(() => pipelineFromDump(empty)).toThrow(/odu:pin=<ref>/);
+
+    // A REPEAT IS A TYPO, NOT A SECOND INTENT: one pin per ref, and the
+    // second declaration could only ever re-state the first.
+    const twice = dump() as any;
+    twice.modules.ci.recipes.e2e.attributes = [
+      { metadata: ["odu:pin=main"] },
+      { metadata: ["odu:pin=main"] },
+    ];
+    expect(() => pipelineFromDump(twice)).toThrow(/one pin per ref/);
+
+    // Bare twice is the same repeat, said the other way.
+    const bareTwice = dump() as any;
+    bareTwice.modules.ci.recipes.e2e.attributes = [
+      { metadata: ["odu:pin"] },
+      { metadata: ["odu:pin"] },
+    ];
+    expect(() => pipelineFromDump(bareTwice)).toThrow(/the default branch/);
+  });
+
+  it("refuses the list and the glob somebody reaches for instead", () => {
+    // THE TWO WRONG SHAPES. Accepted as text, `a,b` and `re*` would be refs
+    // no run is ever on: the pin would never be made and nothing would say
+    // so. The refusal names the shape that works.
+    const list = dump() as any;
+    list.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin=a,b"] }];
+    expect(() => pipelineFromDump(list)).toThrow(/one ref per attribute; repeat it/);
+
+    const glob = dump() as any;
+    glob.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin=re*"] }];
+    expect(() => pipelineFromDump(glob)).toThrow(/one ref per attribute; repeat it/);
+  });
+
   it("includes a --root override's own body-bearing recipe as a node", () => {
     const spec = pipelineFromDump(dump(), { root: "ci::e2e" });
     expect(spec.tasks.map((t) => t.id).sort()).toEqual([

@@ -102,29 +102,108 @@ function hasCiMetadata(recipe: DumpRecipe): boolean {
   );
 }
 
-function shardCount(recipe: DumpRecipe): number | undefined {
-  const values = recipe.attributes.flatMap((attr): string[] => {
+/** Every `[metadata("…")]` string a recipe declares, flattened across its
+ *  attributes. ONE reader for every `odu:` marker: two copies of this walk is
+ *  two places for "where does `just` put metadata" to be answered differently
+ *  the day the dump's shape changes. */
+function metadataValues(recipe: DumpRecipe): string[] {
+  return recipe.attributes.flatMap((attr): string[] => {
     if (typeof attr !== "object" || attr === null) return [];
     const metadata = (attr as Record<string, unknown>).metadata;
     return Array.isArray(metadata)
       ? metadata.filter((value): value is string => typeof value === "string")
       : [];
   });
-  const shardMetadata = values.filter((value) => value.startsWith("odu:shard="));
-  if (shardMetadata.length === 0) return undefined;
-  if (shardMetadata.length > 1) {
+}
+
+/** Every declaration of one `odu:` marker on a recipe, in the order the dump
+ *  lists them: the text after `=`, or `null` for a bare marker.
+ *  PRESENCE only — how many declarations are legal, and what their
+ *  text may say, stays with the caller, because the markers disagree about
+ *  both: a recipe has ONE shard count, and may pin on several refs. Folding
+ *  either rule in here would make each marker a case in one function, so the
+ *  day one grows a richer value the other has to be re-read to change it. */
+function markerDeclarations(
+  recipe: DumpRecipe,
+  marker: string,
+): (string | null)[] {
+  const prefix = `${marker}=`;
+  return metadataValues(recipe)
+    .filter((value) => value === marker || value.startsWith(prefix))
+    .map((value) =>
+      value.startsWith(prefix) ? value.slice(prefix.length) : null,
+    );
+}
+
+function shardCount(recipe: DumpRecipe): number | undefined {
+  const declared = markerDeclarations(recipe, "odu:shard");
+  if (declared.length === 0) return undefined;
+  // ONE shard count per recipe. A second declaration is two answers to "how
+  // many ways does this split", and honouring either silently would run a
+  // fan-out neither author asked for.
+  if (declared.length > 1) {
     throw new Error(
       `odu: recipe "${recipe.namepath}" declares odu:shard more than once`,
     );
   }
-  const raw = shardMetadata[0]!.slice("odu:shard=".length);
+  const raw = declared[0]!;
   const count = Number(raw);
-  if (!Number.isInteger(count) || count < 2) {
+  if (raw === null || raw === "" || !Number.isInteger(count) || count < 2) {
     throw new Error(
       `odu: recipe "${recipe.namepath}" metadata must be odu:shard=N with integer N >= 2`,
     );
   }
   return count;
+}
+
+/**
+ * The git REFS this recipe's pushed closure is pinned under, in the order the
+ * dump lists them (`just` sorts a recipe's attributes, and the decision is a
+ * membership test, so the order carries no meaning) — `[metadata("odu:pin=main")]`,
+ * and `null` for a bare
+ * `[metadata("odu:pin")]`, which names the repository's DEFAULT branch
+ * without spelling it.
+ *
+ * Refs rather than a boolean because a pin is only wanted on the branches the
+ * repository treats as trunks: pinning every feature branch's closure would
+ * hold a bucket's whole history open, and the recipe is the only place that
+ * knows which refs its output is worth keeping for. WHICH ref this run is on,
+ * and what the default branch IS, are the coordinator's to answer
+ * (`coordinator/run.ts`) — the dump is read on whatever machine ran `just`.
+ *
+ * REPEATING THE ATTRIBUTE NAMES MORE REFS, the way `just`'s own multi-valued
+ * attributes work (`[group("a")] [group("b")]`). So the two shapes an author
+ * reaches for instead — `odu:pin=a,b` and a glob — are refused by name rather
+ * than accepted as a ref nobody will ever be on, which pins nothing and says
+ * nothing. A ref declared twice is a typo, not a second intent.
+ */
+function pinRefs(recipe: DumpRecipe): (string | null)[] | undefined {
+  const declared = markerDeclarations(recipe, "odu:pin");
+  if (declared.length === 0) return undefined;
+  const seen = new Set<string | null>();
+  for (const ref of declared) {
+    if (ref === "") {
+      throw new Error(
+        `odu: recipe "${recipe.namepath}" metadata must be odu:pin for the ` +
+          `default branch or odu:pin=<ref> naming the ref to pin on`,
+      );
+    }
+    if (ref !== null && /[,\s*]/.test(ref)) {
+      throw new Error(
+        `odu: recipe "${recipe.namepath}" metadata "odu:pin=${ref}" is not a ` +
+          `ref: one ref per attribute; repeat it ` +
+          `([metadata("odu:pin=a")] [metadata("odu:pin=b")])`,
+      );
+    }
+    if (seen.has(ref)) {
+      throw new Error(
+        `odu: recipe "${recipe.namepath}" pins twice on ` +
+          `${ref === null ? "the default branch" : `"${ref}"`}; one pin per ref`,
+      );
+    }
+    seen.add(ref);
+  }
+  return declared;
 }
 
 /**
@@ -350,6 +429,7 @@ export function pipelineFromDump(
   const tasks: TaskSpec[] = [...reachable.values()].map(
     ({ recipe, module }) => {
       const shards = shardCount(recipe);
+      const pin = pinRefs(recipe);
       // THE ROOT'S OWN `source`, whose directory is the workspace root every
       // module's directory is expressed against.
       const workdir = workdirOf(module, recipe, (dump as DumpModule).source);
@@ -363,6 +443,7 @@ export function pipelineFromDump(
         os: osAttributes(recipe),
         ...(workdir === null ? {} : { workdir }),
         ...(shards === undefined ? {} : { shards }),
+        ...(pin === undefined ? {} : { pin }),
       };
     },
   );

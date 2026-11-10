@@ -15,8 +15,9 @@
 #     with:
 #       # cache: OMITTED — ./flake.nix's extra-substituters line above is it
 #       token: <your ODU_CACHE_TOKEN secret, as a workflow expression>
-#       pin: <true on the ref you want held — the README spells the one-line
-#             GitHub expression; it cannot be written in this file>
+#       # pin: OMITTED — your default branch pins itself; `true`/`false` is
+#       #      obeyed as given, and any other rule is an expression YOUR
+#       #      workflow writes (it cannot be written in this file)
 #
 # **ONE FACT, NOT THREE.** `cache:` is the substituter URL a repository
 # already has in its `nix.conf`; the push origin and the bucket name are read
@@ -61,14 +62,18 @@
 #   - no token on a `push` event  → fail, naming the missing secret
 #   - the token is never echoed, and never appears in a command line
 #
-# **`pin: true` keeps this closure out of garbage collection.** A boolean,
-# not a name, and the action holds no policy about WHEN: the CALLING WORKFLOW
-# compares `github.ref_name` with `github.event.repository.default_branch` and
-# passes the result, which is what odu's own `nix-cache.yml` does. The literal
-# expression is in the README and in that workflow and CANNOT be written here
-# — GitHub evaluates workflow expressions while PARSING an action file, where
-# the `github` context does not exist, and one in any string refuses the whole
-# action with "Unrecognized named-value: github".
+# **A PIN KEEPS THIS CLOSURE OUT OF GARBAGE COLLECTION, and `pin:` defaults
+# to your default branch.** Left empty it pins when `github.ref` is
+# `refs/heads/<the repository's default branch>` — the comparison every
+# caller was pasting in, read by the step from the event payload, so the
+# repository whose branch is called something else is right without writing
+# anything. An explicit `true` or `false` is obeyed exactly as given and
+# nothing is inferred from it: a workflow that pins on some OTHER ref writes
+# that expression and passes the answer. The literal expression is in the
+# README and in odu's own `nix-cache.yml` and CANNOT be written here —
+# GitHub evaluates workflow expressions while PARSING an action file, where
+# the `github` context does not exist, and one in any string refuses the
+# whole action with "Unrecognized named-value: github".
 #
 # THE NAME IS DERIVED and never typed: `<owner>/<repo>@<ref>/<system>`, e.g.
 # `juspay/kolu@master/x86_64-linux`. Four repositories share one bucket, so
@@ -148,12 +153,14 @@ inputs:
     default: ""
   pin:
     description: >-
-      true to keep this push's closure out of garbage collection. The name is
-      derived — <owner>/<repo>@<ref>/<system> — and this action applies no
-      policy of its own about which ref may pin: pass the comparison of
-      github.ref_name with github.event.repository.default_branch from your
-      workflow (the README has the line; an expression cannot appear in this
-      file). Anything falsy, the default, pins nothing.
+      Whether to keep this push's closure out of garbage collection. EMPTY —
+      the default — pins when this run is on your repository's default
+      branch, i.e. github.ref equals refs/heads/<default branch>, read from
+      the event payload; outside Actions it pins nothing. An explicit true or
+      false is obeyed exactly. To pin on some other ref, write that
+      comparison in your workflow and pass its result (the README has the
+      line; an expression cannot appear in this file). The name is derived —
+      <owner>/<repo>@<ref>/<system> — never typed.
     required: false
     default: ""
 

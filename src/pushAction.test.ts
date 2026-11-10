@@ -26,9 +26,9 @@
  * fails the STEP with odu's own sentence rather than reaching a bucket.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -125,7 +125,16 @@ printf 'token=%s\\n' "\${ODU_CACHE_TOKEN:-}" >> ${JSON.stringify(record)}
 case "$1 $2" in
   "cache target") ${answer} ;;
   "cache push")
-    printf '%s' '{"pushed":1,"alreadyPresent":0,"skippedUpstream":0,"failed":0,"failures":[],"pageUrl":"https://odu.example/cache/main","substituter":"https://cache.example.com/main","served":[],"pinned":null}'
+    # A PIN COMES BACK WHEN ONE WAS ASKED FOR, as the real push answers it
+    # whenever every path landed — \`push.sh\` turns a missing \`pinned\` red,
+    # so a stub that always said null would fail every pinning run.
+    pinned=null
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--pin" ]; then pinned='{"name":"'"$arg"'","rootPaths":1}'; fi
+      prev=$arg
+    done
+    printf '%s' '{"pushed":1,"alreadyPresent":0,"skippedUpstream":0,"failed":0,"failures":[],"pageUrl":"https://odu.example/cache/main","substituter":"https://cache.example.com/main","served":[],"pinned":'"$pinned"'}'
     exit 0 ;;
 esac
 printf 'stub odu: unexpected %s\\n' "$*" >&2
@@ -139,6 +148,10 @@ exit 2
 for arg in "$@"; do
   case "$arg" in
     *"#odu") printf '%s\\n' ${JSON.stringify(join(work, "pusher"))}; exit 0 ;;
+    # What a pin's name carries. The real call is
+    # \`nix eval --impure --raw --expr builtins.currentSystem\`, so the
+    # recorded pin name is stable on whatever machine runs this test.
+    "builtins.currentSystem") printf 'x86_64-linux'; exit 0 ;;
   esac
 done
 printf 'stub nix: unexpected %s\\n' "$*" >&2
@@ -172,7 +185,10 @@ exit 2
       status = failed.status ?? 1;
       output = `${failed.stdout ?? ""}${failed.stderr ?? ""}`;
     }
-    const lines = readFileSync(record, "utf-8").trim().split("\n").filter(Boolean);
+    // NO RECORD AT ALL is a run that refused before it ever built the pusher
+    // — a bad `pin:`, say. That is "the stub saw nothing", not a test error.
+    const recorded = existsSync(record) ? readFileSync(record, "utf-8") : "";
+    const lines = recorded.trim().split("\n").filter(Boolean);
     return {
       status,
       output,
@@ -236,5 +252,150 @@ describe("the push action with no `cache:` input", () => {
     expect(ran.calls).toHaveLength(1);
     expect(ran.calls[0]).toContain("cache push --cache https://named.example/bucket");
     expect(ran.tokens[0]).toBe("odu_write_token");
+  });
+});
+
+/** An event payload on disk, the way the runner leaves one — the file
+ *  `$GITHUB_EVENT_PATH` names, which is where the script reads both a pull
+ *  request's head sha and the repository's default branch. */
+const written: string[] = [];
+afterAll(() => {
+  for (const dir of written) rmSync(dir, { recursive: true, force: true });
+});
+const eventFile = (payload: unknown): string => {
+  const dir = mkdtempSync(join(tmpdir(), "odu-push-event-"));
+  written.push(dir);
+  const path = join(dir, "event.json");
+  writeFileSync(path, JSON.stringify(payload));
+  return path;
+};
+
+/**
+ * WHICH COMMIT A ROW CARRIES (cache 4.7). The bucket keeps what a push says
+ * built its paths, and a commit nobody can check out is worth less than none:
+ * on a `pull_request` event `$GITHUB_SHA` is the synthetic merge ref, which
+ * moves under the pull request and is gone when it closes.
+ */
+describe("the commit the push action states", () => {
+  /** The word after `--commit` in the stub's recorded argv. */
+  const commitOf = (call: string): string | undefined =>
+    call.split(" ").at(call.split(" ").indexOf("--commit") + 1);
+
+  it("states $GITHUB_SHA on a push event", () => {
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: { GITHUB_EVENT_NAME: "push", GITHUB_SHA: "a".repeat(40) },
+    });
+    expect(ran.status, ran.output).toBe(0);
+    expect(commitOf(ran.calls[1] ?? "")).toBe("a".repeat(40));
+  });
+
+  it("states the pull request's HEAD sha, not the merge commit it is handed", () => {
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: {
+        GITHUB_EVENT_NAME: "pull_request",
+        // The merge ref, which is what a runner sets on this event.
+        GITHUB_SHA: "m".repeat(40),
+        GITHUB_EVENT_PATH: eventFile({ pull_request: { head: { sha: "h".repeat(40) } } }),
+      },
+    });
+    expect(ran.status, ran.output).toBe(0);
+    expect(commitOf(ran.calls[1] ?? "")).toBe("h".repeat(40));
+  });
+
+  it("falls back to $GITHUB_SHA when the payload names no head", () => {
+    // A push whose bytes are good is not worth failing over a label, and the
+    // merge ref is still a commit — it is just one nobody can fetch later.
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: {
+        GITHUB_EVENT_NAME: "pull_request",
+        GITHUB_SHA: "m".repeat(40),
+        GITHUB_EVENT_PATH: eventFile({ repository: {} }),
+      },
+    });
+    expect(ran.status, ran.output).toBe(0);
+    expect(commitOf(ran.calls[1] ?? "")).toBe("m".repeat(40));
+  });
+});
+
+/**
+ * WHEN A PUSH PINS. `pin:` defaults to the comparison every caller was
+ * pasting into its workflow — "am I on this repository's default branch?" —
+ * because a cache step whose closure is collected the week after is the
+ * failure the input exists to prevent, and it was the default that made that
+ * the easy outcome. An explicit value is still obeyed to the letter: the
+ * repository that pins a release branch, or pins nothing, says so and this
+ * step infers nothing from it.
+ *
+ * Driven through the real script, so what is asserted is what the pusher was
+ * HANDED: `--pin <derived name>` in argv, or no `--pin` at all.
+ */
+describe("when the push action pins", () => {
+  /** The word after `--pin` in the stub's recorded argv, if there is one. */
+  const pinOf = (call: string): string | undefined => {
+    const words = call.split(" ");
+    const at = words.indexOf("--pin");
+    return at === -1 ? undefined : words[at + 1];
+  };
+  /** A runner's environment on `refs/heads/<branch>`, with `master` the
+   *  repository's default branch in the payload. */
+  const onBranch = (branch: string): Record<string, string> => ({
+    GITHUB_EVENT_NAME: "push",
+    GITHUB_EVENT_PATH: eventFile({ repository: { default_branch: "master" } }),
+    GITHUB_REF: `refs/heads/${branch}`,
+    GITHUB_REF_NAME: branch,
+    GITHUB_REPOSITORY: "juspay/odu",
+  });
+
+  it("pins with no `pin:` at all when the run is on the default branch", () => {
+    const ran = runPush({ target: { ok: "https://cache.example.com/main" }, env: onBranch("master") });
+    expect(ran.status, ran.output).toBe(0);
+    expect(pinOf(ran.calls[1] ?? "")).toBe("juspay/odu@master/x86_64-linux");
+  });
+
+  it("pins nothing with no `pin:` when the run is on another branch", () => {
+    const ran = runPush({ target: { ok: "https://cache.example.com/main" }, env: onBranch("feature") });
+    expect(ran.status, ran.output).toBe(0);
+    expect(pinOf(ran.calls[1] ?? "")).toBeUndefined();
+  });
+
+  it("pins nothing with no `pin:` outside Actions, where there is no ref and no payload", () => {
+    // A laptop's run of the script must not re-point the name the
+    // repository's own pushes hold.
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: { GITHUB_EVENT_NAME: "local", GITHUB_REPOSITORY: "juspay/odu" },
+    });
+    expect(ran.status, ran.output).toBe(0);
+    expect(pinOf(ran.calls[1] ?? "")).toBeUndefined();
+  });
+
+  it("obeys an explicit `false` on the default branch itself", () => {
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: { ...onBranch("master"), ODU_PUSH_PIN: "false" },
+    });
+    expect(ran.status, ran.output).toBe(0);
+    expect(pinOf(ran.calls[1] ?? "")).toBeUndefined();
+  });
+
+  it("obeys an explicit `true` on a branch that is not the default", () => {
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: { ...onBranch("release-1.x"), ODU_PUSH_PIN: "true" },
+    });
+    expect(ran.status, ran.output).toBe(0);
+    expect(pinOf(ran.calls[1] ?? "")).toBe("juspay/odu@release-1.x/x86_64-linux");
+  });
+
+  it("refuses a `pin:` that is neither empty nor a boolean, saying what empty now means", () => {
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: { ...onBranch("master"), ODU_PUSH_PIN: "master" },
+    });
+    expect(ran.status).not.toBe(0);
+    expect(ran.output).toContain("pins on your repository's default branch");
   });
 });

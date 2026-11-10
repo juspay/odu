@@ -155,6 +155,12 @@ export interface CacheFaceProps {
    *  the runs' client and so the cell; this face holds the cache's and cannot
    *  reach it. `null` for a build that baked none. */
   pushActionRef: () => string | null;
+  /** WHERE A RUN LIVES, as the shell's router spells it — minted by
+   *  `@odu/service-client`'s `runHash`, which this package may not import
+   *  (`closure.test.ts` holds that fence) and whose spelling it must not
+   *  guess: a hand-copied `#/run/` here goes stale silently the day the
+   *  board's address changes. */
+  runHref: (runId: string) => string;
   /** One clock for the page, read once a second by the shell. */
   now: number;
   /** MAY THIS PERSON ADMINISTER BUCKETS? The ROW's floor is `admin`, and the
@@ -246,6 +252,7 @@ export function CacheFace(props: CacheFaceProps): JSX.Element {
           local={props.local}
           tunnelRow={props.tunnelRow}
           pushActionRef={props.pushActionRef}
+          runHref={props.runHref}
         />
       )}
     </Show>
@@ -669,6 +676,11 @@ type BucketTab = (typeof BUCKET_TABS)[number];
  *  short enough that the names beside them line up. */
 export const HASH_SHOWN = 8;
 
+/** How much of a COMMIT a column shows. Seven hex characters is what git
+ *  itself abbreviates to and what a person has in their terminal scrollback,
+ *  so the cell matches what they would compare it against. */
+const SHA_SHOWN = 7;
+
 /** What the table can be ordered by — the CONTRACT's word, because the order
  *  is the row's to apply. The hash is not among them: it is a random string,
  *  so sorting by it is sorting by nothing, and `wanted` moves under the
@@ -699,6 +711,11 @@ export interface PathRow {
   readonly hits: number;
   readonly pushed: number;
   readonly wanted: number;
+  /** WHAT BUILT IT, as the push stated it: the run that put it there and the
+   *  commit it was built from, or null where nothing was said. A group's are
+   *  the NEWEST version's, read off the same row the hash is. */
+  readonly run: string | null;
+  readonly commit: string | null;
 }
 
 /**
@@ -718,6 +735,10 @@ const pathRow = (path: CachePath, name: string): PathRow => ({
   hits: path.hits,
   pushed: path.created,
   wanted: path.lastWanted,
+  // A DAEMON OLDER THAN 4.7 ANSWERS NEITHER FIELD, and a path pushed before
+  // this said nothing: both read as "unknown", which the cells draw as empty.
+  run: path.run ?? null,
+  commit: path.commit ?? null,
 });
 
 /**
@@ -737,6 +758,8 @@ export function pathRows(page: CachePaths): readonly PathRow[] {
       hits: group.hits,
       pushed: group.pushed,
       wanted: group.wanted,
+      run: group.run ?? null,
+      commit: group.commit ?? null,
     }));
   }
   return page.paths.map((path) => pathRow(path, storePathParts(path.storePath).name));
@@ -805,6 +828,8 @@ function BucketPaths(props: {
   bucket: string;
   /** The page's clock, stopped while this panel's tab is away. */
   now: number;
+  /** The board's address for a run, for the `run` column. {@link CacheFaceProps.runHref} */
+  runHref: (runId: string) => string;
 }): JSX.Element {
   /** What the person typed, and what the query is allowed to see. Two signals:
    *  the box must track every keystroke, and the request must not. */
@@ -1087,7 +1112,7 @@ function BucketPaths(props: {
   };
 
   /**
-   * THE TABLE, AS DATA — six columns, their widths, and what each cell is.
+   * THE TABLE, AS DATA — eight columns, their widths, and what each cell is.
    *
    * Every width but the name's is fixed, so the name takes what is left and
    * nothing in a cell can widen the page; the `Table` primitive owns the
@@ -1144,6 +1169,37 @@ function BucketPaths(props: {
       width: "4rem",
       sortable: true,
       cell: (row) => row.hits,
+    },
+    /**
+     * WHAT BUILT IT (cache 4.7). Two cells rather than one: a commit is a
+     * fact a reader compares against their own checkout, and a run is a place
+     * they go.
+     *
+     * A SHORT SHA for the same reason the hash cell is short — seven
+     * characters is what a person recognises a commit by, and the whole one
+     * is the `title`. A path whose push said nothing renders NOTHING here,
+     * not a dash: an empty cell reads as "this bucket does not know", while a
+     * placeholder reads as a value.
+     */
+    {
+      key: "commit",
+      label: "commit",
+      width: "5rem",
+      cell: (row) =>
+        row.commit === null ? null : <span title={row.commit}>{row.commit.slice(0, SHA_SHOWN)}</span>,
+    },
+    {
+      key: "run",
+      label: "run",
+      width: "6rem",
+      // THE SHELL SPELLS THE ADDRESS ({@link CacheFaceProps.runHref}): a run
+      // id goes in and the board's own router hands back where it lives.
+      cell: (row) =>
+        row.run === null ? null : (
+          <a class="link" href={props.runHref(row.run)} title={row.run}>
+            {row.run}
+          </a>
+        ),
     },
     {
       key: "wanted",
@@ -1310,6 +1366,7 @@ function BucketPage(
       local: boolean;
       tunnelRow: boolean;
       pushActionRef: () => string | null;
+      runHref: (runId: string) => string;
     },
 ): JSX.Element {
   /** THE REF THE PUSH BLOCK OFFERS — the daemon's own commit when it baked one,
@@ -1512,6 +1569,7 @@ function BucketPage(
                   client={props.client}
                   call={props.call}
                   bucket={props.name}
+                  runHref={props.runHref}
                   now={pathsClock()}
                 />
               </div>

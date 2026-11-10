@@ -55,6 +55,36 @@ export function gitBranch(repoRoot: string): string | null {
   return name === "" ? null : name;
 }
 
+/**
+ * The branch `origin` calls its default — `master`, `main`, whatever the
+ * remote's HEAD points at — or `null` when this checkout cannot say.
+ *
+ * LOCAL AND OFFLINE: `symbolic-ref refs/remotes/origin/HEAD` reads the ref
+ * `git clone` (or `git remote set-head`) already wrote under `.git`. No
+ * network, so a run's pin decision cannot hang on, or be decided by, a remote
+ * that is unreachable at that moment — and a clone made with `--no-tags
+ * --depth 1` or a repo whose origin was added by hand simply has no such ref,
+ * which is `null` here and a sentence on `_ci-setup` there. Never guessed:
+ * assuming `main` would pin a `master` repository's closure under a branch
+ * nothing is ever on, silently.
+ *
+ * Read ONCE per run, beside {@link gitBranch}, for the same reason: a second
+ * read is a second chance for two decisions to name different refs.
+ */
+export function gitDefaultBranch(repoRoot: string): string | null {
+  const ref = spawnSync(
+    "git",
+    ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+    { cwd: repoRoot, encoding: "utf-8" },
+  );
+  if (ref.status !== 0) return null;
+  const name = ref.stdout.trim();
+  const prefix = "refs/remotes/origin/";
+  return name.startsWith(prefix) && name.length > prefix.length
+    ? name.slice(prefix.length)
+    : null;
+}
+
 /** The durable-log identity from the process's real git: the repo root and the
  *  current short SHA. Returns `null` outside a git checkout (→ "missing" for
  *  any durable-log read). Used by both `mcpCommand` and the test harness. */

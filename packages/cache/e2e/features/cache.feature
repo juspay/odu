@@ -40,6 +40,19 @@ Feature: The cache is a row of the board
     And that path says when it was last wanted
     And there should be no page errors
 
+  # WHAT BUILT A PATH, on the page that lists it. A path nobody recognises is
+  # a path nobody dares collect: the push states the run that made it and the
+  # commit it came from, and the row draws the commit the length a person
+  # compares it at and the run as a LINK to the run's own page.
+  Scenario: A path says which commit built it, and links the run that pushed it
+    Given a bucket with one path pushed from the CLI with a run and a commit
+    And I open the cache
+    When I open that bucket
+    Then the pushed path is listed
+    And that path shows the commit it was built from, abbreviated
+    And that path links to the run that pushed it
+    And there should be no page errors
+
   Scenario: The filter narrows a bucket's paths
     # TWO paths, so this shows NARROWING rather than show-and-hide: one filter
     # leaves both, another leaves exactly one.

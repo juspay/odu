@@ -84,17 +84,25 @@ interface FileSpec {
  *  it opens the page (the page is then read as it stands), and one that opens
  *  the page FIRST and pushes into it — which is the scenario that grades the
  *  property the row exists for, a push arriving with no reload. */
-function arrangePush(world: OduWorld, howMany = 1): void {
+function arrangePush(world: OduWorld, howMany = 1, states: readonly string[] = []): void {
   arrangeFiles(
     world,
     Array.from({ length: howMany }, (_, index) => {
       const name = unique(index === 0 ? "path" : `path-${index}`);
       return { name, body: `odu web acceptance: ${name}\n` };
     }),
+    states,
   );
 }
 
-function arrangeFiles(world: OduWorld, specs: readonly FileSpec[]): void {
+/** `states` is what the push SAYS about itself beyond its paths — `--run` and
+ *  `--commit` (cache 4.7). Empty for every scenario that is not about
+ *  provenance, which is what a developer's own push sends. */
+function arrangeFiles(
+  world: OduWorld,
+  specs: readonly FileSpec[],
+  states: readonly string[] = [],
+): void {
   const bucket = unique("bucket");
   // LEAF FILES, added straight to the store: a path with no references, so the
   // narinfo needs no referrers and the import cannot sit at 202 waiting for
@@ -136,9 +144,11 @@ function arrangeFiles(world: OduWorld, specs: readonly FileSpec[]): void {
   });
   assert.strictEqual(minted.status, 0, `cache token_mint failed: ${minted.stderr}`);
 
-  const pushed = oduCli(world.service, ["cache", "push", bucket, ...paths, "-o", "json"], {
-    ODU_CACHE_TOKEN: mintedToken(minted),
-  });
+  const pushed = oduCli(
+    world.service,
+    ["cache", "push", bucket, ...paths, ...states, "-o", "json"],
+    { ODU_CACHE_TOKEN: mintedToken(minted) },
+  );
   assert.strictEqual(pushed.status, 0, `odu cache push failed: ${pushed.stderr}`);
 
   world.cacheBucket = bucket;
@@ -217,6 +227,27 @@ Given("a bucket with one path pushed from the CLI", function (this: OduWorld) {
 Given("a bucket with two paths pushed from the CLI", function (this: OduWorld) {
   arrangePush(this, 2);
 });
+
+/**
+ * A PUSH THAT SAYS WHAT BUILT IT (cache 4.7) — the arrange a run makes, from
+ * a terminal like every other one here.
+ *
+ * The commit is forty hex characters because that is what a sha is and the
+ * table abbreviates it; the run id names no run this scenario started, which
+ * is the point — the page draws the LINK from the string it was given and
+ * resolves nothing.
+ */
+Given(
+  "a bucket with one path pushed from the CLI with a run and a commit",
+  function (this: OduWorld) {
+    const stated: StatedProvenance = {
+      run: unique("run"),
+      commit: "abcdef0123456789".repeat(3).slice(0, 40),
+    };
+    this.rowState.set(PROVENANCE, stated);
+    arrangePush(this, 1, ["--run", stated.run, "--commit", stated.commit]);
+  },
+);
 
 /** THREE BUILDS OF ONE PACKAGE: the same base name, different bytes, so the
  *  store gives each its own hash and the table has a group to draw. */
@@ -387,6 +418,47 @@ Then("the pushed path is listed", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no path was arranged");
   await pathRow(this, name).waitFor({ timeout: 30_000 });
+});
+
+/** WHAT THIS SCENARIO'S PUSH STATED, kept in the harness's row bag because it
+ *  is the cache row's noun and not the harness's. */
+interface StatedProvenance {
+  run: string;
+  commit: string;
+}
+const PROVENANCE = "cache.provenance";
+function statedProvenance(world: OduWorld): StatedProvenance {
+  const held = world.rowState.get(PROVENANCE) as StatedProvenance | undefined;
+  assert.ok(held !== undefined, "this scenario pushed nothing with a run and a commit");
+  return held;
+}
+
+/** THE SHORT SHA IS WHAT IS DRAWN, and the whole one is the cell's `title` —
+ *  so the assertion is both: the row carries the commit it was pushed with,
+ *  and what a reader SEES is the seven characters they would compare against
+ *  their own checkout. */
+Then(
+  "that path shows the commit it was built from, abbreviated",
+  async function (this: OduWorld) {
+    const name = this.cachePathName;
+    assert.ok(name !== undefined && name !== "", "no path was arranged");
+    const { commit } = statedProvenance(this);
+    const cell = pathRow(this, name).locator(`[title="${commit}"]`).first();
+    await cell.waitFor({ timeout: 30_000 });
+    assert.strictEqual((await cell.innerText()).trim(), commit.slice(0, 7));
+  },
+);
+
+/** A RUN IS A PLACE, so the cell is an ANCHOR: `#/run/<id>` is the board's own
+ *  hash route for a run, and a reader who wants to know why a path is here
+ *  clicks rather than copies an id into a search box. */
+Then("that path links to the run that pushed it", async function (this: OduWorld) {
+  const name = this.cachePathName;
+  assert.ok(name !== undefined && name !== "", "no path was arranged");
+  const { run } = statedProvenance(this);
+  const link = pathRow(this, name).locator(`a.link[href="#/run/${run}"]`).first();
+  await link.waitFor({ timeout: 30_000 });
+  assert.strictEqual((await link.innerText()).trim(), run);
 });
 
 /** WANTED, not read. The table's last column is the clock GC decides by, and

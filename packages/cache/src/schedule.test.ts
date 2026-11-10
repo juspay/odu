@@ -74,6 +74,7 @@ async function push(cache: Cache, storePath: string): Promise<void> {
         controller.close();
       },
     }),
+    { run: null, commit: null },
   );
   if (!outcome.ok) throw new Error(`push ${storePath}: ${outcome.message}`);
 }

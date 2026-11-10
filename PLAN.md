@@ -18,7 +18,7 @@ Status: living, 2026-11-03.
    - [Phase 1: foundations](#phase-1-foundations) ✅
    - [Phase 2: the cache as a product](#phase-2-the-cache-as-a-product) (2.1–2.4 ✅)
    - [Phase 3: teams](#phase-3-teams)
-   - [Phase 4: CI pushes for you](#phase-4-ci-pushes-for-you)
+   - [Phase 4: CI pushes for you](#phase-4-ci-pushes-for-you) (4.1, 4.2, 4.4 ✅)
    - [Phase 5: hosted CI](#phase-5-hosted-ci)
    - [Phase 6: scale and hosting](#phase-6-scale-and-hosting) (6.2 ✅)
 5. [Risks](#risks)
@@ -303,9 +303,19 @@ What each step delivers:
   step on the run page with its own log stream. Dogfooded on kolu
   (juspay/kolu#2345): the lanes warm `kolu-r2` and the linux GitHub push job
   is gone.[^runpush]
-- **4.2 Provenance and pins.** A path on the bucket page links to the run and
-  commit that built it. `[metadata("odu:pin")]` on a recipe keeps its closure
-  out of GC under `<repo>@<ref>/<system>`, the same pin the Action makes.[^pins]
+- **4.2 ✅ Provenance and pins** (#169). Every narinfo a run writes carries the
+  run's id and the commit it was built from (cache 4.7), and the bucket page's
+  Paths table draws the commit short and the run as a link to its own page.
+  `[metadata("odu:pin")]` on a recipe keeps its closure out of GC under
+  `<owner>/<repo>@<ref>/<system>` — the same name the Action derives, so a run
+  and a workflow re-point one pin rather than two. Bare is the repository's
+  default branch, read from `origin/HEAD` in the checkout; `odu:pin=<ref>`
+  names a ref instead, and repeating the attribute names more. A run on none
+  of them pushes silently; a run that cannot answer — a detached HEAD, no
+  github.com origin, no `origin/HEAD` — says one line on its `_ci-setup` node
+  why, beside the line naming where it pushes. The ref is the one `gitBranch`
+  the coordinator already read for the manifest, so a board and a pin cannot
+  disagree.[^pins]
 - **4.3 The hook.** For hosts whose every build should land in one org bucket:
   the host owner installs it, lanes still hold no repo credentials, and a cache
   outage only queues paths. Deferred until a lane's own store stops being
@@ -388,11 +398,12 @@ Commits and PR bodies use the earlier names.
 | PR 1.5 | 1.3 | | PR 3g | 2.9 |
 | PR 2 (+hotfix) | 1.4 | | PR 4 | 3.1 |
 | PR 2.5 | 1.5 | | #159, #162 | 4.1 ✅ (4.3 deferred) |
-| PR 3e | 1.6 | | #161 + nixos-config | 4.4 ✅ |
-| PR 3a | 2.1 | | PR 7, 8 | 5.1, 5.2 |
-| PR 3b (+fix) | 2.2 | | PR 9, 10 | 5.3, 5.4 |
-| PR 3f | 2.3 | | PR 11 | folded into 2.4–2.9 |
-| PR 3c | 2.4 | | PR 12 | 6.1 |
+| PR 3e | 1.6 | | #169 | 4.2 ✅ |
+| PR 3a | 2.1 | | #161 + nixos-config | 4.4 ✅ |
+| PR 3b (+fix) | 2.2 | | PR 7, 8 | 5.1, 5.2 |
+| PR 3f | 2.3 | | PR 9, 10 | 5.3, 5.4 |
+| PR 3c | 2.4 | | PR 11 | folded into 2.4–2.9 |
+| | | | PR 12 | 6.1 |
 | | | | PR 13, 14 | 6.2, 6.3 |
 
 [^chutney]: chutney's Attic: 669 GB on S3 and 46 GB of Postgres, growing
@@ -686,9 +697,16 @@ Commits and PR bodies use the earlier names.
     token (SEC-5) and the push 401'd: the Action resolves the URL and then
     NAMES it, which a workflow may do where a laptop may not.
 
-[^pins]: The catalog records path ↔ run ↔ commit at push time; the bucket
-    page's grouped Paths table shows it per group. `odu:pin` pins through the
-    run's token, re-pointing the pin of the same name.
+[^pins]: Not a catalog: the CACHE's own object row learns two nullable
+    columns, written at the narinfo PUT from `x-odu-run` and `x-odu-commit`
+    headers — above the narinfo body, which is a format every Nix client
+    parses. They COALESCE on conflict and independently, so a developer's bare
+    re-push erases neither and the Action (which states `--commit` only) does
+    not blank a run. `cache_bucket_paths` answers both; a group answers its
+    newest version's, out of the same subquery row its hash comes from. The
+    pin goes through the run's own write token (`createdBy: write` already
+    re-points a write token's pin), only when every path of that recipe
+    landed, and only on the ref the recipe named.
 
 [^podci]: Two repositories. nixos-config: `ODU_HOSTS` on the Deployment names
     the lanes; one Tailscale-operator egress Service per lane
