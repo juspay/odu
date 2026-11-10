@@ -1,12 +1,18 @@
 # Odu as a product: Nix cache + CI you run yourself
 
-Status: living, 2026-11-03.
-- Phase 1 and all of Phase 2 are on master: 2.8 is #148, #150 and #152, and
-  2.9 is #154.
-- **Next is Phase 3**, orgs.
-- **6.2 landed early, out of order** (#156): metrics needed no org model, and a
-  deployment that is already public wanted numbers before it wanted tenancy.
-  Nothing in Phase 3–6.1 depends on it.
+Status: living, 2026-11-10.
+- Phase 1 and Phase 2 are on master; 2.11 (#168) is the page a repository
+  reads to adopt odu. One Phase 2 item is still open: 2.12, the board does
+  not draw `pipeline.mermaid`.
+- **Next is Phase 3**, orgs. It is also what 4.1 waits on: a run may push to
+  any bucket this daemon serves until 3.1 says which repository owns which.
+- **Landed out of order:** 6.2 (#156) — metrics needed no org model, and a
+  deployment that is already public wanted numbers before it wanted tenancy;
+  4.1, 4.2 and 4.4 — the run pushes, pins and provenance, the pod runs CI —
+  all bounded by the operator until 3.1.
+- **Every consumer is on master** (kolu, olai, agent-distro): one odu per
+  repository, the push action without `cache:` or `pin:`, `odu:pin` on the
+  recipes whose outputs the default branch must serve.
 - One step is one PR, and the order is a dependency order. There is no schedule.
 
 ## Contents
@@ -16,7 +22,7 @@ Status: living, 2026-11-03.
 3. [Architecture](#architecture)
 4. [Roadmap](#roadmap)
    - [Phase 1: foundations](#phase-1-foundations) ✅
-   - [Phase 2: the cache as a product](#phase-2-the-cache-as-a-product) (2.1–2.4 ✅)
+   - [Phase 2: the cache as a product](#phase-2-the-cache-as-a-product) (2.1–2.11 ✅, 2.12 open)
    - [Phase 3: teams](#phase-3-teams)
    - [Phase 4: CI pushes for you](#phase-4-ci-pushes-for-you) (4.1, 4.2, 4.4 ✅)
    - [Phase 5: hosted CI](#phase-5-hosted-ci)
@@ -163,6 +169,8 @@ the read path wherever it can be, behind a board people want to use.
 | 2.8 | Reads leave odu | ✅ #148 |
 | 2.9 | Uploads go straight to the store | ✅ #154 |
 | 2.10 | The admin CLI is retired | ✅ #144 |
+| 2.11 | One page for repos using odu | ✅ #168 |
+| 2.12 | The board draws the pipeline | open |
 
 What each step delivers:
 - **2.1 ✅** `cache.kolu.dev` is live through a Cloudflare tunnel, with no open
@@ -190,10 +198,11 @@ What each step delivers:
     tokens. They are reviewed in the PR.
   - Screens for later features (GC and pins, starting a new run) land inside
     the steps that add those features, built in this design.
-  - **Two parity gaps 2.10's audit found, and handed here:** no face renders
-    `pipeline.mermaid`, though `pipeline_read` carries it; and the board has
-    no "newest run of THIS checkout" selector, which `odu ci status` resolves
-    with git.
+  - **Two parity gaps 2.10's audit found, and handed here.** One closed: the
+    board folds a checkout's runs to the newest (`streams.checkout`), which
+    is what `odu ci status` resolved with git. One did not: no face renders
+    `pipeline.mermaid`, though `pipeline_read` carries it. That is a verb
+    with no control, which the Decisions call a defect; it is 2.12.
 - **2.7 ✅ GC and pins on every store.** Liveness comes from pushes, not reads,
   because reads are about to leave odu. GC is written only against
   `ObjectStore`, and deletions purge the CDN.[^gc] The bucket page dry-runs the
@@ -286,12 +295,47 @@ What each step delivers:
   one PR at a time through 2.4–2.9, and `odu surface <row> <verb>` is the full
   API by derivation.[^retire]
 
+- **2.11 ✅ One page for repos using odu** (#168). `website/src/content/docs.md`
+  "Use odu from your repository": declare the cache once in `flake.nix`,
+  tag the pipeline, run it, the one workflow you may still need, require it,
+  agents, what you see, what odu promises, what to ask your operator for.
+  README keeps the four steps; the skill says the same in the same words;
+  `examples/consumer/` is the four files the page quotes, read back by odu's
+  own readers in `src/consumerExample.test.ts` so they cannot drift. The same
+  PR made the push action's `cache:` truly optional (#163): the step runs the
+  new `odu cache target` — the one odu substituter in `./flake.nix` — and
+  pushes to it by name, so the token goes with it; `odu cache push` by hand
+  keeps withholding a token from an inferred URL (#159, SEC-5), because at a
+  terminal the token holder and the author of `extra-substituters` are not
+  the same person, and in Actions they are.[^consumer]
+- **2.12 The board draws the pipeline.** `pipeline_read` answers the recipe
+  DAG with a Mermaid rendering from the engine, and only MCP and `odu surface`
+  can see it. The run page and a checkout's board row render it, bundled (no
+  CDN; the same air-gap rule as the fonts[^board]).
+
 ### Phase 3: teams
 
-- **3.1 Orgs.** Teams self-serve without the operator:
-  - membership synced from GitHub, roles, many buckets per org;
-  - private buckets;
-  - quotas, token revocation and an audit log.[^teams]
+Orgs are one model and three PRs. What the first one must close is named by
+three footnotes that have been deferring to it: the run-push bound
+([^runpush]), the `org` field on runs and buckets ([^teams]), and refresh
+tokens ([^identity]).
+
+- **3.1 Orgs.** An org owns buckets, repositories and people:
+  - membership synced from GitHub through the App's installation token, and
+    roles per org;
+  - **a bucket belongs to one org, and a repository is linked to the org
+    whose buckets it may push to.** `run.start` resolves a target only inside
+    that link, which retires the operator-bound interim in [^runpush];
+  - an `org` field on runs and buckets, and the org's facts on the bucket
+    page.
+  Private buckets and token revocation are not new here — both landed in 1.2
+  and 2.8 — what 3.1 adds is that they are the org's, not the operator's.
+- **3.2 Refresh tokens.** Expiring user tokens are stored and refreshed, so a
+  sign-in outlives the App's one-hour token where the App is configured to
+  expire them.[^identity]
+- **3.3 Audit log.** Who did what to which bucket, token, pin or member, per
+  org, on the board and the API. Quotas are 6.3's: a limit is metering with a
+  ceiling.[^teams]
 
 ### Phase 4: CI pushes for you
 
@@ -320,17 +364,24 @@ What each step delivers:
   the host owner installs it, lanes still hold no repo credentials, and a cache
   outage only queues paths. Deferred until a lane's own store stops being
   enough.[^hook]
-- **4.4 ✅ The pod runs CI** (#161 + nixos-config). The "Ours" shape for real:
-  the service that serves the cache is the one that runs the lanes. The pod's
-  inventory names `ci@croissant`, `ci@naiveintent` and `ci@petit`, reached
-  through Tailscale-operator egress Services; one pod ssh identity is
+- **4.4 ✅ The pod runs CI** (#161, #173 + nixos-config). The "Ours" shape for
+  real: the service that serves the cache is the one that runs the lanes. The
+  pod's inventory names `ci@croissant`, `ci@naiveintent` and `ci@petit`,
+  reached through Tailscale-operator egress Services; one pod ssh identity is
   authorised on every lane's `ci` user; lanes trust the pod's substituter. A
   personal token was enough to act from a shell — what shipped is `odu ci run
-  --checkout <abs> --sha <sha>` and `actor` on every run, and a caller may now
-  hand that service a BRANCH beside the commit (`--branch`), which lets it
-  fetch and move its own clone onto a sha it has not got yet. Still manual
-  until 5.1: the checkout under `/data/checkouts/<repo>`, and the tailnet
-  policy (lanes ← `tag:k8s` on 22, pod ← lanes on 443).[^podci]
+  --checkout <abs> --sha <sha>` and `actor` on every run. **#173:** a caller
+  may hand the service a BRANCH beside the commit (`--branch`), and the
+  service fetches it and puts its own clone there — on the branch, never
+  detached, because a pin is read from the branch. That is what lets a
+  GitHub workflow start a pod run for the commit it just pushed:
+  kolu#2349's `linux-pin` job does exactly that on every master push, and
+  `juspay/kolu@master/x86_64-linux` is re-pointed by the run that follows —
+  the trigger 5.2 will replace with a webhook. Still manual until 5.1: the
+  clone under `/data/checkouts/<repo>`, and the tailnet policy (lanes ←
+  `tag:k8s` on 22, pod ← lanes on 443). The pod holds no GitHub credential,
+  so a run it coordinates posts no status; 5.2's installation token is the
+  fix.[^podci]
 
 ### Phase 5: hosted CI
 
@@ -345,7 +396,10 @@ What each step delivers:
 ### Phase 6: scale and hosting
 
 - **6.1 Postgres.** Several odu servers share one database behind one domain.
-  SQLite stays the default.
+  SQLite stays the default. There are THREE SQLite files to swap (`cache`,
+  `auth`, `cloudflare`, each behind its own repository interface), and two
+  things no database swap helps: the run catalog is per-user files on disk,
+  and a 2.9 upload record is one daemon's memory. Both are named in Risks.
 - **6.2 ✅ Metrics.** `GET /metrics`, Prometheus text, on the host — authorised
   by the root token or a `metrics` token (`metrics_token_mint`/`_list`/`_revoke`),
   never anonymous. Rows contribute through a cordis registry, so the host opens
@@ -368,6 +422,8 @@ What each step delivers:
 | Run-scoped push relaxes "lanes hold no credentials" | Scoped, write-only, run-lifetime tokens, revoked when nothing serves the run |
 | No chunking | Deliberate[^chutney]; revisit only if storage cost dominates |
 | Bun streaming backpressure | Measured, not assumed[^bun]; 2.8 takes odu off the read path anyway |
+| Several servers behind one domain (6.1) | Three databases, not one, and two non-database states: the run catalog (per-user files) and in-memory 2.9 upload records, which need sticky routing or a shared table before Postgres helps |
+| Two e2e suites on one lane host | `suitePortFor` is per suite, not per run; two `e2e-cli` runs on one host substitute from each other's daemon. Seen twice on #169; needs per-run ports |
 
 ## Appendix: facts the plan rests on
 
@@ -377,7 +433,7 @@ Each fact was checked in the source when it was written.
 | --- | --- | --- |
 | F1 | `odu web` serves through kolu's `serveSurfaceApp`, which has route, middleware and per-connection service seams[^f1] | Cache routes and the principal are layers, so kolu needs no change |
 | F2 | Without `auth`, whoever reaches the listener is the owner | Loopback mode is the regression guard |
-| F3 | The cache's SQLite is the only database; runs live in per-user files | Postgres is the cache's swap alone |
+| F3 | Three SQLite files, one per row that keeps state (`cache`, `auth`, `cloudflare`), each behind a repository interface; runs live in per-user files | Postgres (6.1) is three swaps and a catalog question |
 | F4 | Every public command is a client of the service (`authority.test.ts`) | `odu cache push` is admissible: it is an HTTP client of the cache |
 | F5 | `post-build-hook` is a Nix daemon setting; lane provisioning never edits `nix.conf` | The hook is host configuration (4.3); 4.1 needs no daemon setting |
 | F6 | Lane hosts never see credentials; GitHub posting happens on the coordinator | 4.1 relaxes this, bounded to one run and one bucket |
@@ -401,7 +457,7 @@ Commits and PR bodies use the earlier names.
 | PR 2 (+hotfix) | 1.4 | | PR 4 | 3.1 |
 | PR 2.5 | 1.5 | | #159, #162 | 4.1 ✅ (4.3 deferred) |
 | PR 3e | 1.6 | | #169 | 4.2 ✅ |
-| PR 3a | 2.1 | | #161 + nixos-config | 4.4 ✅ |
+| PR 3a | 2.1 | | #161, #173 + nixos-config | 4.4 ✅ |
 | PR 3b (+fix) | 2.2 | | PR 7, 8 | 5.1, 5.2 |
 | PR 3f | 2.3 | | PR 9, 10 | 5.3, 5.4 |
 | PR 3c | 2.4 | | PR 11 | folded into 2.4–2.9 |
@@ -413,7 +469,7 @@ Commits and PR bodies use the earlier names.
 
 [^identity]: Sign-in uses the App's authorisation-code flow (1.4). Installation
     tokens arrive in 3.1 (membership sync) and 5.2 (checks). Expiring user
-    tokens are refused until 3.1 stores refresh tokens.
+    tokens are refused until 3.2 stores refresh tokens.
 
 [^pod]: nixos-config `k8s/apps/odu` runs `odu web` in `pureintent`'s K3s: one
     replica, with a `local-path` PVC for the catalog and the `local` store. It
@@ -456,15 +512,16 @@ Commits and PR bodies use the earlier names.
 
 [^rows]: Cordis per olai `docs/architecture/cordis.md`. `@odu/cordis` holds the
     shared contract. `packages/host/src/fence.test.ts` proves, with
-    `@olai/effect-cordis/fence`, that only roots name rows. Versions: host 2.5,
-    `ci` 2.4, `cache` 3.1, `auth` 2.4, `cloudflare` 2.4. Each row is held to an
-    append-only fingerprint ledger by `just test`, and `admitService` admits a
-    client on the rows it declares. **A row is a set of packages, not a
-    directory:** the fence reads each manifest's `cordis.row`, so `ci` is
-    `@odu/ci` (the plugin the daemon mounts, and the board's view) plus
-    `@odu/cli` (`odu ci`'s argv grammar and its TUI). The split is the
-    renderer: `@opentui/core` and `@xterm/headless` are a cost the package
-    served inside the daemon must not carry.
+    `@olai/effect-cordis/fence`, that only roots name rows. Versions on master
+    (each is a `*_CONTRACT_VERSION` constant in the row's `surface.ts`): host
+    2.5, `ci` 2.7, `cache` 4.7, `auth` 2.4, `cloudflare` 2.4, and the host's
+    `metrics` fragment 1.0. Each row is held to an append-only fingerprint
+    ledger by `just test`, and `admitService` admits a client on the rows it
+    declares. **A row is a set of packages, not a directory:** the fence reads
+    each manifest's `cordis.row`, so `ci` is `@odu/ci` (the plugin the daemon
+    mounts, and the board's view) plus `@odu/cli` (`odu ci`'s argv grammar and
+    its TUI). The split is the renderer: `@opentui/core` and `@xterm/headless`
+    are a cost the package served inside the daemon must not carry.
 
 [^protocol]: Routes per bucket:
     ```
@@ -657,7 +714,33 @@ Commits and PR bodies use the earlier names.
 [^teams]: Membership is synced server-side from the App's installation token, so
     a removal in GitHub is a removal in odu. Private buckets are read through
     netrc. Runs and buckets gain an org field. The bucket page already exists
-    (1.3), so 3.1 adds the org's facts to it.
+    (1.3), so 3.1 adds the org's facts to it. The repository ↔ org link is the
+    fact `run.start` has lacked since 4.1: today any checkout the daemon runs
+    may push to any bucket it serves. 3.3's audit log reads the actions each
+    row already logs; 6.3's quotas are the same per-org counters with a limit.
+
+[^consumer]: Where the consumers stand after #168–#174 and their own PRs
+    (kolu#2347, #2348, #2349; olai#689, #690; agent-distro#149, #152, #153).
+    Every one pins odu by revision — the push action by SHA, kolu and olai by
+    npins, agent-distro's `github:juspay/odu/<rev>` in six places — and bumps
+    them together, because a floating `github:juspay/odu` is how the 2.10
+    rename broke agent-distro's `just protect`. kolu's `nix/consumer.nix`
+    requires olai's grafted `@odu/*` pins to equal kolu's own, so olai's
+    npins follow kolu's. Each repository's own workflow proved the
+    authenticated push with neither `cache:` nor `pin:` on its PR. kolu's
+    `publish-closure` action (content-addressed closures plus an index, for
+    hosts that trust no cache key) stays kolu's; it already calls `odu cache
+    push`. Two things the plan does not do: a bot to bump the pins
+    (Dependabot moves the action; `npins update` the pin), and a second
+    variable for "which server the CLI dials" — `--origin` is enough, and
+    `ODU_WEB_ORIGIN`'s double meaning (bind address for `odu web`, dial
+    address for `odu ci`) is an operator's detail. Found on the way and not
+    yet done: the pin-name grammar lives in three places (coordinator,
+    `pin-name.sh`, cache) — an `odu cache pin-name` verb would make it one;
+    and the board's routes are a hand-written `routeOf`/`hashOf` pair in
+    `web-ui/src/app.tsx` beside the shared `runHash` — #174 was a caller
+    typing `/runs/<id>` by hand, and a typed `Route` union with a round-trip
+    test in `@odu/service-client/routes` would make that impossible.
 
 [^hook]: `odu cache hook` appends `OUT_PATHS` to a crash-safe queue and returns.
     `odu cache hookd` drains it with batching, missing-path queries and
