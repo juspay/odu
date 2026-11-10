@@ -361,11 +361,13 @@ describe("pushing a closure", () => {
   });
 
   /**
-   * WHAT BUILT THESE PATHS RIDES ON THE NARINFO PUT (cache 4.7), and on
-   * nothing else: that request is the one that writes the row, and the
-   * narinfo BODY stays the format a Nix client parses.
+   * WHAT BUILT THESE PATHS RIDES ON THE TWO REQUESTS THAT REACH A ROW (cache
+   * 4.7): the narinfo PUT, which writes the row for a path this push uploads,
+   * and the `missing` query, which is the ONLY request a path the bucket
+   * already holds ever gets. The narinfo BODY stays the format a Nix client
+   * parses, and the NAR upload — which writes no row — carries neither.
    */
-  it("states the run and the commit on the narinfo, and only there", async () => {
+  it("states the run and the commit on the narinfo and on the missing query", async () => {
     const server = startServer();
     try {
       server.missing = [LIBC];
@@ -385,6 +387,12 @@ describe("pushing a closure", () => {
       // NOT IN THE BODY: a narinfo is Nix's format, and an odu field in it is
       // a line every other reader of this cache has to learn to ignore.
       expect(narinfo[0]?.body).not.toContain("run-17");
+      // THE QUERY CARRIES IT TOO. This push uploads one path of three, and
+      // without the headers here the two the bucket already holds would learn
+      // nothing from the run that wanted them — they get no other request.
+      const asked = server.seen.filter((seen) => seen.path.endsWith("/missing"));
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toMatchObject({ run: "run-17", commit: "a".repeat(40) });
       // AND NOT ON THE NAR UPLOAD, which writes no row: a header there would
       // be provenance the cache can do nothing with.
       const nars = server.seen.filter(
@@ -411,8 +419,12 @@ describe("pushing a closure", () => {
       );
       // ABSENT, not empty: the cache reads a header it did not get as "said
       // nothing", which is what keeps a bare push from erasing what a run
-      // stated about the same path.
+      // stated about the same path — on either request.
       expect(narinfo).toMatchObject({ run: null, commit: null });
+      expect(server.seen.find((seen) => seen.path.endsWith("/missing"))).toMatchObject({
+        run: null,
+        commit: null,
+      });
     } finally {
       server.stop();
     }

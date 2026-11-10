@@ -588,10 +588,17 @@ export interface Cache {
   ): Promise<NarinfoOutcome>;
   /** Which of `paths` the bucket needs. `skipped` is the subset it will never
    *  take because an upstream key signed it — reported separately so `odu cache
-   *  push` can say "upstream" rather than "already there". */
+   *  push` can say "upstream" rather than "already there".
+   *
+   *  `provenance` is what the asker says built them, and it lands on the paths
+   *  the bucket ALREADY holds — the ones that get no narinfo PUT. Only a null
+   *  column is filled and none is ever overwritten, so the first builder to
+   *  state a fact keeps it, a run may claim a path its own workflow uploaded
+   *  at the same commit, and a later unrelated run changes nothing. */
   missing(
     bucket: BucketRow,
     paths: readonly { path: string; sigs?: readonly string[] }[],
+    provenance: Provenance,
   ): { missing: readonly string[]; skipped: readonly string[] };
   /**
    * EVERY BUCKET'S ROW, without a credential — what a SUBSCRIBER reads.
@@ -2496,7 +2503,7 @@ export function createCache(options: CacheOptions): Cache {
       return outcome;
     },
 
-    missing(bucket, paths) {
+    missing(bucket, paths, provenance) {
       const missing: string[] = [];
       const skipped: string[] = [];
       /** The paths this bucket HAS and the asker wants. */
@@ -2512,13 +2519,21 @@ export function createCache(options: CacheOptions): Cache {
         });
         (upstream ? skipped : missing).push(path);
       }
-      // THE QUESTION IS THE RENEWAL. A pusher asking "do you have these"
-      // is a build that wants them: the paths it is about to push arrive as
-      // rows with a fresh clock, and the ones already here — the whole point
-      // of a cache hit — have theirs renewed by the asking. Without this, the
-      // paths a CI job hits every day would expire while it kept hitting them,
-      // because the hit is a `missing` answer and never a read.
-      repo.want(bucket.name, wanted, now());
+      // THE QUESTION IS THE RENEWAL, AND THE CLAIM. A pusher asking "do you
+      // have these" is a build that wants them: the paths it is about to push
+      // arrive as rows with a fresh clock, and the ones already here — the
+      // whole point of a cache hit — have theirs renewed by the asking.
+      // Without this, the paths a CI job hits every day would expire while it
+      // kept hitting them, because the hit is a `missing` answer and never a
+      // read.
+      //
+      // IT IS ALSO THE ONLY MOMENT those paths are touched by this push, so
+      // what the asker says built them lands here: only a null `run` or
+      // `commit` is filled and neither is ever overwritten, so the first
+      // builder to state a fact keeps it, a run may claim a path its own
+      // workflow uploaded at the same commit, and a later unrelated run
+      // changes nothing.
+      repo.want(bucket.name, wanted, now(), provenance);
       return { missing, skipped };
     },
 

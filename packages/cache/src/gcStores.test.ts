@@ -286,7 +286,10 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       travel(100 * DAY);
       const bucket = cache.bucket("main");
       if (bucket === null) throw new Error("no bucket");
-      expect(cache.missing(bucket, [{ path: asked }])).toEqual({ missing: [], skipped: [] });
+      expect(cache.missing(bucket, [{ path: asked }], { run: null, commit: null })).toEqual({
+        missing: [],
+        skipped: [],
+      });
       // A READ of the other one, which must NOT save it.
       cache.touch(bucket, storePathHash(silent));
 
@@ -403,6 +406,66 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
           commit: "e".repeat(40),
         }),
       ]);
+      await dispose();
+    });
+
+    /** The `missing` query a push makes FIRST, with what it says built the
+     *  paths — the request that touches a path the bucket already holds, and
+     *  the only one that does: a present path gets no narinfo PUT. */
+    const ask = (cache: Cache, storePath: string, provenance: Provenance) => {
+      const bucket = cache.bucket("main");
+      if (bucket === null) throw new Error("no bucket main");
+      return cache.missing(bucket, [{ path: storePath }], provenance);
+    };
+
+    it("claims a path it already holds from the query that asked about it", async () => {
+      const { cache, travel, dispose } = await make();
+      // THE SHAPE THE DOGFOOD HIT: a workflow uploaded this closure minutes
+      // before a run built the same commit, so the run's push had nothing to
+      // upload and would have written nothing anywhere.
+      const path = "/nix/store/pppppppppppppppppppppppppppppppp-present";
+      await push(cache, path);
+      expect((await pathsOf(cache))[0]).toMatchObject({ run: null, commit: null });
+
+      travel(1 * DAY);
+      expect(ask(cache, path, { run: "run-9", commit: "f".repeat(40) })).toEqual({
+        missing: [],
+        skipped: [],
+      });
+      expect((await pathsOf(cache))[0]).toMatchObject({
+        run: "run-9",
+        commit: "f".repeat(40),
+      });
+      await dispose();
+    });
+
+    it("never overwrites provenance a push or an earlier query already wrote", async () => {
+      const { cache, travel, dispose } = await make();
+      const path = "/nix/store/ffffffffffffffffffffffffffffffff-first";
+      await push(cache, path, [], { run: "run-first", commit: "1".repeat(40) });
+
+      // A LATER, UNRELATED RUN asking about the same path changes nothing:
+      // the first builder keeps the row, so a bucket page never re-points a
+      // path at a run that merely wanted it.
+      travel(1 * DAY);
+      ask(cache, path, { run: "run-later", commit: "2".repeat(40) });
+      expect((await pathsOf(cache))[0]).toMatchObject({
+        run: "run-first",
+        commit: "1".repeat(40),
+      });
+
+      // AND EACH COLUMN ON ITS OWN. A path the Action uploaded states a
+      // commit and no run, so the run of the build that made it — same
+      // commit, same closure — may still claim the empty half.
+      const actioned = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-actioned";
+      await push(cache, actioned, [], { run: null, commit: "3".repeat(40) });
+      travel(1 * DAY);
+      ask(cache, actioned, { run: "run-claims", commit: "3".repeat(40) });
+      const byPath = new Map((await pathsOf(cache)).map((row) => [row.storePath, row]));
+      expect(byPath.get(actioned)).toMatchObject({
+        run: "run-claims",
+        commit: "3".repeat(40),
+      });
       await dispose();
     });
   });

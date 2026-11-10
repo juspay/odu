@@ -694,10 +694,14 @@ describe("missing", () => {
     await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
     const bucket = cache.bucket("main");
     if (bucket === null) throw new Error("no bucket");
-    const answer = cache.missing(bucket, [
-      { path: "/nix/store/11111111111111111111111111111111-a", sigs: ["no-colon-here"] },
-      { path: "/nix/store/22222222222222222222222222222222-b", sigs: ["cache.nixos.org-1:AAAA"] },
-    ]);
+    const answer = cache.missing(
+      bucket,
+      [
+        { path: "/nix/store/11111111111111111111111111111111-a", sigs: ["no-colon-here"] },
+        { path: "/nix/store/22222222222222222222222222222222-b", sigs: ["cache.nixos.org-1:AAAA"] },
+      ],
+      { run: null, commit: null },
+    );
     expect(answer).toEqual({
       missing: ["/nix/store/11111111111111111111111111111111-a"],
       skipped: ["/nix/store/22222222222222222222222222222222-b"],

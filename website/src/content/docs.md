@@ -168,7 +168,7 @@ The verbs are the same as the CLI's and the board's: `run_start`, `run_wait`, `r
 
 - **A run's page**: the DAG, each node's log, and a push step per recipe naming the bucket and every path it warmed.
 - **A bucket's page**: paths grouped by package, pins by name, what the next collection would take, storage and reads.
-- **A path**: the commit it was built from, short, and the run that pushed it, as a link to that run's page — where the push said so. A path somebody pushed by hand says neither.
+- **A path**: the commit it was built from, short, and the run that pushed it, as a link to that run's page — where the push said so. A path somebody pushed by hand says neither. The first builder to state a fact keeps it: odu fills only what a row has not got, never overwriting, so a run can claim a path its own workflow uploaded at the same commit and a later unrelated run changes nothing.
 - **GitHub**: one status per `<recipe>@<system>`, linking to the node's log.
 
 ### 8. What odu promises you

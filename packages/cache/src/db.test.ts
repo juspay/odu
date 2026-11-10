@@ -206,7 +206,10 @@ describe("objects", () => {
     const other = { ...object, storePath: `${object.storePath}-two`, hash: "b".repeat(32) };
     const untouched = { ...object, storePath: `${object.storePath}-three`, hash: "c".repeat(32) };
     for (const row of [object, other, untouched]) repo.putObject(row);
-    repo.want("main", [object.storePath, other.storePath], NOW + 1_000);
+    repo.want("main", [object.storePath, other.storePath], NOW + 1_000, {
+      run: null,
+      commit: null,
+    });
     expect(repo.object("main", object.storePath)?.lastWanted).toBe(NOW + 1_000);
     expect(repo.object("main", other.storePath)?.lastWanted).toBe(NOW + 1_000);
     expect(repo.object("main", untouched.storePath)?.lastWanted).toBe(NOW);

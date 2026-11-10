@@ -1093,7 +1093,13 @@ export const CACHE_KEY = "cache";
  * 4.7: WHAT BUILT A PATH (PLAN 4.2). Additive: `run` and `commit` on a path
  * and on a package's newest version, stated by the pusher and kept opaque, so
  * a bucket page can say which run put a path there and which commit it was
- * built from. Optional output fields; a reader that ignores them sees 4.6.
+ * built from. A push states them on both requests that reach a row — the
+ * narinfo it uploads, and the `missing` query it asks first, which is the
+ * only one a path the bucket ALREADY holds gets — and the bucket fills only
+ * a column that is still null and never overwrites one, so the first builder
+ * to state a fact keeps it, a run may claim a path its own workflow uploaded
+ * at the same commit, and a later unrelated run changes nothing. Optional
+ * output fields; a reader that ignores them sees 4.6.
  */
 export const CACHE_CONTRACT_VERSION = "4.7";
 

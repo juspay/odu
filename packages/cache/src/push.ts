@@ -962,7 +962,11 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
           skippedUpstream: [] as readonly string[],
           substituter: null,
         }
-      : await askMissing(resolved, headers, closure);
+      : // THE PROVENANCE RIDES HERE TOO, not only on the narinfo PUT: the
+        // paths this answer calls present get no PUT at all, and this is the
+        // one request that touches their rows. The bucket fills a null column
+        // and overwrites none.
+        await askMissing(resolved, { ...headers, ...provenance }, closure);
   const present = closure.size - answer.missing.length;
   const alreadyPresent = present - answer.skippedUpstream.length;
   // ONE PREAMBLE, then a line per path: what the closure is, what the bucket

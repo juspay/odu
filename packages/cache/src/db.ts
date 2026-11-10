@@ -27,6 +27,7 @@
 import { Database } from "bun:sqlite";
 import { dirname } from "node:path";
 import { chmodSync, mkdirSync } from "node:fs";
+import type { Provenance } from "./paths";
 import { type PathSort, storePathParts } from "./surface";
 
 /** A bucket: one cache, one substituter URL, one signing keypair. */
@@ -285,10 +286,19 @@ export interface CacheRepo {
   /** ONE READ, counted. The hit count moves; `last_wanted` does not — see
    *  {@link ObjectRow.lastWanted}. */
   countRead(bucket: string, storePath: string): void;
-  /** SOMEBODY WANTS THESE PATHS: renew their retention clock. One statement
-   *  for the batch, because the `missing` query asks about a whole closure and
-   *  a row write per path would be a thousand of them per push. */
-  want(bucket: string, storePaths: readonly string[], at: number): void;
+  /** SOMEBODY WANTS THESE PATHS: renew their retention clock, and claim the
+   *  ones that have no provenance yet. One statement for the batch, because
+   *  the `missing` query asks about a whole closure and a row write per path
+   *  would be a thousand of them per push.
+   *
+   *  `COALESCE`, exactly as the narinfo write does: a column already set is
+   *  never overwritten, so the FIRST builder to state a fact keeps it. */
+  want(
+    bucket: string,
+    storePaths: readonly string[],
+    at: number,
+    provenance: Provenance,
+  ): void;
   deleteObject(bucket: string, storePath: string): void;
 
   putPin(row: PinRow): void;
@@ -970,14 +980,26 @@ export function openCacheRepo(path: string): CacheRepo {
         storePath,
       ]);
     },
-    want(bucket, storePaths, at) {
+    want(bucket, storePaths, at, provenance) {
       if (storePaths.length === 0) return;
       // ONE statement for the batch: a push asks about its whole closure, and
       // a thousand-path closure must not be a thousand writes.
+      //
+      // AND THE PROVENANCE RIDES ON IT. A path the bucket already holds gets
+      // no narinfo PUT — that is the whole point of asking what is missing —
+      // so without this a run that warmed a path somebody else uploaded would
+      // leave the row saying nothing about where its bytes came from, which
+      // is the common case for a repository whose workflow pushes the same
+      // closure. `COALESCE` and never an overwrite: the first builder to
+      // state a fact keeps it, a run may claim a path its own workflow
+      // uploaded at the same commit, and a later unrelated run changes
+      // nothing.
       const holes = storePaths.map(() => "?").join(", ");
       db.run(
-        `UPDATE object SET last_wanted = ? WHERE bucket = ? AND store_path IN (${holes})`,
-        [at, bucket, ...storePaths],
+        `UPDATE object SET last_wanted = ?, run = COALESCE(run, ?), ` +
+          `commit_sha = COALESCE(commit_sha, ?) ` +
+          `WHERE bucket = ? AND store_path IN (${holes})`,
+        [at, provenance.run, provenance.commit, bucket, ...storePaths],
       );
     },
     deleteObject(bucket, storePath) {
