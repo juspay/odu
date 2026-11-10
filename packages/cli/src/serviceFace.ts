@@ -318,6 +318,10 @@ export interface Here {
  */
 export interface RunTarget extends Here {
   mine: boolean;
+  /** The branch the SERVICE's clone should be on for {@link Here.sha}, when
+   *  the caller said so. Absent means today's rule: a clone that is not
+   *  already on that commit is refused rather than moved. */
+  branch?: string;
 }
 
 export function git(args: string[], cwd: string): string | null {
@@ -359,7 +363,7 @@ export function checkoutHere(cwd: string = process.cwd()): string {
  * entirely: a path on the SERVICE's machine, which this process cannot see, has
  * no business resolving, and must therefore send verbatim.
  *
- * Two refusals, and each exists because the alternative is a run against
+ * Three refusals, and each exists because the alternative is a run against
  * something nobody named:
  *
  *   - **`--sha` is REQUIRED with `--checkout`.** `expectedSha` is the strict
@@ -377,6 +381,10 @@ export function checkoutHere(cwd: string = process.cwd()): string {
  *     it here: one reader asks "where do I dial" and gets the default, this
  *     one asks "did anybody say", and two spellings of the trim-and-empty
  *     test would answer `$ODU_WEB_ORIGIN="  "` differently.
+ *   - **`--branch` is only meaningful with `--checkout`.** It licenses the
+ *     SERVICE to move its own clone onto that branch at `--sha`. There is no
+ *     such licence to give for the checkout you are standing in — odu never
+ *     moves it — so the flag alone is a usage error rather than a no-op.
  *
  * It answers `mine` as well as the pair, because "is this shell the run's
  * world" is decided HERE and nowhere else. A caller re-deriving it from the
@@ -385,7 +393,13 @@ export function checkoutHere(cwd: string = process.cwd()): string {
  * that the flag calls elsewhere.
  */
 export function runTarget(
-  opts: { checkout?: string; sha?: string; origin?: string; cwd?: string },
+  opts: {
+    checkout?: string;
+    sha?: string;
+    branch?: string;
+    origin?: string;
+    cwd?: string;
+  },
   env: Record<string, string | undefined> = process.env,
 ): RunTarget {
   if (opts.checkout === undefined) {
@@ -394,6 +408,13 @@ export function runTarget(
         "odu: --sha names the commit of --checkout, which was not given — in " +
           "this checkout odu reads HEAD itself, so there is nothing for --sha " +
           "to say",
+      );
+    }
+    if (opts.branch !== undefined) {
+      throw new Error(
+        "odu: --branch names the branch of --checkout, which was not given — " +
+          "this checkout is yours and odu never moves it; check out the " +
+          "branch you mean and run again",
       );
     }
     return { ...here(opts.cwd), mine: true };
@@ -413,9 +434,15 @@ export function runTarget(
         `Pass --origin <url>, or export $${SERVICE_ORIGIN_ENV}.`,
     );
   }
-  // VERBATIM, both. The path is resolved where it exists and the commit is
-  // read where the path is; this side knows neither and must not pretend to.
-  return { checkout: opts.checkout, sha: opts.sha, mine: false };
+  // VERBATIM, all three. The path is resolved where it exists, the commit is
+  // read where the path is, and the branch is a ref in that clone's remote;
+  // this side knows none of them and must not pretend to.
+  return {
+    checkout: opts.checkout,
+    sha: opts.sha,
+    mine: false,
+    ...(opts.branch === undefined ? {} : { branch: opts.branch }),
+  };
 }
 
 /**

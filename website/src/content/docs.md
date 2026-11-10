@@ -208,7 +208,7 @@ The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`lo
 
 | You want | CLI | API verb | On the board |
 | --- | --- | --- | --- |
-| start a run, every option | `odu ci run …` | `run_start` | **New run** — recipes, platforms, host pins, justfile root, hosts file, no-deps, no-strict, no-post, supersede, linger. `--checkout ABS --sha SHA` names a checkout on a service you name, instead of the one you are standing in |
+| start a run, every option | `odu ci run …` | `run_start` | **New run** — recipes, platforms, host pins, justfile root, hosts file, no-deps, no-strict, no-post, supersede, linger. `--checkout ABS --sha SHA` names a checkout on a service you name, instead of the one you are standing in; `--branch NAME` lets that service fetch and move its own clone onto the commit |
 | see the pipeline first | `odu ci dump`, `odu ci graph` | `pipeline_read` | **New run** → **Preview pipeline** |
 | retry, cancel, read a log | `odu ci rerun`, `odu ci cancel`, `odu ci logs` | `run_retry`, `run_cancel`, `log_read` | a run's page |
 | machines and holds | `odu ci hosts`, `odu ci lease`, `odu ci release` | `venue_probe`, `venue_hold`, `venue_release` | **Machines** |
@@ -565,6 +565,8 @@ odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-po
 
 `--sha` is **required** with `--checkout`: it is the strict gate, and a checkout that has moved on is refused rather than quietly run at a different commit. `--checkout` is refused unless a service is **named** (`--origin`, or `ODU_WEB_ORIGIN` as above) — the check is naming, not distance, so an explicit `http://127.0.0.1:18440` is accepted; what is refused is the default, which is the daemon for the directory you are standing in. Without the flags `odu ci run` means this checkout, as it always has.
 
+`--branch NAME` is how a caller hands the server a commit its clone has not got yet — a workflow naming the sha it has just pushed. The service fetches `origin/NAME`, refuses a dirty tree or a sha that branch does not contain (it says both shas), then puts the clone on NAME at that commit and runs it; the run's `_ci-setup` log says it moved. Without `--branch` nothing is ever moved: a clone that is not already on the commit is refused. The clone is left **on the branch**, never on a detached HEAD, because a run's pins are read from the branch its checkout is on.
+
 Your `$ODU_HOSTS` is sent when it names a **path**, `--checkout` included: a face does not decide that your fleet stops applying to your own run, and a path the server has not got is skipped by its resolution chain, which falls through to the server's own `~/.config/odu/hosts.json`. A shell with **no** `$ODU_HOSTS` sends nothing at all for a `--checkout` run — saying "mine is empty" about a world you are not in would blank the server's own variable, and on a pod whose Deployment sets the fleet that is the only inventory there is.
 
 Every run records **who started it** — the token's person, or `@local` on a loopback daemon (a login cannot contain `@`, so the reserved word can never be mistaken for a person). It appears as `started by <login>` on the run's header and in `odu ci history list --all` (`--all`, because such a run's checkout is a path on the server, not yours), and `run_read` answers it as `actor`. It is provenance, not authority: revoking a token stops the next call, not a run already launched.
@@ -714,7 +716,7 @@ odu mcp
 
 | Command | Purpose / useful flags | On the board |
 | --- | --- | --- |
-| `ci run [recipe[@platform]…]` | `--host P=ADDR`, `--platform P`, `--root NAMEPATH`, `--checkout ABS` with `--sha SHA` (a checkout on the service; needs the service named by `--origin` or `ODU_WEB_ORIGIN`), `--no-deps`, `--no-post`, `--no-strict`, `--no-snapshot`, `--no-wait`, `--linger`, `--supersede`. Pushes every recipe's `result*` closure to the odu cache this repository's `flake.nix` already reads from | **New run** |
+| `ci run [recipe[@platform]…]` | `--host P=ADDR`, `--platform P`, `--root NAMEPATH`, `--checkout ABS` with `--sha SHA` (a checkout on the service; needs the service named by `--origin` or `ODU_WEB_ORIGIN`) and optional `--branch NAME` (the service fetches and moves that clone onto NAME at `--sha`), `--no-deps`, `--no-post`, `--no-strict`, `--no-snapshot`, `--no-wait`, `--linger`, `--supersede`. Pushes every recipe's `result*` closure to the odu cache this repository's `flake.nix` already reads from | **New run** |
 | `ci status`, `ci attach` | Current checkout's run; `-o json` for machine output | the board's row, a run's page |
 | `ci wait [--run R]` | `--after CURSOR`, `--deadline-ms N`, `--settle`, `--expected-sha SHA`; `--timeout-ms` aliases the deadline | a run's page, live |
 | `ci rerun [--run R] SELECTOR` | `--expect-attempt N`, `--request-id ID` | a node's **Retry** |

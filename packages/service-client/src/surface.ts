@@ -211,8 +211,15 @@ export const HOST_CONTRACT_VERSION = "2.5";
  *
  *      Neither reader is stranded, and neither branches on a refusal that
  *      moved.
+ * 2.7: `run.start`'s `branch` — the branch a service-side clone should be ON
+ *      for the commit it is being handed (PLAN 4.4). One optional INPUT key;
+ *      additive. A 2.6 daemon drops it as excess and keeps today's rule, so
+ *      a clone that is not already on the commit is REFUSED rather than
+ *      moved — the answer a caller gets without the field at all, and the
+ *      reason this needs no `*_SINCE` constant: the skew shows up as the
+ *      refusal it always was, not as a run against the wrong commit.
  */
-export const CI_CONTRACT_VERSION = "2.6";
+export const CI_CONTRACT_VERSION = "2.7";
 
 /**
  * THE RUNS' VERSION THAT INTRODUCED `log_read`'s `stream`, named because one
@@ -1155,6 +1162,30 @@ const StartInputSchema = Schema.Struct({
    *  different run. */
   expectedSha: Schema.String.check(Schema.isMinLength(7)),
   requestId: RequestId,
+  /**
+   * THE BRANCH THAT CLONE SHOULD BE ON, when the caller is handing the
+   * service a commit rather than reading one back (PLAN 4.4).
+   *
+   * Absent — today's rule, unchanged: a checkout that is not already on
+   * `expectedSha` is REFUSED. That is the only safe answer about a directory
+   * somebody else may be working in, and it is what `odu ci run` means from
+   * the checkout you are standing in, which never sends this.
+   *
+   * Present — the caller is naming a clone the SERVICE keeps (the pod's
+   * `/data/checkouts/<repo>`), so the service fetches `origin/<branch>`,
+   * refuses unless `expectedSha` is an ancestor of it, and moves the clone to
+   * that commit ON that branch. A workflow calling this with the commit it
+   * just pushed is the case: the clone has never heard of it yet.
+   *
+   * ON A BRANCH, never a detached HEAD, because a run's pins are read from
+   * the branch its checkout is on — a detached clone pins nothing.
+   *
+   * A BRANCH NAME, held to git's own grammar and refused with a sentence
+   * when it is not one — a name beginning with `-` most of all, because git
+   * reads it as an option and this one ends up on a `git fetch` command
+   * line.
+   */
+  branch: Schema.optionalKey(Schema.String),
   /** `recipe[@platform]` selectors. Empty means the whole `[metadata("ci")]`
    *  DAG. */
   selectors: Schema.optionalKey(Schema.Array(Schema.String)),

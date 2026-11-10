@@ -64,6 +64,7 @@ function request(over: Partial<LaunchRequest> = {}): LaunchRequest {
     push: null,
     pushSkipped: null,
     pushKeyWarning: null,
+    checkoutMoved: null,
     ...over,
   };
 }

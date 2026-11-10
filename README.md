@@ -227,6 +227,8 @@ export ODU_TOKEN=odu_… ODU_WEB_ORIGIN=https://odu.example
 odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
 ```
 
+Add `--branch` when the server's clone is not on that commit yet — a workflow naming the sha it has just pushed. The service fetches `origin/<branch>`, refuses a dirty tree or a sha that branch does not contain, and moves the clone onto the branch; `_ci-setup` says that it did. Without it a clone that moved is refused, as before. The clone must be left **on a branch**: a detached HEAD pins nothing.
+
 Every run records **who started it** — the token's person, or `@local` on a loopback daemon — shown as `started by <login>` on the run's header and in `odu ci history list --all`, and answered by `run_read`. (`--all`, because a run started this way has the SERVER's path as its checkout, not yours.)
 
 ## Develop

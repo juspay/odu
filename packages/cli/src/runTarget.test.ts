@@ -101,6 +101,32 @@ describe("odu ci run --checkout", () => {
       /--sha names the commit of --checkout/,
     );
   });
+
+  it("carries --branch beside the pair, as the licence to move that clone", () => {
+    const at = runTarget(
+      { checkout: POD, sha: SHA, branch: "master", origin: ORIGIN },
+      NOWHERE,
+    );
+    expect(at).toEqual({ checkout: POD, sha: SHA, branch: "master", mine: false });
+    expect(
+      startInputOf(at, opts({ checkout: POD, sha: SHA, branch: "master", origin: ORIGIN })).branch,
+    ).toBe("master");
+  });
+
+  it("sends NO branch when none was given, which is today's stricter rule", () => {
+    const at = runTarget({ checkout: POD, sha: SHA, origin: ORIGIN }, NOWHERE);
+    expect("branch" in startInputOf(at, opts({ checkout: POD, sha: SHA, origin: ORIGIN }))).toBe(
+      false,
+    );
+  });
+
+  it("refuses a --branch with no --checkout rather than ignoring it", () => {
+    // Your own checkout is never moved, so there is no licence to give and a
+    // silently dropped flag would read as one that was honoured.
+    expect(() => runTarget({ branch: "master", origin: ORIGIN }, NOWHERE)).toThrow(
+      /--branch names the branch of --checkout/,
+    );
+  });
 });
 
 describe("what the start asks for", () => {

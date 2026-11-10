@@ -32,7 +32,8 @@
  */
 
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { dialRun } from "@odu/run-client/dial";
 import { errorMessage, firstFrame, runUnary } from "@odu/execution/common/effectEdge";
 import { ghForge } from "@odu/execution/common/forge";
@@ -53,6 +54,8 @@ import type {
   CancelOutcome,
   CancelRequest,
   CheckoutFacts,
+  CheckoutMoveOutcome,
+  CheckoutMoveRequest,
   PushPort,
   PushResolution,
   PushTarget,
@@ -60,6 +63,8 @@ import type {
 } from "@odu/service/ports";
 import { actorOf } from "@odu/service/caller";
 import { preparePush } from "@odu/service/pushGrant";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * What the service can learn about a checkout without running anything.
@@ -113,6 +118,143 @@ export function probeCheckout(
     branch: gitBranch(checkout),
     liveRunId: live?.runId ?? null,
   };
+}
+
+/**
+ * One git command, off the event loop, as TWO shapes.
+ *
+ * An answer and a complaint are different things and were one field: `out`
+ * held `rev-parse`'s sha on the way out and git's stderr on the way down, and
+ * the EXIT CODE — the only bit that tells a plumbing command's "no" from its
+ * "I could not look" — was thrown away. `merge-base --is-ancestor` exits 1 for
+ * the first and 128 for the second, and a caller holding one boolean has to
+ * word them the same.
+ */
+type GitRan =
+  | { readonly ok: true; readonly value: string }
+  | { readonly ok: false; readonly code: number | null; readonly said: string };
+
+async function runGit(checkout: string, args: readonly string[]): Promise<GitRan> {
+  try {
+    const done = await execFileAsync("git", [...args], {
+      cwd: checkout,
+      encoding: "utf-8",
+      maxBuffer: GIT_OUTPUT_MAX,
+    });
+    return { ok: true, value: done.stdout.trim() };
+  } catch (err) {
+    const failure = err as {
+      code?: unknown;
+      stderr?: string;
+      stdout?: string;
+      message?: string;
+    };
+    const text = `${failure.stderr ?? ""}${failure.stdout ?? ""}`.trim();
+    return {
+      ok: false,
+      // A NUMBER or nothing: a spawn that never ran git at all answers
+      // `ENOENT` here, which is not an exit status and must not be read as one.
+      code: typeof failure.code === "number" ? failure.code : null,
+      said: gitSaid(text === "" ? (failure.message ?? "git failed") : text),
+    };
+  }
+}
+
+/** What one git command may say back. Generous for a fetch's progress, far
+ *  short of anything that could hold the daemon's memory. */
+const GIT_OUTPUT_MAX = 1024 * 1024;
+
+/** How much of git's own sentence a REFUSAL carries. `GIT_OUTPUT_MAX` bounds
+ *  what the daemon reads; this bounds what a board row, a receipt and an
+ *  agent's answer are made to hold — a megabyte of fetch progress is not a
+ *  reason, and the first lines are where the reason is. */
+const GIT_SAID_MAX = 400;
+
+function gitSaid(out: string): string {
+  const lines = out.split("\n").slice(0, 5).join("; ");
+  return lines.length <= GIT_SAID_MAX ? lines : `${lines.slice(0, GIT_SAID_MAX)}…`;
+}
+
+/**
+ * PUT A SERVICE-SIDE CLONE ON THE BRANCH AND COMMIT A START ASKED FOR.
+ *
+ * Only reached when `run.start` carried a `branch` and the clone is not
+ * already on the commit — a workflow handing the service the sha it has just
+ * pushed, which this clone has never heard of. Four steps, and each refusal
+ * is a different thing to go and do:
+ *
+ *   1. **Dirty is a refusal.** Tracked changes only, deliberately: a clone
+ *      that has run CI is full of untracked `result` links and `.ci` records,
+ *      and refusing on those would refuse every second run. Tracked edits are
+ *      somebody's work and odu does not discard work it did not make.
+ *   2. **`git fetch origin <branch>`**, whose tip is read from `FETCH_HEAD` —
+ *      what THIS fetch brought back. `origin/<branch>` is the same commit in
+ *      an ordinary clone and is not updated at all in one whose remote has no
+ *      fetch refspec, which is a clone this would then move to a stale tip.
+ *   3. **The commit must be ON that branch** — present after that fetch, and
+ *      an ancestor of the tip. A sha from another branch, or one force-pushed
+ *      away, is refused with both shas rather than checked out anyway: a run
+ *      is about a commit the branch contains, and a pin written from a
+ *      detached clone pins nothing. Both halves are measured — `cat-file -e`
+ *      for "the fetch did not bring it", `merge-base --is-ancestor`'s exit 1
+ *      for "it is not reachable" — because anything else from `merge-base`
+ *      means it could not look, which is a failure and not a verdict.
+ *   4. **`git checkout -B <branch> <sha>`** — the branch, pointed at that
+ *      commit, and HEAD on the branch rather than detached, which is what
+ *      `gitBranch` has to be able to answer for the run's pins.
+ *
+ * It is reached with `branch` and `sha` ALREADY held to their grammars by
+ * `run.start` — a name git would read as an option never gets this far — and
+ * every call that takes `--` is given it anyway.
+ */
+export async function moveCheckout({
+  checkout,
+  branch,
+  sha,
+}: CheckoutMoveRequest): Promise<CheckoutMoveOutcome> {
+  const dirty = await runGit(checkout, ["status", "--porcelain", "--untracked-files=no"]);
+  if (!dirty.ok) return { kind: "failed", detail: dirty.said };
+  if (dirty.value !== "") return { kind: "dirty", detail: gitSaid(dirty.value) };
+  // `--` BEFORE THE REF, wherever git takes it: the service has already held
+  // `branch` to git's own grammar, and an end-of-options marker is the second
+  // lock on the same door. `checkout -B` is the one that cannot have it — a
+  // `--` there begins PATHS, not a start-point — so that call rests on the
+  // name having been checked.
+  const fetched = await runGit(checkout, ["fetch", "origin", "--", branch]);
+  if (!fetched.ok) return { kind: "fetch_failed", detail: fetched.said };
+  // NOT `fetch_failed`: the fetch landed and this is odu unable to read what
+  // it brought back, which is a different thing to go and do.
+  const tip = await runGit(checkout, ["rev-parse", "FETCH_HEAD"]);
+  if (!tip.ok) return { kind: "failed", detail: tip.said };
+  // IS THE COMMIT EVEN HERE? The ordinary way a caller names a sha that is
+  // not on this branch is a sha from ANOTHER branch — which the fetch above
+  // did not bring, so the object does not exist locally and `merge-base`
+  // cannot compare it. That is still the measured answer "what we fetched of
+  // this branch does not contain it", so it is `not_on_branch` and not a
+  // failure; what it must not be is `merge-base` exiting 128 and being read
+  // as a verdict.
+  const present = await runGit(checkout, ["cat-file", "-e", `${sha}^{commit}`]);
+  if (!present.ok) return { kind: "not_on_branch", tip: tip.value };
+  const contains = await runGit(checkout, [
+    "merge-base",
+    "--is-ancestor",
+    "--",
+    sha,
+    tip.value,
+  ]);
+  // EXIT 1 is git's answer "no"; anything else is git unable to look, and a
+  // refusal naming two shas would be a sentence about a comparison that never
+  // ran.
+  if (!contains.ok && contains.code !== 1) {
+    return { kind: "failed", detail: contains.said };
+  }
+  if (!contains.ok) return { kind: "not_on_branch", tip: tip.value };
+  const moved = await runGit(checkout, ["checkout", "-B", branch, sha]);
+  if (!moved.ok) return { kind: "failed", detail: moved.said };
+  const head = await runGit(checkout, ["rev-parse", "HEAD"]);
+  if (!head.ok) return { kind: "failed", detail: head.said };
+  if (head.value === "") return { kind: "failed", detail: "git read no HEAD back" };
+  return { kind: "moved", head: head.value };
 }
 
 /**
@@ -342,6 +484,7 @@ export function webPorts(
       }),
     cancel: cancelThroughSocket,
     probeCheckout,
+    moveCheckout,
     push,
     // The five that made `odu ci hosts`, `odu ci lease`, `odu ci release`,
     // `odu ci dump`, `odu ci graph` and `odu ci protect` clients of the shared

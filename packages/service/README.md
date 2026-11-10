@@ -40,6 +40,7 @@ binds (`./ports`):
 | `RunRetrier` | retry a recorded run | `@odu/execution`'s retry policy |
 | `RunCanceller` | reach *this run's* coordinator | a dial of its socket, identity checked |
 | `CheckoutProbe` | is that path a repo, what commit is it on, and does the CATALOG say a run is live there | `spawnSync("git", …)` + `listRuns` |
+| `CheckoutMover` | put a service-side clone on a branch at a commit, when a start named one | `git status` / `fetch` / `merge-base` / `checkout -B` |
 
 `RunCanceller` carries the run's `<sha>#<seq>` and not only its endpoint,
 because **an endpoint is not an identity**: `.ci/odu.sock` belongs to a

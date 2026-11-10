@@ -129,6 +129,9 @@ export interface RunOpts {
   /** The commit the caller believes {@link RunOpts.checkout} is on, sent as
    *  `expectedSha`. Only meaningful beside a `checkout`. */
   sha?: string;
+  /** The branch the SERVICE's clone should be on for {@link RunOpts.sha}.
+   *  Only meaningful beside a `checkout`; see `runTarget`. */
+  branch?: string;
 }
 
 /**
@@ -147,6 +150,11 @@ export function startInputOf(at: RunTarget, opts: RunOpts) {
   return {
     checkout: at.checkout,
     expectedSha: at.sha,
+    // THE LICENCE TO MOVE THAT CLONE, when the caller gave one. Absent is the
+    // older and stricter rule — a checkout that is not on the commit is
+    // refused — and that is what every run in this shell's own checkout
+    // sends, because odu does not move a tree somebody is standing in.
+    ...(at.branch === undefined ? {} : { branch: at.branch }),
     requestId: requestId(opts.requestId),
     selectors: opts.selectors,
     platforms: opts.platforms,

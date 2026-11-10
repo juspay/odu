@@ -57,6 +57,14 @@ const LEDGER: ContractLedger = {
   // rewrite a historical line — is about a number somebody could already be
   // running.
   "2.6": "e2f201e5520f3c25",
+  // 2.7 — PLAN 4.4: `run.start`'s `branch`. A caller that names a checkout on
+  // the service may now name the branch that clone should be ON for the
+  // commit it is handing over, and the service fetches and moves it there
+  // rather than refusing every commit the clone has not got yet. One optional
+  // INPUT key; additive, so MINOR. A 2.6 daemon drops it as excess and keeps
+  // refusing a clone that is not already on the commit — the answer a caller
+  // gets without the field, never a run against the wrong one.
+  "2.7": "4c20bdfec513e71c",
 };
 
 describe("the ci row's contract", () => {

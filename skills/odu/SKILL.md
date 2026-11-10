@@ -582,6 +582,17 @@ told because four things change for an agent.
     --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
   ```
 
+- **A commit the server's clone has not got needs `--branch`.** Adding
+  `--branch <name>` lets the service FETCH `origin/<name>` and move its own
+  clone onto that branch at `--sha` — the case a workflow is in when it names
+  the commit it has just pushed. It refuses a dirty tree, and a sha that
+  branch does not contain (it says both shas); the run's `_ci-setup` log says
+  what it moved. Without the flag nothing is ever moved and a clone that is
+  not already on the commit is refused, which is also why `odu ci run` in
+  YOUR checkout never sends it. The clone is left ON the branch: a run's pins
+  are read from the branch its checkout is on, and a detached HEAD pins
+  nothing.
+
 - **A run records who started it.** `run_read` answers `actor` — the token's
   login, or `@local` on a loopback daemon — and the board and `odu ci history
   list --all` show `started by <login>` (`--all`, because such a run's
@@ -615,8 +626,9 @@ MCP resources: `surface://cells/service`, `surface://collections/runs`,
 
 `odu ci run` is the human's one-shot spelling of the same thing: it calls
 `run_start` for the checkout you are standing in and then observes. Its options
-are `run_start`'s inputs plus six of its own — `--checkout` with `--sha` (a
-checkout on a service you NAME instead of the one you stand in; see "Signing
+are `run_start`'s inputs plus six of its own — `--checkout` with `--sha` and
+optionally `--branch` (a checkout on a service you NAME instead of the one you
+stand in, and the branch that service may move its clone onto; see "Signing
 in"), `--no-wait` (start and return without observing), `--request-id`,
 `--origin` and `-o json`. Ctrl-C stops observing; the run keeps going.
 
@@ -845,6 +857,14 @@ declares.
   answered by `run_read` and shown as `started by <login>` on the board and
   in `odu ci history list --all`. It is provenance, not
   authority: a revoked token stops the next call, not a launched run.
+- **THE SERVICE WILL MOVE ITS OWN CLONE** (`ci` 2.7, PLAN 4.4): `run_start`
+  takes an optional `branch`, and `odu ci run --checkout … --sha … --branch
+  <name>` sends it. When the clone is not already on that commit the service
+  fetches `origin/<name>`, refuses a dirty tree or a sha that branch does not
+  contain, and puts the clone on the branch at that commit — so a workflow
+  may call odu with the commit it has just pushed. Without `branch` nothing
+  is moved and a clone that is not on the commit is refused, exactly as
+  before; `--branch` without `--checkout` is a usage error.
 - **Each row versions its own surface.** The host is at 2.5, `ci` at 2.6, `cache` at 4.7,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
   major of a row **it reads** differs. The refusal names that row

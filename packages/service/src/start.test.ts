@@ -14,6 +14,7 @@ import { ServiceRefused, type StartInput } from "@odu/service-client/surface";
 import {
   makeWorld,
   recordingPorts,
+  type RecordingPorts,
   registerFixtureRun,
   type World,
 } from "./fixture.testlib";
@@ -57,6 +58,8 @@ function deps(w: World, ports = recordingPorts()) {
           startRun(input(over), {
             launch: ports.launch,
             probeCheckout: ports.probeCheckout,
+            moveCheckout: ports.moveCheckout,
+            cancel: ports.cancel,
             push: ports.push,
             requests: requestStore({ root: w.requestsRoot }),
             catalog: { root: w.catalogRoot },
@@ -286,6 +289,8 @@ describe("run.start", () => {
         startRun(input(), {
           launch: ports.launch,
           probeCheckout: ports.probeCheckout,
+          moveCheckout: ports.moveCheckout,
+          cancel: ports.cancel,
           push: ports.push,
           requests: store,
           catalog: { root: w.catalogRoot },
@@ -298,6 +303,258 @@ describe("run.start", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]).not.toBeNull();
     expect(seen[0]?.dispatchedAt).toBeDefined();
+  });
+});
+
+/**
+ * A START THAT NAMES A BRANCH MOVES THE SERVICE'S OWN CLONE.
+ *
+ * The case is a GitHub workflow calling `run.start` with the commit it has
+ * just pushed, against a clone on the service's machine that has never heard
+ * of it (PLAN 4.4). Every outcome below is stated without git, which is what
+ * the `moveCheckout` port is for.
+ */
+describe("run.start, moving a checkout onto a branch", () => {
+  /** What the clone is on before anything moves it. */
+  const BEFORE = "b".repeat(40);
+
+  /** A clone on {@link BEFORE} whose probe answers the NEW head once the
+   *  mover has moved it — the two reads `start` really performs. */
+  function clone(
+    over: Parameters<typeof recordingPorts>[0] = {},
+    liveRunId: string | null = null,
+  ): RecordingPorts {
+    let head = BEFORE;
+    return recordingPorts({
+      checkout: () => ({ isRepo: true, head, branch: "main", liveRunId }),
+      move: (request) => {
+        head = request.sha;
+        return { kind: "moved", head };
+      },
+      ...over,
+    });
+  }
+
+  it("fetches, moves the clone, and runs the commit it was handed", async () => {
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "main" });
+    expect(result._tag).toBe("Success");
+    if (result._tag !== "Success") return;
+    expect(result.success.accepted).toBe(true);
+    expect(ports.moves).toEqual([
+      { checkout: "/code/app", branch: "main", sha: HEAD },
+    ]);
+    // The run is about the commit the caller asked for, not the one the clone
+    // was on when the call arrived.
+    expect(ports.launches[0]?.expectedSha).toBe(HEAD);
+    expect(ports.launches[0]?.checkoutMoved).toBe(
+      `moved /code/app to main at ${HEAD.slice(0, 7)}`,
+    );
+  });
+
+  it("moves nothing when the clone is already on that commit", async () => {
+    const w = open();
+    const ports = recordingPorts();
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "main" });
+    expect(result._tag).toBe("Success");
+    expect(ports.moves).toEqual([]);
+    expect(ports.launches[0]?.checkoutMoved).toBeNull();
+  });
+
+  it("refuses a dirty tree, and moves nothing", async () => {
+    // odu does not discard work it did not make.
+    const w = open();
+    const ports = clone({
+      move: () => ({ kind: "dirty", detail: " M packages/service/src/start.ts" }),
+    });
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "main" });
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    const refusal = result.failure as ServiceRefused;
+    expect(refusal.code).toBe("checkout_refused");
+    expect(refusal.message).toContain("uncommitted changes");
+    expect(refusal.message).toContain("packages/service/src/start.ts");
+    expect(ports.launches).toHaveLength(0);
+  });
+
+  it("reports the fetch's own failure", async () => {
+    const w = open();
+    const ports = clone({
+      move: () => ({
+        kind: "fetch_failed",
+        detail: "fatal: couldn't find remote ref main",
+      }),
+    });
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "main" });
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    const refusal = result.failure as ServiceRefused;
+    expect(refusal.code).toBe("checkout_refused");
+    expect(refusal.message).toContain("couldn't find remote ref main");
+    expect(ports.launches).toHaveLength(0);
+  });
+
+  it("refuses a commit that is not on that branch, and says BOTH shas", async () => {
+    // The two mistakes behind this are opposite — a commit from another
+    // branch, and one that was force-pushed away — and only both shas
+    // together tell them apart.
+    const w = open();
+    const tip = "c".repeat(40);
+    const ports = clone({ move: () => ({ kind: "not_on_branch", tip }) });
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "main" });
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    const refusal = result.failure as ServiceRefused;
+    expect(refusal.message).toContain(HEAD);
+    expect(refusal.message).toContain(tip.slice(0, 12));
+    expect(refusal.message).toContain("origin/main");
+    expect(ports.launches).toHaveLength(0);
+  });
+
+  it("answers a busy clone with the run already in it, and moves nothing", async () => {
+    // The live-run rule keeps its meaning: a branch is not a licence to take
+    // a checkout somebody else's run is reading.
+    const w = open();
+    const existing = registerFixtureRun(w, { repoRoot: "/code/app", sha: BEFORE });
+    const ports = clone({}, existing.runId);
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "main" });
+    expect(result._tag).toBe("Success");
+    if (result._tag !== "Success") return;
+    expect(result.success.accepted).toBe(false);
+    expect(result.success.runId).toBe(existing.runId);
+    expect(ports.moves).toEqual([]);
+    expect(ports.cancels).toHaveLength(0);
+  });
+
+  it("stops the live run, and CONFIRMS it stopped, before the tree moves", async () => {
+    // The coordinator's own cancel-then-claim happens after the launch, by
+    // which time the files would already have moved under a live process.
+    const w = open();
+    const existing = registerFixtureRun(w, { repoRoot: "/code/app", sha: BEFORE });
+    const cancelsWhenMoved: number[] = [];
+    let head = BEFORE;
+    const ports: RecordingPorts = recordingPorts({
+      checkout: () => ({ isRepo: true, head, branch: "main", liveRunId: existing.runId }),
+      move: (request) => {
+        cancelsWhenMoved.push(ports.cancels.length);
+        head = request.sha;
+        return { kind: "moved", head };
+      },
+    });
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "main", supersede: true });
+    expect(result._tag).toBe("Success");
+    if (result._tag !== "Success") return;
+    expect(result.success.accepted).toBe(true);
+    expect(ports.cancels[0]?.runId).toBe(existing.runId);
+    expect(ports.cancels[0]?.scope).toEqual({ kind: "run" });
+    // THE ORDERING, as the only thing that can state it: the cancel had
+    // already been answered when the mover was entered.
+    expect(cancelsWhenMoved).toEqual([1]);
+  });
+
+  it("moves nothing when the incumbent cannot be confirmed stopped", async () => {
+    const w = open();
+    const existing = registerFixtureRun(w, { repoRoot: "/code/app", sha: BEFORE });
+    const ports = clone({ cancelOk: false }, existing.runId);
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "main", supersede: true });
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    expect((result.failure as ServiceRefused).message).toContain(
+      "could not be confirmed stopped",
+    );
+    expect(ports.moves).toEqual([]);
+    expect(ports.launches).toHaveLength(0);
+  });
+
+  it("refuses, and does not move, when no branch was named", async () => {
+    // Today's rule, byte for byte, which is every run from the checkout its
+    // caller is standing in.
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const result = await d.run();
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    expect((result.failure as ServiceRefused).message).toContain(
+      "moved since you read it",
+    );
+    expect(ports.moves).toEqual([]);
+  });
+
+  it("is a DIFFERENT request from the same start without a branch", async () => {
+    // The branch licenses moving the checkout, so repeating one id with and
+    // without it is a conflict to be told about rather than a replay.
+    const w = open();
+    const d = deps(w, clone());
+    await d.run({ branch: "main" });
+    const conflict = await d.run();
+    expect(conflict._tag).toBe("Failure");
+    if (conflict._tag !== "Failure") return;
+    expect((conflict.failure as ServiceRefused).code).toBe("request_conflict");
+  });
+
+  it("refuses a branch git would read as an OPTION, before git is reached", async () => {
+    // `--upload-pack=<cmd>` on a `git fetch` command line runs that command.
+    // `execFile` takes the shell away and takes nothing away from git's own
+    // option parsing, so the name is held to git's grammar here — and the
+    // port, which is the only thing that spells it to git, is never entered.
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "--upload-pack=touch /tmp/pwned" });
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    const refusal = result.failure as ServiceRefused;
+    expect(refusal.code).toBe("bad_input");
+    expect(refusal.message).toContain("leading dash");
+    expect(ports.moves).toEqual([]);
+    expect(ports.launches).toHaveLength(0);
+  });
+
+  it("refuses the rest of git's non-branch names too", async () => {
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const names = ["", "a b", "feat/..x", "x@{0}", "main.lock", ".hidden", "a//b"];
+    for (const [index, branch] of names.entries()) {
+      // A fresh id per name: a receipt replays, and these are seven requests.
+      const result = await d.run({ branch, requestId: `bad-name-${index}` });
+      expect(result._tag, branch).toBe("Failure");
+      if (result._tag !== "Failure") continue;
+      expect((result.failure as ServiceRefused).code, branch).toBe("bad_input");
+    }
+    expect(ports.moves).toEqual([]);
+  });
+
+  it("takes the branch names git takes", async () => {
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "release/1.2-rc_3" });
+    expect(result._tag).toBe("Success");
+    expect(ports.moves[0]?.branch).toBe("release/1.2-rc_3");
+  });
+
+  it("refuses an expectedSha that is not a commit", async () => {
+    // It reaches `git merge-base` and `git checkout -B` on the move path, so
+    // it is held to hex for the same reason the branch is held to a name.
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const result = await d.run({ expectedSha: "--upload-pack=x", branch: "main" });
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    expect((result.failure as ServiceRefused).code).toBe("bad_input");
+    expect(ports.moves).toEqual([]);
   });
 });
 
@@ -532,6 +789,8 @@ describe("crash reconciliation", () => {
         startRun(input(), {
           launch: d.ports.launch,
           probeCheckout: d.ports.probeCheckout,
+          moveCheckout: d.ports.moveCheckout,
+          cancel: d.ports.cancel,
           push: d.ports.push,
           requests: store,
           catalog: { root: w.catalogRoot },

@@ -85,6 +85,7 @@ async function runCoordinator(rest: string[]): Promise<number> {
       "push-token-id": { type: "string" },
       "push-skipped": { type: "string" },
       "push-key-warning": { type: "string" },
+      "checkout-moved": { type: "string" },
     },
   });
   if (values.progress !== undefined && values.progress !== "json") {
@@ -142,6 +143,11 @@ async function runCoordinator(rest: string[]): Promise<number> {
       ...(values["push-key-warning"] === undefined
         ? {}
         : { pushKeyWarning: values["push-key-warning"] }),
+      // AND WHETHER THE CHECKOUT WAS MOVED to be on this commit — the
+      // service's sentence, carried to the same setup log.
+      ...(values["checkout-moved"] === undefined
+        ? {}
+        : { checkoutMoved: values["checkout-moved"] }),
     },
     {
       face: cliRunFace({

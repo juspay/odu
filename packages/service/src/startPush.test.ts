@@ -73,6 +73,8 @@ function start(
         {
           launch: ports.launch,
           probeCheckout: ports.probeCheckout,
+          moveCheckout: ports.moveCheckout,
+          cancel: ports.cancel,
           push: ports.push,
           requests: requestStore({ root: w.requestsRoot }),
           catalog: { root: w.catalogRoot },

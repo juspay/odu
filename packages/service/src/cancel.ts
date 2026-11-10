@@ -77,6 +77,52 @@ export function cancelRun(
   );
 }
 
+/**
+ * STOP A RUN AND WAIT UNTIL IT IS STOPPED — the whole-run cancel, without a
+ * receipt of its own.
+ *
+ * `run.start` needs this when it is about to MOVE a checkout out from under a
+ * live run the caller said to supersede. The coordinator's own
+ * cancel-then-claim is no use there: it happens after the launch, and by then
+ * the tree has already been moved under a process still reading it.
+ *
+ * It is this module's and not `start.ts`'s because both rules it keeps are
+ * stated here — the endpoint comes off the ownership record, and the run's
+ * `<sha>#<seq>` travels with the request so a crashed run's recycled socket
+ * address cannot be used to tear down a live stranger.
+ *
+ * Three answers: `stopped` (it took the cancel, or nothing was serving the
+ * run), `declined` and `unresolved`. The last two are the same to a caller
+ * that must not move anything — but only one of them is safe to repeat, so
+ * they stay apart.
+ */
+export async function stopLiveRun(
+  runId: string,
+  deps: { cancel: RunCanceller; catalog?: CatalogOptions; now: () => number },
+): Promise<
+  | { kind: "stopped" }
+  | { kind: "declined"; detail: string }
+  | { kind: "unresolved"; detail: string }
+> {
+  const handle = handleFor(runId, deps.catalog ?? {});
+  const manifest = readManifest(handle);
+  const owner = currentOwner(handle.dir);
+  if (manifest === null || owner === null || owner.endpoint === null) {
+    // Nothing is serving it. The checkout is free, which is what the caller
+    // asked about.
+    return { kind: "stopped" };
+  }
+  if (ownerProvablyAlive(handle.dir, deps.now()) === false) return { kind: "stopped" };
+  const outcome = await deps.cancel({
+    endpoint: owner.endpoint,
+    runId,
+    expect: { sha: manifest.sha, seq: manifest.seq },
+    scope: { kind: "run" },
+  });
+  if (outcome.kind === "cancelled") return { kind: "stopped" };
+  return { kind: outcome.kind, detail: outcome.detail };
+}
+
 async function run(
   input: CancelInput,
   deps: CancelDeps,
