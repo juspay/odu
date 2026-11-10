@@ -70,6 +70,7 @@ import {
 } from "@odu/service-client/surface";
 import { readServiceCell } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
+import { runHash } from "@odu/service-client/routes";
 import { verdictStateOf } from "./liveFromService";
 import { printVerdict } from "./render";
 import {
@@ -252,8 +253,17 @@ export async function runViaService(opts: RunOpts): Promise<number> {
   });
 }
 
-/** What a start says to a person: which run this is, and where to see it. */
-function renderStart(receipt: StartReceipt, origin: string | undefined): string {
+/**
+ * What a start says to a person: which run this is, and where to see it.
+ *
+ * The address is MINTED, never typed. `runHash` is the board's own spelling of
+ * where a run lives, and `parseRunHash` on the other side is what reads it
+ * back; a second spelling here is how this line came to print a bare
+ * `runs/<id>` pathname under the origin — which the board answers with its run
+ * LIST, so every link a person clicked out of a CI log landed on the board
+ * instead of on their run.
+ */
+export function renderStart(receipt: StartReceipt, origin: string | undefined): string {
   const where = origin ?? serviceOrigin();
   const lines: string[] = [];
   if (!receipt.accepted && receipt.existing !== undefined) {
@@ -267,7 +277,7 @@ function renderStart(receipt: StartReceipt, origin: string | undefined): string 
   } else {
     lines.push(`odu · started ${receipt.runId}`);
   }
-  lines.push(`odu · ${where}/runs/${receipt.runId}`);
+  lines.push(`odu · ${new URL(runHash(receipt.runId), where).href}`);
   if (receipt.lifetime !== undefined) lines.push(`odu · ${receipt.lifetime}`);
   lines.push("odu · Ctrl-C stops WATCHING; the run keeps going (odu ci cancel stops it)");
   return `${lines.join("\n")}\n`;
