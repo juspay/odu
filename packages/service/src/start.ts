@@ -457,9 +457,7 @@ async function start(
       );
     }
   }
-  // `let`, because a start that MOVES this checkout re-probes it below and
-  // the facts it continues on are the ones after the move.
-  let facts = deps.probeCheckout(input.checkout);
+  const facts = deps.probeCheckout(input.checkout);
   if (!facts.isRepo) {
     return refuseAndRecord(
       deps,
@@ -479,8 +477,10 @@ async function start(
     );
   }
   // A PREFIX match, so a caller may name the sha the length its own tooling
-  // prints.
+  // prints. ONE reading of it, because the two rules below are the two sides
+  // of this one fact and a second spelling could disagree with the first.
   const wanted = input.expectedSha.toLowerCase();
+  const onWanted = facts.head.toLowerCase().startsWith(wanted);
   /** What the checkout is on, which the move below can change. */
   let head = facts.head;
   // WITHOUT `branch`, a checkout that is not on that commit is refused rather
@@ -491,7 +491,7 @@ async function start(
   // WITH `branch`, the caller is naming a clone the SERVICE keeps and saying
   // where it should be — so this refusal is deferred until after the live-run
   // rule below, which decides whether that tree may be touched at all.
-  if (!head.toLowerCase().startsWith(wanted) && input.branch === undefined) {
+  if (!onWanted && input.branch === undefined) {
     return refuseAndRecord(
       deps,
       input.requestId,
@@ -535,7 +535,7 @@ async function start(
   // after the launch, by which time this would already have moved the files
   // under a process still reading them.
   let movedNote: string | null = null;
-  if (input.branch !== undefined && !head.toLowerCase().startsWith(wanted)) {
+  if (input.branch !== undefined && !onWanted) {
     if (facts.liveRunId !== null) {
       const stopped = await stopLiveRun(facts.liveRunId, {
         cancel: deps.cancel,
@@ -605,19 +605,24 @@ async function start(
     // what the checkout now IS. They agree in every ordinary case, and the
     // case they do not is somebody else moving that tree in between — which
     // must not reach a launch as the commit this start asked for.
-    facts = deps.probeCheckout(input.checkout);
-    if (facts.head === null || !facts.head.toLowerCase().startsWith(wanted)) {
+    //
+    // A READING OF ITS OWN, not a second value of `facts`: everything the
+    // probe answered before the move has already been used, and a name that
+    // meant the clone-before here and the clone-after there would be one
+    // `liveRunId` standing for two different moments.
+    const after = deps.probeCheckout(input.checkout);
+    if (after.head === null || !after.head.toLowerCase().startsWith(wanted)) {
       return refuseAndRecord(
         deps,
         input.requestId,
         "checkout_refused",
         `odu: ${input.checkout} was moved to ${input.branch} at ` +
           `${outcome.head.slice(0, 12)} and reads ` +
-          `${facts.head === null ? "no HEAD" : facts.head.slice(0, 12)} now — ` +
+          `${after.head === null ? "no HEAD" : after.head.slice(0, 12)} now — ` +
           "something else is moving this checkout",
       );
     }
-    head = facts.head;
+    head = after.head;
     movedNote = `moved ${input.checkout} to ${input.branch} at ${head.slice(0, 7)}`;
   }
 

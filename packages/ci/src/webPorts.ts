@@ -120,24 +120,43 @@ export function probeCheckout(
   };
 }
 
-/** One git command, off the event loop, with its output whichever way it
- *  went — git says what is wrong on stderr and these sentences are what the
- *  refusals carry. */
-async function runGit(
-  checkout: string,
-  args: readonly string[],
-): Promise<{ ok: boolean; out: string }> {
+/**
+ * One git command, off the event loop, as TWO shapes.
+ *
+ * An answer and a complaint are different things and were one field: `out`
+ * held `rev-parse`'s sha on the way out and git's stderr on the way down, and
+ * the EXIT CODE — the only bit that tells a plumbing command's "no" from its
+ * "I could not look" — was thrown away. `merge-base --is-ancestor` exits 1 for
+ * the first and 128 for the second, and a caller holding one boolean has to
+ * word them the same.
+ */
+type GitRan =
+  | { readonly ok: true; readonly value: string }
+  | { readonly ok: false; readonly code: number | null; readonly said: string };
+
+async function runGit(checkout: string, args: readonly string[]): Promise<GitRan> {
   try {
     const done = await execFileAsync("git", [...args], {
       cwd: checkout,
       encoding: "utf-8",
       maxBuffer: GIT_OUTPUT_MAX,
     });
-    return { ok: true, out: done.stdout.trim() };
+    return { ok: true, value: done.stdout.trim() };
   } catch (err) {
-    const said = err as { stderr?: string; stdout?: string; message?: string };
-    const text = `${said.stderr ?? ""}${said.stdout ?? ""}`.trim();
-    return { ok: false, out: text === "" ? (said.message ?? "git failed") : text };
+    const failure = err as {
+      code?: unknown;
+      stderr?: string;
+      stdout?: string;
+      message?: string;
+    };
+    const text = `${failure.stderr ?? ""}${failure.stdout ?? ""}`.trim();
+    return {
+      ok: false,
+      // A NUMBER or nothing: a spawn that never ran git at all answers
+      // `ENOENT` here, which is not an exit status and must not be read as one.
+      code: typeof failure.code === "number" ? failure.code : null,
+      said: gitSaid(text === "" ? (failure.message ?? "git failed") : text),
+    };
   }
 }
 
@@ -176,6 +195,9 @@ function gitSaid(out: string): string {
  *      from another branch, or one force-pushed away, is refused with both
  *      shas rather than checked out anyway: a run is about a commit the
  *      branch contains, and a pin written from a detached clone pins nothing.
+ *      Read off the EXIT CODE: `merge-base --is-ancestor` answers 1 for "it
+ *      is not", and anything else means it could not look — which is a
+ *      failure, not a verdict about the commit.
  *   4. **`git checkout -B <branch> <sha>`** — the branch, pointed at that
  *      commit, and HEAD on the branch rather than detached, which is what
  *      `gitBranch` has to be able to answer for the run's pins.
@@ -190,35 +212,36 @@ export async function moveCheckout({
   sha,
 }: CheckoutMoveRequest): Promise<CheckoutMoveOutcome> {
   const dirty = await runGit(checkout, ["status", "--porcelain", "--untracked-files=no"]);
-  if (!dirty.ok) return { kind: "failed", detail: gitSaid(dirty.out) };
-  if (dirty.out !== "") return { kind: "dirty", detail: gitSaid(dirty.out) };
+  if (!dirty.ok) return { kind: "failed", detail: dirty.said };
+  if (dirty.value !== "") return { kind: "dirty", detail: gitSaid(dirty.value) };
   // `--` BEFORE THE REF, wherever git takes it: the service has already held
   // `branch` to git's own grammar, and an end-of-options marker is the second
   // lock on the same door. `checkout -B` is the one that cannot have it — a
   // `--` there begins PATHS, not a start-point — so that call rests on the
   // name having been checked.
   const fetched = await runGit(checkout, ["fetch", "origin", "--", branch]);
-  if (!fetched.ok) return { kind: "fetch_failed", detail: gitSaid(fetched.out) };
+  if (!fetched.ok) return { kind: "fetch_failed", detail: fetched.said };
+  // NOT `fetch_failed`: the fetch landed and this is odu unable to read what
+  // it brought back, which is a different thing to go and do.
   const tip = await runGit(checkout, ["rev-parse", "FETCH_HEAD"]);
-  if (!tip.ok) return { kind: "fetch_failed", detail: gitSaid(tip.out) };
+  if (!tip.ok) return { kind: "failed", detail: tip.said };
   const contains = await runGit(checkout, [
     "merge-base",
     "--is-ancestor",
     "--",
     sha,
-    tip.out,
+    tip.value,
   ]);
-  if (!contains.ok) return { kind: "not_on_branch", tip: tip.out };
-  const moved = await runGit(checkout, ["checkout", "-B", branch, sha]);
-  if (!moved.ok) return { kind: "failed", detail: gitSaid(moved.out) };
-  const head = await runGit(checkout, ["rev-parse", "HEAD"]);
-  if (!head.ok || head.out === "") {
-    return {
-      kind: "failed",
-      detail: head.out === "" ? "git read no HEAD back" : gitSaid(head.out),
-    };
+  if (!contains.ok && contains.code !== 1) {
+    return { kind: "failed", detail: contains.said };
   }
-  return { kind: "moved", head: head.out };
+  if (!contains.ok) return { kind: "not_on_branch", tip: tip.value };
+  const moved = await runGit(checkout, ["checkout", "-B", branch, sha]);
+  if (!moved.ok) return { kind: "failed", detail: moved.said };
+  const head = await runGit(checkout, ["rev-parse", "HEAD"]);
+  if (!head.ok) return { kind: "failed", detail: head.said };
+  if (head.value === "") return { kind: "failed", detail: "git read no HEAD back" };
+  return { kind: "moved", head: head.value };
 }
 
 /**
