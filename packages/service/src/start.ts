@@ -157,6 +157,41 @@ export function digestOfRequest(input: StartInput, scope: RunScope): string {
 }
 
 /**
+ * WHY THIS IS NOT A BRANCH NAME, or `null` when it is one.
+ *
+ * `git check-ref-format --branch` states the same rules, and calling it would
+ * mean handing the very string this exists to distrust to a git process — the
+ * option-injection it is here to stop. So the rules are written out: git's
+ * `refs/heads/<name>` grammar, plus the leading `-` that makes a name an
+ * option rather than a ref.
+ *
+ * A SENTENCE rather than a boolean, because a caller that typed `feature/x..y`
+ * is owed which character git refused.
+ */
+function branchNameProblem(name: string): string | null {
+  if (name === "") return "it is empty";
+  // THE ONE THAT MATTERS. Everything below is git's own ref grammar; this is
+  // the rule about git's command line.
+  if (name.startsWith("-")) return "git reads a leading dash as an option";
+  if (/[\x00-\x20\x7f~^:?*[\\]/.test(name)) {
+    return "it holds a character git refuses in a ref (space, control, or one of ~^:?*[\\)";
+  }
+  if (name.includes("..")) return "`..` separates two refs";
+  if (name.includes("@{")) return "`@{` names a reflog entry";
+  if (name === "@") return "`@` is git's own name for HEAD";
+  if (name.startsWith("/") || name.endsWith("/") || name.includes("//")) {
+    return "a ref's path components cannot be empty";
+  }
+  if (name.endsWith(".") || name.endsWith(".lock")) {
+    return "a ref cannot end with `.` or `.lock`";
+  }
+  if (name.split("/").some((part) => part.startsWith(".") || part.endsWith(".lock"))) {
+    return "no path component may begin with `.` or end with `.lock`";
+  }
+  return null;
+}
+
+/**
  * What a finished request recorded, as a value with a tag.
  *
  * A refusal is an ANSWER: the request was understood, it will not be performed,
@@ -388,6 +423,39 @@ async function start(
         "path — run.start resolves it in the service, where your working " +
         "directory does not exist. Point $ODU_HOSTS at an absolute path.",
     );
+  }
+  // ── THE TWO FIELDS THAT REACH GIT'S ARGV, CHECKED BEFORE THEY DO ──
+  //
+  // `expectedSha` and `branch` are the only caller strings a start can put in
+  // front of git (`git fetch origin -- <branch>`, `git checkout -B <branch>
+  // <sha>`). `execFile` takes the shell out of it and takes nothing out of
+  // GIT'S OWN option parsing: `branch: "--upload-pack=<cmd>"` is a command
+  // run on this machine by anyone who may start a run. So both are held to
+  // their grammars HERE, with nothing of them having been spelled to a
+  // subprocess — `git check-ref-format` would itself be a place to send
+  // `--upload-pack=…`, which is why the rule below is code rather than a
+  // call.
+  if (!/^[0-9a-fA-F]{7,40}$/.test(input.expectedSha)) {
+    return refuseAndRecord(
+      deps,
+      input.requestId,
+      "bad_input",
+      `odu: "${input.expectedSha}" is not a commit — expectedSha is 7 to 40 ` +
+        "hex characters, the sha a caller read with `git rev-parse HEAD`",
+    );
+  }
+  if (input.branch !== undefined) {
+    const wrong = branchNameProblem(input.branch);
+    if (wrong !== null) {
+      return refuseAndRecord(
+        deps,
+        input.requestId,
+        "bad_input",
+        `odu: "${input.branch}" is not a usable branch name — ${wrong}. ` +
+          "run.start moves a checkout with git, and a name git would read as " +
+          "an option is a command, not a branch.",
+      );
+    }
   }
   // `let`, because a start that MOVES this checkout re-probes it below and
   // the facts it continues on are the ones after the move.

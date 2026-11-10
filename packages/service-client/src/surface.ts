@@ -1179,6 +1179,11 @@ const StartInputSchema = Schema.Struct({
    *
    * ON A BRANCH, never a detached HEAD, because a run's pins are read from
    * the branch its checkout is on — a detached clone pins nothing.
+   *
+   * A BRANCH NAME, held to git's own grammar and refused with a sentence
+   * when it is not one — a name beginning with `-` most of all, because git
+   * reads it as an option and this one ends up on a `git fetch` command
+   * line.
    */
   branch: Schema.optionalKey(Schema.String),
   /** `recipe[@platform]` selectors. Empty means the whole `[metadata("ci")]`

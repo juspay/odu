@@ -501,6 +501,61 @@ describe("run.start, moving a checkout onto a branch", () => {
     if (conflict._tag !== "Failure") return;
     expect((conflict.failure as ServiceRefused).code).toBe("request_conflict");
   });
+
+  it("refuses a branch git would read as an OPTION, before git is reached", async () => {
+    // `--upload-pack=<cmd>` on a `git fetch` command line runs that command.
+    // `execFile` takes the shell away and takes nothing away from git's own
+    // option parsing, so the name is held to git's grammar here — and the
+    // port, which is the only thing that spells it to git, is never entered.
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "--upload-pack=touch /tmp/pwned" });
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    const refusal = result.failure as ServiceRefused;
+    expect(refusal.code).toBe("bad_input");
+    expect(refusal.message).toContain("leading dash");
+    expect(ports.moves).toEqual([]);
+    expect(ports.launches).toHaveLength(0);
+  });
+
+  it("refuses the rest of git's non-branch names too", async () => {
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const names = ["", "a b", "feat/..x", "x@{0}", "main.lock", ".hidden", "a//b"];
+    for (const [index, branch] of names.entries()) {
+      // A fresh id per name: a receipt replays, and these are seven requests.
+      const result = await d.run({ branch, requestId: `bad-name-${index}` });
+      expect(result._tag, branch).toBe("Failure");
+      if (result._tag !== "Failure") continue;
+      expect((result.failure as ServiceRefused).code, branch).toBe("bad_input");
+    }
+    expect(ports.moves).toEqual([]);
+  });
+
+  it("takes the branch names git takes", async () => {
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const result = await d.run({ branch: "release/1.2-rc_3" });
+    expect(result._tag).toBe("Success");
+    expect(ports.moves[0]?.branch).toBe("release/1.2-rc_3");
+  });
+
+  it("refuses an expectedSha that is not a commit", async () => {
+    // It reaches `git merge-base` and `git checkout -B` on the move path, so
+    // it is held to hex for the same reason the branch is held to a name.
+    const w = open();
+    const ports = clone();
+    const d = deps(w, ports);
+    const result = await d.run({ expectedSha: "--upload-pack=x", branch: "main" });
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    expect((result.failure as ServiceRefused).code).toBe("bad_input");
+    expect(ports.moves).toEqual([]);
+  });
 });
 
 /**

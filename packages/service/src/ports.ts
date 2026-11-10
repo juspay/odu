@@ -338,7 +338,12 @@ export type CheckoutProbe = (checkout: string) => CheckoutFacts;
 // ── moving a checkout to the commit it was asked for ────────────────────────
 
 /** A clone the SERVICE keeps, the branch it should be on, and the commit on
- *  that branch the caller wants run. */
+ *  that branch the caller wants run.
+ *
+ *  BOTH REFS ARE ALREADY CHECKED when a mover is handed this: `run.start`
+ *  holds `sha` to hex and `branch` to git's own branch grammar before any of
+ *  it is spelled to a subprocess, because a `branch` of `--upload-pack=…` is
+ *  a command and `execFile` does nothing about git's option parsing. */
 export interface CheckoutMoveRequest {
   readonly checkout: string;
   readonly branch: string;

@@ -145,6 +145,17 @@ async function runGit(
  *  short of anything that could hold the daemon's memory. */
 const GIT_OUTPUT_MAX = 1024 * 1024;
 
+/** How much of git's own sentence a REFUSAL carries. `GIT_OUTPUT_MAX` bounds
+ *  what the daemon reads; this bounds what a board row, a receipt and an
+ *  agent's answer are made to hold — a megabyte of fetch progress is not a
+ *  reason, and the first lines are where the reason is. */
+const GIT_SAID_MAX = 400;
+
+function gitSaid(out: string): string {
+  const lines = out.split("\n").slice(0, 5).join("; ");
+  return lines.length <= GIT_SAID_MAX ? lines : `${lines.slice(0, GIT_SAID_MAX)}…`;
+}
+
 /**
  * PUT A SERVICE-SIDE CLONE ON THE BRANCH AND COMMIT A START ASKED FOR.
  *
@@ -168,6 +179,10 @@ const GIT_OUTPUT_MAX = 1024 * 1024;
  *   4. **`git checkout -B <branch> <sha>`** — the branch, pointed at that
  *      commit, and HEAD on the branch rather than detached, which is what
  *      `gitBranch` has to be able to answer for the run's pins.
+ *
+ * It is reached with `branch` and `sha` ALREADY held to their grammars by
+ * `run.start` — a name git would read as an option never gets this far — and
+ * every call that takes `--` is given it anyway.
  */
 export async function moveCheckout({
   checkout,
@@ -175,21 +190,33 @@ export async function moveCheckout({
   sha,
 }: CheckoutMoveRequest): Promise<CheckoutMoveOutcome> {
   const dirty = await runGit(checkout, ["status", "--porcelain", "--untracked-files=no"]);
-  if (!dirty.ok) return { kind: "failed", detail: dirty.out };
-  if (dirty.out !== "") {
-    return { kind: "dirty", detail: dirty.out.split("\n").slice(0, 5).join("; ") };
-  }
-  const fetched = await runGit(checkout, ["fetch", "origin", branch]);
-  if (!fetched.ok) return { kind: "fetch_failed", detail: fetched.out };
+  if (!dirty.ok) return { kind: "failed", detail: gitSaid(dirty.out) };
+  if (dirty.out !== "") return { kind: "dirty", detail: gitSaid(dirty.out) };
+  // `--` BEFORE THE REF, wherever git takes it: the service has already held
+  // `branch` to git's own grammar, and an end-of-options marker is the second
+  // lock on the same door. `checkout -B` is the one that cannot have it — a
+  // `--` there begins PATHS, not a start-point — so that call rests on the
+  // name having been checked.
+  const fetched = await runGit(checkout, ["fetch", "origin", "--", branch]);
+  if (!fetched.ok) return { kind: "fetch_failed", detail: gitSaid(fetched.out) };
   const tip = await runGit(checkout, ["rev-parse", "FETCH_HEAD"]);
-  if (!tip.ok) return { kind: "fetch_failed", detail: tip.out };
-  const contains = await runGit(checkout, ["merge-base", "--is-ancestor", sha, tip.out]);
+  if (!tip.ok) return { kind: "fetch_failed", detail: gitSaid(tip.out) };
+  const contains = await runGit(checkout, [
+    "merge-base",
+    "--is-ancestor",
+    "--",
+    sha,
+    tip.out,
+  ]);
   if (!contains.ok) return { kind: "not_on_branch", tip: tip.out };
   const moved = await runGit(checkout, ["checkout", "-B", branch, sha]);
-  if (!moved.ok) return { kind: "failed", detail: moved.out };
+  if (!moved.ok) return { kind: "failed", detail: gitSaid(moved.out) };
   const head = await runGit(checkout, ["rev-parse", "HEAD"]);
   if (!head.ok || head.out === "") {
-    return { kind: "failed", detail: head.out === "" ? "git read no HEAD back" : head.out };
+    return {
+      kind: "failed",
+      detail: head.out === "" ? "git read no HEAD back" : gitSaid(head.out),
+    };
   }
   return { kind: "moved", head: head.out };
 }
