@@ -171,6 +171,21 @@ command -v jq >/dev/null 2>&1 ||
 command -v curl >/dev/null 2>&1 ||
   fail "odu push: \`curl\` is not on PATH. GitHub-hosted runners ship it; a self-hosted runner needs it installed."
 
+# THE COMMIT A ROW WILL CARRY, and it must be one a reader can check out.
+# `$GITHUB_SHA` is that commit on every event but one: on `pull_request` it is
+# the synthetic MERGE ref (`refs/pull/N/merge`), which nobody fetches by name,
+# which moves under the pull request and which disappears when it closes — so
+# a bucket page offering it would be offering a commit that cannot be looked
+# at. The pull request's own head sha is the commit that built these paths,
+# and the event payload is where it is (there is no `$GITHUB_HEAD_SHA`). An
+# empty answer falls back to `$GITHUB_SHA` rather than failing the push: the
+# bytes are good, and the pusher reads an empty value as "said nothing".
+commit=${GITHUB_SHA:-}
+if [ "$event" = pull_request ] && [ -s "${GITHUB_EVENT_PATH:-}" ]; then
+  head=$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || true)
+  if [ -n "$head" ]; then commit=$head; fi
+fi
+
 # ── what to push ────────────────────────────────────────────────────────────
 
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/odu-push.XXXXXX")
@@ -363,7 +378,7 @@ set +e
 # this action is a workflow step that may be nobody's run.
 ODU_CACHE_TOKEN="$token" "$odu" cache push --cache "$cache" --output json \
   ${pin_args[@]+"${pin_args[@]}"} \
-  --commit "${GITHUB_SHA:-}" \
+  --commit "$commit" \
   "${targets[@]}" > "$result"
 status=$?
 set -e

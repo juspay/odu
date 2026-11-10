@@ -26,7 +26,7 @@
  * fails the STEP with odu's own sentence rather than reaching a bucket.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -236,5 +236,67 @@ describe("the push action with no `cache:` input", () => {
     expect(ran.calls).toHaveLength(1);
     expect(ran.calls[0]).toContain("cache push --cache https://named.example/bucket");
     expect(ran.tokens[0]).toBe("odu_write_token");
+  });
+});
+
+/**
+ * WHICH COMMIT A ROW CARRIES (cache 4.7). The bucket keeps what a push says
+ * built its paths, and a commit nobody can check out is worth less than none:
+ * on a `pull_request` event `$GITHUB_SHA` is the synthetic merge ref, which
+ * moves under the pull request and is gone when it closes.
+ */
+describe("the commit the push action states", () => {
+  const written: string[] = [];
+  afterAll(() => {
+    for (const dir of written) rmSync(dir, { recursive: true, force: true });
+  });
+  /** A `pull_request` event payload on disk, the way the runner leaves one. */
+  const eventFile = (payload: unknown): string => {
+    const dir = mkdtempSync(join(tmpdir(), "odu-push-event-"));
+    written.push(dir);
+    const path = join(dir, "event.json");
+    writeFileSync(path, JSON.stringify(payload));
+    return path;
+  };
+  /** The word after `--commit` in the stub's recorded argv. */
+  const commitOf = (call: string): string | undefined =>
+    call.split(" ").at(call.split(" ").indexOf("--commit") + 1);
+
+  it("states $GITHUB_SHA on a push event", () => {
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: { GITHUB_EVENT_NAME: "push", GITHUB_SHA: "a".repeat(40) },
+    });
+    expect(ran.status, ran.output).toBe(0);
+    expect(commitOf(ran.calls[1] ?? "")).toBe("a".repeat(40));
+  });
+
+  it("states the pull request's HEAD sha, not the merge commit it is handed", () => {
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: {
+        GITHUB_EVENT_NAME: "pull_request",
+        // The merge ref, which is what a runner sets on this event.
+        GITHUB_SHA: "m".repeat(40),
+        GITHUB_EVENT_PATH: eventFile({ pull_request: { head: { sha: "h".repeat(40) } } }),
+      },
+    });
+    expect(ran.status, ran.output).toBe(0);
+    expect(commitOf(ran.calls[1] ?? "")).toBe("h".repeat(40));
+  });
+
+  it("falls back to $GITHUB_SHA when the payload names no head", () => {
+    // A push whose bytes are good is not worth failing over a label, and the
+    // merge ref is still a commit — it is just one nobody can fetch later.
+    const ran = runPush({
+      target: { ok: "https://cache.example.com/main" },
+      env: {
+        GITHUB_EVENT_NAME: "pull_request",
+        GITHUB_SHA: "m".repeat(40),
+        GITHUB_EVENT_PATH: eventFile({ repository: {} }),
+      },
+    });
+    expect(ran.status, ran.output).toBe(0);
+    expect(commitOf(ran.calls[1] ?? "")).toBe("m".repeat(40));
   });
 });
