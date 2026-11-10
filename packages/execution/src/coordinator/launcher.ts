@@ -154,6 +154,10 @@ export interface LaunchRequest {
   /** What is wrong while it does: the bucket's key is missing from the
    *  repository's `trusted-public-keys`. Null when there is nothing to say. */
   readonly pushKeyWarning: string | null;
+  /** The clone was MOVED to the commit this run is about — one sentence for
+   *  the same setup log. Null when nothing was moved, which is every run
+   *  started from a checkout its caller is standing in. */
+  readonly checkoutMoved: string | null;
 }
 
 export interface LaunchReceipt {
@@ -246,6 +250,11 @@ export function launchArgv(request: LaunchRequest): string[] {
   }
   if (request.pushKeyWarning !== null) {
     args.push("--push-key-warning", request.pushKeyWarning.slice(0, PUSH_NOTE_MAX));
+  }
+  // THE SAME CEILING, for the same reason: this one carries a path somebody
+  // else chose.
+  if (request.checkoutMoved !== null) {
+    args.push("--checkout-moved", request.checkoutMoved.slice(0, PUSH_NOTE_MAX));
   }
   return args;
 }

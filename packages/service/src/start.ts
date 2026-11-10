@@ -21,6 +21,14 @@
  *      even an error: it is almost certainly the run the caller wanted, so the
  *      answer is that run, addressed, with `accepted: false` — and
  *      `supersede: true` is how a caller says it really did mean to take it.
+ *
+ *      **A start that names a `branch` may MOVE that checkout** (PLAN 4.4).
+ *      Only then, and only after the live-run rule above has had its say: a
+ *      clone with a live run in it is still answered with that run, and a
+ *      caller that said `supersede` has the incumbent stopped and confirmed
+ *      stopped before a file moves. Without `branch` nothing is ever moved
+ *      and a checkout that is not on the commit is refused, which is what
+ *      every run from the caller's own checkout gets.
  *   4. **Resolve where this run PUSHES** (PLAN 4.1). The cache the checkout's
  *      `flake.nix` already reads from, if this daemon serves it, plus a write
  *      token minted for this run. Deliberately AFTER the receipt and
@@ -51,7 +59,14 @@ import {
 import { Effect } from "effect";
 import { callerOf } from "./caller";
 import type { Principal } from "@odu/cordis/principal";
-import type { CheckoutProbe, PushPort, RunLauncher } from "./ports";
+import type {
+  CheckoutMover,
+  CheckoutProbe,
+  PushPort,
+  RunCanceller,
+  RunLauncher,
+} from "./ports";
+import { stopLiveRun } from "./cancel";
 import { preparePush } from "./pushGrant";
 import {
   claimReceipt,
@@ -67,6 +82,13 @@ import {
 export interface StartDeps {
   launch: RunLauncher;
   probeCheckout: CheckoutProbe;
+  /** Put the service's own clone on the branch and commit a `branch` start
+   *  named. Only reached by such a start; every other one never moves a file. */
+  moveCheckout: CheckoutMover;
+  /** Stop the run already in that clone before moving it, when the caller
+   *  said `supersede`. The coordinator's own cancel-then-claim is too late:
+   *  it runs after the launch, and the tree has to be still by then. */
+  cancel: RunCanceller;
   push: PushPort;
   requests: ReceiptStore;
   catalog?: CatalogOptions;
@@ -100,6 +122,11 @@ export function digestOfRequest(input: StartInput, scope: RunScope): string {
   return digestOf([
     input.checkout,
     input.expectedSha,
+    // THE BRANCH, which changes what the request DOES — it licenses moving
+    // the checkout — so a start repeated under one id with and without it is
+    // two requests. `optionalPart` because absent ("refuse a checkout that
+    // moved") and a named branch are different asks, not one with a default.
+    optionalPart(input.branch),
     scope.selectors.join(","),
     scope.platforms.join(","),
     scope.root ?? "",
@@ -362,7 +389,9 @@ async function start(
         "directory does not exist. Point $ODU_HOSTS at an absolute path.",
     );
   }
-  const facts = deps.probeCheckout(input.checkout);
+  // `let`, because a start that MOVES this checkout re-probes it below and
+  // the facts it continues on are the ones after the move.
+  let facts = deps.probeCheckout(input.checkout);
   if (!facts.isRepo) {
     return refuseAndRecord(
       deps,
@@ -382,9 +411,19 @@ async function start(
     );
   }
   // A PREFIX match, so a caller may name the sha the length its own tooling
-  // prints. Refused rather than substituted: the whole promise of `expectedSha`
-  // is that a checkout which moved on gets an answer, not a different run.
-  if (!facts.head.toLowerCase().startsWith(input.expectedSha.toLowerCase())) {
+  // prints.
+  const wanted = input.expectedSha.toLowerCase();
+  /** What the checkout is on, which the move below can change. */
+  let head = facts.head;
+  // WITHOUT `branch`, a checkout that is not on that commit is refused rather
+  // than substituted: the whole promise of `expectedSha` is that a checkout
+  // which moved on gets an answer, not a different run. That is every start
+  // from a checkout the caller is standing in, byte for byte as it was.
+  //
+  // WITH `branch`, the caller is naming a clone the SERVICE keeps and saying
+  // where it should be — so this refusal is deferred until after the live-run
+  // rule below, which decides whether that tree may be touched at all.
+  if (!head.toLowerCase().startsWith(wanted) && input.branch === undefined) {
     return refuseAndRecord(
       deps,
       input.requestId,
@@ -412,6 +451,106 @@ async function start(
         sha: existing?.sha ?? facts.head,
       },
     });
+  }
+
+  // ── THE CLONE IS NOT ON THAT COMMIT, AND THE CALLER NAMED A BRANCH ──
+  //
+  // A GitHub workflow calls `run.start` with the commit it has just pushed,
+  // and the service's clone has never heard of it — so the service fetches
+  // and moves it rather than refusing every such call (PLAN 4.4).
+  //
+  // AFTER the live-run rule, which is the ordering this block turns on. A run
+  // already in that clone is still answered with itself and nothing is
+  // touched; reaching here with one means the caller said `supersede`, and
+  // then the incumbent is stopped AND CONFIRMED STOPPED before the tree
+  // moves. The coordinator's own cancel-then-claim cannot do it: that happens
+  // after the launch, by which time this would already have moved the files
+  // under a process still reading them.
+  let movedNote: string | null = null;
+  if (input.branch !== undefined && !head.toLowerCase().startsWith(wanted)) {
+    if (facts.liveRunId !== null) {
+      const stopped = await stopLiveRun(facts.liveRunId, {
+        cancel: deps.cancel,
+        catalog,
+        now: deps.now,
+      });
+      if (stopped.kind !== "stopped") {
+        return refuseAndRecord(
+          deps,
+          input.requestId,
+          "checkout_refused",
+          `odu: run ${facts.liveRunId} is live in ${input.checkout} and ` +
+            `could not be confirmed stopped — ${stopped.detail}. Nothing was ` +
+            "moved: a checkout is not taken from a run that may still be " +
+            "reading it.",
+          { runId: facts.liveRunId },
+        );
+      }
+    }
+    const outcome = await deps.moveCheckout({
+      checkout: input.checkout,
+      branch: input.branch,
+      sha: input.expectedSha,
+    });
+    if (outcome.kind === "dirty") {
+      return refuseAndRecord(
+        deps,
+        input.requestId,
+        "checkout_refused",
+        `odu: ${input.checkout} has uncommitted changes, so it cannot be ` +
+          `moved to ${input.branch} — ${outcome.detail}. odu does not discard ` +
+          "work it did not make.",
+        { suggestion: ["git", "-C", input.checkout, "status", "--porcelain"] },
+      );
+    }
+    if (outcome.kind === "fetch_failed") {
+      return refuseAndRecord(
+        deps,
+        input.requestId,
+        "checkout_refused",
+        `odu: could not fetch origin ${input.branch} in ${input.checkout} — ` +
+          outcome.detail,
+      );
+    }
+    if (outcome.kind === "not_on_branch") {
+      // BOTH SHAS, because the two mistakes behind this are opposite ones: a
+      // commit that is on another branch, and one that was force-pushed away.
+      return refuseAndRecord(
+        deps,
+        input.requestId,
+        "checkout_refused",
+        `odu: ${input.expectedSha} is not on origin/${input.branch}, which is ` +
+          `at ${outcome.tip.slice(0, 12)} — odu runs a commit that branch ` +
+          "contains, never one it has to be moved off to reach",
+      );
+    }
+    if (outcome.kind === "failed") {
+      return refuseAndRecord(
+        deps,
+        input.requestId,
+        "checkout_refused",
+        `odu: could not put ${input.checkout} on ${input.branch} at ` +
+          `${input.expectedSha} — ${outcome.detail}`,
+      );
+    }
+    // RE-PROBED rather than trusted: the port says what it did, and this says
+    // what the checkout now IS. They agree in every ordinary case, and the
+    // case they do not is somebody else moving that tree in between — which
+    // must not reach a launch as the commit this start asked for.
+    facts = deps.probeCheckout(input.checkout);
+    if (facts.head === null || !facts.head.toLowerCase().startsWith(wanted)) {
+      return refuseAndRecord(
+        deps,
+        input.requestId,
+        "checkout_refused",
+        `odu: ${input.checkout} was moved to ${input.branch} at ` +
+          `${outcome.head.slice(0, 12)} and reads ` +
+          `${facts.head === null ? "no HEAD" : facts.head.slice(0, 12)} now — ` +
+          "something else is moving this checkout",
+      );
+    }
+    head = facts.head;
+    movedNote = `moved ${input.checkout} to ${input.branch} at ${head.slice(0, 7)}`;
   }
 
   const runId = claim.receipt.plannedRunId;
@@ -450,7 +589,7 @@ async function start(
     parentRunId: null,
     requestId: input.requestId,
     scope,
-    expectedSha: facts.head,
+    expectedSha: head,
     noStrict: input.noStrict ?? false,
     noSnapshot: input.noSnapshot ?? false,
     noPost: input.noPost ?? false,
@@ -469,6 +608,9 @@ async function start(
     push,
     pushSkipped: prepared.skipped,
     pushKeyWarning: prepared.keyWarning,
+    // AND WHETHER THIS CHECKOUT HAD TO BE MOVED to be on that commit — one
+    // sentence for the same setup log, beside the push's.
+    checkoutMoved: movedNote,
   });
   if (!launched.ok) {
     // THE TOKEN GOES BACK. Nothing ever reached a lane, so a credential left
@@ -491,7 +633,7 @@ async function start(
     runId,
     requestId: input.requestId,
     replayed: false,
-    sha: registered?.sha ?? facts.head,
+    sha: registered?.sha ?? head,
     scope: registered?.scope ?? scope,
     endpoint: launched.endpoint,
     cursor: formatCursor({ runId, seq: 0 }),

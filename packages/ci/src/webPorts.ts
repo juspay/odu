@@ -32,7 +32,8 @@
  */
 
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { dialRun } from "@odu/run-client/dial";
 import { errorMessage, firstFrame, runUnary } from "@odu/execution/common/effectEdge";
 import { ghForge } from "@odu/execution/common/forge";
@@ -53,6 +54,8 @@ import type {
   CancelOutcome,
   CancelRequest,
   CheckoutFacts,
+  CheckoutMoveOutcome,
+  CheckoutMoveRequest,
   PushPort,
   PushResolution,
   PushTarget,
@@ -60,6 +63,8 @@ import type {
 } from "@odu/service/ports";
 import { actorOf } from "@odu/service/caller";
 import { preparePush } from "@odu/service/pushGrant";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * What the service can learn about a checkout without running anything.
@@ -113,6 +118,80 @@ export function probeCheckout(
     branch: gitBranch(checkout),
     liveRunId: live?.runId ?? null,
   };
+}
+
+/** One git command, off the event loop, with its output whichever way it
+ *  went — git says what is wrong on stderr and these sentences are what the
+ *  refusals carry. */
+async function runGit(
+  checkout: string,
+  args: readonly string[],
+): Promise<{ ok: boolean; out: string }> {
+  try {
+    const done = await execFileAsync("git", [...args], {
+      cwd: checkout,
+      encoding: "utf-8",
+      maxBuffer: GIT_OUTPUT_MAX,
+    });
+    return { ok: true, out: done.stdout.trim() };
+  } catch (err) {
+    const said = err as { stderr?: string; stdout?: string; message?: string };
+    const text = `${said.stderr ?? ""}${said.stdout ?? ""}`.trim();
+    return { ok: false, out: text === "" ? (said.message ?? "git failed") : text };
+  }
+}
+
+/** What one git command may say back. Generous for a fetch's progress, far
+ *  short of anything that could hold the daemon's memory. */
+const GIT_OUTPUT_MAX = 1024 * 1024;
+
+/**
+ * PUT A SERVICE-SIDE CLONE ON THE BRANCH AND COMMIT A START ASKED FOR.
+ *
+ * Only reached when `run.start` carried a `branch` and the clone is not
+ * already on the commit — a workflow handing the service the sha it has just
+ * pushed, which this clone has never heard of. Four steps, and each refusal
+ * is a different thing to go and do:
+ *
+ *   1. **Dirty is a refusal.** Tracked changes only, deliberately: a clone
+ *      that has run CI is full of untracked `result` links and `.ci` records,
+ *      and refusing on those would refuse every second run. Tracked edits are
+ *      somebody's work and odu does not discard work it did not make.
+ *   2. **`git fetch origin <branch>`**, whose tip is read from `FETCH_HEAD` —
+ *      what THIS fetch brought back. `origin/<branch>` is the same commit in
+ *      an ordinary clone and is not updated at all in one whose remote has no
+ *      fetch refspec, which is a clone this would then move to a stale tip.
+ *   3. **The commit must be ON that branch** — an ancestor of the tip. A sha
+ *      from another branch, or one force-pushed away, is refused with both
+ *      shas rather than checked out anyway: a run is about a commit the
+ *      branch contains, and a pin written from a detached clone pins nothing.
+ *   4. **`git checkout -B <branch> <sha>`** — the branch, pointed at that
+ *      commit, and HEAD on the branch rather than detached, which is what
+ *      `gitBranch` has to be able to answer for the run's pins.
+ */
+export async function moveCheckout({
+  checkout,
+  branch,
+  sha,
+}: CheckoutMoveRequest): Promise<CheckoutMoveOutcome> {
+  const dirty = await runGit(checkout, ["status", "--porcelain", "--untracked-files=no"]);
+  if (!dirty.ok) return { kind: "failed", detail: dirty.out };
+  if (dirty.out !== "") {
+    return { kind: "dirty", detail: dirty.out.split("\n").slice(0, 5).join("; ") };
+  }
+  const fetched = await runGit(checkout, ["fetch", "origin", branch]);
+  if (!fetched.ok) return { kind: "fetch_failed", detail: fetched.out };
+  const tip = await runGit(checkout, ["rev-parse", "FETCH_HEAD"]);
+  if (!tip.ok) return { kind: "fetch_failed", detail: tip.out };
+  const contains = await runGit(checkout, ["merge-base", "--is-ancestor", sha, tip.out]);
+  if (!contains.ok) return { kind: "not_on_branch", tip: tip.out };
+  const moved = await runGit(checkout, ["checkout", "-B", branch, sha]);
+  if (!moved.ok) return { kind: "failed", detail: moved.out };
+  const head = await runGit(checkout, ["rev-parse", "HEAD"]);
+  if (!head.ok || head.out === "") {
+    return { kind: "failed", detail: head.out === "" ? "git read no HEAD back" : head.out };
+  }
+  return { kind: "moved", head: head.out };
 }
 
 /**
@@ -342,6 +421,7 @@ export function webPorts(
       }),
     cancel: cancelThroughSocket,
     probeCheckout,
+    moveCheckout,
     push,
     // The five that made `odu ci hosts`, `odu ci lease`, `odu ci release`,
     // `odu ci dump`, `odu ci graph` and `odu ci protect` clients of the shared

@@ -160,6 +160,9 @@ export const PORT_SLOT = {
   /** `push.e2e.test.ts` — a SECOND daemon, serving a bucket the first one
    *  does not: the "served elsewhere" arm needs a real foreign `Odu-Origin`. */
   runPushForeign: 22,
+  /** `checkout-branch.e2e.test.ts` — a daemon that moves its OWN clone onto a
+   *  branch at a commit the clone has never had. */
+  checkoutBranch: 23,
 } as const;
 
 /** The port for one named slot in THIS suite's block. */

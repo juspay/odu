@@ -322,6 +322,8 @@ export function createOduService(opts: ServiceOptions): OduService {
                   {
                     launch: opts.ports.launch,
                     probeCheckout: opts.ports.probeCheckout,
+                    moveCheckout: opts.ports.moveCheckout,
+                    cancel: opts.ports.cancel,
                     push: opts.ports.push,
                     requests,
                     catalog,

@@ -42,6 +42,8 @@ import type {
   CancelOutcome,
   CancelRequest,
   CheckoutFacts,
+  CheckoutMoveOutcome,
+  CheckoutMoveRequest,
   LaunchReceipt,
   LaunchRequest,
   RetryOutcome,
@@ -341,6 +343,10 @@ export interface RecordingPorts extends ServicePorts {
   launches: LaunchRequest[];
   retries: RetryRequest[];
   cancels: CancelRequest[];
+  /** Every checkout the service asked to have MOVED, in order — the
+   *  assertion for "it moved nothing", which is what most of these tests are
+   *  about. */
+  moves: CheckoutMoveRequest[];
   /** Every probe, hold, release and protect the service ASKED FOR. A repeat
    *  that replays leaves these unchanged, which is the assertion. */
   probes: VenueProbeRequest[];
@@ -366,6 +372,11 @@ type ProtectOutcome = Awaited<ReturnType<ServicePorts["protect"]>>;
 
 export function recordingPorts(opts: {
   checkout?: (path: string) => CheckoutFacts;
+  /** What moving that checkout comes to. The default MOVES it — to the sha
+   *  it was asked for — because the interesting cases are the refusals, and
+   *  a suite states each of those by naming it here. Pair it with a
+   *  `checkout` stub that answers the new head on its second call. */
+  move?: (request: CheckoutMoveRequest) => CheckoutMoveOutcome;
   launch?: (request: LaunchRequest) => LaunchReceipt;
   retry?: (request: RetryRequest) => RetryOutcome;
   /** What the stub coordinator says back. `false` is the declined arm; a whole
@@ -385,6 +396,7 @@ export function recordingPorts(opts: {
   const launches: LaunchRequest[] = [];
   const retries: RetryRequest[] = [];
   const cancels: CancelRequest[] = [];
+  const moves: CheckoutMoveRequest[] = [];
   const probes: VenueProbeRequest[] = [];
   const holds: VenueHoldRequest[] = [];
   const releases: VenueReleaseRequest[] = [];
@@ -396,6 +408,11 @@ export function recordingPorts(opts: {
     launches,
     retries,
     cancels,
+    moves,
+    moveCheckout: async (request) => {
+      moves.push(request);
+      return opts.move?.(request) ?? { kind: "moved", head: request.sha };
+    },
     probes,
     holds,
     releases,

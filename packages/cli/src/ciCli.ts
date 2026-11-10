@@ -68,7 +68,8 @@ Every command below is a client of the shared odu service. It is started for you
 if none is running; nothing here runs CI by itself.
 
 run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH]
-    [--checkout ABS --sha SHA] [--no-deps] [--no-strict] [--no-snapshot]
+    [--checkout ABS --sha SHA [--branch NAME]] [--no-deps] [--no-strict]
+    [--no-snapshot]
     [--no-post] [--supersede] [--no-wait] [--request-id ID] [--progress json]
     [-o json]
                               # start a run in THIS checkout and watch it.
@@ -83,6 +84,13 @@ run [recipe[@platform]…] [--platform P]… [--host P=ADDR]… [--root NAMEPATH
                               # path (one the service has not got falls
                               # through to its chain); with none set,
                               # nothing is sent and the service's own stands.
+                              # --branch lets the service FETCH and move that
+                              # clone onto NAME at --sha when it is not there
+                              # already (it refuses a dirty tree, and a sha
+                              # that is not on the branch). Without it a
+                              # checkout that moved is refused, as before.
+                              # A clone must be ON a branch for a run's pins:
+                              # a detached HEAD pins nothing.
                               # Every recipe's result* closure is pushed to
                               # the odu cache this repository's flake.nix
                               # nixConfig already reads from, when this daemon
@@ -327,6 +335,9 @@ export async function ciCommand(
           // Parsed as a pair and refused as a pair — see `runTarget`.
           checkout: { type: "string" },
           sha: { type: "string" },
+          // And the branch that clone should be ON, which licenses the
+          // service to fetch and move it there. Refused without `--checkout`.
+          branch: { type: "string" },
           "no-deps": { type: "boolean" },
           "no-strict": { type: "boolean" },
           "no-snapshot": { type: "boolean" },
@@ -368,6 +379,7 @@ export async function ciCommand(
         ...(values.origin === undefined ? {} : { origin: values.origin }),
         ...(values.checkout === undefined ? {} : { checkout: values.checkout }),
         ...(values.sha === undefined ? {} : { sha: values.sha }),
+        ...(values.branch === undefined ? {} : { branch: values.branch }),
         json: values.output === "json",
       });
     }

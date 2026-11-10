@@ -326,9 +326,11 @@ What each step delivers:
   through Tailscale-operator egress Services; one pod ssh identity is
   authorised on every lane's `ci` user; lanes trust the pod's substituter. A
   personal token was enough to act from a shell — what shipped is `odu ci run
-  --checkout <abs> --sha <sha>` and `actor` on every run. Still manual until
-  5.1: the checkout under `/data/checkouts/<repo>`, and the tailnet policy
-  (lanes ← `tag:k8s` on 22, pod ← lanes on 443).[^podci]
+  --checkout <abs> --sha <sha>` and `actor` on every run, and a caller may now
+  hand that service a BRANCH beside the commit (`--branch`), which lets it
+  fetch and move its own clone onto a sha it has not got yet. Still manual
+  until 5.1: the checkout under `/data/checkouts/<repo>`, and the tailnet
+  policy (lanes ← `tag:k8s` on 22, pod ← lanes on 443).[^podci]
 
 ### Phase 5: hosted CI
 

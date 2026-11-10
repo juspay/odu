@@ -854,6 +854,9 @@ async function relaunch(
     push: null,
     pushSkipped: null,
     pushKeyWarning: null,
+    // A REPLAY MOVES NOTHING. It runs the checkout as it stands, which is
+    // what makes it a replay rather than a second start.
+    checkoutMoved: null,
   };
   // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, for the same
   // reason the live path marks before its rerun call: from here on, a lost

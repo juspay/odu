@@ -107,6 +107,10 @@ export interface LaunchRequest {
    *  that is pushing and a run that is not are opposite states, and a reader
    *  holding one sentence had to consult `push` to learn which it held. */
   readonly pushKeyWarning: string | null;
+  /** THE CLONE WAS MOVED to get here — one sentence for the setup log, beside
+   *  the push's own. Null when nothing was moved, which is every run started
+   *  from a checkout the caller is standing in. */
+  readonly checkoutMoved: string | null;
 }
 
 export interface LaunchReceipt {
@@ -331,6 +335,53 @@ export interface CheckoutFacts {
  *  wants to state "the checkout moved on" must be able to say without one. */
 export type CheckoutProbe = (checkout: string) => CheckoutFacts;
 
+// ── moving a checkout to the commit it was asked for ────────────────────────
+
+/** A clone the SERVICE keeps, the branch it should be on, and the commit on
+ *  that branch the caller wants run. */
+export interface CheckoutMoveRequest {
+  readonly checkout: string;
+  readonly branch: string;
+  readonly sha: string;
+}
+
+/**
+ * WHAT MOVING THAT CLONE CAME TO — four refusals and one success, as values.
+ *
+ * Each arm is a fact the port learned and the SERVICE words, for the reason
+ * {@link CheckoutFacts} is a struct of facts: a port that composed the
+ * sentence would be a second place refusals are written, and this one has to
+ * be stated by a suite that has no git.
+ */
+export type CheckoutMoveOutcome =
+  /** The clone is on `branch` at `sha`, and `head` is what it reads now. */
+  | { readonly kind: "moved"; readonly head: string }
+  /** Uncommitted work. Refused rather than stashed or discarded: a tree
+   *  somebody is holding is not odu's to throw away. */
+  | { readonly kind: "dirty"; readonly detail: string }
+  /** `git fetch origin <branch>` failed — no such branch, no network, no
+   *  credentials. `detail` is git's own sentence. */
+  | { readonly kind: "fetch_failed"; readonly detail: string }
+  /** The fetch landed and `sha` is NOT an ancestor of `origin/<branch>`:
+   *  either a commit on some other branch, or one that was force-pushed away.
+   *  `tip` is what `origin/<branch>` is on, so both shas can be said. */
+  | { readonly kind: "not_on_branch"; readonly tip: string }
+  /** Everything else git refused — the checkout itself, or a HEAD that could
+   *  not be read back afterwards. */
+  | { readonly kind: "failed"; readonly detail: string };
+
+/**
+ * Move a clone onto a branch at a commit.
+ *
+ * A SEPARATE port from {@link CheckoutProbe} and asynchronous, because this
+ * one reaches the network: the probe is a synchronous filesystem read that
+ * every start performs, and this runs only when a caller handed the service a
+ * commit its clone has not got.
+ */
+export type CheckoutMover = (
+  request: CheckoutMoveRequest,
+) => Promise<CheckoutMoveOutcome>;
+
 // ── reading a checkout's pipeline ───────────────────────────────────────────
 
 /** One recipe in a resolved DAG. Structurally `@odu/execution`'s `TaskSpec`,
@@ -538,6 +589,9 @@ export interface ServicePorts {
    *  substituter. */
   push: PushPort;
   probeCheckout: CheckoutProbe;
+  /** Put a service-side clone on the branch and commit a start named. Beside
+   *  the probe for the same reason `push` is: it reaches the network. */
+  moveCheckout: CheckoutMover;
   pipeline: PipelineReader;
   probeVenues: VenueProber;
   holdVenue: VenueHolder;

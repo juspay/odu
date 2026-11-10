@@ -207,6 +207,10 @@ export interface RunArgs {
    *  the `trusted-public-keys` warning. Absent when there is nothing to say. */
   pushSkipped?: string;
   pushKeyWarning?: string;
+  /** What the service had to do to this checkout before the run could be
+   *  about this commit — "moved <path> to <branch> at <sha7>". Absent when
+   *  nothing was moved. */
+  checkoutMoved?: string;
 }
 
 /**
@@ -2291,6 +2295,13 @@ async function orchestrate(
     const id = fanId(SETUP, platform);
     if (store.get().nodes[id]?.status !== "pending") return;
     updateNode(id, { status: "running", startedAt: Date.now() });
+    // WHAT THE SERVICE DID TO THIS CHECKOUT to make the run about this
+    // commit, first, because it happened first: a clone the service moved
+    // onto a branch is a fact an operator reading "why is this building that
+    // sha" needs before anything else on this node.
+    if (args.checkoutMoved !== undefined) {
+      appendLocal(id, `[odu] ${args.checkoutMoved}\n`);
+    }
     // THE ONE LINE THIS RUN OWES ABOUT PUSHING (PLAN 4.1) — where it is
     // pushing, or why it is not. Written here because `_ci-setup` is the node
     // every face already opens first, and because a run must be able to say
