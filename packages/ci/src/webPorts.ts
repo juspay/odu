@@ -191,13 +191,14 @@ function gitSaid(out: string): string {
  *      what THIS fetch brought back. `origin/<branch>` is the same commit in
  *      an ordinary clone and is not updated at all in one whose remote has no
  *      fetch refspec, which is a clone this would then move to a stale tip.
- *   3. **The commit must be ON that branch** — an ancestor of the tip. A sha
- *      from another branch, or one force-pushed away, is refused with both
- *      shas rather than checked out anyway: a run is about a commit the
- *      branch contains, and a pin written from a detached clone pins nothing.
- *      Read off the EXIT CODE: `merge-base --is-ancestor` answers 1 for "it
- *      is not", and anything else means it could not look — which is a
- *      failure, not a verdict about the commit.
+ *   3. **The commit must be ON that branch** — present after that fetch, and
+ *      an ancestor of the tip. A sha from another branch, or one force-pushed
+ *      away, is refused with both shas rather than checked out anyway: a run
+ *      is about a commit the branch contains, and a pin written from a
+ *      detached clone pins nothing. Both halves are measured — `cat-file -e`
+ *      for "the fetch did not bring it", `merge-base --is-ancestor`'s exit 1
+ *      for "it is not reachable" — because anything else from `merge-base`
+ *      means it could not look, which is a failure and not a verdict.
  *   4. **`git checkout -B <branch> <sha>`** — the branch, pointed at that
  *      commit, and HEAD on the branch rather than detached, which is what
  *      `gitBranch` has to be able to answer for the run's pins.
@@ -225,6 +226,15 @@ export async function moveCheckout({
   // it brought back, which is a different thing to go and do.
   const tip = await runGit(checkout, ["rev-parse", "FETCH_HEAD"]);
   if (!tip.ok) return { kind: "failed", detail: tip.said };
+  // IS THE COMMIT EVEN HERE? The ordinary way a caller names a sha that is
+  // not on this branch is a sha from ANOTHER branch — which the fetch above
+  // did not bring, so the object does not exist locally and `merge-base`
+  // cannot compare it. That is still the measured answer "what we fetched of
+  // this branch does not contain it", so it is `not_on_branch` and not a
+  // failure; what it must not be is `merge-base` exiting 128 and being read
+  // as a verdict.
+  const present = await runGit(checkout, ["cat-file", "-e", `${sha}^{commit}`]);
+  if (!present.ok) return { kind: "not_on_branch", tip: tip.value };
   const contains = await runGit(checkout, [
     "merge-base",
     "--is-ancestor",
@@ -232,6 +242,9 @@ export async function moveCheckout({
     sha,
     tip.value,
   ]);
+  // EXIT 1 is git's answer "no"; anything else is git unable to look, and a
+  // refusal naming two shas would be a sentence about a comparison that never
+  // ran.
   if (!contains.ok && contains.code !== 1) {
     return { kind: "failed", detail: contains.said };
   }
