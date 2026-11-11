@@ -157,21 +157,49 @@ let
         bun scripts/build-web-ui.ts $out
       '';
 
-  # The repo tree with node_modules installed and the @kolu/* surface
-  # libraries hydrated from the npins kolu pin — bun-runnable, no build
-  # step (the kolu/drishti convention).
+  # WHAT `bun install` MAKES, and nothing of the source tree. Keyed on the
+  # manifests and the lockfile, so it is ONE store path for as long as the
+  # dependencies hold still.
   #
+  # `odu-base` used to be this install and the sources in one derivation, which
+  # made 226 MB of node_modules part of a package whose hash moves with every
+  # commit. The cache measured what that costs: 187 copies in eight days, 42 GB
+  # of the bucket's 117 GB, every one of them the same dependencies re-pushed
+  # under a new name because a `.ts` file one directory over had changed.
+  # Split out, those bytes are stored once per lockfile and `odu-base` is left
+  # holding only what genuinely differs between two commits.
+  #
+  # The fileset is therefore everything `bun install --frozen-lockfile` READS
+  # and not one file more: the root manifest, the lockfile, `bunfig.toml` (the
+  # linker), `bun.nix` (the fetched tarballs), every workspace member's
+  # `package.json` so the member resolves, and the hydrate script the
+  # post-install hook runs. Adding a source file here gives the per-commit
+  # churn back.
+  depsSrc = pkgs.lib.fileset.toSource {
+    root = ./.;
+    fileset = pkgs.lib.fileset.unions [
+      ./package.json
+      ./bun.lock
+      ./bunfig.toml
+      ./bun.nix
+      (pkgs.lib.fileset.fileFilter (f: f.name == "package.json") ./packages)
+      ./scripts/hydrate-kolu-packages.sh
+    ];
+  };
+
   # Dep fetching: `b2n.fetchBunDeps` reads the committed `bun.nix` and
   # builds a fake Bun cache via per-tarball FODs (hashes from the
   # lockfile, no network in the build sandbox). `b2n.hook` installs that
-  # cache into $src via `bun install --ignore-scripts`.
-  base =
+  # cache into $src via `bun install --ignore-scripts`, and the @kolu/*
+  # surface libraries are hydrated from the npins kolu pin on top of it.
+  odu-deps =
     if b2n == null
-    then throw "odu's build derivation needs `b2n` (lib.mkBun2nix output) — invoke via flake.nix"
+    then throw "odu's dependency tree needs `b2n` (lib.mkBun2nix output) — invoke via flake.nix"
     else
       pkgs.stdenv.mkDerivation {
-        pname = "odu-base";
-        inherit version src;
+        pname = "odu-deps";
+        inherit version;
+        src = depsSrc;
 
         # `b2n.hook` propagates its own bun via propagated-build-inputs.
         # Listing our npins-pinned `bun` FIRST wins on PATH, so the install
@@ -227,12 +255,91 @@ let
             ${pkgs.cordis.hydrateArgs}
         '';
 
+        # node_modules AND NOTHING ELSE. The manifests that produced it are
+        # already in the lockfile's hash, and keeping a copy of them here would
+        # put a second spelling of the sources in a derivation whose whole point
+        # is not to have any.
+        #
+        # The workspace links this leaves in `$out/node_modules/@odu/*` point at
+        # `../../packages/<member>`, which is NOT in this output and is not
+        # meant to be. They stay RELATIVE so they land on real source inside
+        # `base`'s tree; dangling here is the trick, not an accident.
         installPhase = ''
           runHook preInstall
-          cp -r . $out
+          mkdir -p $out
+          cp -a node_modules $out/node_modules
+
+          # The isolated linker also gives every workspace member its own
+          # node_modules beside its manifest — relative symlinks, decided by the
+          # manifests, install output like the rest. They are parked under a
+          # dotted name no resolver will read as a scope, and `base` replays
+          # them into `packages/<member>/node_modules` where their `../../../`
+          # hops are true.
+          for member in packages/*; do
+            [ -d "$member/node_modules" ] || continue
+            name=$(basename "$member")
+            mkdir -p "$out/node_modules/.workspaces/$name"
+            cp -a "$member/node_modules" "$out/node_modules/.workspaces/$name/node_modules"
+          done
           runHook postInstall
         '';
       };
+
+  # The repo tree, bun-runnable with no build step (the kolu/drishti
+  # convention) — the source fileset, plus a node_modules that POINTS AT
+  # `odu-deps` rather than containing it. A commit's worth of difference is now
+  # a few megabytes of source and a few hundred symlinks.
+  base = pkgs.runCommand "odu-base-${version}"
+    {
+      meta.description = "odu's source tree with node_modules resolved against odu-deps";
+    } ''
+    cp -r ${src} $out
+    chmod -R u+w $out
+
+    shopt -s dotglob nullglob
+
+    # Mirror deps' node_modules one directory at a time. Three kinds of entry,
+    # three answers:
+    #
+    #   a symlink      — replayed VERBATIM. Every one bun writes is relative,
+    #                    and the tree it means is THIS one: `.bun/…` lands on
+    #                    the reference below, `../../packages/<member>` on real
+    #                    source.
+    #   a scope (`@…`) — recursed into, because `@odu` holds workspace links and
+    #                    `@babel` holds dependency links and only the entries
+    #                    themselves know which.
+    #   any other dir  — linked BY REFERENCE into the store. That is `.bun` (the
+    #                    254 MB this change is about), `.bin`, and the hydrated
+    #                    `@kolu/*`, `@olai/*`, `cordis` and `osfacts-client`
+    #                    sources. A hydrated package resolves its own imports
+    #                    from its REALPATH, which is inside `odu-deps`, whose
+    #                    root node_modules is the one holding `effect` and
+    #                    `@orpc/*` — the walk-up invariant `bunfig.toml` states,
+    #                    now satisfied one derivation over.
+    mirror() {
+      local from=$1 to=$2 path name
+      mkdir -p "$to"
+      for path in "$from"/*; do
+        name=''${path##*/}
+        if [ "$name" = ".workspaces" ]; then
+          continue
+        elif [ -L "$path" ]; then
+          cp -P "$path" "$to/$name"
+        elif [ -d "$path" ] && [ "''${name#@}" != "$name" ]; then
+          mirror "$path" "$to/$name"
+        else
+          ln -s "$path" "$to/$name"
+        fi
+      done
+    }
+    mirror ${odu-deps}/node_modules $out/node_modules
+
+    for member in ${odu-deps}/node_modules/.workspaces/*; do
+      target=$out/packages/$(basename "$member")/node_modules
+      cp -a "$member/node_modules" "$target"
+      chmod -R u+w "$target"
+    done
+  '';
 
   # Lane agent: the coordinator `nix copy`s this derivation's closure to
   # each lane host, realises it there, and runs it over
@@ -349,7 +456,7 @@ let
   '';
 in
 {
-  inherit odu odu-runner base web-ui;
+  inherit odu odu-runner base odu-deps web-ui;
   # The tree a remote host resolves the lane runner from, with the
   # `binary-cache.json` sidecar and `commit-hash` beside it. The `odu` wrapper
   # bakes this same derivation; `nix-cache.yml`'s `publish-closure` step
