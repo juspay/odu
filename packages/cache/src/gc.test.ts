@@ -18,9 +18,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { diskObjectStore } from "@odu/objects";
+import { diskObjectStore, type ObjectStore } from "@odu/objects";
 import { type BucketRow, type CacheRepo, type ObjectRow, type PinRow, openCacheRepo } from "./db";
-import { planGc, previewGc, runGc, sweepOrphans } from "./gc";
+import {
+  type GcBucketPlan,
+  type GcCollection,
+  type GcRunOptions,
+  planGc,
+  previewGc,
+  runGc,
+  sweepOrphans,
+} from "./gc";
 import { objectKey } from "./staging";
 
 const NOW = 1_700_000_000_000;
@@ -211,9 +219,41 @@ describe("runGc", () => {
   const keys = async (prefix: string): Promise<string[]> =>
     (await store().list(prefix)).map((entry) => entry.key).sort();
 
+  /** The collection, on the FIXTURE'S clock. Each batch asks the plan's own
+   *  question again, so a run taken on another clock would answer about a
+   *  different retention than the plan it was handed. */
+  const collect = (
+    repo: CacheRepo,
+    plan: readonly GcBucketPlan[],
+    objectsOf: (bucket: string) => ObjectStore,
+    options: GcRunOptions = {},
+  ): Promise<GcCollection> => runGc(repo, plan, objectsOf, { now: () => NOW, ...options });
+
+  /** A store that refuses every `deleteMany` from the `from`-th BATCH on,
+   *  the way R2 refused one: a batch is two calls, the narinfos and then the
+   *  NARs. The body is the service's, XML and all — what reaches a person
+   *  must not be. */
+  const refusing = (from: number): ObjectStore => {
+    const live = store();
+    let calls = 0;
+    return {
+      ...live,
+      deleteMany: async (keys: readonly string[]): Promise<void> => {
+        calls += 1;
+        if (Math.ceil(calls / 2) >= from) {
+          throw new Error(
+            "DeleteObjects main: 429 <Error><Code>ServiceUnavailable</Code>" +
+              "<Message>Reduce your concurrent request rate for the same object.</Message></Error>",
+          );
+        }
+        await live.deleteMany(keys);
+      },
+    };
+  };
+
   it("drops the rows and deletes each evicted object's key", async () => {
     const repo = await seeded(objects.filter((row) => row.bucket === "main"));
-    const { report, removed } = await runGc(
+    const { report, removed } = await collect(
       repo,
       planGc({ buckets: [bucket], objects, pins, now: NOW }),
       () => store(),
@@ -239,7 +279,7 @@ describe("runGc", () => {
     const repo = await seeded(rows);
     const plan = planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW });
     const promised = plan[0]?.bytes ?? -1;
-    const { report } = await runGc(repo, plan, () => store());
+    const { report } = await collect(repo, plan, () => store());
     expect(report.bytes).toBe(promised);
     // Non-vacuous: C and its twin are both evicted and share ONE object, so
     // a plan that summed every row would have promised 100 bytes too many.
@@ -250,7 +290,7 @@ describe("runGc", () => {
 
   it("names what left, so the deletion can be announced", async () => {
     const repo = await seeded([C]);
-    const { removed } = await runGc(
+    const { removed } = await collect(
       repo,
       planGc({ buckets: [bucket], objects: [C], pins: [], now: NOW }),
       () => store(),
@@ -273,7 +313,7 @@ describe("runGc", () => {
     };
     const repo = await seeded([oldTwin, liveTwin]);
     const rows = [oldTwin, liveTwin];
-    const { report, removed } = await runGc(
+    const { report, removed } = await collect(
       repo,
       planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }),
       () => store(),
@@ -287,35 +327,38 @@ describe("runGc", () => {
     expect(removed.get("main")?.[0]?.narFile).toBeNull();
   });
 
-  it("re-checks the rows before each delete: a NarHash recorded mid-run keeps its bytes", async () => {
+  it("re-checks the rows before each BATCH: a NarHash recorded mid-run keeps its bytes", async () => {
     // THE SNAPSHOT IS NOT THE ANSWER: a row naming an evicted NarHash that
-    // appears while the collection runs must keep that object.
+    // appears while the collection runs must keep that object. One row a
+    // batch, so the row that lands during the first batch's deletes is there
+    // to be found when the second is decided.
     const rows = [C, F];
     const repo = await seeded(rows);
     const arriving = store();
-    let seen = 0;
+    let batches = 0;
     const watched = {
       ...arriving,
-      delete: async (key: string): Promise<void> => {
-        seen += 1;
-        if (seen === 1) {
-          const next = rows.find((row) => keyOf(row) !== key) as ObjectRow;
+      deleteMany: async (keys: readonly string[]): Promise<void> => {
+        batches += 1;
+        if (batches === 1) {
           repo.putObject({
-            ...next,
+            ...F,
             storePath: "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-arrived",
             hash: "z".repeat(32),
             lastWanted: NOW,
           });
         }
-        await arriving.delete(key);
+        await arriving.deleteMany(keys);
       },
     };
-    const { report } = await runGc(
+    const { report } = await collect(
       repo,
       planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }),
       () => watched,
+      { batch: 1 },
     );
     expect(report.evicted).toBe(2);
+    // F's bytes stayed: the row that arrived names its NarHash.
     expect(report.kept).toBe(1);
     expect(await keys("main")).toHaveLength(1);
   });
@@ -325,18 +368,75 @@ describe("runGc", () => {
       .filter((row) => row.bucket === "main")
       .map((row) => (row.storePath === C.storePath ? { ...row, fileSize: 999 } : row));
     const repo = await seeded(sized);
-    const { report } = await runGc(
+    const { report } = await collect(
       repo,
-      planGc({ buckets: [bucket], objects: sized, pins: [], now: NOW }),
+      planGc({ buckets: [bucket], objects: sized, pins, now: NOW }),
       () => store(),
     );
-    // C's recorded `fileSize` beats its NAR size; D is evicted too, because
-    // this plan has no pins.
-    const expected = [C, D, E, F].reduce(
+    // C's recorded `fileSize` beats its NAR size; D is held by the fixture's
+    // pin, which the collection re-checks against the rows as they are.
+    const expected = [C, E, F].reduce(
       (sum, row) => sum + (row.storePath === C.storePath ? 999 : row.narSize),
       0,
     );
     expect(report.buckets[0]?.bytes).toBe(expected);
+  });
+
+  it("stops where the store refused, and keeps every row whose objects did not go", async () => {
+    // THE DAY THIS WAS WRITTEN: R2 answered one DELETE with a 429 a quarter
+    // of an hour into a 6 137-path collection, and the whole thing ended with
+    // an XML document on the bucket page and every row of the aborted batch
+    // already forgotten. Now the batch that failed keeps its rows.
+    const rows = [C, E, F];
+    const repo = await seeded(rows);
+    const { report, removed } = await collect(
+      repo,
+      planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }),
+      () => refusing(2),
+      { batch: 1 },
+    );
+    expect(report.evicted).toBe(1);
+    expect(report.bytes).toBe(100);
+    // WHAT A PERSON READS: the service's own words, and no markup.
+    expect(report.stopped).toContain("Reduce your concurrent request rate");
+    expect(report.stopped).not.toContain("<");
+    // Only the batch that landed is announced, and only its row is gone.
+    expect(removed.get("main")?.map((one) => one.storePath)).toEqual([C.storePath]);
+    expect(repo.objects("main").map((row) => row.storePath).sort()).toEqual(
+      [E.storePath, F.storePath].sort(),
+    );
+    expect(await keys("main")).toEqual([E, F].map(keyOf).sort());
+
+    // AND PRESSING RUN GC AGAIN RESUMES: the rows that stayed are the plan.
+    const again = await collect(
+      repo,
+      planGc({ buckets: [bucket], objects: repo.objects("main"), pins: [], now: NOW }),
+      () => store(),
+      { batch: 1 },
+    );
+    expect(again.report).toMatchObject({ evicted: 2, stopped: null });
+    expect(repo.objects("main")).toEqual([]);
+    expect(await keys("main")).toEqual([]);
+  });
+
+  it("deletes objects before rows: a store that refuses everything leaves every row", async () => {
+    // THE ORDER IS THE WHOLE POINT. A row dropped ahead of its object is a
+    // narinfo the store still serves for a path odu has forgotten, with a NAR
+    // URL that 404s — so a collection that could delete NOTHING must forget
+    // nothing either.
+    const rows = [C, E, F];
+    const repo = await seeded(rows);
+    const { report, removed } = await collect(
+      repo,
+      planGc({ buckets: [bucket], objects: rows, pins: [], now: NOW }),
+      () => refusing(1),
+      { batch: 1 },
+    );
+    expect(report).toMatchObject({ evicted: 0, kept: 0, bytes: 0 });
+    expect(report.stopped).not.toBeNull();
+    expect(removed.get("main")).toEqual([]);
+    expect(repo.objects("main")).toHaveLength(3);
+    expect(await keys("main")).toEqual(rows.map(keyOf).sort());
   });
 
   it("sweeps the keys no row names, and leaves another bucket's alone", async () => {

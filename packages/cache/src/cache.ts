@@ -1962,10 +1962,16 @@ export function createCache(options: CacheOptions): Cache {
     planGc({ buckets, objects: repo.objects(), pins: repo.pins(), now: now() });
 
   /**
-   * The whole collection — plan, delete, and (for a collection of EVERY
-   * bucket) the orphan sweep — under the one write lock, so a pin or a
-   * re-push cannot land between the plan and the delete and lose a path it
-   * had just promised to keep.
+   * The whole collection: plan, delete in batches, and (for a collection of
+   * EVERY bucket) the orphan sweep.
+   *
+   * THE WRITE LOCK IS TAKEN FOR DECISIONS, NEVER ACROSS THE NETWORK. The plan
+   * is made under it, each batch is decided and its rows dropped under it, and
+   * the deletes in between run with it free — a collection of forty thousand
+   * objects used to hold it for the whole hour, and every push to the daemon
+   * waited behind it. What that keeps is in `runGc`: a pin or a re-push that
+   * lands before a batch is decided still wins, because the batch asks the
+   * plan's own predicate again under the lock.
    *
    * `sweep` is false for one named bucket: orphans appear when a push dies,
    * not when retention passes, so the button a person presses twice must not
@@ -1976,37 +1982,43 @@ export function createCache(options: CacheOptions): Cache {
     buckets: readonly BucketRow[],
     sweep: boolean,
   ): Promise<GcCollection> {
-    return withWriteLock(async () => {
-      const collected = await runGc(repo, planFor(buckets), objectsOf);
-      const { report } = collected;
-      if (sweep) {
-        for (const bucket of buckets) {
-          const swept = await sweepOrphans(repo, bucket.name, storeOf(bucket));
-          const entry = report.buckets.find((one) => one.bucket === bucket.name);
-          if (entry !== undefined) entry.orphans = swept;
-          report.orphans += swept;
-        }
+    const plan = await withWriteLock(async () => planFor(buckets));
+    const collected = await runGc(repo, plan, objectsOf, { now, withLock: withWriteLock });
+    const { report } = collected;
+    // A COLLECTION THAT STOPPED DOES NOT THEN WALK THE WHOLE STORE: the sweep
+    // is a full paged LIST per bucket, asked of the service that has just
+    // refused a delete, and what it would find is still there for the next
+    // pass.
+    if (sweep && report.stopped === null) {
+      for (const bucket of buckets) {
+        const swept = await sweepOrphans(repo, bucket.name, storeOf(bucket));
+        const entry = report.buckets.find((one) => one.bucket === bucket.name);
+        if (entry !== undefined) entry.orphans = swept;
+        report.orphans += swept;
       }
-      // Every bucket the collection touched answers a different count now.
-      if (report.evicted > 0 || report.orphans > 0) notify();
-      options.log?.("cache.gc", {
-        evicted: report.evicted,
-        kept: report.kept,
-        orphans: report.orphans,
-        bytes: report.bytes,
-        // AND THE SPLIT, because the totals cannot be apportioned afterwards:
-        // `/metrics` counts evictions per bucket, and a run that took a
-        // thousand paths is only actionable once the line says which bucket
-        // gave them up. The report already has it; this is it flattened to the
-        // three fields a reader of the line (or of the counter) acts on.
-        buckets: report.buckets.map((one) => ({
-          bucket: one.bucket,
-          evicted: one.evicted,
-          bytes: one.bytes,
-        })),
-      });
-      return collected;
+    }
+    // Every bucket the collection touched answers a different count now.
+    if (report.evicted > 0 || report.orphans > 0) notify();
+    options.log?.("cache.gc", {
+      evicted: report.evicted,
+      kept: report.kept,
+      orphans: report.orphans,
+      bytes: report.bytes,
+      // AND THE SPLIT, because the totals cannot be apportioned afterwards:
+      // `/metrics` counts evictions per bucket, and a run that took a
+      // thousand paths is only actionable once the line says which bucket
+      // gave them up. The report already has it; this is it flattened to the
+      // three fields a reader of the line (or of the counter) acts on.
+      buckets: report.buckets.map((one) => ({
+        bucket: one.bucket,
+        evicted: one.evicted,
+        bytes: one.bytes,
+      })),
+      // AND WHY IT STOPPED, when it did: the one line the bucket page shows,
+      // in the log a daemon keeps.
+      ...(report.stopped === null ? {} : { stopped: report.stopped }),
     });
+    return collected;
   }
 
   async function proveSelfNow(): Promise<SelfProofReport> {

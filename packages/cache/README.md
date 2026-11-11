@@ -121,10 +121,15 @@ on the wire and `cache_bucket_create` to an agent.
   store and deletes object keys no row named — a put whose record never landed.
   They are bytes nothing else can enumerate, so the pass that sweeps them is
   the one moment they are visible (`orphans` on the report).
-- **Collecting is `list` and `delete` and nothing else.** GC speaks only
+- **Collecting is `list` and `deleteMany` and nothing else.** GC speaks only
   `ObjectStore`, so a bucket on R2 collects exactly as one on local disk —
   `@odu/objects`' contract suite and `src/gcStores.test.ts` run the same cases
   against disk AND a real S3 service.
+- **A collection is batches, objects before rows.** Five hundred rows at a
+  time: decided under the write lock, deleted with the lock free, rows dropped
+  under it again. A store that refuses a delete stops the run with `stopped`
+  on the report — one plain sentence — and every row whose objects were not
+  confirmed deleted is still there, so collecting again resumes.
 - **What left is announced, not purged here.** The deleted URLs go out through
   `CachePurge` (`@odu/cordis`): the cloudflare row purges them at the CDN, and
   with nobody registered `announce` is a no-op — no CDN, no purge, no refusal.

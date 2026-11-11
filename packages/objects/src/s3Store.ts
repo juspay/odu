@@ -4,7 +4,7 @@
  * `s3ObjectStore`).
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { S3Client } from "bun";
 import {
   type CopyOptions,
@@ -72,11 +72,78 @@ const READ_WINDOW = 1024 * 1024;
 const READ_PIECE = 64 * 1024;
 /** UploadPartCopy's ceiling is 5 GiB a part; 1 GiB keeps a copy's parts few. */
 const COPY_PART = 1024 * 1024 * 1024;
+/** Keys in one `DeleteObjects`. S3's own ceiling, and R2 keeps it. */
+const DELETE_KEYS = 1000;
 
-/** An S3 call that answered something other than what it promised. */
+/**
+ * AN S3 CALL THAT ANSWERED SOMETHING OTHER THAN WHAT IT PROMISED — in words.
+ *
+ * The message reaches a person: a collection that stopped says why on the
+ * bucket page, and an XML document is not a sentence. So the service's own
+ * `<Code>` and `<Message>` answer when the body is S3's error document, and
+ * `tries` says how many times the call was made where the service was asked
+ * again (see {@link underPressure}).
+ */
 class S3Failure extends Error {
-  constructor(what: string, response: Response, body: string) {
-    super(`${what}: ${response.status} ${body.slice(0, 300)}`);
+  constructor(what: string, status: number, body: string, tries = 1) {
+    super(`${what}: ${status} ${said(body)}${tries > 1 ? ` after ${tries} tries` : ""}`.trimEnd());
+  }
+}
+
+/** WHAT THE SERVICE SAID: the code and sentence out of an S3 error document,
+ *  or the first 300 characters of whatever else arrived, on one line. */
+const said = (body: string): string => {
+  const code = xmlValue(body, "Code");
+  if (code === null) return body.slice(0, 300).replace(/\s+/g, " ").trim();
+  const message = xmlValue(body, "Message");
+  return message === null ? code : `${code} (${message})`;
+};
+
+/**
+ * HOW LONG A SERVICE THAT SAID "SLOW DOWN" IS LEFT ALONE, and how many times
+ * it is asked at all: 250 ms doubling, five tries in the whole, with jitter
+ * so callers refused together do not return together.
+ *
+ * This is the other half of why a collection deletes in batches. R2 answered
+ * `429 ServiceUnavailable "Reduce your concurrent request rate for the same
+ * object"` a quarter of an hour into one, and a single refusal ended the
+ * whole collection — a service asking for less is not a failure, it is a
+ * service asking for less.
+ */
+const PRESSURE_BACKOFF_MS = [250, 500, 1000, 2000] as const;
+export const S3_PRESSURE_TRIES = PRESSURE_BACKOFF_MS.length + 1;
+
+/** The three ways an S3 service says "you are asking too fast": HTTP's own
+ *  429, a 503, and the `SlowDown` code AWS answers with a 503 body. */
+const slowingDown = (status: number, body: string): boolean =>
+  status === 429 || status === 503 || body.includes("<Code>SlowDown</Code>");
+
+/** What an attempt answers when the service asked for less: what to say if
+ *  this was the last try. */
+interface Pressed {
+  readonly pressed: { readonly what: string; readonly status: number; readonly body: string };
+}
+const isPressed = (outcome: unknown): outcome is Pressed =>
+  typeof outcome === "object" && outcome !== null && "pressed" in outcome;
+
+/**
+ * RUN `attempt` UNTIL THE SERVICE STOPS ASKING FOR LESS, then answer what it
+ * answered; after {@link S3_PRESSURE_TRIES} of them, throw the last refusal
+ * as the {@link S3Failure} it always was, naming the tries.
+ *
+ * Every verb may use it; the ones that do are the DELETES, whose request is
+ * a few hundred bytes this process can send again. A body that is a stream
+ * is read once and cannot be, which is why this is a helper and not a
+ * wrapper around `call`.
+ */
+async function underPressure<T>(attempt: () => Promise<T | Pressed>): Promise<T> {
+  for (let tries = 1; ; tries += 1) {
+    const outcome = await attempt();
+    if (!isPressed(outcome)) return outcome;
+    const base = PRESSURE_BACKOFF_MS[tries - 1];
+    const { what, status, body } = outcome.pressed;
+    if (base === undefined) throw new S3Failure(what, status, body, tries);
+    await Bun.sleep(base + Math.floor(Math.random() * base * 0.25));
   }
 }
 
@@ -98,6 +165,11 @@ const xmlValue = (xml: string, element: string): string | null => {
   const found = new RegExp(`<${element}>([^<]*)</${element}>`).exec(xml);
   return found === null ? null : (found[1] as string).replaceAll("&#34;", '"').replaceAll("&quot;", '"');
 };
+
+/** A key as XML text. Nothing a store writes carries these, and a body that
+ *  is not well-formed is a request S3 refuses whole. */
+const xmlText = (text: string): string =>
+  text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
 /**
  * HOW A CONDITIONAL WRITE IS DECIDED. `412 Precondition Failed` is the only
@@ -262,7 +334,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   async function headOf(key: string): Promise<{ size: number; facts: ObjectFacts | null } | null> {
     const response = await call("HEAD", safeKey(key));
     if (response.status === 404) return null;
-    if (!response.ok) throw new S3Failure(`HEAD ${key}`, response, "");
+    if (!response.ok) throw new S3Failure(`HEAD ${key}`, response.status, "");
     /** A count a header states, or null when it states none this can use. */
     const counted = (header: string): number | null => {
       const value = Number(response.headers.get(header) ?? Number.NaN);
@@ -281,10 +353,73 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     return { size: measured ?? 0, facts: null };
   }
 
+  /** ONE KEY, ONE SIGNED DELETE — asked again while the service asks for
+   *  less. S3's DELETE of an absent key is a 204, and a 404 from a service
+   *  that answers one instead is the same idempotent nothing. */
   async function deleteKey(key: string): Promise<void> {
-    const response = await call("DELETE", key);
-    const body = await response.text();
-    if (!response.ok && response.status !== 404) throw new S3Failure(`DELETE ${key}`, response, body);
+    await underPressure(async () => {
+      const response = await call("DELETE", key);
+      const body = await response.text();
+      if (slowingDown(response.status, body)) {
+        return { pressed: { what: `DELETE ${key}`, status: response.status, body } };
+      }
+      if (!response.ok && response.status !== 404) throw new S3Failure(`DELETE ${key}`, response.status, body);
+      return null;
+    });
+  }
+
+  /**
+   * ONE `DeleteObjects` — up to {@link DELETE_KEYS} keys in ONE request, and
+   * the reason a collection of six thousand paths finishes.
+   *
+   * QUIET, so a 200 carries only what did NOT go. An absent key is not among
+   * them: S3 reports deleting a key that was never there as a success, which
+   * is the same promise `delete` makes. A key the service refused with a code
+   * that means "ask again" is asked again — the whole request, with just
+   * those keys — and anything else ends the call with what the service said.
+   *
+   * Content-MD5 IS REQUIRED by S3 on this call (and accepted by R2), which is
+   * also why the body is built as bytes and measured here rather than handed
+   * to `fetch` as a string.
+   */
+  async function deleteObjects(keys: readonly string[]): Promise<void> {
+    let pending = keys;
+    await underPressure(async () => {
+      const body = new TextEncoder().encode(
+        '<?xml version="1.0" encoding="UTF-8"?><Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
+          pending.map((key) => `<Object><Key>${xmlText(key)}</Key></Object>`).join("") +
+          "<Quiet>true</Quiet></Delete>",
+      );
+      const what = `DeleteObjects ${target.bucket} (${pending.length} keys)`;
+      const response = await call("POST", "", {
+        query: { delete: "" },
+        headers: {
+          "content-type": "application/xml",
+          "content-length": String(body.length),
+          "content-md5": createHash("md5").update(body).digest("base64"),
+        },
+        body: body as Uint8Array<ArrayBuffer>,
+      });
+      const text = await response.text();
+      if (slowingDown(response.status, text)) {
+        return { pressed: { what, status: response.status, body: text } };
+      }
+      if (!response.ok) throw new S3Failure(what, response.status, text);
+      // PER KEY, inside a 200: the ones that did not go, each with its own
+      // code. A `SlowDown` among them is this request again for those keys;
+      // anything else is a refusal nothing here can wait out.
+      const refused = [...text.matchAll(/<Error>([\s\S]*?)<\/Error>/g)].map((found) => {
+        const entry = found[1] as string;
+        return { key: xmlValue(entry, "Key") ?? "", code: xmlValue(entry, "Code") ?? "", entry };
+      });
+      const fatal = refused.find((one) => one.code !== "SlowDown" && one.code !== "ServiceUnavailable");
+      if (fatal !== undefined) {
+        throw new S3Failure(`DeleteObjects ${fatal.key}`, response.status, fatal.entry);
+      }
+      if (refused.length === 0) return null;
+      pending = refused.map((one) => one.key);
+      return { pressed: { what, status: response.status, body: text } };
+    });
   }
 
   async function factsOf(key: string): Promise<ObjectFacts | null> {
@@ -336,7 +471,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     const response = await call("POST", key, { query: { uploads: "" }, headers });
     const body = await response.text();
     const id = response.ok ? xmlValue(body, "UploadId") : null;
-    if (id === null) throw new S3Failure(`CreateMultipartUpload ${key}`, response, body);
+    if (id === null) throw new S3Failure(`CreateMultipartUpload ${key}`, response.status, body);
     return id;
   }
 
@@ -369,7 +504,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     // A COMPLETE CAN FAIL WITH 200: S3 sends the status before it knows, and
     // reports the failure as an `<Error>` body.
     if (!response.ok || text.includes("<Error>")) {
-      throw new S3Failure(`CompleteMultipartUpload ${key}`, response, text);
+      throw new S3Failure(`CompleteMultipartUpload ${key}`, response.status, text);
     }
     return "stored";
   }
@@ -420,7 +555,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
           return "source_changed";
         }
         const etag = response.ok ? xmlValue(body, "ETag") : null;
-        if (etag === null) throw new S3Failure(`UploadPartCopy ${key}`, response, body);
+        if (etag === null) throw new S3Failure(`UploadPartCopy ${key}`, response.status, body);
         etags.push(etag);
       }
       const decided = await complete(key, uploadId, etags, true);
@@ -480,7 +615,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         });
         const text = await response.text();
         const decided = decidedBy(response);
-        if (decided === "stored" && !response.ok) throw new S3Failure(`PUT ${key}`, response, text);
+        if (decided === "stored" && !response.ok) throw new S3Failure(`PUT ${key}`, response.status, text);
         return decided;
       });
       if (decided === "conflict") return conflicted(key, CONFLICT_TRIES);
@@ -515,7 +650,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         });
         const text = await response.text();
         const etag = response.headers.get("etag");
-        if (!response.ok || etag === null) throw new S3Failure(`UploadPart ${uploadKey}`, response, text);
+        if (!response.ok || etag === null) throw new S3Failure(`UploadPart ${uploadKey}`, response.status, text);
         etags[number - 1] = etag;
       })().then(
         () => {
@@ -665,7 +800,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
             throw new ObjectChanged(key, version, `a window answered ${response.status}`);
           }
           const body = await response.text().catch(() => "");
-          throw new S3Failure(`GET ${key} (a window)`, response, body);
+          throw new S3Failure(`GET ${key} (a window)`, response.status, body);
         }
         const window = await response.arrayBuffer();
         if (window.byteLength !== span) throw short(span, window.byteLength);
@@ -741,7 +876,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         query: { uploads: "", "max-uploads": String(pageSize), ...(prefix === "" ? {} : { prefix }), ...marker },
       });
       const body = await response.text();
-      if (!response.ok) throw new S3Failure(`ListMultipartUploads ${prefix}`, response, body);
+      if (!response.ok) throw new S3Failure(`ListMultipartUploads ${prefix}`, response.status, body);
       for (const [, upload] of body.matchAll(/<Upload>([\s\S]*?)<\/Upload>/g)) {
         const key = xmlValue(upload as string, "Key");
         const uploadId = xmlValue(upload as string, "UploadId");
@@ -862,7 +997,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       }
       if (first.status !== 206 || spans === null || spans.last === null) {
         const body = await first.text().catch(() => "");
-        throw new S3Failure(`GET ${key}`, first, body);
+        throw new S3Failure(`GET ${key}`, first.status, body);
       }
       const end = Math.min(range?.end ?? spans.size - 1, spans.size - 1);
       return {
@@ -883,6 +1018,16 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       // Signed here rather than through Bun's client, which closed the
       // connection on versitygw's empty 204.
       await deleteKey(safeKey(key));
+    },
+
+    // ONE REQUEST PER 1000 KEYS, which is what makes a collection a few
+    // requests instead of one per object. Nothing is deleted when there is
+    // nothing to delete: S3 refuses an empty `Delete` document.
+    async deleteMany(keys) {
+      const scoped = keys.map(safeKey);
+      for (let at = 0; at < scoped.length; at += DELETE_KEYS) {
+        await deleteObjects(scoped.slice(at, at + DELETE_KEYS));
+      }
     },
 
     async list(prefix) {

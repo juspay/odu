@@ -432,6 +432,11 @@ const GcOutputSchema = Schema.Struct({
   kept: Schema.Int,
   bytes: Schema.Int,
   orphans: Schema.Int,
+  /** WHY IT DID NOT FINISH — one plain sentence, or null when it did. A
+   *  collection deletes in batches and a store that refuses one stops it:
+   *  the counts above are what left, everything else is still recorded, and
+   *  asking again carries on from there. Never a service's XML. */
+  stopped: Schema.NullOr(Schema.String),
 });
 export type CacheGcReport = typeof GcOutputSchema.Type;
 
@@ -1100,8 +1105,16 @@ export const CACHE_KEY = "cache";
  * to state a fact keeps it, a run may claim a path its own workflow uploaded
  * at the same commit, and a later unrelated run changes nothing. Optional
  * output fields; a reader that ignores them sees 4.6.
+ *
+ * 4.8: A COLLECTION THAT STOPS SAYS SO. Additive: `stopped` on `gc.run`'s
+ * report — one plain sentence, or null. A collection now deletes in batches,
+ * deletes a batch's objects BEFORE dropping its rows, and asks a store that
+ * refuses to delete again (five tries) before giving up; what it did not
+ * confirm is still recorded, so the counts beside `stopped` are what left and
+ * asking again carries on from there. A reader that ignores the field sees
+ * 4.7.
  */
-export const CACHE_CONTRACT_VERSION = "4.7";
+export const CACHE_CONTRACT_VERSION = "4.8";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

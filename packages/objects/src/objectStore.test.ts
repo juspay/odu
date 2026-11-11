@@ -192,6 +192,80 @@ describe("s3 object store: a 409 decides nothing", () => {
   });
 });
 
+/**
+ * A `send` that ANSWERS `DeleteObjects` itself — what each request carried,
+ * and whatever the service is being made to say to it — and forwards
+ * everything else to the gateway. The keys are read back out of the body, so
+ * these cases hold the wire: one request per chunk, each with its own
+ * Content-MD5, which S3 requires on this call.
+ */
+function batchDeletes(answer: (at: number) => Response) {
+  const sent: { keys: string[]; md5: string | null; body: Uint8Array }[] = [];
+  const send = (async (url: string | URL | Request, init?: RequestInit) => {
+    const asked = new URL(url as string | URL);
+    if (init?.method !== "POST" || !asked.searchParams.has("delete")) return fetch(url as string | URL, init);
+    const body = init.body as Uint8Array;
+    const text = new TextDecoder().decode(body);
+    const headers = (init.headers ?? {}) as Record<string, string>;
+    sent.push({
+      keys: [...text.matchAll(/<Key>([^<]*)<\/Key>/g)].map((found) => found[1] as string),
+      md5: headers["content-md5"] ?? null,
+      body,
+    });
+    return answer(sent.length);
+  }) as typeof fetch;
+  return { send, sent };
+}
+
+/** What R2 answered the collection that ended, verbatim in shape. */
+const slowDown = (): Response =>
+  new Response(
+    "<Error><Code>ServiceUnavailable</Code><Message>Reduce your concurrent " +
+      "request rate for the same object.</Message></Error>",
+    { status: 429 },
+  );
+const deleted = (): Response => new Response("<DeleteResult></DeleteResult>", { status: 200 });
+
+describe("s3 object store: deleting a set of keys", () => {
+  let target: S3Target;
+  beforeEach(async () => {
+    target = await gateway.bucket();
+  });
+  const keys = Array.from({ length: 2500 }, (_, at) => `main/nar/k${at}.nar.zst`);
+
+  it("sends one DeleteObjects per 1000 keys, each signed with its own Content-MD5", async () => {
+    const { send, sent } = batchDeletes(deleted);
+    await s3ObjectStore({ target, partSize: PART, send }).deleteMany(keys);
+    expect(sent.map((request) => request.keys.length)).toEqual([1000, 1000, 500]);
+    expect(sent.flatMap((request) => request.keys)).toEqual(keys);
+    expect(sent.map((request) => request.md5)).toEqual(
+      sent.map((request) => createHash("md5").update(request.body).digest("base64")),
+    );
+  });
+
+  it("asks again when the service says it is being asked too fast", async () => {
+    // THE INCIDENT: one 429 ended a 6 137-path collection. A service asking
+    // for less is not a failure, and the second ask lands.
+    const { send, sent } = batchDeletes((at) => (at === 1 ? slowDown() : deleted()));
+    await s3ObjectStore({ target, partSize: PART, send }).deleteMany(keys.slice(0, 3));
+    expect(sent.length).toBe(2);
+    // THE SAME KEYS, all of them: a refused batch is not a partial one.
+    expect(sent.map((request) => request.keys)).toEqual([keys.slice(0, 3), keys.slice(0, 3)]);
+  });
+
+  it(
+    "gives up after five tries, saying what the service said and not its XML",
+    async () => {
+      const { send, sent } = batchDeletes(slowDown);
+      const refused = s3ObjectStore({ target, partSize: PART, send }).deleteMany(keys.slice(0, 3));
+      await expect(refused).rejects.toThrow(/429 ServiceUnavailable .* after 5 tries/);
+      await expect(refused).rejects.toThrow(/Reduce your concurrent request rate/);
+      expect(sent.length).toBe(5);
+    },
+    20_000,
+  );
+});
+
 describe("s3 object store: an object odu did not write", () => {
   it("is an UnrecordedObject naming the key, never a re-read of its bytes", async () => {
     const target = await gateway.bucket();

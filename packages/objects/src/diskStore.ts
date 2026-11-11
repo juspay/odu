@@ -173,6 +173,17 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     }
   }
 
+  /** ONE KEY GONE: the object and the facts beside it. Absent is not an
+   *  error — the store's promise, kept for `delete` and `deleteMany` alike
+   *  from one place. */
+  async function removeKey(key: string): Promise<void> {
+    for (const path of [pathOf(key), factsPathOf(key)]) {
+      await unlink(path).catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== "ENOENT") throw err;
+      });
+    }
+  }
+
   return {
     put,
 
@@ -199,12 +210,14 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
 
     facts: factsOf,
 
-    async delete(key) {
-      for (const path of [pathOf(key), factsPathOf(key)]) {
-        await unlink(path).catch((err: NodeJS.ErrnoException) => {
-          if (err.code !== "ENOENT") throw err;
-        });
-      }
+    delete: removeKey,
+
+    // A LOOP, because a filesystem has no batch call and needs none: these
+    // are local unlinks, not round trips. The port's verb is one call so an
+    // S3 bucket can answer it in one request; here it is the same per-key
+    // delete, and an absent key is no more an error in a set than alone.
+    async deleteMany(keys) {
+      for (const key of keys) await removeKey(key);
     },
 
     async list(prefix) {
