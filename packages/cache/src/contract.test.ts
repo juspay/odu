@@ -49,7 +49,7 @@ const LEDGER: ContractLedger = {
   "4.7": "a318983ddb5cebdb",
   // 4.8 — a collection that stops says why: `stopped` on the GC report, one
   // plain sentence or null. One output field; additive.
-  "4.8": "b83b04eee575e8fa",
+  "4.8": "a5bb71441d42f75f",
 };
 
 describe("the cache row's contract", () => {

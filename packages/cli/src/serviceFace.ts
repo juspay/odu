@@ -818,8 +818,10 @@ export function nodesStream(
  * EVERY FRAME OF A RUN, until it says it is done.
  *
  * A stream ENDING is not evidence about the run, and treating it as evidence is
- * the bug this exists to remove. The link pings; a daemon busy with several
- * live coordinators can miss one; the link's run then ends and the subscription
+ * the bug this exists to remove. A link can end under a live run — a daemon
+ * busy with several live coordinators can go quiet past the keep-alive
+ * backstop (60–65s, `@kolu/surface/keepAlive`; the websocket leg then cycles
+ * its socket), or send a frame that does not decode — and the subscription
  * is INTERRUPTED. `endOnInterrupt` turns that into a clean end of iteration —
  * correctly, because an interrupt is not an error — and every consumer here
  * then concluded the run was over. `odu ci run --progress json` stopped emitting

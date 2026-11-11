@@ -10,7 +10,6 @@ import {
   formatHolder,
   isMixedPool,
   leaseProbeIsOurs,
-  LEASE_PULSE_MS,
   leaseBurstSlots,
   leaseLanes,
   parseHolderBody,
@@ -32,10 +31,6 @@ it("keeps slot zero's lock identity stable when declared capacity changes", () =
   expect(slotLockPath("/tmp/odu.lock", { host: "ci", slot: 2, slots: 4 })).toBe(
     "/tmp/odu.lock.2",
   );
-});
-
-it("pulses quiet lease sessions inside Effect's five-second ping cadence", () => {
-  expect(LEASE_PULSE_MS).toBeLessThan(5_000);
 });
 
 it("verifies the lock belongs to this run, not merely that it is busy", () => {

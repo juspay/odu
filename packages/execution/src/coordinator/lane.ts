@@ -19,13 +19,14 @@
  * Which is why this module gained no retry loop: the death is reported here,
  * and what a run makes of it belongs to the run.
  *
- * Nothing here rides a blip out at the transport, and nothing can: Effect
- * RPC's own pinger writes every 5s and ends the socket the moment a tick finds
- * the previous ping unanswered, so 5–10s of silence kills any link on this
- * stack — see the canonical account in `@kolu/surface`'s
- * `src/links/wire.ts` ("never gets a vote"). The lane really is dead within
- * seconds; resurrection is what makes the RUN survive that, at the cost of
- * re-running whichever node was in flight.
+ * Nothing here rides a blip out at the transport, and nothing can. A lane
+ * rides an ssh session whose liveness watchdog (`@kolu/surface/heartbeat` at
+ * its defaults: a 15s probe with a 10s timeout) force-cycles a silent ssh arm
+ * at ~25s, with ssh's own dead-peer policy (~30s) beside it and the link's
+ * pinger beneath both as a 60–65s backstop — numbers kolu bakes, with the
+ * canonical account in `@kolu/surface/keepAlive`. Any of them ends the link,
+ * and the lane with it; resurrection is what makes the RUN survive that, at
+ * the cost of re-running whichever node was in flight.
  */
 
 import {

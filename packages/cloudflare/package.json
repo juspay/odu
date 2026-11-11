@@ -20,7 +20,7 @@
   "dependencies": {
     "@odu/cordis": "workspace:*",
     "@odu/face": "workspace:*",
-    "effect": "4.0.0",
+    "effect": "4.1.4",
     "solid-js": "^1.9.15"
   },
   "//devDependencies": "The browser suite's toolchain, for the features and steps this row OWNS: a row keeps its promises under its own `e2e/`, and cucumber and playwright are what runs them.",

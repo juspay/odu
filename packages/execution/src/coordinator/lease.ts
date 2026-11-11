@@ -124,9 +124,11 @@ const LEASE_PULSE_TIMEOUT_MS = envNumber(
  *  two failures are never confused for one another. */
 const PIN_CEILING_MS = envNumber("ODU_LEASE_PIN_CEILING_MS", 45 * 60_000, 1);
 
-/** Keep a held, otherwise quiet lease RPC active inside Effect's fixed
- * five-second transport-ping cadence. */
-export const LEASE_PULSE_MS = 2_000;
+/** How often a held lease re-probes its lock, so a lock that is no longer
+ *  this run's is noticed within one pulse. It does not keep the link alive:
+ *  link liveness is the session watchdog's and kolu's pinger backstop's
+ *  (`@kolu/surface/keepAlive`), and a quiet link answers their pings. */
+const LEASE_PULSE_MS = 2_000;
 
 export interface LeaseIdentity {
   holder: string;
