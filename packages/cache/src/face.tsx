@@ -2689,17 +2689,28 @@ function BucketGc(
    *  nothing to say about it, which is not the same as not having answered. */
   const next = (): CacheGcPlan["buckets"][number] | null =>
     plan.value()?.buckets.find((row) => row.bucket === props.name) ?? null;
+  /** WHY THE LAST COLLECTION STOPPED, or null. A collection deletes in
+   *  batches and a store may refuse one: what it did leave is the receipt
+   *  above, and this is the row's own sentence for the rest. Written from the
+   *  answer, because the answer is the only place it exists, and cleared when
+   *  a new collection starts so a stale refusal never hangs over a fresh run. */
+  const [stopped, setStopped] = createSignal<string | null>(null);
   const collect = (): void => {
+    setStopped(null);
     action.run(
       props.client.procedures.gc.run({ rootToken: props.rootToken(), bucket: props.name }),
-      (report) =>
-        `Collected: evicted ${report.evicted} path${report.evicted === 1 ? "" : "s"}` +
-        `${report.kept > 0 ? ` (${report.kept} whose bytes a twin path still names)` : ""}` +
-        `, freed ${bytes(report.bytes)}` +
-        // The objects no row ever named — a put whose record never landed.
-        // They are bytes nothing on this page could list, so the one moment
-        // they are visible is the pass that swept them.
-        `${report.orphans > 0 ? ` and ${report.orphans} orphaned object${report.orphans === 1 ? "" : "s"}` : ""}.`,
+      (report) => {
+        setStopped(report.stopped);
+        return (
+          `Collected: evicted ${report.evicted} path${report.evicted === 1 ? "" : "s"}` +
+          `${report.kept > 0 ? ` (${report.kept} whose bytes a twin path still names)` : ""}` +
+          `, freed ${bytes(report.bytes)}` +
+          // The objects no row ever named — a put whose record never landed.
+          // They are bytes nothing on this page could list, so the one moment
+          // they are visible is the pass that swept them.
+          `${report.orphans > 0 ? ` and ${report.orphans} orphaned object${report.orphans === 1 ? "" : "s"}` : ""}.`
+        );
+      },
       // WHATEVER THE COLLECTION ANSWERED, a plan somebody asked for is now a
       // guess — so it is asked again, and a section nobody asked stays quiet.
       () => {
@@ -2748,6 +2759,10 @@ function BucketGc(
             </Field>
           </div>
           <Answer control={action} />
+          {/* A COLLECTION THAT DID NOT FINISH, in the place a refusal is
+              drawn: the receipt above says what left, and this says why the
+              rest did not — and that pressing the button again carries on. */}
+          <Show when={stopped()}>{(why) => <Receipt tone="refused">{why()}</Receipt>}</Show>
           <Show when={plan.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
           <Show when={next()}>
             {(would) => (

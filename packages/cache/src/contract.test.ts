@@ -46,7 +46,10 @@ const LEDGER: ContractLedger = {
   // version, so a bucket page can say which run put a path there and which
   // commit it was built from. Two optional output fields, opaque to the
   // cache; additive.
-  "4.7": "346ebeaeb97365c8",
+  "4.7": "a318983ddb5cebdb",
+  // 4.8 — a collection that stops says why: `stopped` on the GC report, one
+  // plain sentence or null. One output field; additive.
+  "4.8": "a5bb71441d42f75f",
 };
 
 describe("the cache row's contract", () => {

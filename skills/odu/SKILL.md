@@ -357,7 +357,7 @@ terminal.
 | what the pins hold | `odu surface cache pin_list --input '{…}' --json` | `cache_pin_list` | `rootToken`, `bucket` | `pins[]` (`bucket`, `name`, `rootPaths[]`, `created`, `createdBy`: `write` a push made it, `admin` a person did) |
 | drop a pin | `odu surface cache pin_delete --input '{…}' --json` | `cache_pin_delete` | `rootToken`, `bucket`, `name` | `bucket`, `name` — admin only, even where a write token may pin |
 | what a collection WOULD take | `odu surface cache gc_plan --input '{…}' --json` | `cache_gc_plan` | `rootToken`, `bucket?`, `retentionDays?` (4.4 — plan as if every bucket in scope kept a path that many days from `lastWanted`; absent is each bucket's own, `0` is only what a reference or a pin holds; a non-integer or negative is `bad_input`. Nothing is written, and `gc_run` deliberately has no such field) | `buckets[]` (`evicted`, `bytes`, `remaining`, `paths[]` — a readable head, oldest want first), `evicted`, `bytes`. THE DRY RUN: read it before `gc_run` |
-| reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` (absent collects every bucket, and only then sweeps orphans) | `buckets[]` (`evicted`, `kept`, `bytes`, `orphans`), `evicted`, `kept`, `bytes`, `orphans` |
+| reclaim cache space | `odu surface cache gc_run --input '{…}' --json` | `cache_gc_run` | `rootToken`, `bucket?` (absent collects every bucket, and only then sweeps orphans) | `buckets[]` (`evicted`, `kept`, `bytes`, `orphans`), `evicted`, `kept`, `bytes`, `orphans`, `stopped` (4.8 — why it did not finish, or null; what it did not delete is still recorded) |
 | cache sizes and reads | `odu surface cache stats_read --input '{…}' --json` | `cache_stats_read` | `rootToken` | `buckets[]`, `objects`, `bytes`, `hits`, `lastWanted` (the newest renewal anywhere, or null) |
 | the tunnel and its names | `odu surface cloudflare status_read --json` | `cloudflare_status_read` | *(none)* | `tunnel` (`state`, `name`, `id`, `reason`) and `routes[]` (`domain`, `bucket`, `state` `wiring`/`live`/`failed`, `reason`, `updated`) — a route with `bucket: null` is the server's own public origin |
 | mint a scrape credential | `odu surface metrics token_mint --input '{…}' --json` | `metrics_token_mint` | `rootToken`, `label?` | `token` (plaintext, ONCE), `facts` — the credential a Prometheus holds for `GET /metrics`, and it opens nothing else |
@@ -402,7 +402,7 @@ docs, "Set up an R2 bucket"):
   "auto"; credentialsFile; publicUrl?; }` — `publicUrl` being the custom domain
   bound to that bucket, an origin with no path, which public buckets on the
   store are then advertised at.
-The cache row is at contract 4.7 (3.0 removed `held` and `--wait`; 3.1 added
+The cache row is at contract 4.8 (3.0 removed `held` and `--wait`; 3.1 added
 `store` and the `stores` resource; 4.0 moved retention onto `lastWanted` — the
 old last-access field is gone from a path and from `stats_read` — and added
 `bucket_retention`, `pin_list`, `pin_delete`, `gc_plan` and `orphans`; 4.1 added
@@ -414,7 +414,10 @@ added `bucket_paths`' `group`, `name`, `sort` and `descending` — a bucket
 counted and ordered by the row rather than by whoever holds one page; 4.6 added
 `label` on a token's public half, so the Tokens list says `run <id>` for a
 credential odu minted for a run; 4.7 added `run` and `commit` on a path and on
-a package's newest version — what the push said built it, kept opaque).
+a package's newest version — what the push said built it, kept opaque; 4.8
+added `stopped` on the GC report — a collection deletes in batches, objects
+before rows, and a store that refuses one stops it with a plain sentence while
+everything unconfirmed stays recorded, so asking again resumes).
 
 - **WRITES LEAVE ODU TOO, on an S3 store.** `odu cache push` asks the bucket
   where a NAR's bytes go before it sends any. A bucket whose store takes its
@@ -451,6 +454,13 @@ a package's newest version — what the push said built it, kept opaque).
   to keep — `0` is "what is here that nothing references and no pin holds" —
   and it writes nothing; `cache_gc_run` takes no such field, so a retention a
   plan asked about can never be one a collection evicts by.
+- **A collection deletes in batches and says why it stopped** (cache 4.8).
+  Each batch deletes its objects BEFORE dropping its rows, so a store that
+  refuses a delete — R2 answers `429` to a collection asking too fast, after
+  five tries with backoff — ends the run with `stopped`, one plain sentence
+  on the report and the red line in the bucket page's GC box. The counts
+  beside it are what left; everything unconfirmed is still recorded, so
+  `cache_gc_run` again carries on from there.
 - **A pin is a name over a closure**, re-pointed by pinning the same name
   again. A WRITE token may create or re-point one over HTTP
   (`POST /_odu/v1/buckets/<bucket>/pin`, and `odu cache push --pin NAME`),
@@ -865,7 +875,7 @@ declares.
   may call odu with the commit it has just pushed. Without `branch` nothing
   is moved and a clone that is not on the commit is refused, exactly as
   before; `--branch` without `--checkout` is a usage error.
-- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.6, `cache` at 4.7,
+- **Each row versions its own surface.** The host is at 2.5, `ci` at 2.6, `cache` at 4.8,
   and `auth` and `cloudflare` at 2.4. A client is refused only when the host's major or the
   major of a row **it reads** differs. The refusal names that row
   (`serves the cache row at 4.0; this build reads cache 3.1`): run `odu web --upgrade`.

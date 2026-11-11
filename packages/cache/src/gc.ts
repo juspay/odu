@@ -35,19 +35,28 @@
  * and therefore one object key; the file is deleted only when no remaining row
  * in the bucket names that NarHash.
  *
- * **ONLY `ObjectStore`.** Deleting is `delete`, and the orphan sweep is `list`.
- * Nothing here opens a file, names a directory or signs an S3 request, so a
- * bucket on R2 collects exactly as a bucket on disk does — which is what
+ * **ONLY `ObjectStore`.** Deleting is `deleteMany`, and the orphan sweep is
+ * `list`. Nothing here opens a file, names a directory or signs an S3 request,
+ * so a bucket on R2 collects exactly as a bucket on disk does — which is what
  * `@odu/objects`' contract suite and the cache's own GC suite prove by running
  * the same cases against both.
  *
- * **And nothing can land in between.** The cache holds ONE async mutex over
- * keep-and-record, `pin` and `gc`: a collection plans and deletes with no
- * writer able to interleave, and a pin that arrived first is already in the
- * plan. A push keeps its object under that lock too, so it cannot see an object
- * this run is about to delete. Each delete still asks the rows, not the plan,
- * whether a twin names its NarHash — the lock is the guarantee, the re-check is
- * what keeps a writer added outside it from costing bytes.
+ * **In batches, objects before rows, and the lock only around the
+ * decisions.** A collection is thousands of deletes and the service they go
+ * to may ask for less at any point, so the run is cut into batches: each is
+ * decided under the cache's write lock, deletes its objects with the lock
+ * FREE, and drops its rows under the lock again. A batch whose deletes failed
+ * drops no rows and the collection stops with a sentence saying why, so
+ * nothing is ever forgotten before its bytes are gone and collecting again
+ * resumes where this one left off.
+ *
+ * **And a writer that lands first still wins.** The cache holds ONE async
+ * mutex over keep-and-record, `pin` and `gc`, and each batch asks
+ * {@link planGc}'s own predicate again under it: a pin or a re-push that
+ * arrived since the plan takes its row out of the batch. Each delete still
+ * asks the rows, not the plan, whether a twin names its NarHash. What the
+ * lock no longer spans is the network — see {@link runGc} for what that
+ * costs and what it buys.
  */
 
 import type { ObjectStore } from "@odu/objects";
@@ -235,6 +244,17 @@ export interface GcReport {
   kept: number;
   bytes: number;
   orphans: number;
+  /**
+   * WHY THE COLLECTION DID NOT FINISH, in one plain sentence, or null.
+   *
+   * A store that refuses a delete is not a crash and is not an empty
+   * report: the counts above are what DID leave, every row whose objects
+   * were not confirmed deleted is still recorded, and pressing Run GC again
+   * carries on from there. The sentence is for a person — an operator read
+   * an R2 `<Error>` document on the bucket page the day this was written —
+   * so it names the service's code and its words and never its XML.
+   */
+  stopped: string | null;
 }
 
 /**
@@ -253,16 +273,152 @@ export interface GcCollection {
 }
 
 /**
- * Do the plan. An object leaves with its row; the bytes are the object store's,
- * deleted by key, so nothing on this machine's Nix store is touched (the
- * server does not have one).
+ * HOW MANY ROWS ONE BATCH TAKES. A batch is two `deleteMany` calls — the
+ * narinfos, then the NARs — so on S3 it is two requests, inside the 1000-key
+ * ceiling of each. It is also the most work one refusal can cost: a batch
+ * whose deletes failed drops no rows, and the next collection starts there.
+ */
+const GC_BATCH_ROWS = 500;
+
+/** What {@link runGc} needs beyond the plan. */
+export interface GcRunOptions {
+  /** The clock the plan was taken on — the same one, so a re-check cannot
+   *  find a row expired that the plan found live. */
+  now?: () => number;
+  /**
+   * RUN `work` WITH NOTHING ELSE ABLE TO WRITE — the cache's write lock.
+   *
+   * Decisions and row drops take it; the deletes between them never do. The
+   * default runs the work as it is, for a caller with no writers (the suite).
+   */
+  withLock?: <T>(work: () => Promise<T>) => Promise<T>;
+  /** Rows per batch; {@link GC_BATCH_ROWS} unless a caller says otherwise. */
+  batch?: number;
+}
+
+/** WHAT ONE BATCH IS ABOUT TO DO, decided against the rows AS THEY ARE and
+ *  with no network in it: the caller takes the lock for this and lets it go
+ *  for the deletes. */
+interface GcBatch {
+  /** The rows going, in the plan's order — still doomed, still recorded. */
+  rows: ObjectRow[];
+  /** One per row: the narinfo object that is the row's own. */
+  narinfos: string[];
+  /** The NAR objects no row outside this batch names any more. */
+  nars: string[];
+  /** Per row, what the purge port is told. */
+  removals: GcRemoval[];
+  /** Rows whose bytes another row still names — the object stayed. */
+  kept: number;
+  bytes: number;
+}
+
+/**
+ * THE DECISION FOR ONE BATCH, taken again rather than read off the plan.
+ *
+ * `doomed` is {@link planGc}'s own answer re-asked of the rows as they are
+ * NOW, which is the whole point of deciding per batch: a pin or a re-push
+ * that landed since the plan takes its row out of the batch rather than
+ * losing its bytes.
+ *
+ * TWINS: two rows can carry the same NarHash (different store paths, one
+ * object), and the bytes go only when no row in the bucket names them. The
+ * question is asked of the database — an indexed lookup — minus the rows
+ * this batch is itself dropping, so a row that appeared mid-run keeps its
+ * object and a NarHash wholly inside this batch is deleted exactly once,
+ * with the last of its rows. It is `freedBytes`' rule, applied to the rows
+ * as they are.
+ */
+function decideBatch(
+  repo: CacheRepo,
+  bucket: string,
+  batch: readonly ObjectRow[],
+  doomed: ReadonlySet<string>,
+): GcBatch {
+  const rows = batch.filter((row) => doomed.has(row.storePath));
+  const going = new Set(rows.map((row) => row.storePath));
+  /** The row that will delete each NarHash's object: the last one here. */
+  const closes = new Map(rows.map((row) => [row.narHash, row.storePath]));
+  const decided: GcBatch = { rows, narinfos: [], nars: [], removals: [], kept: 0, bytes: 0 };
+  for (const row of rows) {
+    const elsewhere = repo
+      .objectsByNarHash(bucket, row.narHash)
+      .some((other) => !going.has(other.storePath));
+    const takesBytes = !elsewhere && closes.get(row.narHash) === row.storePath;
+    // THE NARINFO OBJECT IS THE ROW'S OWN (PLAN 2.8) — one per store path,
+    // never shared by twins the way a NAR is, so it goes whenever the row
+    // does. A store left holding it would answer a path odu has forgotten,
+    // with a NAR URL that 404s.
+    decided.narinfos.push(narinfoKey(bucket, row.hash));
+    if (takesBytes) {
+      decided.nars.push(objectKey(bucket, row.narHash, row.compression));
+      decided.bytes += sizeOf(row);
+    } else {
+      decided.kept += 1;
+    }
+    decided.removals.push({
+      storePath: row.storePath,
+      hash: row.hash,
+      narFile: takesBytes ? narFileName(row.narHash, row.compression) : null,
+    });
+  }
+  return decided;
+}
+
+/** WHY A COLLECTION STOPPED, as a person reads it: one line, the service's
+ *  own words, and no markup whatever threw. */
+function stoppedBy(bucket: string, err: unknown): string {
+  const said = (err instanceof Error ? err.message : String(err))
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+  return (
+    `${bucket}: the store refused a delete — ${said}. ` +
+    "Everything it would not delete is still recorded, so collecting again carries on from there."
+  );
+}
+
+/**
+ * DO THE PLAN, A BATCH AT A TIME. An object leaves BEFORE its row: the bytes
+ * are the object store's, deleted by key, so nothing on this machine's Nix
+ * store is touched (the server does not have one).
+ *
+ * **Objects, then rows, and never the other way round.** A row dropped ahead
+ * of its object is a narinfo R2 still serves for a path odu has forgotten,
+ * whose NAR 404s until an all-bucket orphan sweep — which is exactly what an
+ * aborted collection left behind the day this was written. So a batch deletes
+ * its narinfos, then its NARs, then drops its rows; a batch that fails drops
+ * none of them and the collection STOPS, saying so ({@link GcReport.stopped}),
+ * with every unconfirmed row still recorded. Pressing Run GC again resumes.
+ *
+ * **The narinfos go first** because the two are not symmetric: a run that
+ * stops between them leaves a NAR whose narinfo is gone, which the row still
+ * names and the boot backfill rewrites — where the other order leaves a
+ * narinfo promising a NAR that is not there.
+ *
+ * **The lock is held for decisions, never across the network.** Each batch is
+ * decided under `withLock` and its rows dropped under `withLock`; the deletes
+ * between run with the lock free, so an hour-long collection no longer blocks
+ * every push to the daemon. The invariant that buys: a pin or a re-push that
+ * lands between the plan and a batch's decision WINS — the decision is
+ * {@link planGc}'s predicate asked again of the rows as they are, and a row it
+ * no longer dooms is left where it is. What the lock no longer covers is the
+ * deletes themselves: a push that lands while a batch's objects are being
+ * deleted may be told the bucket has a path whose object is going. That window
+ * is one batch of deletes rather than, as before, the whole collection, and it
+ * costs a re-push rather than a row that outlives its bytes.
  */
 export async function runGc(
   repo: CacheRepo,
   plan: readonly GcBucketPlan[],
   /** The store each bucket's objects live in. */
   objectsOf: (bucket: string) => ObjectStore,
+  options: GcRunOptions = {},
 ): Promise<GcCollection> {
+  const now = options.now ?? Date.now;
+  const withLock = options.withLock ?? ((work) => work());
+  const size = Math.max(1, options.batch ?? GC_BATCH_ROWS);
   const perBucket = new Map<string, GcBucketReport>(
     plan.map((entry) => [
       entry.bucket,
@@ -270,34 +426,34 @@ export async function runGc(
     ]),
   );
   const removed = new Map<string, GcRemoval[]>();
+  let stopped: string | null = null;
   for (const entry of plan) {
+    if (stopped !== null) break;
     const report = perBucket.get(entry.bucket) as GcBucketReport;
     const left: GcRemoval[] = [];
-    const objects = objectsOf(entry.bucket);
-    for (const row of entry.evict) {
-      repo.deleteObject(entry.bucket, row.storePath);
-      // TWINS: two rows can carry the same NarHash (different store paths, one
-      // object). The bytes go only when no row in the bucket names them NOW —
-      // asked of the database right before the delete (an indexed lookup), not
-      // of the plan's snapshot, so a row that appeared mid-run keeps its object.
-      // It is `freedBytes`' rule, applied against the rows as they are.
-      const twin = repo.objectsByNarHash(entry.bucket, row.narHash).length > 0;
-      if (!twin) await objects.delete(objectKey(entry.bucket, row.narHash, row.compression));
-      // THE NARINFO OBJECT IS THE ROW'S OWN (PLAN 2.8) — one per store path,
-      // never shared by twins the way a NAR is, so it goes whenever the row
-      // does. A store left holding it would answer a path odu has forgotten,
-      // with a NAR URL that 404s.
-      await objects.delete(narinfoKey(entry.bucket, row.hash));
-      left.push({
-        storePath: row.storePath,
-        hash: row.hash,
-        narFile: twin ? null : narFileName(row.narHash, row.compression),
-      });
-      report.evicted += 1;
-      if (twin) report.kept += 1;
-      else report.bytes += sizeOf(row);
-    }
     removed.set(entry.bucket, left);
+    const objects = objectsOf(entry.bucket);
+    for (let at = 0; at < entry.evict.length; at += size) {
+      const batch = entry.evict.slice(at, at + size);
+      const decided = await withLock(async () =>
+        decideBatch(repo, entry.bucket, batch, stillDoomed(repo, entry.bucket, now())),
+      );
+      if (decided.rows.length === 0) continue;
+      try {
+        await objects.deleteMany(decided.narinfos);
+        await objects.deleteMany(decided.nars);
+      } catch (err) {
+        stopped = stoppedBy(entry.bucket, err);
+        break;
+      }
+      await withLock(async () => {
+        for (const row of decided.rows) repo.deleteObject(entry.bucket, row.storePath);
+      });
+      left.push(...decided.removals);
+      report.evicted += decided.rows.length;
+      report.kept += decided.kept;
+      report.bytes += decided.bytes;
+    }
   }
   const buckets = [...perBucket.values()];
   return {
@@ -307,9 +463,25 @@ export async function runGc(
       kept: buckets.reduce((sum, bucket) => sum + bucket.kept, 0),
       bytes: buckets.reduce((sum, bucket) => sum + bucket.bytes, 0),
       orphans: 0,
+      stopped,
     },
     removed,
   };
+}
+
+/** THE PLAN'S OWN PREDICATE, ASKED AGAIN of one bucket's rows as they are:
+ *  the store paths {@link planGc} would evict from it NOW. A bucket deleted
+ *  mid-collection dooms nothing. */
+function stillDoomed(repo: CacheRepo, bucket: string, now: number): ReadonlySet<string> {
+  const row = repo.bucket(bucket);
+  if (row === null) return new Set();
+  const [fresh] = planGc({
+    buckets: [row],
+    objects: repo.objects(bucket),
+    pins: repo.pins(),
+    now,
+  });
+  return new Set((fresh?.evict ?? []).map((one) => one.storePath));
 }
 
 /**

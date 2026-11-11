@@ -270,6 +270,27 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
+    it("takes a whole set of keys at once, absent ones among them", async () => {
+      // WHAT A COLLECTION ACTUALLY ASKS FOR: not one delete per object — six
+      // thousand paths is twelve thousand round trips and a service that
+      // starts refusing — but the set, in as few requests as the service has.
+      // Absent keys are no more an error here than they are alone, so a
+      // caller may name keys it only believes are there.
+      const { store, dispose } = await make();
+      const doomed = ["main/nar/one.nar.zst", "main/a1.narinfo", "main/nar/two.nar.zst"];
+      for (const key of doomed) await store.put(key, streamOf([bytes(key)]));
+      await store.put("other/nar/spared.nar.zst", streamOf([bytes("spared")]));
+      await store.deleteMany([...doomed, "main/nar/never-was-here.nar.zst"]);
+      expect(await store.list("main")).toEqual([]);
+      expect(await store.facts("main/a1.narinfo")).toBeNull();
+      expect((await store.list("other")).map((entry) => entry.key)).toEqual(["other/nar/spared.nar.zst"]);
+      // NOTHING TO DELETE IS NOT A REQUEST: a batch whose twins all survived
+      // has no NARs to take, and S3 refuses an empty delete document.
+      await store.deleteMany([]);
+      expect((await store.list("other")).length).toBe(1);
+      await dispose();
+    });
+
     it("reads a byte range, and reports the whole size", async () => {
       const { store, dispose } = await make();
       const payload = bytes("0123456789abcdef");
