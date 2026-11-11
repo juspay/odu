@@ -64,7 +64,7 @@ const LEDGER: ContractLedger = {
   // INPUT key; additive, so MINOR. A 2.6 daemon drops it as excess and keeps
   // refusing a clone that is not already on the commit — the answer a caller
   // gets without the field, never a run against the wrong one.
-  "2.7": "4c20bdfec513e71c",
+  "2.7": "3cf445349a1994c0",
 };
 
 describe("the ci row's contract", () => {

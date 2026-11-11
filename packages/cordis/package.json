@@ -11,6 +11,6 @@
     "./*": "./src/*.ts"
   },
   "dependencies": {
-    "effect": "4.0.0"
+    "effect": "4.1.4"
   }
 }

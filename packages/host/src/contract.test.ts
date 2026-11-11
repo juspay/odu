@@ -35,7 +35,7 @@ import {
 import { CACHE_CONTRACT_VERSION, CACHE_KEY, CACHE_NEEDS } from "@odu/cache/surface";
 
 const LEDGER: ContractLedger = {
-  "2.5": "f1d5f6253fd77c08",
+  "2.5": "ede33df851613ad9",
 };
 
 /** The identity cell, as the runs' root serves it: its spec entry, its tags

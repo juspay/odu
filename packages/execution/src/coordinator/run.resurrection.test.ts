@@ -3,9 +3,11 @@
  *
  * A CI run that has spent four minutes on a builder should not be thrown away
  * because a laptop changed wifi networks. Holding the link open through it is
- * not available: Effect RPC's pinger ends the socket after 5–10s of silence and
- * exposes no cadence knob (`@kolu/surface`'s `src/links/wire.ts`), and the
- * runner is ephemeral by design — it dies with the pipe, and that death is what
+ * not available: Effect RPC's pinger ends the socket after 5–10s with no frame
+ * from the peer, and `@kolu/surface` deliberately sets none of its cadence
+ * options (`pingInterval`/`pingTimeout`, which Effect 4.0.0 did not have;
+ * `src/links/wire.ts`), so that deadline is not odu's to move. The runner is
+ * ephemeral by design — it dies with the pipe, and that death is what
  * frees the venue flock and reaps the recipe process trees. So survival is the
  * coordinator's job, after the fact: claim another venue and start a new lane
  * over the nodes the dead one had not finished.

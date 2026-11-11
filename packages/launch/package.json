@@ -14,7 +14,7 @@
   "dependencies": {
     "@odu/execution": "workspace:*",
     "@odu/service-client": "workspace:*",
-    "effect": "4.0.0"
+    "effect": "4.1.4"
   },
   "cordis": {
     "row": "ci"

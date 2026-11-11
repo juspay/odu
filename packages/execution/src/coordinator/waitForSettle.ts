@@ -383,9 +383,11 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     //
     // A dropped link is NOT a settled run, and the two used to be answered the
     // same way. A link's own keep-alive makes 5–10s of PEER silence fatal to it
-    // (`@kolu/surface`'s `openWireLink`: the client writes a ping every 5s and
-    // ends the socket run the tick one goes unanswered — a deadline it records
-    // as unmovable), and a coordinator busy claiming a venue or copying a
+    // (`@kolu/surface`'s `openWireLink`, on Effect 4.1.4's pinger: the client
+    // writes a ping every 5s, counts any frame from the peer as liveness, and
+    // ends the socket run on the first tick that finds its ping outstanding
+    // and nothing heard for a full interval — a deadline kolu records as
+    // unmovable), and a coordinator busy claiming a venue or copying a
     // runner closure goes quiet for that long routinely.
     // The subscription then failed with `SurfaceStdioTransportClosed`, the
     // catch below read it as end-of-stream, and `odu ci wait --settle` printed

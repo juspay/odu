@@ -15,7 +15,7 @@ import { type ContractLedger, contractLedgerMismatch, rowShape, surfaceFingerpri
 import { AUTH_CONTRACT_VERSION, ODU_AUTH_EXPOSE, oduAuthSurface } from "./surface";
 
 const LEDGER: ContractLedger = {
-  "2.4": "a567ba5fcc47b5ee",
+  "2.4": "c7abf8b321276149",
 };
 
 describe("the auth row's contract", () => {
