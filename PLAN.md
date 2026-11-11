@@ -514,7 +514,7 @@ Commits and PR bodies use the earlier names.
     shared contract. `packages/host/src/fence.test.ts` proves, with
     `@olai/effect-cordis/fence`, that only roots name rows. Versions on master
     (each is a `*_CONTRACT_VERSION` constant in the row's `surface.ts`): host
-    2.5, `ci` 2.7, `cache` 4.7, `auth` 2.4, `cloudflare` 2.4, and the host's
+    2.5, `ci` 2.7, `cache` 4.8, `auth` 2.4, `cloudflare` 2.4, and the host's
     `metrics` fragment 1.0. Each row is held to an append-only fingerprint
     ledger by `just test`, and `admitService` admits a client on the rows it
     declares. **A row is a set of packages, not a directory:** the fence reads
@@ -541,9 +541,10 @@ Commits and PR bodies use the earlier names.
     both lines. CI can put the token in the URL instead.
 
 [^storage]: `ObjectStore` offers `put`, `get(range)`, `head`, `facts`, `delete`,
-    `list` and `sweepTemp`, plus disk's optional `link`. Keys are opaque, and
-    facts are a size and a hex sha256. The cache owns the key layout and the
-    one hex ↔ `FileHash` conversion (`packages/cache/src/fileHash.ts`).
+    `deleteMany`, `list` and `sweepTemp`, plus disk's optional `link`. Keys are
+    opaque, and facts are a size and a hex sha256. The cache owns the key
+    layout and the one hex ↔ `FileHash` conversion
+    (`packages/cache/src/fileHash.ts`).
     - Put-if-absent: disk uses `link`; S3 uses `If-None-Match: *` plus a
       per-key queue. `412` means lost; `409` is retried.
     - Stores are declared in `services.odu.cache.stores` (env

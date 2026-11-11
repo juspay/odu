@@ -189,6 +189,19 @@ export interface ObjectStore {
   facts(key: string): Promise<ObjectFacts | null>;
   /** Idempotent: deleting an absent key is not an error. */
   delete(key: string): Promise<void>;
+  /**
+   * THE SAME DELETE, FOR A SET OF KEYS — one request per chunk where the
+   * service has such a call (S3's `DeleteObjects`, 1000 keys at a time), a
+   * loop where it does not (disk).
+   *
+   * It exists because a collection is thousands of keys and one signed
+   * request each is a collection that does not finish: evicting 6 137 paths
+   * off R2 is 12 274 round trips at ~70 a minute, and the service begins
+   * answering `429` long before the end. Absent keys are not errors, exactly
+   * as {@link delete}'s are not, so a caller may name keys it only believes
+   * are there. It either deletes every key it was given or throws.
+   */
+  deleteMany(keys: readonly string[]): Promise<void>;
   /** Every object under `prefix` (a directory-like prefix: `a/b`), all pages
    *  of it. Temp names are not objects and are never listed. */
   list(prefix: string): Promise<{ key: string; size: number }[]>;

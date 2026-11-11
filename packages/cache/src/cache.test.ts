@@ -512,10 +512,13 @@ describe("chunked uploads", () => {
 });
 
 describe("gc and a concurrent push", () => {
-  it("keeps the object of a path re-pushed while the collection runs", async () => {
-    // THE WINDOW: a push that finds the object present and records AFTER the
-    // collection deleted it would leave a row with no bytes. Keeping and
-    // recording are under the collection's lock, so it re-creates the object.
+  it("takes a push while the collection is deleting, instead of making it wait", async () => {
+    // THE LOCK IS FOR DECISIONS, NOT FOR THE NETWORK. A collection of forty
+    // thousand objects held the cache's write lock for the whole hour it ran,
+    // so every push to the daemon queued behind it. Now the plan and each
+    // batch's decision take the lock and the deletes do not — and this is that
+    // claim, falsifiable: the push below completes while a delete is still in
+    // flight, and the arrangement deadlocks if the lock is ever held across it.
     const disk = diskObjectStore({ dir: join(scratch, "cache") });
     const gate = Promise.withResolvers<void>();
     const deleting = Promise.withResolvers<void>();
@@ -529,19 +532,18 @@ describe("gc and a concurrent push", () => {
           "local",
           {
             ...disk,
-            async delete(key: string) {
+            async deleteMany(keys: readonly string[]) {
               deleting.resolve();
               await gate.promise;
-              await disk.delete(key);
+              await disk.deleteMany(keys);
             },
           },
         ],
       ]),
     });
     await cache.admin.create({ ...createInput, retentionDays: 0 });
-    const path = "/nix/store/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr-repushed";
-    const payload = nar(path);
-    const push = async (): Promise<NarinfoOutcome> => {
+    const push = async (path: string): Promise<NarinfoOutcome> => {
+      const payload = nar(path);
       await putNar(cache, "main", payload);
       return cache.acceptNarinfo(
         cache.bucket("main") as never,
@@ -550,22 +552,28 @@ describe("gc and a concurrent push", () => {
         NOTHING_SAID,
       );
     };
-    expect(await push()).toMatchObject({ ok: true });
+    const expired = "/nix/store/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr-expired";
+    expect(await push(expired)).toMatchObject({ ok: true });
     const db = new Database(join(scratch, "cache", "cache.sqlite"));
     db.run("UPDATE object SET last_wanted = 0");
     db.close();
 
     const collecting = cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
     await deleting.promise;
-    const repushing = push();
-    // Long enough for the push to verify and reach whatever it waits on.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // A PATH THE PLAN NEVER SAW, pushed with a delete of another one in
+    // flight: it is recorded now, not after the collection.
+    const landed = "/nix/store/llllllllllllllllllllllllllllllll-landed";
+    expect(await push(landed)).toMatchObject({ ok: true });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(landed))).not.toBeNull();
+
     gate.resolve();
-    expect(await collecting).toMatchObject({ ok: true });
-    expect(await repushing).toMatchObject({ ok: true });
-    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toBeNull();
+    expect(await collecting).toMatchObject({ ok: true, value: { report: { evicted: 1, stopped: null } } });
+    // The expired path is gone, and the one that landed mid-collection is
+    // whole: its row, and its bytes.
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(expired))).toBeNull();
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(landed))).not.toBeNull();
     expect(
-      await cache.narSource(cache.bucket("main") as never, `${payload.narHash.slice(7)}.nar`),
+      await cache.narSource(cache.bucket("main") as never, `${nar(landed).narHash.slice(7)}.nar`),
     ).toMatchObject({ kind: "object" });
     await cache.close();
   });
