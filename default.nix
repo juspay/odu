@@ -162,12 +162,12 @@ let
   # dependencies hold still.
   #
   # `odu-base` used to be this install and the sources in one derivation, which
-  # made 226 MB of node_modules part of a package whose hash moves with every
-  # commit. The cache measured what that costs: 187 copies in eight days, 42 GB
-  # of the bucket's 117 GB, every one of them the same dependencies re-pushed
-  # under a new name because a `.ts` file one directory over had changed.
-  # Split out, those bytes are stored once per lockfile and `odu-base` is left
-  # holding only what genuinely differs between two commits.
+  # made 263 MB of node_modules part of a package whose hash moves with every
+  # commit. The cache measured what that costs: 187 copies of a ~226 MB closure
+  # in eight days, 42 GB of the bucket's 117 GB, every one of them the same
+  # dependencies re-pushed under a new name because a `.ts` file one directory
+  # over had changed. Split out, those bytes are stored once per lockfile and
+  # `odu-base` is left holding only what genuinely differs between two commits.
   #
   # The fileset is therefore everything `bun install --frozen-lockfile` READS
   # and not one file more: the root manifest, the lockfile, `bunfig.toml` (the
@@ -255,10 +255,18 @@ let
             ${pkgs.cordis.hydrateArgs}
         '';
 
-        # node_modules AND NOTHING ELSE. The manifests that produced it are
-        # already in the lockfile's hash, and keeping a copy of them here would
-        # put a second spelling of the sources in a derivation whose whole point
-        # is not to have any.
+        # TWO DIRECTORIES, and both are install output. `$out/node_modules` is
+        # exactly what bun wrote at the root — no manifest, no source, nothing
+        # this derivation was handed — because the inputs are already in the
+        # lockfile's hash and a copy of them here would be a second spelling of
+        # a tree whose whole point is not to have one.
+        #
+        # `$out/workspaces/<member>/node_modules` is the SECOND thing bun wrote:
+        # the isolated linker gives every workspace member its own farm beside
+        # its manifest (`bunfig.toml` says why isolated), decided by the
+        # manifests like the rest. It is kept beside node_modules rather than
+        # inside it so that the sentence above stays true of the one directory a
+        # resolver reads.
         #
         # The workspace links this leaves in `$out/node_modules/@odu/*` point at
         # `../../packages/<member>`, which is NOT in this output and is not
@@ -268,18 +276,11 @@ let
           runHook preInstall
           mkdir -p $out
           cp -a node_modules $out/node_modules
-
-          # The isolated linker also gives every workspace member its own
-          # node_modules beside its manifest — relative symlinks, decided by the
-          # manifests, install output like the rest. They are parked under a
-          # dotted name no resolver will read as a scope, and `base` replays
-          # them into `packages/<member>/node_modules` where their `../../../`
-          # hops are true.
           for member in packages/*; do
             [ -d "$member/node_modules" ] || continue
-            name=$(basename "$member")
-            mkdir -p "$out/node_modules/.workspaces/$name"
-            cp -a "$member/node_modules" "$out/node_modules/.workspaces/$name/node_modules"
+            target=$out/workspaces/$(basename "$member")
+            mkdir -p "$target"
+            cp -a "$member/node_modules" "$target/node_modules"
           done
           runHook postInstall
         '';
@@ -288,7 +289,7 @@ let
   # The repo tree, bun-runnable with no build step (the kolu/drishti
   # convention) — the source fileset, plus a node_modules that POINTS AT
   # `odu-deps` rather than containing it. A commit's worth of difference is now
-  # a few megabytes of source and a few hundred symlinks.
+  # a few megabytes of source and a tree of symlinks.
   base = pkgs.runCommand "odu-base-${version}"
     {
       meta.description = "odu's source tree with node_modules resolved against odu-deps";
@@ -303,27 +304,25 @@ let
     #
     #   a symlink      — replayed VERBATIM. Every one bun writes is relative,
     #                    and the tree it means is THIS one: `.bun/…` lands on
-    #                    the reference below, `../../packages/<member>` on real
-    #                    source.
+    #                    the reference this same loop makes, and
+    #                    `../../packages/<member>` on real source.
     #   a scope (`@…`) — recursed into, because `@odu` holds workspace links and
     #                    `@babel` holds dependency links and only the entries
     #                    themselves know which.
-    #   any other dir  — linked BY REFERENCE into the store. That is `.bun` (the
-    #                    254 MB this change is about), `.bin`, and the hydrated
-    #                    `@kolu/*`, `@olai/*`, `cordis` and `osfacts-client`
-    #                    sources. A hydrated package resolves its own imports
-    #                    from its REALPATH, which is inside `odu-deps`, whose
-    #                    root node_modules is the one holding `effect` and
-    #                    `@orpc/*` — the walk-up invariant `bunfig.toml` states,
-    #                    now satisfied one derivation over.
+    #   any other dir  — linked BY REFERENCE into the store. That is `.bun` (254
+    #                    of the 263 MB this change is about), `.bin`, and the
+    #                    hydrated `@kolu/*`, `@olai/*`, `cordis` and
+    #                    `osfacts-client` sources. A hydrated package resolves
+    #                    its own imports from its REALPATH, which is inside
+    #                    `odu-deps`, whose root node_modules is the one holding
+    #                    `effect` and `@orpc/*` — the walk-up invariant
+    #                    `bunfig.toml` states, now satisfied one derivation over.
     mirror() {
       local from=$1 to=$2 path name
       mkdir -p "$to"
       for path in "$from"/*; do
         name=''${path##*/}
-        if [ "$name" = ".workspaces" ]; then
-          continue
-        elif [ -L "$path" ]; then
+        if [ -L "$path" ]; then
           cp -P "$path" "$to/$name"
         elif [ -d "$path" ] && [ "''${name#@}" != "$name" ]; then
           mirror "$path" "$to/$name"
@@ -334,7 +333,9 @@ let
     }
     mirror ${odu-deps}/node_modules $out/node_modules
 
-    for member in ${odu-deps}/node_modules/.workspaces/*; do
+    # And each member's own farm back beside its manifest, where the `../../../`
+    # hops in it are true again.
+    for member in ${odu-deps}/workspaces/*; do
       target=$out/packages/$(basename "$member")/node_modules
       cp -a "$member/node_modules" "$target"
       chmod -R u+w "$target"
