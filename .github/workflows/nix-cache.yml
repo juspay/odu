@@ -181,7 +181,7 @@ jobs:
       # rather than from anything the declaration spells. WITH `sidecar`,
       # installables are full flake installables, and the revision the entries
       # are keyed under defaults to the published commit.
-      - uses: juspay/kolu/.github/actions/publish-closure@97fdee59295b87fa6136fa75ec1b7243f5dfb52b
+      - uses: juspay/kolu/.github/actions/publish-closure@2371891ca435cfaffdff704b9a07399718a7095d
         with:
           sidecar: ${{ runner.temp }}/declaration/binary-cache.json
           installables: .#odu-runner

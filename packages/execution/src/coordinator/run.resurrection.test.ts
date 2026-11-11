@@ -3,11 +3,11 @@
  *
  * A CI run that has spent four minutes on a builder should not be thrown away
  * because a laptop changed wifi networks. Holding the link open through it is
- * not available: Effect RPC's pinger ends the socket after 5–10s with no frame
- * from the peer, and `@kolu/surface` deliberately sets none of its cadence
- * options (`pingInterval`/`pingTimeout`, which Effect 4.0.0 did not have;
- * `src/links/wire.ts`), so that deadline is not odu's to move. The runner is
- * ephemeral by design — it dies with the pipe, and that death is what
+ * not available: the session's watchdog force-cycles a silent ssh arm at ~25s,
+ * ssh's dead-peer policy ends it at ~30s, and the link's own pinger is a
+ * 60–65s backstop beneath both. kolu bakes all three (`@kolu/surface/keepAlive`;
+ * no link factory takes a timing parameter), so that deadline is not odu's to
+ * move. The runner is ephemeral by design — it dies with the pipe, and that death is what
  * frees the venue flock and reaps the recipe process trees. So survival is the
  * coordinator's job, after the fact: claim another venue and start a new lane
  * over the nodes the dead one had not finished.
