@@ -70,7 +70,8 @@
 # anything. An explicit `true` or `false` is obeyed exactly as given and
 # nothing is inferred from it: a workflow that pins on some OTHER ref writes
 # that expression and passes the answer. The literal expression is in the
-# README and in odu's own `nix-cache.yml` and CANNOT be written here —
+# cache docs (`website/src/content/cache.md`, Push from GitHub Actions) and
+# CANNOT be written here —
 # GitHub evaluates workflow expressions while PARSING an action file, where
 # the `github` context does not exist, and one in any string refuses the
 # whole action with "Unrecognized named-value: github".
@@ -158,7 +159,8 @@ inputs:
       branch, i.e. github.ref equals refs/heads/<default branch>, read from
       the event payload; outside Actions it pins nothing. An explicit true or
       false is obeyed exactly. To pin on some other ref, write that
-      comparison in your workflow and pass its result (the README has the
+      comparison in your workflow and pass its result
+      (https://odu.kolu.dev/docs/cache/#push-from-github-actions has the
       line; an expression cannot appear in this file). The name is derived —
       <owner>/<repo>@<ref>/<system> — never typed.
     required: false

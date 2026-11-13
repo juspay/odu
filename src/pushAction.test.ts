@@ -13,8 +13,8 @@
  * The rule is narrow because the failure is: an expression in `action.yml`
  * may name `inputs.` and nothing else. `inputs` is the one context an
  * action's own `runs:` is evaluated with; everything a CALLER writes —
- * `github`, `secrets`, `matrix` — belongs in a workflow, and in the README
- * where it can be read.
+ * `github`, `secrets`, `matrix` — belongs in a workflow, and in the docs
+ * (`website/src/content/cache.md`) where it can be read.
  *
  * **Two: an omitted `cache:` pushes to a NAMED target, with the token** (#163).
  * The documented spelling used to resolve the substituter inside
@@ -67,7 +67,7 @@ describe("the action files this repository ships", () => {
         ? ""
         : "an action.yml may only interpolate `inputs.…`; GitHub evaluates every other " +
           "expression at parse time, where `github` and `secrets` do not exist, and refuses " +
-          "the whole action. Describe it in words here and keep the literal line in the README:\n" +
+          "the whole action. Describe it in words here and keep the literal line in the docs:\n" +
           offenders.join("\n"),
     ).toEqual([]);
     expect(
