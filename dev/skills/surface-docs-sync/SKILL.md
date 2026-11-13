@@ -1,6 +1,6 @@
 ---
 name: surface-docs-sync
-description: Keep odu's three surface docs (README.md, website/src/content/docs.md, the odu skill) in sync with the service contract. Use whenever editing src/main.ts, packages/cli/src/ciCli.ts, packages/cache/src/cli.ts, packages/auth/src/cli.ts, packages/service-client/src/surface.ts, packages/service-client/src/verbs.ts, packages/run-client/src/surface.ts, packages/execution/src/common/laneSurface.ts, packages/cli/src/serviceCli.ts, packages/cli/src/serviceMcp.ts, or anything that adds, renames or changes a verb, cell, CLI command or flag.
+description: Keep odu's three surface docs (website/src/content/docs.md, website/src/content/cache.md, the odu skill) in sync with the service contract. Use whenever editing src/main.ts, packages/cli/src/ciCli.ts, packages/cache/src/cli.ts, packages/auth/src/cli.ts, packages/service-client/src/surface.ts, packages/service-client/src/verbs.ts, packages/run-client/src/surface.ts, packages/execution/src/common/laneSurface.ts, packages/cli/src/serviceCli.ts, packages/cli/src/serviceMcp.ts, or anything that adds, renames or changes a verb, cell, CLI command or flag.
 ---
 
 ## Keep the surface docs in sync
@@ -28,10 +28,15 @@ When you add or change any of:
 
 update **all three** in the *same* change:
 
-1. **`README.md`** — the `## CLI` block, the verb table, and the agent-loop prose.
-2. **`website/src/content/docs.md`** — the reference the site publishes.
+1. **`website/src/content/docs.md`** — the reference the site publishes: the
+   CLI reference, the board table, and the agent loop.
+2. **`website/src/content/cache.md`** — the cache command reference, for a
+   cache verb or an `odu cache` command or flag.
 3. **`skills/odu/SKILL.md`** — the single authored skill: the
    bootstrap, the loop, and the CLI/MCP guidance, which are one skill because
    CLI and MCP are two faces of one service rather than two adoption paths.
 
 Keep all three concise — a one-line entry per verb or command, not a tutorial.
+
+`README.md` holds only the quick-start command and links into the docs. Touch
+it only when that command or a heading it links to changes.

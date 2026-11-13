@@ -2,7 +2,7 @@
 
 `odu web` also serves Nix binary caches. The same loopback service that runs CI answers the standard Nix HTTP binary cache protocol, so every Nix client works unchanged.
 
-A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. By default the cache binds loopback, like the board: `$ODU_WEB_ORIGIN` is the address it listens on, and the NixOS module puts nginx in front of it — proxying the cache's protocol paths only, unless [server mode](../docs/#server-mode) is configured, where the board and `/mcp` are behind the same door. The cache keeps the compressed NAR a pusher sent (like Cachix and Attic) and no Nix store of its own — on the server's disk, or in any S3-compatible bucket ([Keep a bucket on S3](#keep-a-bucket-on-s3)); see [Where the data lives](#where-the-data-lives).
+A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. By default the cache binds loopback, like the board: `$ODU_WEB_ORIGIN` is the address it listens on, and the NixOS module puts nginx in front of it — proxying the cache's protocol paths only, unless [server mode](../#server-mode) is configured, where the board and `/mcp` are behind the same door. The cache keeps the compressed NAR a pusher sent (like Cachix and Attic) and no Nix store of its own — on the server's disk, or in any S3-compatible bucket ([Keep a bucket on S3](#keep-a-bucket-on-s3)); see [Where the data lives](#where-the-data-lives).
 
 ## Create a bucket
 
@@ -82,7 +82,7 @@ export ODU_ROOT_TOKEN=...
 odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30}' --json
 ```
 
-**On a server with a door, the rule is your role.** Once [server mode](../docs/#server-mode) is configured, the root token is not an administrator — it exists to grant the first owner — and administration needs an `admin` or an `owner`:
+**On a server with a door, the rule is your role.** Once [server mode](../#server-mode) is configured, the root token is not an administrator — it exists to grant the first owner — and administration needs an `admin` or an `owner`:
 
 ```sh
 odu surface auth user_whoami --json   # who this machine's token belongs to, and its role
@@ -202,7 +202,7 @@ Then it proves the push. For every path the bucket serves, `check.sh` asks `<sub
 
 **`cache:` is the one fact — the substituter URL**, the same line your `nix.conf` already has. The push origin and the bucket name are read off `<cache>/nix-cache-info`, which states them ([The cache describes itself](#the-cache-describes-itself)). They cannot be derived any more: a bucket whose reads are served from a store answers `GET` at an address that takes no push at all. A cache that states neither refuses the step, naming the URL it asked.
 
-**And `cache:` may be left out entirely**, when your `flake.nix` already names the bucket in `nixConfig` — which a repository that READS from it does. The step then asks `odu cache target` for that one substituter and pushes to it by name, token and all; no odu cache there, or two, fails the step naming what it found. Name `cache:` when the workflow builds for a cache the flake does not list, or when the bucket is **private** — the inference probes anonymously, and a private bucket answers its `nix-cache-info` to nobody. [Use odu from your repository](../docs/#use-odu-from-your-repository) is the consumer's whole of it.
+**And `cache:` may be left out entirely**, when your `flake.nix` already names the bucket in `nixConfig` — which a repository that READS from it does. The step then asks `odu cache target` for that one substituter and pushes to it by name, token and all; no odu cache there, or two, fails the step naming what it found. Name `cache:` when the workflow builds for a cache the flake does not list, or when the bucket is **private** — the inference probes anonymously, and a private bucket answers its `nix-cache-info` to nobody. [Use odu from your repository](../#use-odu-from-your-repository) is the consumer's whole of it.
 
 **With no `paths`, the whole flake goes** — every `packages.<system>`, `devShells.<system>` and `checks.<system>` output for the runner's system, enumerated by Nix rather than listed by hand, so a flake that gains an output gains it here on the next push. Name `paths` to push exactly what you name instead: store paths, `result` links, or flake installables, space- or newline-separated, installables built first. A bucket page prints this block filled in with its own substituter URL under **Set up → GitHub Actions**.
 
@@ -495,7 +495,7 @@ An upload sits in `staging/` until its narinfo arrives; one that never gets it i
 
 **The daemon's own home is the one thing that is not under `<state>` by default.** It holds the singleton's gate and control socket, and its name is derived from the origin — `odu-web` at the default origin, `odu-web-<hash>` at any other, so two services cannot share one. Without `$ODU_STATE_DIR` it is `$HOME/.local/state/odu-web*`: a SIBLING of `odu` rather than a child of it, and deliberately not under `$XDG_STATE_HOME` — that variable varies by launch context (a login shell, a bare ssh, a systemd unit), and two contexts computing two "state" homes would split one daemon's identity. Set `$ODU_STATE_DIR` and the home moves inside it, which is what a container with a read-only `$HOME` wants.
 
-The service needs no `nix.settings.trusted-users` entry and no Nix store: it never imports a path. Running all of this on a NixOS host, with the state under `/var/lib/odu` and nginx in front, is [Self-host on NixOS](../docs/#self-host-on-nixos).
+The service needs no `nix.settings.trusted-users` entry and no Nix store: it never imports a path. Running all of this on a NixOS host, with the state under `/var/lib/odu` and nginx in front, is [Self-host on NixOS](../#self-host-on-nixos).
 
 ## A domain for a bucket
 
@@ -652,7 +652,7 @@ The CLI keeps the four cache commands a shell is the natural place for. Everythi
 | --- | --- | --- | --- |
 | Print the substituter and key settings, the `nixConfig` block, and the netrc lines. No account for a public bucket | `odu cache use <bucket>` | `bucket_describe` | a bucket page's block |
 | Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — | — (a machine's disk) |
-| Upload only the paths the bucket is missing; the bucket keeps what it takes. `--cache <substituter>` reads the origin and the bucket off the cache's own `nix-cache-info` instead of being told them. `--pin NAME` re-points that pin at the closure this push landed, unless a path was refused | `odu cache push <bucket> <paths…> [--part-size MiB] [--pin NAME]`, or `odu cache push --cache <substituter> <paths…>` | — | — (a build box's job) |
+| Upload only the paths the bucket is missing; the bucket keeps what it takes. `--cache <substituter>` reads the origin and the bucket off the cache's own `nix-cache-info` instead of being told them. `--pin NAME` re-points that pin at the closure this push landed, unless a path was refused. `--run ID` and `--commit SHA` state what built the paths (see [Push](#push)) | `odu cache push <bucket> <paths…> [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA]`, or `odu cache push --cache <substituter> <paths…>` | — | — (a build box's job) |
 | Print the one odu substituter `./flake.nix`'s `nixConfig` names, and nothing else (`-o json` → `{cache, origin, bucket}`). The push action resolves an omitted `cache:` with it | `odu cache target` | — | — (reads this checkout) |
 | Create a bucket; answer its substituter URL, public key and store. `retentionDays` is how long it keeps what nobody wants (90 when absent). `upstreamKeys: []` takes everything, including upstream-signed closures (costs disk; for consumers that cannot reach cache.nixos.org). `store` keeps its objects in a declared store (default `local`) | — | `bucket_create` | Cache → **Create bucket**, **Skip upstream paths** off, the **store** field |
 | List buckets | — | `bucket_list` | Cache |

@@ -101,6 +101,15 @@ Pass `--host SYSTEM=localhost` for an explicit local run, or create `~/.config/o
 
 A remote pool leases one available machine per platform. Builders need SSH access, Nix and outbound HTTPS. Each lane host also needs the lane runner built for its Nix system, which odu resolves from the build that shipped its own coordinator: a published revision reaches a Linux host on Nix 2.17–2.34 with **no cache key on the host** (the host pulls the content-addressed build itself), while macOS and other Nix lines need the binary cache odu's flake declares to be trusted. Do not mix localhost and remote machines in one pool.
 
+That cache is odu's own, declared in its flake's `nixConfig`. A macOS lane, or one on another Nix line, trusts it in its `nix.conf`:
+
+```ini
+extra-substituters = https://cache.kolu.dev/kolu-r2
+extra-trusted-public-keys = kolu-r2-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=
+```
+
+`--accept-flake-config` reads the same two settings from the flake, but Nix honours them only for a trusted user.
+
 Hosts are read from the first existing file: `$ODU_HOSTS`, `~/.config/odu/hosts.json`, then the legacy `~/.config/justci/hosts.json`. No configured host means a refusal, never an implicit local build.
 
 On the board: **Machines** shows the service's last probe of the same inventory and its age — opening the page dials nothing — and **Probe machines** takes a fresh one, narrowed by platform if you name one.

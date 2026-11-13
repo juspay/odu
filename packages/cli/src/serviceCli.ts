@@ -31,7 +31,7 @@
  * `odu ci wait`'s own exits are DIFFERENT and deliberately so: that command
  * answers a question about CI, so it spends its exit codes on CI's answer. This
  * face answers a question about a CALL, so it spends them on the call. Two
- * vocabularies, each internally consistent, and the README says which is which.
+ * vocabularies, each internally consistent, and the docs' CLI reference says which is which.
  */
 
 import {

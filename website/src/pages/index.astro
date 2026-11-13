@@ -7,7 +7,10 @@ import SiteChrome from "../components/SiteChrome.astro";
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const github = "https://github.com/juspay/odu";
-const runCmd = "nix run github:juspay/odu -- run --host x86_64-linux=localhost --no-post";
+// The try-it command, typed once: the hero and the "Run a lane" step style its two halves apart.
+const runVerb = "nix run github:juspay/odu -- ci run";
+const runFlags = "--host x86_64-linux=localhost --no-post";
+const runCmd = `${runVerb} ${runFlags}`;
 
 // Dogfood: show odu's real CI justfile. Astro's cwd is website/, so ../ci is the repo.
 const justfileSource = readFileSync(resolve(process.cwd(), "../ci/mod.just"), "utf-8");
@@ -77,7 +80,7 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                   <button class="copy-btn" type="button" data-copy={runCmd} style="margin-left:auto">copy</button>
                 </div>
                 <div class="term-body">
-                  <div class="cmd"><span class="prompt">$</span> nix run github:juspay/odu -- run <span class="flag">--host x86_64-linux=localhost --no-post</span></div>
+                  <div class="cmd"><span class="prompt">$</span> {runVerb} <span class="flag">{runFlags}</span></div>
                   <div class="pipeline" aria-hidden="true">
                     <span class="pnode"><span class="pdot" style="--d:0s"><span class="pcheck">✓</span></span>typecheck</span>
                     <span class="parrow">→</span>
@@ -411,8 +414,8 @@ const justfileHref = `${github}/blob/master/ci/mod.just`;
                 <p>This starts the local service automatically. Use your Nix system in the host pin; this example is x86_64 Linux.</p>
                 <div class="code-block">
                   <button class="copy-btn" type="button" data-copy={runCmd}>copy</button>
-                  <span class="line"><span class="dim">$</span> nix run github:juspay/odu -- run</span>
-                  <span class="line indent">--host x86_64-linux=localhost --no-post</span>
+                  <span class="line"><span class="dim">$</span> {runVerb}</span>
+                  <span class="line indent">{runFlags}</span>
                   <span class="line gap"><span class="accent">✓</span> typecheck  <span class="accent">✓</span> unit  <span class="dim">⠹</span> e2e</span>
                 </div>
               </div>

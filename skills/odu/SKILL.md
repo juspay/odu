@@ -948,8 +948,9 @@ declares.
 
 ## When NOT to use this skill
 
-- Questions about odu's internals or design history — read the
-  [README](https://github.com/juspay/odu/blob/master/README.md).
+- Questions about odu's internals or design history — read
+  [PLAN.md](https://github.com/juspay/odu/blob/master/PLAN.md) and the package
+  READMEs under [packages/](https://github.com/juspay/odu/tree/master/packages).
 - Project-specific CI operations (warm pools, banned flags, which lanes are
   required) — that is the consuming repo's operational docs, layered on top of
   this reference.
