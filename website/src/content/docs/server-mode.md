@@ -5,7 +5,9 @@ section: Run the service
 order: 3
 ---
 
-Give odu a GitHub App's credentials and it runs in server mode. A browser that is not signed in meets a sign-in page, `/mcp` returns `401` without a personal token, and every API verb runs as a signed-in person with a role. Without the credentials, none of this applies, and a loopback `odu web` lets every caller do everything.
+Give odu a GitHub App's credentials and it runs in server mode. A browser that is not signed in meets a sign-in page, `/mcp` returns `401` without a personal token, and every API verb runs as a signed-in person with a role.
+
+Without the credentials, none of this applies, and a loopback `odu web` lets every caller do everything.
 
 Commands are written with the [`odu` shorthand](/docs/#quick-start).
 

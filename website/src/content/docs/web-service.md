@@ -5,7 +5,7 @@ section: Run the service
 order: 1
 ---
 
-`odu web` is the one service behind everything: it runs CI, serves the board, answers the CLI and agents, and serves the cache. The CLI and agents start it for you when it is not running. You start it yourself to keep it in a terminal, replace it, or change how it is reached.
+`odu web` is the one service behind everything: it runs CI, serves the board, answers the CLI and agents, and serves the cache. The CLI and agents start it when it is not running. Start it yourself to keep it in a terminal, replace it, or change how it is reached.
 
 Commands are written with the [`odu` shorthand](/docs/#quick-start).
 

@@ -24,7 +24,7 @@ odu ci wait --run latest -o json
 
 ## Read a failure's log
 
-`ci wait` gives you the failure's `logKey`. Read it with `odu ci logs KEY`, and add `-f` to follow it. A page of the log carries `nextOffset`, `eof` and `open`: keep reading until it is at EOF and no longer open.
+`ci wait` gives you the failure's `logKey`. Read it with `odu ci logs KEY`, and add `-f` to follow it. A page of the log carries `nextOffset`, `eof` and `open`: keep reading until `eof` is true and `open` is false.
 
 ## When a push fails
 

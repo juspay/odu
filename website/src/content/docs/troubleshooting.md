@@ -5,7 +5,7 @@ section: Use odu
 order: 6
 ---
 
-Find the symptom, then the next step. Each row links to the page that explains it.
+Find the symptom, then the next step. Each next step links to the page that explains it.
 
 | Symptom | Next step |
 | --- | --- |

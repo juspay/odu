@@ -49,7 +49,7 @@ The bucket's **kept by** column says why each path is still here and when it goe
 | `nothing · next collection` | no pin, and every clock has run out | the next daily collection, or **Run GC** |
 
 - Hover a cell for the whole sentence and the day the path leaves.
-- A package row shows its version held longest (any pinned one, else the latest) among those the filter leaves. Open the row to see each version.
+- A package's line shows its version held longest (any pinned one, else the latest) among those the filter leaves. Open it to see each version.
 - The column is a snapshot, like the rest of the list. **refresh paths** asks again, and changing **Retention** re-reads it.
 - Pin names are part of the answer, so anyone who can read the path list sees them.
 

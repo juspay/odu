@@ -111,8 +111,8 @@ Anyone may read a bucket's page, which uses `bucket_describe` and `bucket_paths`
 
 ### The paths table
 
-- It is grouped by name by default: `odu-base-0.1.0` with six builds is one row with the count, total size, newest push and summed reads. The service counts over the whole bucket, not the rows on screen.
-- Click **group by name** for one row per path.
+- It is grouped by name by default: `odu-base-0.1.0` with six builds is one line with the count, total size, newest push and summed reads. The service counts over the whole bucket, not the lines on screen.
+- Click **group by name** for one line per path.
 - Click **name**, **size**, **pushed** or **reads** to sort by it, and again to reverse. **Show 20 more** continues in the same order. Inside an open package, **show N more** pages its versions.
 - The filter box narrows what the bucket returns.
 - A hash shows its first eight characters. Its tooltip is the whole store path, and clicking it copies the path.

@@ -5,7 +5,7 @@ section: Use odu
 order: 4
 ---
 
-Every `odu ci` command talks to the odu service on the machine you are on, unless you name another. To run the server's clone of your repository from any shell, with no checkout of your own, you name the server, the path on it, and the commit you believe is there.
+Every `odu ci` command talks to the odu service on the machine you are on, unless you name another. To run the server's clone of your repository from any shell, you name the server, the path on it, and the commit you believe is there.
 
 Commands are written with the [`odu` shorthand](/docs/#quick-start).
 
