@@ -234,6 +234,29 @@ Feature: An admin administers the cache from the board
     And the bucket's facts say "90d retention"
     And there should be no page errors
 
+  # WHY IS THIS PATH STILL HERE, AND WHEN DOES IT GO. The column is the
+  # collector's own answer, so it is graded against the same arrangement the
+  # dry run is: a pin is the whole difference between the two paths, and
+  # ZERO DAYS turns the unpinned one into what the next collection takes —
+  # with no clock having to move.
+  Scenario: Each path says what keeps it, and when it leaves
+    Given a bucket created from the board
+    And I mint a "write" token
+    And two paths are pushed with that token from the CLI
+    And I open the pins
+    And I pin the first path as "release"
+    Then the cache says "Pinned release"
+    When I open the paths
+    And I press "refresh paths"
+    Then the first path is kept by "pin release"
+    And the second path is kept by retention, with a day it leaves
+    When I set the retention to "0" days
+    Then the cache says "now keeps only what a reference or a pin holds"
+    When I press "refresh paths"
+    Then the second path is kept by "nothing · next collection"
+    And the first path is kept by "pin release"
+    And there should be no page errors
+
   @signed-in:admin
   Scenario: An empty pin is refused by the row, in its words
     Given a bucket created from the board

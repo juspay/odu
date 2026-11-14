@@ -51,7 +51,7 @@
  */
 
 import { createControl, type Control } from "@odu/face/control";
-import { ago, bytes } from "@odu/cordis/format";
+import { ago, ahead, bytes } from "@odu/cordis/format";
 import { refusalText } from "@odu/face/refusal";
 import {
   BackLink,
@@ -95,6 +95,7 @@ import {
   type CacheBucket,
   type CacheGcPlan,
   type CacheMigration,
+  type CacheKeptBy,
   type CachePath,
   type CachePaths,
   type CachePin,
@@ -716,6 +717,10 @@ export interface PathRow {
    *  the NEWEST version's, read off the same row the hash is. */
   readonly run: string | null;
   readonly commit: string | null;
+  /** WHAT KEEPS IT, and until when (cache 4.9) — the row's verdict, never
+   *  the page's: a page holding twenty rows cannot see the reference graph.
+   *  A group's is its version held longest. Null from an older daemon. */
+  readonly keptBy: CacheKeptBy | null;
 }
 
 /**
@@ -739,6 +744,7 @@ const pathRow = (path: CachePath, name: string): PathRow => ({
   // this said nothing: both read as "unknown", which the cells draw as empty.
   run: path.run ?? null,
   commit: path.commit ?? null,
+  keptBy: path.keptBy ?? null,
 });
 
 /**
@@ -760,9 +766,72 @@ export function pathRows(page: CachePaths): readonly PathRow[] {
       wanted: group.wanted,
       run: group.run ?? null,
       commit: group.commit ?? null,
+      keptBy: group.keptBy ?? null,
     }));
   }
   return page.paths.map((path) => pathRow(path, storePathParts(path.storePath).name));
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * WHY A PATH IS STILL HERE, AND WHEN IT GOES — a cell short enough to scan
+ * down a column, and the whole sentence as its `title`.
+ *
+ * The VERDICT is the row's (`kind`, decided when the page was answered); the
+ * "in 83d" is drawn against the page's clock from the absolute `until`, the
+ * way `wanted` is. `retentionDays` is the bucket's, and it is what turns
+ * `until` back into the moment the clock was last wound: `until` is that
+ * want plus the bucket's days, for the path's own clock and for `via`'s.
+ *
+ * `grouped` is a package row of several versions, which shows the one held
+ * longest and says so. Exported and pure, so the wording is pinned by a unit
+ * test rather than by reading JSX.
+ */
+export function keptByText(
+  keptBy: CacheKeptBy,
+  now: number,
+  options: { grouped: boolean; retentionDays: number },
+): { cell: string; title: string } {
+  const leaves = `leaves at the first collection after ${new Date(keptBy.until).toISOString().slice(0, 10)}`;
+  const wanted = ago(keptBy.until - options.retentionDays * DAY_MS, now);
+  const said = ((): { cell: string; title: string } => {
+    switch (keptBy.kind) {
+      case "pin": {
+        const [first, ...rest] = keptBy.pins;
+        const one = rest.length === 0;
+        return {
+          cell: `pin ${first ?? ""}${one ? "" : ` +${rest.length}`}`,
+          title:
+            `held by ${one ? "the pin" : "the pins"} ${keptBy.pins.join(", ")}; ` +
+            `it stays until ${one ? "the pin is" : "every one of them is"} deleted or re-pointed; ` +
+            `after that: ${now > keptBy.until ? "the next collection" : ahead(keptBy.until, now)}`,
+        };
+      }
+      case "retention":
+        return {
+          cell: `retention · ${ahead(keptBy.until, now)}`,
+          title:
+            `wanted ${wanted}; the bucket keeps a path ${options.retentionDays} ` +
+            `day${options.retentionDays === 1 ? "" : "s"} after the last want; ${leaves}`,
+        };
+      case "reference":
+        return {
+          cell: `reference · ${ahead(keptBy.until, now)}`,
+          title: `${keptBy.via ?? "a path"} still needs it, and was wanted ${wanted}; ${leaves}`,
+        };
+      case "nothing":
+        return {
+          cell: "nothing · next collection",
+          title:
+            `expired ${ago(keptBy.until, now)}; nothing references it and no pin holds it; ` +
+            "the daily collection or Run GC takes it",
+        };
+    }
+  })();
+  return options.grouped
+    ? { cell: said.cell, title: `${said.title} — the version held longest; open the row for each` }
+    : said;
 }
 
 /**
@@ -830,6 +899,9 @@ function BucketPaths(props: {
   now: number;
   /** The board's address for a run, for the `run` column. {@link CacheFaceProps.runHref} */
   runHref: (runId: string) => string;
+  /** The bucket's retention, which turns a `kept by` date back into the want
+   *  that wound it. */
+  retentionDays: number;
 }): JSX.Element {
   /** What the person typed, and what the query is allowed to see. Two signals:
    *  the box must track every keystroke, and the request must not. */
@@ -1112,7 +1184,7 @@ function BucketPaths(props: {
   };
 
   /**
-   * THE TABLE, AS DATA — eight columns, their widths, and what each cell is.
+   * THE TABLE, AS DATA — nine columns, their widths, and what each cell is.
    *
    * Every width but the name's is fixed, so the name takes what is left and
    * nothing in a cell can widen the page; the `Table` primitive owns the
@@ -1207,6 +1279,25 @@ function BucketPaths(props: {
       align: "right",
       width: "5.5rem",
       cell: (row) => ago(row.wanted, props.now),
+    },
+    /**
+     * WHY IT IS STILL HERE, AND WHEN IT GOES (cache 4.9). Last, beside the
+     * `wanted` clock it is mostly derived from. Not sortable: the verdict
+     * comes from the reference graph, which no column in SQL holds. The cell
+     * is short enough to scan; the sentence is its `title`.
+     */
+    {
+      key: "keptBy",
+      label: "kept by",
+      width: "11rem",
+      cell: (row) => {
+        if (row.keptBy === null) return null;
+        const said = keptByText(row.keptBy, props.now, {
+          grouped: row.versions > 1,
+          retentionDays: props.retentionDays,
+        });
+        return <span title={said.title}>{said.cell}</span>;
+      },
     },
   ];
   /**
@@ -1332,16 +1423,20 @@ function BucketPaths(props: {
           </Show>
         }
       >
-        <Table
-          class="paths-table"
-          label="paths"
-          columns={columns}
-          rows={rows()}
-          sorted={{ key: column(), descending: descending() }}
-          onSort={(key) => sortBy(key as PathColumn)}
-          under={(row) => versionsOf(row)}
-          note={(row) => noteUnder(row)}
-        />
+        {/* THE TABLE SCROLLS IN ITS OWN BOX (`face.css`), so the panel's head,
+            its foot and the page stay put while a reader goes to `kept by`. */}
+        <div class="paths-scroll">
+          <Table
+            class="paths-table"
+            label="paths"
+            columns={columns}
+            rows={rows()}
+            sorted={{ key: column(), descending: descending() }}
+            onSort={(key) => sortBy(key as PathColumn)}
+            under={(row) => versionsOf(row)}
+            note={(row) => noteUnder(row)}
+          />
+        </div>
       </Show>
       <Show when={next()}>
         {(after) => (
@@ -1571,6 +1666,7 @@ function BucketPage(
                   bucket={props.name}
                   runHref={props.runHref}
                   now={pathsClock()}
+                  retentionDays={bucket()?.retentionDays ?? DEFAULT_RETENTION_DAYS}
                 />
               </div>
               {/* KEYED ON THE NAME AND NOTHING ELSE: a half-typed pin belongs

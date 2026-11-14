@@ -41,6 +41,10 @@ import {
   type GcRemoval,
   GC_PREVIEW_PATHS,
   type GcPreview,
+  type Hold,
+  holdsOf,
+  keptBy,
+  longestHeld,
   planGc,
   previewGc,
   runGc,
@@ -64,7 +68,13 @@ import {
 } from "./narinfo";
 import { newChain, serial } from "./serial";
 import { CACHE_MOUNT, type Provenance } from "./paths";
-import { LOCAL_STORE, PATH_PAGE_SIZE, PRESIGN_SECONDS } from "./surface";
+import {
+  type CacheKeptBy,
+  LOCAL_STORE,
+  PATH_PAGE_SIZE,
+  PRESIGN_SECONDS,
+  storePathParts,
+} from "./surface";
 import {
   cacheInfoKey,
   CACHE_INFO_CONTENT_TYPE,
@@ -424,6 +434,9 @@ export interface PathPageRow {
    *  null where nothing was said. */
   run: string | null;
   commit: string | null;
+  /** WHAT KEEPS IT, and until when — the collector's own answer, read as
+   *  the page was answered. Null only for a row the holds could not place. */
+  keptBy: CacheKeptBy | null;
 }
 
 /** One PACKAGE, as a grouped `paths` lists it: every version of one store
@@ -440,6 +453,8 @@ export interface PathGroupPageRow {
   storePath: string;
   run: string | null;
   commit: string | null;
+  /** What keeps the version held LONGEST among those the filter leaves. */
+  keptBy: CacheKeptBy | null;
 }
 
 /** The verdict on a presented credential. `status` is what the route answers
@@ -886,6 +901,46 @@ export function createCache(options: CacheOptions): Cache {
    */
   const writers = newChain();
   const withWriteLock = <T>(work: () => Promise<T>): Promise<T> => serial(writers, work);
+
+  /**
+   * WHAT HOLDS EACH PATH, per bucket — the collector's own holds, and every
+   * path's name beside them so a package can find its versions.
+   *
+   * KEPT, because they need the whole bucket and the page asks often: on
+   * open, on every sort click, every filtered keystroke, every "show more"
+   * and every package opened, and kolu's sixteen thousand rows are a tenth
+   * of a second of event loop to load and walk. Holds carry no clock, so
+   * nothing but a WRITE makes them false, and `repo.revision` is the number
+   * every such write moves. Read with no lock: the read is synchronous, like
+   * the page read beside it, and the collector never looks here — it plans
+   * from fresh rows under its own lock.
+   */
+  const holdsMemo = new Map<
+    string,
+    { revision: number; holds: Map<string, Hold>; byName: Map<string, string[]> }
+  >();
+  function holdsFor(bucket: BucketRow): {
+    holds: Map<string, Hold>;
+    byName: Map<string, string[]>;
+  } {
+    const revision = repo.revision(bucket.name);
+    const kept = holdsMemo.get(bucket.name);
+    if (kept !== undefined && kept.revision === revision) return kept;
+    const objects = repo.objects(bucket.name);
+    const holds = holdsOf(bucket, objects, repo.pins(bucket.name));
+    // THE NAME MIGRATION 16 WROTE INTO `object.name`, split by the same
+    // function, so a package here is exactly the group SQL counted.
+    const byName = new Map<string, string[]>();
+    for (const row of objects) {
+      const name = storePathParts(row.storePath).name;
+      const versions = byName.get(name);
+      if (versions === undefined) byName.set(name, [row.storePath]);
+      else versions.push(row.storePath);
+    }
+    const fresh = { revision, holds, byName };
+    holdsMemo.set(bucket.name, fresh);
+    return fresh;
+  }
 
   /**
    * MAY THIS CALL ADMINISTER A BUCKET?
@@ -1710,6 +1765,7 @@ export function createCache(options: CacheOptions): Cache {
         // and the TOKENS minted for this bucket alone, which `deleteBucket`
         // takes with it.
         repo.deleteBucket(bucket.name);
+        holdsMemo.delete(bucket.name);
         options.log?.("cache.bucket.deleted", { bucket: bucket.name, objects, bytes });
         notify();
         return { ok: true as const, value: { name: bucket.name, objects, bytes } };
@@ -1821,9 +1877,34 @@ export function createCache(options: CacheOptions): Cache {
         // says, so nothing drawn there depends on this default.
         descending: input.descending ?? true,
       };
+      // WHAT KEEPS EACH ROW, decided NOW: the holds are the bucket's as of its
+      // last write, and the clock is this answer's.
+      const { holds, byName } = holdsFor(bucket);
+      const at = now();
+      const verdict = (hold: Hold | null | undefined): CacheKeptBy | null =>
+        hold === null || hold === undefined ? null : keptBy(hold, at);
       if (input.group === "name") {
         const grouped = repo.objectGroupsPage(bucket.name, page);
-        return { ok: true, value: { paths: [], groups: grouped.rows, next: grouped.next } };
+        // THE VERSIONS THE GROUP COUNTED: the same name, narrowed by the same
+        // substring SQL's `instr` applied, so a filtered package says how long
+        // the versions it shows are kept rather than one it hides.
+        const filter = page.filter === null || page.filter === "" ? null : page.filter;
+        const versionsOf = (name: string): Hold[] =>
+          (byName.get(name) ?? []).flatMap((path) => {
+            const hold = holds.get(path);
+            return hold === undefined || (filter !== null && !path.includes(filter)) ? [] : [hold];
+          });
+        return {
+          ok: true,
+          value: {
+            paths: [],
+            groups: grouped.rows.map((group) => ({
+              ...group,
+              keptBy: verdict(longestHeld(versionsOf(group.name))),
+            })),
+            next: grouped.next,
+          },
+        };
       }
       const listed = repo.objectsPage(bucket.name, { ...page, name: input.name ?? null });
       return {
@@ -1837,6 +1918,7 @@ export function createCache(options: CacheOptions): Cache {
             lastWanted: row.lastWanted,
             run: row.run,
             commit: row.commit,
+            keptBy: verdict(holds.get(row.storePath)),
           })),
           groups: null,
           next: listed.next,

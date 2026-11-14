@@ -98,6 +98,16 @@ on the wire and `cache_bucket_create` to an agent.
   same statement. GC then walks the bucket's own references from those roots,
   which is how a path pushed later under a pinned root is held too. `pin.list`
   says what each pin holds and `pin.delete` lets one go.
+- **Each path says which of the three holds it.** `holdsOf` (`gc.ts`) answers
+  per path the pins whose closure reaches it and `until`, the latest
+  `lastWanted + retention` of anything whose closure reaches it (`via` is that
+  path, or null for its own clock). `planGc` evicts exactly what it calls
+  released — no pin, `now > until` — and `bucket.paths` answers the same holds
+  as `keptBy` (cache surface **4.9**): `pin`, `retention`, `reference` or
+  `nothing`, which is the bucket page's **kept by** column. One function, so
+  the page cannot say a path is kept that the next collection takes. The holds
+  carry no clock and are kept per bucket against `repo.revision(bucket)`, which
+  every write they read moves.
 - **The dry run is what a person reads before the button.** `gc.plan` answers
   the same decision without doing it: the whole count and the whole byte total,
   plus the first `GC_PREVIEW_PATHS` paths oldest want first, so the top line is

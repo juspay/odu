@@ -21,13 +21,25 @@
  *  counts, and "1d ago" for something that ran this morning loses information
  *  nobody asked them to lose. */
 export function ago(at: number, now: number): string {
-  const seconds = Math.max(0, Math.round((now - at) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
+  return `${span(now - at)} ago`;
+}
+
+/** How long until, as coarsely and on the same lines as {@link ago} — "in
+ *  83d" — so a date a page says a thing leaves rounds the way the date it
+ *  arrived does. Never negative: a moment already past reads "in 0s". */
+export function ahead(at: number, now: number): string {
+  return `in ${span(at - now)}`;
+}
+
+/** One stretch of time, in the largest unit that keeps it readable. */
+function span(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return `${minutes}m`;
   const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
+  if (hours < 48) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
 }
 
 /** Bytes as a person reads them — binary units, because a store is. */

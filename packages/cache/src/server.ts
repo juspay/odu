@@ -90,6 +90,7 @@ import {
 } from "./staging";
 import {
   type CacheBucket,
+  type CacheKeptBy,
   CACHE_KEY,
   CacheRefused,
   type CacheStore,
@@ -104,6 +105,11 @@ type CacheSpec = (typeof oduCacheSurface)["spec"];
  *  none — nixpkgs', which is what a bucket almost always means. */
 const DEFAULT_UPSTREAM_KEY = "cache.nixos.org-1";
 export type CacheSurfaceDeps = ImplementSurfaceDeps<CacheSpec>;
+
+/** A row's verdict as the wire carries it: ABSENT where the row has none,
+ *  because the field is `optionalKey`, and its pins a copy the answer owns. */
+const keptByOf = (keptBy: CacheKeptBy | null): { keptBy?: CacheKeptBy } =>
+  keptBy === null ? {} : { keptBy: { ...keptBy, pins: [...keptBy.pins] } };
 
 /** The sibling's publishing half, as the composed bundle hands it over — the
  *  collection this row owns. */
@@ -825,10 +831,15 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 descending: input.descending ?? null,
               }),
             (page) => ({
-              paths: page.paths.map((path) => ({ ...path })),
+              paths: page.paths.map(({ keptBy, ...path }) => ({ ...path, ...keptByOf(keptBy) })),
               ...(page.groups === null
                 ? {}
-                : { groups: page.groups.map((group) => ({ ...group })) }),
+                : {
+                    groups: page.groups.map(({ keptBy, ...group }) => ({
+                      ...group,
+                      ...keptByOf(keptBy),
+                    })),
+                  }),
               ...(page.next === null ? {} : { next: page.next }),
             }),
           ),

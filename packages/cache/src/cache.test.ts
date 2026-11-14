@@ -653,6 +653,96 @@ describe("gc and pin", () => {
   });
 });
 
+/**
+ * WHAT KEEPS A PATH, through the verb the bucket page reads — and every write
+ * the kept holds must notice. A stale verdict is a column that lies, so each
+ * kind of write is made here and the next answer read.
+ */
+describe("paths say what keeps them", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const pinned = "/nix/store/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-widget-1.0";
+  const sibling = "/nix/store/ssssssssssssssssssssssssssssssss-widget-1.0";
+
+  async function arranged(): Promise<{ cache: Cache; travel: (ms: number) => void }> {
+    let clock = NOW;
+    const cache = createCache({
+      publicOrigin: "http://cache.test",
+      stateRoot: scratch,
+      stores: localStores(scratch),
+      rootToken: ROOT,
+      now: () => clock,
+    });
+    await cache.admin.create(createInput);
+    for (const path of [pinned, sibling]) {
+      const payload = nar(path);
+      await putNar(cache, "main", payload);
+      await cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(path),
+        stream(narinfoText(path, payload)),
+        NOTHING_SAID,
+      );
+      clock += DAY;
+    }
+    await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "release", paths: [pinned] });
+    return { cache, travel: (ms) => (clock += ms) };
+  }
+
+  const keptOf = async (cache: Cache, filter: string | null = null) => {
+    const answer = await cache.admin.paths({ bucket: "main", filter, after: null });
+    if (!answer.ok) throw new Error(answer.message);
+    return new Map(answer.value.paths.map((row) => [row.storePath, row.keptBy]));
+  };
+
+  const groupOf = async (cache: Cache, filter: string | null = null) => {
+    const answer = await cache.admin.paths({ bucket: "main", filter, after: null, group: "name" });
+    if (!answer.ok) throw new Error(answer.message);
+    return answer.value.groups?.[0]?.keptBy;
+  };
+
+  it("answers pin for a pinned path and retention for its sibling", async () => {
+    const { cache } = await arranged();
+    const kept = await keptOf(cache);
+    expect(kept.get(pinned)).toMatchObject({ kind: "pin", pins: ["release"], until: NOW + 30 * DAY });
+    expect(kept.get(sibling)).toEqual({
+      kind: "retention",
+      pins: [],
+      via: null,
+      until: NOW + DAY + 30 * DAY,
+    });
+    await cache.close();
+  });
+
+  it("follows a retention change, an unpin and a missing query", async () => {
+    const { cache, travel } = await arranged();
+    await keptOf(cache); // the holds are kept from here on
+
+    await cache.admin.retention({ ...asRoot(ROOT), bucket: "main", retentionDays: 7 });
+    expect((await keptOf(cache)).get(sibling)?.until).toBe(NOW + DAY + 7 * DAY);
+
+    await cache.admin.pinDelete({ ...asRoot(ROOT), bucket: "main", name: "release" });
+    expect((await keptOf(cache)).get(pinned)).toMatchObject({ kind: "retention", pins: [] });
+
+    // A BUILD ASKING ABOUT THE PATH WANTS IT, and that winds its clock.
+    travel(3 * DAY);
+    cache.missing(cache.bucket("main") as never, [{ path: pinned }], NOTHING_SAID);
+    expect((await keptOf(cache)).get(pinned)?.until).toBe(NOW + 2 * DAY + 3 * DAY + 7 * DAY);
+
+    // AND THE VERDICT IS THE ANSWER'S CLOCK, not the holds': no write, and
+    // the sibling's time is up.
+    travel(30 * DAY);
+    expect((await keptOf(cache)).get(sibling)?.kind).toBe("nothing");
+    await cache.close();
+  });
+
+  it("holds a package as long as its longest-held version, among those the filter leaves", async () => {
+    const { cache } = await arranged();
+    expect(await groupOf(cache)).toMatchObject({ kind: "pin", pins: ["release"] });
+    expect(await groupOf(cache, "ssss")).toMatchObject({ kind: "retention", pins: [] });
+    await cache.close();
+  });
+});
+
 describe("retention", () => {
   it("changes a bucket's days, and refuses a number that would be a typo", async () => {
     const cache = cacheWith(ROOT);

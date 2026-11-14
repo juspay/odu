@@ -24,6 +24,10 @@ import {
   type GcBucketPlan,
   type GcCollection,
   type GcRunOptions,
+  type Hold,
+  holdsOf,
+  keptBy,
+  longestHeld,
   planGc,
   previewGc,
   runGc,
@@ -166,6 +170,125 @@ describe("planGc", () => {
   it("never evicts an object a live referrer keeps, however old it is", () => {
     const plan = planGc({ buckets: [bucket], objects, pins: [], now: NOW });
     expect(evicted(plan, "main")).not.toContain(A.storePath);
+  });
+});
+
+/**
+ * WHAT KEEPS EACH PATH — the bucket page's "kept by" column, on the same
+ * fixture graph the collector is graded on. A verdict a reader would notice
+ * was wrong is a case here; the last one is that the column and the
+ * collector cannot disagree.
+ */
+describe("what keeps a path", () => {
+  const main = objects.filter((row) => row.bucket === "main");
+  const verdicts = (
+    rows: readonly ObjectRow[],
+    held: readonly PinRow[],
+    now: number,
+    days = bucket.retentionDays,
+  ) => {
+    const holds = holdsOf({ retentionDays: days }, rows, held);
+    return new Map([...holds].map(([path, hold]) => [path, keptBy(hold, now)]));
+  };
+
+  it("says pin, retention, reference or nothing, from the fixture graph", () => {
+    const said = verdicts(main, pins, NOW);
+    expect(said.get(B.storePath)).toEqual({
+      kind: "retention",
+      pins: [],
+      via: null,
+      until: FRESH + 30 * DAY,
+    });
+    // A IS OLD, and B — fresh, and referencing it — is why it stays: the
+    // column names B and leaves when B's clock does.
+    expect(said.get(A.storePath)).toEqual({
+      kind: "reference",
+      pins: [],
+      via: B.storePath,
+      until: FRESH + 30 * DAY,
+    });
+    expect(said.get(D.storePath)).toMatchObject({ kind: "pin", pins: ["keep-d"] });
+    for (const row of [C, E, F]) expect(said.get(row.storePath)?.kind).toBe("nothing");
+  });
+
+  it("keeps a path at the instant its clock runs out, and not a millisecond later", () => {
+    const until = FRESH + 30 * DAY;
+    expect(verdicts(main, [], until).get(B.storePath)?.kind).toBe("retention");
+    expect(verdicts(main, [], until + 1).get(B.storePath)?.kind).toBe("nothing");
+  });
+
+  it("names every pin over a path, and a path a pin's root references", () => {
+    const G = obj("main", "g", OLD);
+    const root = obj("main", "r", OLD, [G.storePath]);
+    const said = verdicts(
+      [...main, G, root],
+      [
+        ...pins,
+        { bucket: "main", name: "second", rootPaths: [D.storePath], created: OLD + 1, createdBy: "admin" },
+        // THE PIN PREDATES G: its stored closure is only `r`, and the walk over
+        // the bucket's own references is what reaches `g`.
+        { bucket: "main", name: "release", rootPaths: [root.storePath], created: OLD + 2, createdBy: "write" },
+      ],
+      NOW,
+    );
+    expect(said.get(D.storePath)?.pins).toEqual(["keep-d", "second"]);
+    expect(said.get(G.storePath)).toMatchObject({ kind: "pin", pins: ["release"] });
+  });
+
+  it("calls a dependency wanted with its dependent retention, not reference", () => {
+    // ONE PUSH RENEWS A WHOLE CLOSURE TO ONE INSTANT, so the path's own clock
+    // is the answer; `reference` is for a dependent that genuinely outlives it.
+    const child = obj("main", "k", FRESH);
+    const parent = obj("main", "p", FRESH, [child.storePath]);
+    expect(verdicts([child, parent], [], NOW).get(child.storePath)).toMatchObject({
+      kind: "retention",
+      via: null,
+    });
+  });
+
+  it("names the latest clock that reaches a path, however far up it is", () => {
+    const leaf = obj("main", "l", OLD);
+    const middle = obj("main", "m", OLD + DAY, [leaf.storePath]);
+    const top = obj("main", "t", FRESH, [middle.storePath]);
+    const said = verdicts([leaf, middle, top], [], NOW);
+    expect(said.get(leaf.storePath)).toMatchObject({ kind: "reference", via: top.storePath });
+    expect(said.get(middle.storePath)).toMatchObject({ kind: "reference", via: top.storePath });
+  });
+
+  it("at retention 0, answers only pin or nothing", () => {
+    const said = verdicts(main, pins, NOW, 0);
+    expect(new Set([...said.values()].map((verdict) => verdict.kind))).toEqual(
+      new Set(["pin", "nothing"]),
+    );
+  });
+
+  it("ends on a reference cycle and a self-reference", () => {
+    const one = obj("main", "o", OLD, ["/nix/store/".concat("w".padEnd(32, "0"), "-w")]);
+    const two = obj("main", "w", FRESH, [one.storePath]);
+    const self = obj("main", "s", OLD);
+    const looped = { ...self, references: [self.storePath] };
+    const said = verdicts([one, two, looped], [], NOW);
+    expect(said.get(one.storePath)).toMatchObject({ kind: "reference", via: two.storePath });
+    expect(said.get(two.storePath)?.kind).toBe("retention");
+    expect(said.get(looped.storePath)?.kind).toBe("nothing");
+  });
+
+  it("agrees with the collector: `nothing` is exactly what planGc evicts", () => {
+    for (const days of [30, 0]) {
+      const rows = [...main, obj("main", "g", OLD, [D.storePath])];
+      const said = verdicts(rows, pins, NOW, days);
+      const nothing = [...said].filter(([, verdict]) => verdict.kind === "nothing").map(([path]) => path);
+      const plan = planGc({ buckets: [{ ...bucket, retentionDays: days }], objects: rows, pins, now: NOW });
+      expect(nothing.sort()).toEqual(evicted(plan, "main").sort());
+    }
+  });
+
+  it("holds a package for as long as its longest-held version", () => {
+    const clock = (until: number, pinNames: string[] = []): Hold => ({ pins: pinNames, until, via: null });
+    // A PIN HAS NO END DATE, so a pinned version beats any clock.
+    expect(longestHeld([clock(NOW + 9 * DAY), clock(NOW, ["release"])])).toEqual(clock(NOW, ["release"]));
+    expect(longestHeld([clock(NOW), clock(NOW + 9 * DAY), clock(NOW + DAY)])).toEqual(clock(NOW + 9 * DAY));
+    expect(longestHeld([])).toBeNull();
   });
 });
 

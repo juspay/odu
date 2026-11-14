@@ -321,6 +321,56 @@ function pathRow(world: OduWorld, name: string): Locator {
   return world.page.locator("table.paths-table tbody tr", { hasText: name }).first();
 }
 
+/** THE CELL UNDER A HEADER, in a row of the paths table — found by the
+ *  header's own word rather than by position, because a column added beside
+ *  it moves every position after it. The header is drawn in capitals and a
+ *  sortable one carries an arrow glyph after its word; neither is the name. */
+async function cellUnder(world: OduWorld, row: Locator, header: string): Promise<Locator> {
+  const headers = world.page.locator("table.paths-table thead th");
+  await headers.first().waitFor({ timeout: 30_000 });
+  const words = (await headers.allInnerTexts()).map((text) =>
+    text.replace(/[↑↓]/g, "").trim().toLowerCase(),
+  );
+  const index = words.indexOf(header);
+  assert.ok(index >= 0, `no "${header}" column in the paths table (it has ${words.join(", ")})`);
+  return row.locator("td").nth(index);
+}
+
+/** One of the paths this scenario pushed, as its row: by the store path's
+ *  NAME, which is what the row prints. */
+function pushedRow(world: OduWorld, which: 0 | 1): Locator {
+  const path = world.cachePaths?.[which];
+  assert.ok(path !== undefined, `path ${which + 1} was not pushed`);
+  return pathRow(world, path.slice(path.indexOf("-") + 1));
+}
+
+/** WHAT KEEPS IT, as the cell says it — waited for, because the cell is
+ *  drawn from a page that is read after the refresh that asked for it. */
+async function keptBySays(world: OduWorld, which: 0 | 1, expected: RegExp | string): Promise<Locator> {
+  const cell = await cellUnder(world, pushedRow(world, which), "kept by");
+  await until(`path ${which + 1} to be kept by ${String(expected)}`, async () => {
+    const text = (await cell.innerText().catch(() => "")).trim();
+    return (typeof expected === "string" ? text === expected : expected.test(text)) ? true : null;
+  });
+  return cell;
+}
+
+Then("the first path is kept by {string}", async function (this: OduWorld, text: string) {
+  await keptBySays(this, 0, text);
+});
+
+Then("the second path is kept by {string}", async function (this: OduWorld, text: string) {
+  await keptBySays(this, 1, text);
+});
+
+/** THE CELL SAYS HOW LONG; the sentence behind it says the DAY — and both are
+ *  graded, because a reader deciding whether to pin something needs the date. */
+Then("the second path is kept by retention, with a day it leaves", async function (this: OduWorld) {
+  const cell = await keptBySays(this, 1, /^retention · in \d+d$/);
+  const title = await cell.locator("span").getAttribute("title");
+  assert.match(title ?? "", /leaves at the first collection after \d{4}-\d{2}-\d{2}$/);
+});
+
 Then("both pushed paths are listed", async function (this: OduWorld) {
   for (const name of this.cachePathNames ?? []) {
     await pathRow(this, name).waitFor({ timeout: 30_000 });
@@ -461,15 +511,15 @@ Then("that path links to the run that pushed it", async function (this: OduWorld
   assert.strictEqual((await link.innerText()).trim(), run);
 });
 
-/** WANTED, not read. The table's last column is the clock GC decides by, and
+/** WANTED, not read. The `wanted` column is the clock GC decides by, and
  *  the push that arranged this scenario has just renewed it — so what is
  *  asserted is the SHAPE of the fact rather than a number that moves while
- *  the page is open. The column is read by position because that is what a
- *  reader compares it by: the one under the `wanted` header. */
+ *  the page is open. The cell is found under its header, because that is what
+ *  a reader compares it by — not by being last, which `kept by` now is. */
 Then("that path says when it was last wanted", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no path was arranged");
-  const cell = pathRow(this, name).locator("td").last();
+  const cell = await cellUnder(this, pathRow(this, name), "wanted");
   await cell.waitFor({ timeout: 30_000 });
   await until("the path's row to say when it was last wanted", async () =>
     /^\d+[smhd] ago$/.test((await cell.innerText()).trim()) ? true : null,
