@@ -16,6 +16,12 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | 1. Declare the cache once | `your-repository` "1. Declare the cache once" |
 | 2. Tag the pipeline | `your-repository` "2. Tag the pipeline", "Shard a leaf", "What a run pushes", "Keep your default branch's build" |
 | 3. Run it | `your-repository` "3. Run it" |
+| 4. When you still need a GitHub workflow | `your-repository` "4. When you still need a GitHub workflow"; the inputs → `cache/github-actions` |
+| 5. Require it | `your-repository` "5. Require it" |
+| 7. What you see afterwards | `your-repository` "7. What you see afterwards" |
+| 8. What odu promises you | `your-repository` "8. What odu promises you" |
+| 9. What to ask your operator for | `your-repository` "9. What to ask your operator for" |
+| CLI reference | `cli`; the anchor is a map row on `/docs/` |
 | The machines it runs on (h4) | `machines` |
 | Running the server's checkout (h4) | `remote-runs` "Start the run" |
 | Run the server's CI from your shell (under Server mode) | `remote-runs` (title kept as the page's) |
