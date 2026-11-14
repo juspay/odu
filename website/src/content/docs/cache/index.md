@@ -98,55 +98,6 @@ A public bucket is read without a cache token. A private bucket is read with a c
 
 The bucket rows arrive over the wire the page already holds, so a push from a build box moves a bucket's counters — on the list and in its facts line — without a reload; reads are folded into those counters at most once a second rather than once per NAR. The path list and the pin list are pages read when you open them, which is what **refresh paths** and **refresh pins** ask again.
 
-## Protocol
-
-One bucket is one substituter. Point any Nix-compatible tool at these routes:
-
-```text
-GET  /cache/<bucket>/nix-cache-info             StoreDir, WantMassQuery: 1, Priority: 41
-HEAD /cache/<bucket>/<hash>.narinfo
-GET  /cache/<bucket>/<hash>.narinfo
-GET  /cache/<bucket>/nar/<narHash>.<ext>       the object: streamed from a disk store with
-                                               Content-Length + Range, or 307 to the S3 store
-PUT  /cache/<bucket>/nar/<narHash>.<ext>         Bearer or Basic; any ext Nix sends
-POST /cache/<bucket>/nar/<file>/upload          where do this NAR's bytes go?
-GET  …/nar/<file>/upload/<id>/parts/<i>         a presigned PUT for one part
-POST …/nar/<file>/upload/<id>/complete          join the parts, confirm the object
-PUT  /cache/<bucket>/<hash>.narinfo             server re-signs with the bucket key
-POST /_odu/v1/buckets/<bucket>/missing          batch "which of these are you missing"
-POST /_odu/v1/buckets/<bucket>/pin              name a closure a WRITE token keeps
-GET  /cache/<bucket>/                           a public bucket's facts: the use block,
-                                                or JSON on Accept: application/json
-```
-
-**A NAR on an S3 store is a 307**, to a presigned URL good for ten minutes, and the client re-sends its own `Range` there; a disk store streams it from odu. See [A NAR is a redirect](#a-nar-is-a-redirect). The same three protocol files also sit in the store itself (`<bucket>/nix-cache-info`, `<bucket>/<hash>.narinfo`, `<bucket>/nar/<file>`), which is what lets a public bucket be read from the store's own domain with odu switched off.
-
-On a bucket's own domain the same four Nix paths sit at `/`: `/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>` and their uploads. `Host` names the bucket.
-
-Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or HTTP Basic with any username and the token as the password. Nix uses the second through curl on every request, uploads included. The `missing` route backs `odu cache push`; it is not part of the Nix protocol. It answers `missing` — the paths to send — and `skippedUpstream`, the paths the bucket will never take because an upstream key signed them, so a push can report the two as different things.
-
-The three `upload` routes are the 2.9 negotiation (cache surface **4.2**): the client asks where a NAR's bytes go, and an S3-backed bucket answers `{mode:"direct", upload, partSize, part}` — part 0's presigned URL at the store, with the rest signed one at a time — while a disk-backed one answers `{mode:"staged"}`, which means the plain `PUT …/nar/<file>` above. Every byte of a direct upload is a part of ONE multipart upload, so completing it leaves the key with no writer odu ever signed for. The narinfo PUT still decides: odu reads the uploaded object back out of the store, verifies it and copies it into place before it records anything. An origin too old to answer the negotiation is refused by name rather than quietly given the old path.
-
-The `pin` route is the one pin verb outside the administrative surface, and it takes write scope rather than admin on purpose: a write token can already keep any closure alive forever by pushing it again, because a stored push renews a path's `lastWanted`. A pin it creates makes that same promise once instead of nightly, and it reads nothing and deletes nothing.
-
-
-Re-pointing a pin releases whatever that pin held before, so the line is drawn by who made it — `createdBy`, which `pin_list` shows. A write token may re-point a pin a write token made, and never an administrator's: a leaked CI token, or a typo in a workflow's `pin:`, must not drop `release-1.0`. Write tokens of one bucket are peers here, as they already are in pushing to it. Deleting a pin stays an administrator's either way.
-
-### The cache describes itself
-
-`nix-cache-info` carries two lines beyond the three a Nix client reads, in both spellings of it and in the copy the store holds:
-
-```text
-Odu-Origin: https://odu.example.com
-Odu-Bucket: main
-```
-
-`Odu-Origin` is the daemon a push is taken by — never the name the reader arrived on, which may be a store's domain or a CDN that answers `GET` and nothing else — and `Odu-Bucket` is which bucket that substituter serves. Nix ignores keys it does not know, so a reader is unaffected; `odu cache push --cache <substituter>` and [the push action](#push-from-github-actions) are what read them, which is how a consumer repository holds one fact about its cache instead of three.
-
-The object in the store is rewritten whenever that text changes — a move behind a new public origin — by the same boot pass that backfills narinfos, compared by the stored sha256 rather than by length, and the address it was cacheable at is purged at the edge.
-
-**Naming a cache is trusting it.** `--cache` sends your write token to the substituter you named (a private bucket's `nix-cache-info` answers nobody without it) and then pushes to whatever origin that file states, so a cache you do not control — or a DNS or CDN compromise in front of one — is a cache you have handed the token to. Name a substituter you trust, as you already do in `nix.conf`.
-
 ## Command reference
 
 The CLI keeps the four cache commands a shell is the natural place for. Everything else is the board or the API verb — `odu surface cache <verb> --input '{…}' --json`, with `rootToken` a field of the input.

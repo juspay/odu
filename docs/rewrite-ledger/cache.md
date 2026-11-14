@@ -35,6 +35,8 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | What it does not do | `cache/domain` "What a domain does not do" |
 | Where the data lives | the model → `cache/how-it-works`; files, `<state>`, the service's home, sizing, backup and the migration → `cache/operations`. The anchor is a map row on `/docs/cache/` |
 | Operating it | `cache/operations` "Log lines"; the anchor is a map row on `/docs/cache/` |
+| Protocol | `cache/protocol`; the anchor is a map row on `/docs/cache/`. Priority 41 and the `/cache` literal → `cache/how-it-works` |
+| The cache describes itself | `cache/protocol` "The cache describes itself" (same heading); "Naming a cache is trusting it" → `cache/push`; the object rewrite → `cache/operations` |
 
 ## cache/how-it-works
 
@@ -291,3 +293,20 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Old | New | Decided by |
 | --- | --- | --- |
 | "A `--no-upstream` bucket also stores every upstream-signed closure" | "A bucket created with `upstreamKeys: []`" | `packages/cache/src/cli.ts`, `packages/cache/src/face.tsx` (no such flag) |
+
+## cache/protocol
+
+- Kind: reference. Reader: a tool author.
+- Written from: "Protocol" and "The cache describes itself", and the `x-odu-upload` sentence from `docs.md` "Upgrading from a store-backed cache". The routes block and the `Odu-Origin` block are unchanged.
+- Fact home: the routes. Direct and staged uploads are explained on `cache/how-it-works` and linked.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "the 2.9 negotiation" | implementation (an internal plan section); the contract version, 4.2, stays |
+| "on purpose" | rationale |
+| "rather than quietly given the old path" | rationale |
+| "ONE multipart upload", "the cache row's 404", "WRITE token" in prose | capitals and private words |
+| "in both spellings of it" | kept as "both from odu and in the copy the store holds" |
+| "compared by the stored sha256 rather than by length" | implementation |
