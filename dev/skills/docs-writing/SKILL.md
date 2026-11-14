@@ -40,7 +40,7 @@ Edit the page so it stays true. Do not append a paragraph describing your change
 13. **No sentence over 40 words [lint]**; aim for an average under 20.
 14. **At most one em-dash and one semicolon per sentence. [lint]** A pair of dashes around an aside counts as two: use parentheses or commas. The lint reads `--` as a dash too, since the site renders it as one.
 15. **Second person, present tense, active voice.** "You run…", "odu pushes…".
-16. **Bold is for words the reader sees on screen** (button, tab and field labels) and for a term at the point it is defined. Never for emphasis. No capitals for emphasis either.
+16. **Bold is for words the reader sees on screen** (button, tab and field labels) and for a term at the point it is defined. Never for emphasis. No capitals for emphasis either. Quote a label exactly as the board renders it, and check it in the code (`packages/*/src/face*.tsx`, `packages/ci/src/face/`), not in an older page.
 17. **Plain words first.** An internal name (a package, a protocol, a module) appears only if the reader types it or sees it, and is explained once in a short clause. Pick one word per thing and keep it. These are odu's:
 
 | Say | Means | Do not say |
@@ -159,7 +159,7 @@ Every fact and every code span of the old cell is still there, and the reason th
 
 ## Before you commit a page
 
-- `cd website && node --test --test-name-pattern='<slug>' test/docs-lint.test.mjs`: the lint for that page.
+- `cd website && node --test --test-name-pattern='<slug>' test/docs-lint.test.mjs`: the lint for that page. The pattern is a regular expression, so `'^index$'` runs the start page alone and `'^cache/index$'` the cache start page.
 - `just website-linkcheck`: every internal link and `#anchor` in the built site resolves.
 - Renamed a heading? Grep `website/src`, `README.md`, `packages/`, `skills/` and `.github/` for the old anchor and update every link in the same change. These titles are named from outside the site and stay verbatim: **Use odu from your repository**, **Server mode**, **Push from GitHub Actions**, and the heading **Set up an R2 bucket** on `cache/s3`.
 - These anchors are linked from outside the site and must keep resolving on their old URL, as a heading or as a `<span id>` on a row of the page map:
