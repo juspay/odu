@@ -124,19 +124,6 @@ On a client, trust the bucket — the key `bucket_create` printed:
 }
 ```
 
-**The push is its own step.** On a run's page each node that pushes grows a
-second segment under its bar —
-`pushed → <bucket> · N pushed · M present · X MiB · T`, the paths this node
-sent told apart from the ones the bucket already had (the `present` clause is
-omitted when there were none) — starting where the recipe's bar ends, amber
-while the closure is going up and red if it does not land. The node's own
-duration stays the RECIPE's. The
-push's `[odu] …` lines are a log of their own, not appended to the recipe's:
-the page offers **Recipe** and **Push** tabs, and `log_read` takes
-`stream: "recipe" | "push"` (absent is the recipe, so every existing caller
-reads what it always read) against the same log key. A push that fails makes
-the node RED, because green means warmed.
-
 A bucket can keep its objects **on S3 instead of the server's disk** — Cloudflare R2, AWS, Garage or versitygw. Declare the store and name it at creation:
 
 ```nix
@@ -356,47 +343,6 @@ Sessions last 30 days from the sign-in; using one does not extend it. The cache 
 
 One App per odu instance: the callback URL is a single address, and the client secret is the App's. Two servers need two Apps — each owned by the same personal account is fine, and transferring an App to an organisation later keeps its Client ID, so the secret and `ODU_GITHUB_CLIENT_ID` survive the move.
 
-## Daily workflow
-
-```sh
-odu ci run                      # configured platforms, clean commit, GitHub statuses
-odu ci run --no-post            # clean commit, no GitHub writes
-odu ci run --no-strict          # snapshot working tree on every lane, no GitHub writes
-odu ci attach                   # interactive terminal view
-odu ci status -o json
-odu ci wait --run latest -o json
-```
-
-`ci wait` reports an actionable failure before the other jobs settle. Read its `logKey` with `odu ci logs KEY`; add `-f` to follow. `--stream push` reads the same node's cache push instead of its recipe. Pages carry `nextOffset`, `eof`, and `open`: keep reading until at EOF and no longer open.
-
-```sh
-odu ci rerun --run latest test   # unchanged inputs: retry a flake
-odu ci cancel --run latest      # explicit cancellation
-```
-
-A retry uses a new attempt on a live coordinator or creates a linked replay after finalization. `ci run --linger` keeps the coordinator available after settlement but is not required for replay. Old records without placement evidence and dirty/live snapshots may be refused.
-
-**A source fix is a new run.** Commit it and run again. Use `--supersede` to cancel a busy checkout's current run and start the replacement. Without it, Odu returns the existing live run.
-
-Before declaring CI green, check the SHA, requested scope, and outstanding GitHub posting debt. A passing subset does not establish that the whole pipeline passed.
-
-### History and GitHub
-
-On the board: **Maintenance** imports and prunes (each a dry run until you untick it) and applies protection, and the History toggle lists every run.
-
-```sh
-odu ci history list --all
-odu ci history show --run latest
-odu ci history import --dry-run
-odu ci history prune --days 30 --dry-run
-odu ci protect --dry-run
-odu ci protect
-```
-
-Logs and attempt evidence outlive the checkout and coordinator, until retention removes them. Imported or expired evidence may not be replayable.
-
-Strict runs post `<recipe>@<platform>` commit statuses using `gh` credentials available to the service. `ci protect` configures the corresponding required checks; inspect its dry run first. A dry run derives contexts without contacting GitHub, so repository/branch may be null.
-
 <span id="coding-agents-mcp"></span>
 
 ## Coding agents
@@ -486,18 +432,6 @@ The same rename reaches argv: `odu surface cache_create …` is `odu surface cac
 | Service/build mismatch (`serves the <row> row at …`) | That row moved a major. Run `odu web --upgrade`, or use a build that reads that version |
 | Retry refused | Read the reason; check snapshot, placement evidence and checkout availability |
 | CI passed but GitHub is waiting | Inspect posting debt and the service's `gh` credentials |
-
-### Working-tree snapshots
-
-`--no-strict` captures tracked modifications, deletions, modes, symlinks and non-ignored new files into a deterministic Git commit, without staging the user's index, changing HEAD or pushing. All workers and shards run that same `contentSha`. The base remains `sha`; board rows and `run_wait`/`run_read` expose `contentSha` when it differs from the base. Compare both identities when verifying a result. Repeating unchanged edits can reuse the remote object cache; changing content produces a different identity. Each edit needs a new request id.
-
-`--no-snapshot` takes precedence and runs in place on localhost only, including ignored dependencies/build outputs. Non-strict runs never post GitHub statuses, even on clean trees. Finalized working-tree runs cannot be replayed; start a new run. A live retry retains the captured snapshot.
-
-Snapshots always exclude `.ci/` and ignored files. Sparse checkouts and submodule changes are refused. Git clean filters apply; LFS files travel as pointers without remote smudging. Capture fails on any Git error. Bundles include unpushed history and are limited to 64 MiB by `ODU_SNAPSHOT_MAX_BYTES`; an oversized bundle reports its largest overlay paths. A stale prerequisite fetch may require `git fetch --prune origin`.
-
-For transport tests only, set `ODU_SNAPSHOT_TRANSPORT=always` on a private service before starting it: localhost lanes then use origin plus chunked bundles over the real lane stdio surface. This is a test seam, like `ODU_LANE_CONNECT_TIMEOUT_MS`, not a user mode.
-
-Bundle creation and `ODU_SNAPSHOT_MAX_BYTES` apply only when the selected pool may use remote transport. Local-only working-tree runs need no origin and do not pack repository history.
 
 ## Find your page
 

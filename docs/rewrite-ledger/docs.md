@@ -19,6 +19,9 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | The machines it runs on (h4) | `machines` |
 | Running the server's checkout (h4) | `remote-runs` "Start the run" |
 | Run the server's CI from your shell (under Server mode) | `remote-runs` (title kept as the page's) |
+| Daily workflow | `daily-workflow`; the anchor is a map row on `/docs/` |
+| History and GitHub | `daily-workflow` "History", "GitHub statuses and required checks" |
+| Working-tree snapshots (under Troubleshooting) | `daily-workflow` "Run uncommitted changes", "What a snapshot leaves out" |
 
 ## index
 
@@ -132,3 +135,26 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | "saying 'mine is empty' about a world you are not in would blank the server's own variable, and on a pod whose Deployment sets the fleet that is the only inventory there is" | rationale |
 | "it is the strict gate" | private word |
 | "as it always has" | history |
+
+## daily-workflow
+
+- Kind: how-to. Reader: a developer running CI.
+- Written from: "Daily workflow", "History and GitHub", "Working-tree snapshots", and "The push is its own step" from "Self-host on NixOS".
+- Fact home: the push as its own step, its **Push** tab and `--stream push` ("When a push fails").
+
+### Moved
+
+- `ci wait`'s exit codes → `cli` "Exit codes" (linked).
+- The `ci protect` contexts and `Maintenance` → `Apply protection` are also on `your-repository` step 5 (the setup reader); this page keeps the daily reader's two sentences.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| The push segment's colours (amber, red) and where it starts on the bar | visible on screen |
+| `pushed → <bucket> · N pushed · M present · X MiB · T`, verbatim | visible on screen; its parts are named in a sentence |
+| "absent is the recipe, so every existing caller reads what it always read" | history |
+| `stream: "recipe"` as a spelled value | duplicate (the default; `stream: "push"` is the one a reader types) |
+| `ODU_SNAPSHOT_TRANSPORT=always`, `ODU_LANE_CONNECT_TIMEOUT_MS` | implementation (the old page: "a test seam, not a user mode") |
+| "over the real lane stdio surface", "deterministic Git commit" | implementation |
+| "posting debt" | private word; now "statuses odu still owes GitHub" (the `ci status` usage text says "what it still owes GitHub") |
