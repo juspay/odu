@@ -39,6 +39,7 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | First sign-in and the first owner | `server-mode` "Sign in and make the first owner" |
 | A token for a machine or an agent | `server-mode` "A token for a machine or an agent" (same heading) |
 | Two instances | `server-mode` "Two servers" |
+| Metrics | `metrics`; the anchor is a map row on `/docs/` |
 
 ## index
 
@@ -306,3 +307,16 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | "Your name at the foot of the rail opens the profile page" | "Click your login in the rail" | `packages/auth/src/face.tsx` (the account card's login button opens the profile) |
 | "Create one" | **Create token** | `packages/auth/src/face.tsx` |
 | "Half a configuration is refused at startup" | kept; the service's sentence is "sign-in is half configured — … Set all three, or none" | `packages/auth/src/github.ts` |
+
+## metrics
+
+- Kind: reference. Reader: an operator.
+- Written from: "Metrics". Every metric, label and value is kept; the "From" column became "Counts" in the reader's words.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "Each row contributes its own numbers; the host renders them" | private word ("row"); now "Each part of the service contributes its own numbers to one exposition" |
+| "SQL", "the on-disk catalog", "the last venue probe" | implementation and private words; now "the database", "the history on disk", "the last probe of the machines" |
+| "that is standard" | rationale |

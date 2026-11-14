@@ -33,38 +33,6 @@ The examples on these pages use `odu` as shorthand for `nix run github:juspay/od
 
 **Disk does not grow forever.** A bucket keeps what nobody wants for 90 days by default (`retentionDays` at `cache bucket_create`, and the bucket page's **Retention** afterwards), counted from the last time somebody *wanted* a path — a push of it, or the `missing` query a push asks first. A read never renews that clock, because reads are leaving odu and a clock a read wound would make the busiest paths the first to look idle. The row collects every bucket once a day on its own, and nothing is evicted while retention holds, something retained references it, or a pin holds it; **Dry run** on a bucket page says what the next collection would take, and **dry run retention days** beside it asks that question at a retention of your own (`retentionDays` on `cache_gc_plan`; blank is the bucket's own, `0` is what nothing references and no pin holds). The plan writes nothing, and `cache_gc_run` takes no such field, so an answer the dry run gave can never become a collection by another name. A pin holds a closure by name and a push re-points it (`pin: true` in the push action, `--pin NAME` from a shell), which is how a repository keeps its default branch's closure. [Keep and reclaim](cache/#keep-and-reclaim) has the rest.
 
-### Metrics
-
-`GET /metrics` is a Prometheus text exposition of the whole daemon. It is never anonymous: a scrape carries `Authorization: Bearer` with either the root token or a **metrics token** — a read-only credential that opens this route and nothing else, so a Prometheus never holds the secret that administers the server.
-
-```sh
-odu surface metrics token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","label":"prometheus-pod"}' --json
-curl -H "Authorization: Bearer $METRICS_TOKEN" https://cache.example.com/metrics
-```
-
-The plaintext is answered once and only a sha256 of it is kept, in `<state>/metrics/tokens.json` (owner-only). `metrics_token_list` names every token and when it was last used; `metrics_token_revoke` ends one immediately, with no restart. All three need the root token, and a daemon started without one serves no metrics at all.
-
-Each row contributes its own numbers; the host renders them.
-
-| Metric | Type | Labels | From |
-| --- | --- | --- | --- |
-| `odu_cache_requests_total` | counter | `bucket`, `kind` (`narinfo`\|`nar`), `outcome` (`hit`\|`miss`\|`redirect`\|`refused`) | the cache row's served requests |
-| `odu_cache_bytes_total` | counter | `bucket`, `direction` (`served`\|`uploaded`), `mode` | NARs served and uploaded |
-| `odu_cache_uploads_total` | counter | `bucket`, `mode`, `outcome` (`recorded`\|`failed`) | pushes and imports |
-| `odu_cache_gc_evicted_total`, `odu_cache_gc_runs_total` | counter | `bucket` / — | collections |
-| `odu_cache_hits` | gauge | `bucket` | `SUM(hits)` over the paths a bucket holds **now** — a collection lowers it, which is why it is not a `_total` |
-| `odu_cache_paths`, `odu_cache_bytes`, `odu_cache_pins` | gauge | `bucket` | SQL, read at the scrape |
-| `odu_cache_last_gc_timestamp_seconds` | gauge | — | the last collection **since boot**; `0` when there has been none |
-| `odu_runs_total` | counter | `outcome` | the on-disk catalog, each run counted once |
-| `odu_run_duration_seconds` | histogram | `outcome` | verdicts, 10s…2h buckets |
-| `odu_node_duration_seconds` | histogram | `recipe`, `platform`, `outcome` | journal `node_status`, each entry folded once |
-| `odu_lane_reachable`, `odu_lane_held` | gauge | `host`, `platform` / `host` | the last venue probe; absent until something has probed |
-| `odu_metrics_contributor_up` | gauge | `contributor` | `0` when a row failed this scrape — the scrape is still served |
-| `odu_unhandled_total` | counter | `kind` (`rejection`\|`exception`) | rejections and exceptions the daemon caught and kept serving through — both labels present from the first scrape |
-
-**Counters are process-local** and reset when the daemon restarts; that is standard, and `rate()` handles it. The numbers that must survive a restart are gauges read from storage. The catalog walk is bounded (the 200 newest runs, repeated at most every ten seconds), so a scrape costs the same on a catalog of ten thousand runs as on one of two hundred — and what it *publishes* is not that window: each run and each journal entry is folded **once** into totals that only grow, because a counter read off a sliding window falls every time a run leaves it, and a scraper reads a fall as a reset. The run totals therefore start at whatever the window held when the daemon started.
-
-
 ### Contract versions
 
 Each row versions its own surface. The daemon publishes the host's version and every mounted row's on its identity cell (`rows`). A client is admitted when the host's major and the major of **every row it reads** match. A row it does not read is never consulted, so a cache change never refuses kolu or `odu ci run`. A refusal names the row, the version the daemon serves and the one the build reads. It also says when a needed row is not mounted.
