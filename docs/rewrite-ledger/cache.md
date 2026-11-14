@@ -23,6 +23,10 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Tokens | `cache/tokens`; the anchor is a map row on `/docs/cache/` |
 | Keep and reclaim | `cache/retention`; the anchor is a map row on `/docs/cache/`. The bucket page's layout paragraph → `cache/reference` "The board's Cache view" |
 | Delete a bucket | `cache/retention` "Delete a bucket" (same heading) |
+| Keep a bucket on S3 | `cache/s3`; the anchor is a map row on `/docs/cache/` |
+| Set up an R2 bucket | `cache/s3` "Set up an R2 bucket" (heading verbatim; `skills/odu/SKILL.md` and `nix/module.nix` name it) |
+| A public URL for a store | `cache/s3` "A public URL for a store" (same heading) |
+| Move a bucket to another store | `cache/s3` "Move a bucket to another store" (same heading) |
 
 ## cache/how-it-works
 
@@ -195,3 +199,34 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | --- | --- | --- |
 | "the **dry run retention days** field beside the button, placeholder 'its own'" (both pages) | the **retention** field, placeholder `bucket's (90d)` (the bucket's own number) | `packages/cache/src/face.tsx` (field label `retention`, placeholder `` `bucket's (${retentionDays}d)` ``) |
 | Kept-by cell "**pin release**" | `pin <name>`, as in `pin release` | `packages/cache/src/face.tsx` (`` `pin ${name}` ``) |
+
+## cache/s3
+
+- Kind: how-to. Reader: an operator.
+- Written from: "Keep a bucket on S3", "Set up an R2 bucket", "A public URL for a store", "Move a bucket to another store", and the `endpoint` bullet of "A NAR is a redirect".
+- Fact home: S3 stores. R2 set-up is two numbered lists, dashboard and `cf`. The store comparison table is unchanged apart from "never — always there" → "never: always there" and "the CLIENT" → "the client".
+
+### Moved
+
+- `cache.store.endpoint.unreachable` → `cache/operations` "Log lines". The caution about a client-unreachable `endpoint` is a blockquote here.
+- The narinfo backfill at start → `cache/operations` "What the service does at start".
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "Since reads left odu", "The store's `endpoint` is now a CLIENT's address" | history ("since", "now") |
+| "(eviction, OOM, `kill -9`)" | implementation |
+| "A move that flipped first would be a substituter that 404s everything until the copy caught up" | rationale |
+| "the move's own row survives a restart" | implementation; kept as "A move resumes after a restart" |
+| "The cloudflare row has no R2 API: it binds tunnels, creates DNS records and purges the edge, and it is untouched by this" | implementation; kept as "odu does not bind the domain: you do" |
+| "because a domain that is still propagating must not take the cache down" | rationale; kept as "because a domain may still be propagating" |
+| "whatever odu's own routes decide" | rationale |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "Uploads still go through odu; sending them straight to the store is a later release" | cut. A push to an S3 store sends its bytes straight to the store (`writesTo: "store"`), as `cache/how-it-works` says. A move (`bucket_migrate`) copies through odu, which the move's steps now say. | `packages/cache/src/staging.ts` (`uploadMode` is `direct` when the store can presign parts), `packages/cache/src/migrateStore.ts` (`copyOne` reads from the old store and puts to the new one) |
+| "pick a store under **Where to move it**" | **where to move it** | `packages/cache/src/face.tsx` (fieldset legend) |
+| "the **Create bucket** form offers the declared stores" | **New bucket** offers them under **where its objects live** | `packages/cache/src/face.tsx` |
