@@ -140,10 +140,6 @@ What it says while it works — one preamble, then one line per path as the buck
 
 A push records each path as it lands. There is no hold to wait for: references are names in the narinfo, not paths the server must already hold. The exit is non-zero only for refusals. The server keeps and serves the upload as it arrived — `nix copy --to` defaults to xz, `?compression=zstd` sends zstd — and `--wait` is deprecated: it returns at once, and `/held` answers an empty list until the cache row's next major.
 
-Before it sends a NAR's bytes, a push asks the bucket **where they go**, and the answer comes from the bucket's store. On an **S3 store** the answer is `direct`: odu signs URLs, the client PUTs the NAR to the store itself, and **not one NAR byte crosses odu** — which then streams the object back, verifies its `NarHash`, size and `CA:`, copies it into place inside the store and only then records the path. Odu never signs a hash a client claimed. On a **disk store** the answer is `staged` and the NAR comes through the daemon as it always has. The bucket row says which as `writesTo` (`"store"` or `"odu"`), the push's `--output json` says which as `mode`, and there is no flag to set.
-
-A NAR larger than `--part-size` (64 MiB by default) is sent in parts, each retried on its own; the server reassembles them and the same hash proof decides. That is what makes a push work through a proxy with a request-size ceiling — Cloudflare's is 100 MB. In **direct** mode nothing proxies the bytes, so `--part-size` is a FLOOR instead: a part is the largest of it, the store's own part size and S3's 5 MiB minimum. Every byte goes as a **part** of one multipart upload, a one-part NAR included — part 0's URL rides on the plan, so that common case costs no extra round trip, and completing the upload ends every URL odu signed for the key, which is what makes the object odu then reads back one nobody can rewrite. A presigned URL lives ten minutes; a part that misses it begins that path again with a new upload rather than refreshing a URL.
-
 `push` asks the bucket which paths it is missing, then uploads only those, with retries. It talks to the cache's HTTP API directly, so it runs on the machine that holds the paths.
 
 `--pin NAME` re-points that named pin at the closure the push just landed, so garbage collection keeps it — one command and one token, and nothing is pinned if any path was refused. `--output json` reports it as `pinned: {name, rootPaths}`, or `null` when no pin was asked for. The write token is the authority: a token that may push may already keep a closure alive forever by pushing it again, so pinning grants it nothing it lacked.
@@ -399,16 +395,6 @@ On the board, the **Create bucket** form offers the declared stores, and a bucke
 
 ## Reads leave odu
 
-Every byte used to cross the odu machine's uplink. It no longer has to: the store holds the whole protocol, so a reader can be sent to the store — for a public bucket, permanently, and for everything else for the ten minutes a signature lasts.
-
-What a push writes as objects, beside the row it records in SQLite:
-
-| Object | Written by | `Cache-Control` |
-| --- | --- | --- |
-| `<bucket>/nar/<narHash>.<ext>` | the push, as the bytes arrived | `public, max-age=31536000, immutable` |
-| `<bucket>/<hash>.narinfo` | the push, signed with the bucket's key | `public, max-age=86400` |
-| `<bucket>/nix-cache-info` | `bucket_create` | `public, max-age=86400` |
-
 A cache that predates this has rows but no narinfo objects. At boot, after the row is already serving, odu walks every bucket and writes the missing ones, two at a time, logging `cache.narinfo.backfill {bucket, written, remaining}`. It is idempotent — an object already there with the rendered text's length is skipped on one HEAD — so a daemon restarted half way through costs a walk, not a rewrite. Garbage collection deletes a row's narinfo object with the row: a narinfo nobody can get a NAR for is worse than no narinfo.
 
 ### A public URL for a store
@@ -439,19 +425,7 @@ cf r2 buckets domains custom create <r2-bucket> --domain <host> --zone-id <zone>
 
 The cloudflare row has no R2 API: it binds tunnels, creates DNS records and purges the edge, and it is untouched by this. Odu checks your work instead — at boot, for each store with a `publicUrl` and at least one public bucket on it, it fetches `<publicUrl>/<bucket>/nix-cache-info`; anything but a 200 with the expected body is one `cache.store.public.unreachable {store, url, status}` line and never a refused boot, because a domain that is still propagating must not take the cache down.
 
-### A NAR is a redirect
-
-`GET /cache/<bucket>/nar/<file>` on an **S3 store** answers **307** with a presigned URL that expires in ten minutes, and no body. A `307` rather than a `302` because the method must survive the hop: a HEAD that came back as a GET would hand a client asking "is it there?" a whole NAR.
-
-- **It works for a private bucket** because odu authorises first and only then hands out a URL that carries its own authority. Make the store's host differ from odu's and curl drops the `Authorization` header on the redirect, which is exactly what you want: the token never reaches the store.
-- **`Range` is the client's and the store's.** Odu proxies none of it; a client re-sends its range to the presigned URL and the store answers the 206, so a resumed download never touches the daemon.
-- **The redirect itself is `private, no-store`** on every bucket, public or not: it holds a signature that expires, and an edge that cached it would hand out a dead URL long after.
-- **A disk store still streams from odu**, with `Content-Length` and `Range`, exactly as before.
 - **The store's `endpoint` is now a CLIENT's address.** The presigned URL is built from it, so it has to resolve and be reachable from wherever `nix build` runs. A loopback endpoint, a VPC-only name or a tailnet name only the daemon can see turns every NAR read into a failure on the client's side with nothing in odu's log — odu says `cache.store.endpoint.unreachable {store, endpoint, host}` at startup for the cases it can be sure of (loopback and link-local).
-- **What odu gives up** is the byte count: `cache.nar.served` gains `source: "redirect"` with `bytes: 0`, because there is no body to observe.
-
-Narinfos and `nix-cache-info` asked of odu are still rendered from SQLite and answered by odu. An anonymous read of a private bucket is still 404.
-
 ### Move a bucket to another store
 
 ```sh
@@ -477,12 +451,6 @@ It is resumable: an object already in the new store with the same length is skip
 
 ## Where the data lives
 
-The cache keeps **the compressed NAR the pusher sent**, once, and no Nix store of its own. That is the Cachix/Attic model: an object is a content-named file (`<bucket>/nar/<narHash>.<ext>`, where the extension is the stored compression), references are names in the narinfo, and nothing is imported. On the pod this replaced a 166 GB `/nix/store` of upstream closures nobody pulled from us.
-
-- A push assembles (or receives) `nar/<narHash>.<ext>`, decompresses and hashes it against the narinfo's `NarHash`, then **keeps the file** and records its sha256 and length as `FileHash:`/`FileSize:`. One write, no second copy; the same NarHash+compression keeps the existing file, and twins share one object until GC deletes it with the last row.
-- Serving is the object, from the bucket's store, with `Content-Length` and `Range` — or, on an S3 store, a 307 to the store itself ([Reads leave odu](#reads-leave-odu)). When odu does stream it: Cloudflare's 512 MB per-file CACHE limit means larger objects are served uncached through the tunnel, not refused — and its 100 MB request cap is why pushes are chunked. A 634 MB NAR pulls through a cold edge. The server never re-dumps or re-compresses a path per reader.
-- A narinfo whose references are absent is recorded anyway: references are names, not paths a store must hold first. A `.drv` path, or a reference to one, is still refused with 400.
-- `CA:` is **proved from the object we hold**: odu recomputes Nix's `fixed:r:sha256` store path from (name, references and bytes) and serves the line only when the formula reproduces the path. A non-self row uses its NarHash; a self-referencing row uses Nix's hash-modulo-self-references, computed while the NAR streams through verification. Old rows get a one-time background pass after the cache is serving (two workers, progress logged), and the verdict is persisted so a row is read once. Nothing is taken from the pusher.
 - A push also writes the narinfo beside the NAR (`<bucket>/<hash>.narinfo`) and `nix-cache-info` is written at bucket create, so the store holds a readable cache on its own. GC deletes a row's narinfo object and then its NAR, and only then drops the row; an object with no row (a crash between put and record, or a collection that stopped between the two deletes) is swept at boot and logged, and the sweep knows all three kinds of key, so it cannot mistake a narinfo for an orphan.
 - **The one-time migration.** A deployment upgrading from the store-backed cache has rows whose object is not on disk. After the cache is mounted and serving, two at a time, odu dumps each from the old store (`$ODU_CACHE_STORE`, or the host's own `/nix/store` when unset) into the object store. It pauses below 10 GiB free and re-checks every minute, resuming without a restart. Until a row's object lands, its NAR is served through the old store (logged as `source: transition`); a row the old store does not have answers 404 and is named once. A row whose object is missing or unreadable is retried by the next boot's background work, not by a request. The log line `cache.migration.complete` says every row has its object and the old store can be deleted. On the module shape the old store is the host's `/nix/store`: delete the abandoned roots under `<state>/cache/gcroots`, then let `nix-collect-garbage` reclaim the paths; do not delete `/nix/store`.
 - **Sizing.** Disk is the compressed objects plus staging for the largest in-flight NAR; memory is constant per NAR, not proportional to its size. A `--no-upstream` bucket also stores every upstream-signed closure it is pushed, so budget that disk deliberately.
@@ -616,16 +584,9 @@ GET  /cache/<bucket>/                           a public bucket's facts: the use
                                                 or JSON on Accept: application/json
 ```
 
-**Priority 41 is one worse than `cache.nixos.org`'s 40, on purpose.** A bucket created to take everything also holds upstream-signed paths, and at an equal priority the client's own substituter order decides who serves them — this machine's uplink, or the CDN that would have served them from nearer and for free. Losing the tie takes that decision away from whoever wrote the `nix.conf`.
-
 **A NAR on an S3 store is a 307**, to a presigned URL good for ten minutes, and the client re-sends its own `Range` there; a disk store streams it from odu. See [A NAR is a redirect](#a-nar-is-a-redirect). The same three protocol files also sit in the store itself (`<bucket>/nix-cache-info`, `<bucket>/<hash>.narinfo`, `<bucket>/nar/<file>`), which is what lets a public bucket be read from the store's own domain with odu switched off.
 
 On a bucket's own domain the same four Nix paths sit at `/`: `/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>` and their uploads. `Host` names the bucket.
-
-`/cache` is a literal, and it is load-bearing: the board answers `/assets/<hashed
-bundle>` on the same origin, and a bucket at the origin's first segment would
-shadow the page's own JavaScript. A bucket called `cache` lives at
-`/cache/cache`.
 
 Writes, and reads of private buckets, accept `Authorization: Bearer <token>` or HTTP Basic with any username and the token as the password. Nix uses the second through curl on every request, uploads included. The `missing` route backs `odu cache push`; it is not part of the Nix protocol. It answers `missing` — the paths to send — and `skippedUpstream`, the paths the bucket will never take because an upstream key signed them, so a push can report the two as different things.
 
