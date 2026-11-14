@@ -27,6 +27,12 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Set up an R2 bucket | `cache/s3` "Set up an R2 bucket" (heading verbatim; `skills/odu/SKILL.md` and `nix/module.nix` name it) |
 | A public URL for a store | `cache/s3` "A public URL for a store" (same heading) |
 | Move a bucket to another store | `cache/s3` "Move a bucket to another store" (same heading) |
+| A domain for a bucket | `cache/domain`; the anchor is a map row on `/docs/cache/` |
+| Create the Cloudflare token | `cache/domain` "Create the Cloudflare token" (same heading) |
+| Give it to odu | `cache/domain` "Give it to odu" (same heading) |
+| Set the domain | `cache/domain` "Set the domain", "Check that it is live" |
+| Remove it | `cache/domain` "Remove it" (same heading) |
+| What it does not do | `cache/domain` "What a domain does not do" |
 
 ## cache/how-it-works
 
@@ -230,3 +236,27 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | "Uploads still go through odu; sending them straight to the store is a later release" | cut. A push to an S3 store sends its bytes straight to the store (`writesTo: "store"`), as `cache/how-it-works` says. A move (`bucket_migrate`) copies through odu, which the move's steps now say. | `packages/cache/src/staging.ts` (`uploadMode` is `direct` when the store can presign parts), `packages/cache/src/migrateStore.ts` (`copyOne` reads from the old store and puts to the new one) |
 | "pick a store under **Where to move it**" | **where to move it** | `packages/cache/src/face.tsx` (fieldset legend) |
 | "the **Create bucket** form offers the declared stores" | **New bucket** offers them under **where its objects live** | `packages/cache/src/face.tsx` |
+
+## cache/domain
+
+- Kind: how-to. Reader: an operator.
+- Written from: "A domain for a bucket" and its five subsections, and the domain paragraph of `docs.md` "Self-host on NixOS".
+- Fact home: a bucket's own domain. The code block keeps its `kolu` / `cache.kolu.dev` example, and the prose follows it.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "(as it does `nix` only during a migration)" | implementation |
+| "rather than a panel that never moves" | rationale |
+| "for parity" | rationale |
+| "so the daemon's `Host` routing is what keeps the control plane off a substituter's name" | implementation; kept as "odu routes by `Host`" |
+| "which are odu's either way" | rationale |
+| "lets a Tailscale Funnel retire" | history; kept as "A Tailscale Funnel is then not needed" |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "Private buckets — read with a token — come with teams." | "To limit who reads a bucket, make it private", linking `cache/index` "Private buckets". Private buckets work now, and nothing named teams exists. | `packages/cache/src/cache.ts` (a read of a non-public bucket needs a cache token), `packages/cache/src/surface.ts` (`public` on `bucket_create`); a search of the repository finds "teams" only in GitHub's team membership probe and the `team-*` glob example |
+| "refuses the row with Cloudflare's own sentence" | "stops the tunnel part of the service from starting, with Cloudflare's own sentence" | word table ("row"); the behaviour is the old page's |

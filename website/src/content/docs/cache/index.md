@@ -113,67 +113,6 @@ An upload sits in `staging/` until its narinfo arrives; one that never gets it i
 
 The service needs no `nix.settings.trusted-users` entry and no Nix store: it never imports a path. Running all of this on a NixOS host, with the state under `/var/lib/odu` and nginx in front, is [Self-host on NixOS](../#self-host-on-nixos).
 
-## A domain for a bucket
-
-A bucket is served at `https://<your odu>/cache/<bucket>`. Give it a name of its own — `https://cache.kolu.dev` — and that is the URL people put in `nix.conf`, and it stays the same when the server moves.
-
-Odu does the wiring itself through Cloudflare. Hand it one API token and set the domain on the bucket; there is nothing else to run.
-
-### Create the Cloudflare token
-
-In Cloudflare, **My Profile → API Tokens → Create Token → Custom token**:
-
-| Field | Value |
-| --- | --- |
-| Token name | `odu` |
-| Permissions | **Zone → DNS → Edit**, **Zone → Zone → Read**, **Account → Cloudflare Tunnel → Edit** |
-| Zone Resources | Include → Specific zone → `kolu.dev` (one line per zone you will use) |
-| Account Resources | Include → your account |
-
-### Give it to odu
-
-| | |
-| --- | --- |
-| `ODU_CLOUDFLARE_API_TOKEN_FILE` | a file holding the token — a systemd credential under the module |
-
-With the NixOS module, `services.odu.cloudflare.apiTokenFile`. The token is verified at boot: a missing or inactive one refuses the row with Cloudflare's own sentence, rather than a panel that never moves.
-
-### Set the domain
-
-On the bucket's page, under **Domain**, type `cache.kolu.dev` and save. Or, for parity:
-
-```sh
-odu surface cache bucket_domain --origin https://odu.example.com \
-  --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"kolu","domain":"cache.kolu.dev"}' --json
-```
-
-Odu then:
-
-1. creates one Cloudflare Tunnel for this server, named after its public origin, the first time any name is set;
-2. routes every name through that tunnel to the cache;
-3. creates each proxied DNS record;
-4. starts the `cloudflared` connector as a child of the daemon (as it does `nix` only during a migration).
-
-A name is **wiring** while that happens, **live** once `https://<name>/nix-cache-info` answers, or **failed** with Cloudflare's reason (a token without the DNS permission; a zone the token cannot see). The bucket page's route strip and the board's **Tunnel** page show it, and `odu surface cloudflare status_read --json` asks from a terminal. The tunnel page also shows the connector: running, connected, stopped, or failed with the last words `cloudflared` said.
-
-Once live, the bucket's **Set up** block and `odu cache use kolu` print the new URL; the old `/cache/kolu` URL keeps working. Pushes are unchanged: `odu cache push kolu` finds the bucket by name.
-
-**A store's public URL wins over a bucket's domain**, for a public bucket on a store that declares one: the advertised read URL is `<publicUrl>/<bucket>` ([A public URL for a store](#a-public-url-for-a-store)), because that is the address that answers when odu does not. The bucket's own name keeps working for writes and for the `missing` query, which are odu's either way.
-
-**The name serves only the bucket.** `/` is the bucket's public page, the Nix protocol's paths (`/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>`, the push API) are served, and everything else on that hostname — the board, `/mcp`, `/auth`, `/rpc/ws` — is the cache row's 404. The tunnel forwards every path, so the daemon's `Host` routing is what keeps the control plane off a substituter's name; the board stays on `cache.domain`.
-
-**The server's own origin rides the same tunnel** when its host is in a zone the token can edit — the board, `/mcp` and the websocket. That is what lets a Tailscale Funnel retire; the GitHub App's callback URL then moves to that name.
-
-### Remove it
-
-Clear the **Domain** field, or send `bucket_domain` with no `domain` (`'{"rootToken":"…","bucket":"kolu"}'`). Odu removes the route and the DNS record. The tunnel itself is this server's and stays; the connector stops when the last name goes.
-
-### What it does not do
-
-A domain is a name, not a lock. Reads on a public bucket stay anonymous whether you reach it by `/cache/kolu` or by `cache.kolu.dev`. Private buckets — read with a token — come with teams.
-
-The connector needs outbound HTTPS from the server and nothing inbound: no port is opened on your network, and your server's address never appears in DNS.
-
 ## The Cache view
 
 `odu web`'s page has **Runs** and **Cache** in the header. `#/cache` lists the buckets — name, public or private, how many paths, how much space, when it last took a push, how many reads — and `#/cache/<bucket>` is one bucket: its substituter URL, its public key, the `nix.conf` / netrc block above ready to copy, and its paths as a table of **name · hash · size · pushed · reads · commit · run · wanted · kept by**. The facts line says who answers a read of it — **reads served from cache.example.com**, or **reads served by odu**.
