@@ -50,6 +50,11 @@ const LEDGER: ContractLedger = {
   // 4.8 — a collection that stops says why: `stopped` on the GC report, one
   // plain sentence or null. One output field; additive.
   "4.8": "a5bb71441d42f75f",
+  // 4.9 — `keptBy` on a path and on a package: what keeps it (`pin`,
+  // `retention`, `reference`, `nothing`), the pins, the `via` path and
+  // `until` — the collector's own holds, read by the bucket page's "kept by"
+  // column. One optional output field; additive.
+  "4.9": "2ebaa92b37473d69",
 };
 
 describe("the cache row's contract", () => {

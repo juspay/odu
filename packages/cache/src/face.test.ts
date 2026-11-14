@@ -271,6 +271,9 @@ describe("the paths table draws what the row answered", () => {
         // which version that is.
         run: "run-9",
         commit: "f".repeat(40),
+        // A DAEMON OLDER THAN 4.9 SAYS NOTHING about what keeps it, and the
+        // cell draws nothing rather than a guess.
+        keptBy: null,
       },
     ]);
   });
@@ -307,6 +310,31 @@ describe("the paths table draws what the row answered", () => {
     expect(rows[0]).toMatchObject({ run: "run-3", commit: "9".repeat(40) });
   });
 
+  it("carries what keeps a path, and a package, through to the row", async () => {
+    const { pathRows } = await import("./face");
+    const kept = { kind: "pin" as const, pins: ["release"], via: null, until: 9 };
+    const [row] = pathRows({
+      paths: [{ ...path("zlib-1.3", "cccccccccccccccccccccccccccccccc"), keptBy: kept }],
+    });
+    expect(row?.keptBy).toEqual(kept);
+    const [group] = pathRows({
+      paths: [],
+      groups: [
+        {
+          name: "zlib-1.3",
+          versions: 2,
+          bytes: 1,
+          hits: 0,
+          pushed: 1,
+          wanted: 1,
+          storePath: "/nix/store/cccccccccccccccccccccccccccccccc-zlib-1.3",
+          keptBy: kept,
+        },
+      ],
+    });
+    expect(group?.keptBy).toEqual(kept);
+  });
+
   it("splits a store path into the hash a person compares and the name they read", async () => {
     // THE RULE IS THE CONTRACT'S: the row groups a bucket by this name when
     // it stores a path, and the board labels a row and splits the hash off
@@ -322,5 +350,71 @@ describe("the paths table draws what the row answered", () => {
       hash: "",
       name: "not-a-store-path",
     });
+  });
+});
+
+/**
+ * WHY A PATH IS STILL HERE, AND WHEN IT GOES — the cell a reader scans and
+ * the sentence behind it, per kind. The verdict is the row's; what is pinned
+ * here is what the page makes of it against its own clock.
+ */
+describe("the kept by column says why a path stays, and until when", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const NOW = Date.UTC(2026, 10, 13);
+  const own = { grouped: false, retentionDays: 90 };
+
+  it("names one pin, counts the rest, and says what the clock under it does", async () => {
+    const { keptByText } = await import("./face");
+    const one = keptByText({ kind: "pin", pins: ["release"], via: null, until: NOW + 83 * DAY }, NOW, own);
+    expect(one.cell).toBe("pin release");
+    expect(one.title).toContain("until the pin is deleted or re-pointed");
+    expect(one.title).toContain("after that: in 83d");
+    const many = keptByText(
+      { kind: "pin", pins: ["release", "nightly", "beta"], via: null, until: NOW - DAY },
+      NOW,
+      own,
+    );
+    expect(many.cell).toBe("pin release +2");
+    expect(many.title).toContain("release, nightly, beta");
+    expect(many.title).toContain("after that: the next collection");
+  });
+
+  it("says retention with the day it leaves, and the want that wound it", async () => {
+    const { keptByText } = await import("./face");
+    const said = keptByText(
+      { kind: "retention", pins: [], via: null, until: NOW + 83 * DAY },
+      NOW,
+      own,
+    );
+    expect(said.cell).toBe("retention · in 83d");
+    expect(said.title).toContain("wanted 7d ago");
+    expect(said.title).toContain("90 days after the last want");
+    expect(said.title).toContain("first collection after 2027-02-04");
+  });
+
+  it("names the path that still needs it", async () => {
+    const { keptByText } = await import("./face");
+    const via = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app";
+    const said = keptByText({ kind: "reference", pins: [], via, until: NOW + 2 * DAY }, NOW, own);
+    expect(said.cell).toBe("reference · in 2d");
+    expect(said.title.startsWith(`${via} still needs it, and was wanted 88d ago`)).toBe(true);
+  });
+
+  it("says nothing holds an expired path, and the next collection takes it", async () => {
+    const { keptByText } = await import("./face");
+    const said = keptByText({ kind: "nothing", pins: [], via: null, until: NOW - 3 * DAY }, NOW, own);
+    expect(said.cell).toBe("nothing · next collection");
+    expect(said.title).toContain("expired 3d ago");
+  });
+
+  it("says a package's verdict is its version held longest", async () => {
+    const { keptByText } = await import("./face");
+    const said = keptByText(
+      { kind: "retention", pins: [], via: null, until: NOW + DAY },
+      NOW,
+      { grouped: true, retentionDays: 90 },
+    );
+    expect(said.cell).toBe("retention · in 24h");
+    expect(said.title).toContain("the version held longest; open the row for each");
   });
 });

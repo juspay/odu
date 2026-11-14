@@ -308,6 +308,17 @@ export interface CacheRepo {
    *  every pin's root-path list to learn a number the database already knows. */
   pinCounts(): Map<string, number>;
   deletePin(bucket: string, name: string): boolean;
+  /**
+   * HOW MANY TIMES WHAT HOLDS THIS BUCKET'S PATHS HAS BEEN WRITTEN, in this
+   * process — a number that moves on every write `holdsOf` reads (a bucket,
+   * an object, a want, a pin) and on nothing else, so a caller keeping a
+   * bucket's holds can tell they are still true by comparing one integer.
+   *
+   * In memory, because the daemon is the database's only writer. A read is
+   * not a write here: `countRead` moves `hits`, which is not GC's clock, and
+   * a counter a NAR read wound would throw the holds away once per read.
+   */
+  revision(bucket: string): number;
 
   /**
    * The uploads a bucket is holding for references. `put` refreshes the
@@ -801,8 +812,16 @@ export function openCacheRepo(path: string): CacheRepo {
   const all = <T>(sql: string, params: unknown[], map: (row: Row) => T): T[] =>
     (db.query(sql).all(...(params as never[])) as Row[]).map(map);
 
+  // NEVER RESET, so a bucket deleted and created again under its name cannot
+  // land back on a number a reader already holds.
+  const revisions = new Map<string, number>();
+  const bump = (bucket: string): void => {
+    revisions.set(bucket, (revisions.get(bucket) ?? 0) + 1);
+  };
+
   return {
     putBucket(row) {
+      bump(row.name);
       db.run(
         `INSERT INTO bucket (name, is_public, retention_days, key_name, secret_key,
            public_key, upstream_keys, created, domain, store)
@@ -836,6 +855,7 @@ export function openCacheRepo(path: string): CacheRepo {
     },
     buckets: () => all("SELECT * FROM bucket ORDER BY name", [], bucketOf),
     deleteBucket(name) {
+      bump(name);
       db.run("DELETE FROM bucket WHERE name = ?", [name]);
       db.run("DELETE FROM object WHERE bucket = ?", [name]);
       db.run("DELETE FROM pin WHERE bucket = ?", [name]);
@@ -895,6 +915,7 @@ export function openCacheRepo(path: string): CacheRepo {
     },
 
     putObject(row) {
+      bump(row.bucket);
       db.run(
         `INSERT INTO object (bucket, store_path, name, hash, nar_hash, nar_size, refs,
            deriver, ca, ca_proof, compression, file_hash, file_size, sigs, hits, created,
@@ -982,6 +1003,7 @@ export function openCacheRepo(path: string): CacheRepo {
     },
     want(bucket, storePaths, at, provenance) {
       if (storePaths.length === 0) return;
+      bump(bucket);
       // ONE statement for the batch: a push asks about its whole closure, and
       // a thousand-path closure must not be a thousand writes.
       //
@@ -1003,10 +1025,12 @@ export function openCacheRepo(path: string): CacheRepo {
       );
     },
     deleteObject(bucket, storePath) {
+      bump(bucket);
       db.run("DELETE FROM object WHERE bucket = ? AND store_path = ?", [bucket, storePath]);
     },
 
     putPin(row) {
+      bump(row.bucket);
       db.run(
         `INSERT INTO pin (bucket, name, root_paths, created, created_by)
          VALUES (?, ?, ?, ?, ?)
@@ -1015,6 +1039,7 @@ export function openCacheRepo(path: string): CacheRepo {
         [row.bucket, row.name, JSON.stringify(row.rootPaths), row.created, row.createdBy],
       );
     },
+    revision: (bucket) => revisions.get(bucket) ?? 0,
     pins: (bucket) =>
       bucket === undefined
         ? all("SELECT * FROM pin ORDER BY created", [], pinOf)
@@ -1218,6 +1243,7 @@ export function openCacheRepo(path: string): CacheRepo {
         .query("SELECT name FROM pin WHERE bucket = ? AND name = ?")
         .get(bucket, name) as Row | null;
       if (found === null) return false;
+      bump(bucket);
       db.run("DELETE FROM pin WHERE bucket = ? AND name = ?", [bucket, name]);
       return true;
     },

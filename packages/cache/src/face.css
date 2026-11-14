@@ -4,8 +4,9 @@
  * `@odu/face`'s `theme.css` carries the tokens, the primitives `./ui` renders
  * and the page shell — and since the bucket page was decomplected, that
  * includes the TABLE, the FACTS line, the DISCLOSURE and a form's width.
- * What is left here is what only a bucket has: its two tabs, a pin's roots,
- * and the rule at the end of the settings column.
+ * What is left here is what only a bucket has: its two tabs, its paths
+ * table's width, a pin's roots, and the rule at the end of the settings
+ * column.
  *
  * It is here, beside the view that emits these class names, because a row owns
  * everything about itself. Loaded by `scripts/build-web-ui.ts`, which finds
@@ -29,6 +30,51 @@
    */
   .tab-host { min-width: 0; }
   .tab-host[hidden] { display: none; }
+
+  /* ── a bucket's paths table ───────────────────────────────────────────────
+   *
+   * NINE COLUMNS DO NOT FIT EVERY MAIN COLUMN, and a fixed table squeezed
+   * below its fixed widths gives `name` nothing at all. So the table has a
+   * FLOOR — the eight fixed widths (48rem) and twelve for `name` — and below
+   * it, it scrolls sideways in a box of its own, the way a snippet does: the
+   * panel's head, its "Show 20 more" foot and the page never move. The widths
+   * are still the columns'; nothing in a cell sets one.
+   */
+  .cache-paths .paths-scroll {
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  /* The last thing in the panel takes its bottom corners, as a snippet does:
+     a sticky name cell paints the panel's background, and a square one would
+     cut the rounded edge. */
+  .cache-paths .paths-scroll:last-child { border-radius: 0 0 13px 13px; }
+
+  /* `separate` with no spacing keeps each hairline ON a cell, so a sticky
+     cell carries its own line along rather than leaving a gap in the row's.
+     Between two body rows that is one line, as before; under the header it
+     would be two — the header's bottom edge AND the first row's top edge,
+     which `collapse` used to merge — so the first row gives its edge up and
+     the header (sticky name cell included) draws the one rule. */
+  .paths-table {
+    min-width: 60rem;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+  .paths-table tbody > tr:first-child > td { border-top: 0; }
+
+  /* THE NAME STAYS IN VIEW. A reader scrolled across to `kept by` is asking
+     about a path, and a row with no name says nothing about which. Header,
+     rows and versions — never the full-width note, which is not a column —
+     on the panel's own background, so what slides under it is hidden. */
+  .paths-table th:first-child,
+  .paths-table .table-row > td:first-child,
+  .paths-table .table-sub-row > td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--panel);
+  }
 
   /* ── a bucket's pins ──────────────────────────────────────────────────────
    *
