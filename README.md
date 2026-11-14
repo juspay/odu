@@ -14,16 +14,16 @@ nix run github:juspay/odu -- ci run --host x86_64-linux=localhost --no-post
 
 Use your Nix system in place of `x86_64-linux`. Open **http://127.0.0.1:18440**: the command starts the service and watches the run. Ctrl-C stops watching; CI continues.
 
-To adopt it — the cache line in `flake.nix`, the tagged recipe, the machines, required checks, agents — read [Use odu from your repository](https://odu.kolu.dev/docs/#use-odu-from-your-repository). [`examples/consumer/`](examples/consumer/) is those files whole.
+To adopt it — the cache line in `flake.nix`, the tagged recipe, the machines, required checks, agents — read [Use odu from your repository](https://odu.kolu.dev/docs/your-repository/). [`examples/consumer/`](examples/consumer/) is those files whole.
 
 ## Documentation
 
-- [Use odu from your repository](https://odu.kolu.dev/docs/#use-odu-from-your-repository) — the three files, lanes, `ci protect`, what odu promises
-- [The web service and the board](https://odu.kolu.dev/docs/#every-run-at-once-the-web-service) — and [access through Tailscale or a proxy](https://odu.kolu.dev/docs/#access-through-tailscale-or-a-proxy)
-- [Self-host on NixOS](https://odu.kolu.dev/docs/#self-host-on-nixos), [metrics](https://odu.kolu.dev/docs/#metrics), [contract versions](https://odu.kolu.dev/docs/#contract-versions)
-- [Server mode](https://odu.kolu.dev/docs/#server-mode) — GitHub sign-in, roles, tokens, running the server's CI from your shell
-- [Daily workflow](https://odu.kolu.dev/docs/#daily-workflow), [CLI reference](https://odu.kolu.dev/docs/#cli-reference), [troubleshooting](https://odu.kolu.dev/docs/#troubleshooting)
-- [Coding agents](https://odu.kolu.dev/docs/#coding-agents) — the same verbs over `odu surface` and MCP
+- [Use odu from your repository](https://odu.kolu.dev/docs/your-repository/) — the three files, lanes, `ci protect`, what odu promises
+- [The web service and the board](https://odu.kolu.dev/docs/web-service/) — and [access through Tailscale or a proxy](https://odu.kolu.dev/docs/web-service/#access-through-tailscale-or-a-proxy)
+- [Self-host on NixOS](https://odu.kolu.dev/docs/self-host/), [metrics](https://odu.kolu.dev/docs/metrics/), [contract versions](https://odu.kolu.dev/docs/contract-versions/)
+- [Server mode](https://odu.kolu.dev/docs/server-mode/) — GitHub sign-in, roles, tokens, running the server's CI from your shell
+- [Daily workflow](https://odu.kolu.dev/docs/daily-workflow/), [CLI reference](https://odu.kolu.dev/docs/cli/), [troubleshooting](https://odu.kolu.dev/docs/troubleshooting/)
+- [Coding agents](https://odu.kolu.dev/docs/agents/) — the same verbs over `odu surface` and MCP
 - [Nix binary cache](https://odu.kolu.dev/docs/cache/) — buckets, tokens, pushing, retention and pins, S3 stores, the protocol
 
 ## Agents
