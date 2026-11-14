@@ -9,11 +9,17 @@ nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix
 
 [parallel]
 [metadata("ci")]
-default: typecheck unit fmt nix agent-flake-nix e2e-cli e2e-web bun-nix-fresh nixos-module
+default: typecheck unit fmt nix agent-flake-nix e2e-cli e2e-web bun-nix-fresh nixos-module website
 
 install:
     {{ nix_shell }} bun install --frozen-lockfile
     {{ nix_shell }} sh scripts/hydrate-pins.sh
+
+# The site: `astro check`, the docs lint, the build, and an offline link check.
+# No OS attribute, for the reason `nixos-module` gives.
+website:
+    {{ nix_shell }} sh -c 'cd website && npm ci && npm run check && npm test && npm run build'
+    nix shell --impure --expr '(import ./nix/nixpkgs.nix { }).lychee' -c website/linkcheck.sh website/dist
 
 typecheck: install
     {{ nix_shell }} bun run typecheck
