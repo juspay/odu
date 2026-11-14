@@ -198,6 +198,31 @@ export const CacheTokenSchema = Schema.Struct({
 });
 export type CacheToken = typeof CacheTokenSchema.Type;
 
+/**
+ * WHAT KEEPS A PATH IN ITS BUCKET, and when that runs out — the collector's
+ * own answer (`gc.ts`'s `holdsOf`, which is what `gc.run` evicts by), read at
+ * the moment the page was asked for.
+ *
+ * `kind` is the verdict: `pin` (a pin's closure reaches it — it stays until
+ * that pin is deleted or re-pointed), `retention` (its own last want is the
+ * latest clock holding it), `reference` (a path that references it, directly
+ * or not, was wanted later — `via` names that path), or `nothing` (no pin,
+ * every clock has run out: the next collection takes it). `pins` names every
+ * pin that holds it. `until` is when the latest clock holding it runs out —
+ * `lastWanted + retention` of the path itself or of `via` — and is stated
+ * under a pin too, because it is what happens when the pin lets go.
+ *
+ * ONE FLAT STRUCT, not a union: `via` and `until` mean the same thing under
+ * every kind.
+ */
+export const CacheKeptBySchema = Schema.Struct({
+  kind: Schema.Literals(["pin", "retention", "reference", "nothing"]),
+  pins: Schema.Array(Schema.String),
+  via: Schema.NullOr(Schema.String),
+  until: Schema.Number,
+});
+export type CacheKeptBy = typeof CacheKeptBySchema.Type;
+
 /** One stored path, as a bucket lists it. */
 export const CachePathSchema = Schema.Struct({
   storePath: Schema.String,
@@ -215,6 +240,9 @@ export const CachePathSchema = Schema.Struct({
    *  here, spelled as `label` was for the same reason. */
   run: Schema.optionalKey(Schema.NullOr(Schema.String)),
   commit: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** WHAT KEEPS IT, and until when (4.9). `optionalKey` for the same reason
+   *  `run` is: a daemon older than the field still decodes here. */
+  keptBy: Schema.optionalKey(CacheKeptBySchema),
 });
 export type CachePath = typeof CachePathSchema.Type;
 
@@ -592,6 +620,10 @@ export const CachePathGroupSchema = Schema.Struct({
    *  package never shows one build's hash beside another's commit. */
   run: Schema.optionalKey(Schema.NullOr(Schema.String)),
   commit: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** WHAT KEEPS THE VERSION HELD LONGEST (4.9) — any pinned one, else the
+   *  latest `until` — over the versions the filter leaves: the package stays
+   *  as long as that version does. Open the package for each one's. */
+  keptBy: Schema.optionalKey(CacheKeptBySchema),
 });
 export type CachePathGroup = typeof CachePathGroupSchema.Type;
 
@@ -997,7 +1029,13 @@ export const ODU_CACHE_MCP_INSTRUCTIONS = [
   "`--pin`) may be re-pointed by a write token; an administrator's may not,",
   "because re-pointing releases whatever the pin held before.",
   "`cache_bucket_paths` pages a bucket's paths newest first, and takes a",
-  "substring `filter` and the `after` cursor it returned. `cache_bucket_domain`",
+  "substring `filter` and the `after` cursor it returned. Each path (and each",
+  "package, for its version held longest) answers `keptBy`: `kind` `pin`,",
+  "`retention`, `reference` (`via` names the path that still needs it) or",
+  "`nothing` (the next collection takes it), the `pins` that hold it, and",
+  "`until`, when the latest retention clock holding it runs out — the",
+  "collector's own rule, so `nothing` is exactly what `cache_gc_run` evicts.",
+  "`cache_bucket_domain`",
   "gives a bucket a DNS name of its own (clear it with no `domain`); the",
   "advertised `url` becomes that name while `pushUrl` keeps the path the push",
   "API needs. A bucket lives in one STORE, named at `cache_bucket_create`",
@@ -1113,8 +1151,15 @@ export const CACHE_KEY = "cache";
  * confirm is still recorded, so the counts beside `stopped` are what left and
  * asking again carries on from there. A reader that ignores the field sees
  * 4.7.
+ *
+ * 4.9: WHAT KEEPS A PATH, AND WHEN IT LEAVES. Additive: `keptBy` on a path
+ * and on a package — `kind` (`pin`, `retention`, `reference`, `nothing`),
+ * the `pins` that hold it, the `via` path whose clock does, and `until`. It
+ * is the collector's own answer, read through the same function `gc.run`
+ * evicts by, and it names pins to every reader of `bucket.paths`, which takes
+ * no credential. An optional output field; a reader that ignores it sees 4.8.
  */
-export const CACHE_CONTRACT_VERSION = "4.8";
+export const CACHE_CONTRACT_VERSION = "4.9";
 
 /** THE CACHE AND NOTHING ELSE — what a face that reads only this row declares
  *  (`odu cache …`), in the shape `admitService` takes. */

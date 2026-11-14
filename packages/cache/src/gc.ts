@@ -24,6 +24,14 @@
  * to look. It is also the DRY RUN: the plan is what the bucket page shows
  * before anybody presses the button.
  *
+ * **One rule, read two ways.** {@link holdsOf} answers, per path, what holds
+ * it — the pins whose closure reaches it, and the latest retention clock of
+ * anything that reaches it — and {@link planGc}'s eviction is exactly
+ * "nothing holds it now" ({@link released}). The bucket page's "kept by"
+ * column reads the same holds ({@link keptBy}), so the page cannot say a path
+ * is kept that the next collection takes, or the other way round: the
+ * collector is defined by the function the column reads.
+ *
  * **Two closures, because a pin is a promise.** A pin's closure is resolved at
  * pin time and stored, so a path that was in the closure then stays protected
  * even if the bucket has since forgotten the objects that referenced it. GC
@@ -61,6 +69,7 @@
 
 import type { ObjectStore } from "@odu/objects";
 import type { BucketRow, CacheRepo, ObjectRow, PinRow } from "./db";
+import type { CacheKeptBy } from "./surface";
 import { narFileName } from "./narinfo";
 import { cacheInfoKey, narinfoKey, objectKey } from "./staging";
 
@@ -108,11 +117,137 @@ export function closureOf(roots: Iterable<string>, byPath: Map<string, ObjectRow
     const path = queue.pop() as string;
     if (seen.has(path)) continue;
     seen.add(path);
-    for (const reference of byPath.get(path)?.references ?? []) {
-      queue.push(reference.startsWith("/nix/store/") ? reference : `/nix/store/${reference}`);
-    }
+    for (const reference of byPath.get(path)?.references ?? []) queue.push(referenced(reference));
   }
   return seen;
+}
+
+/** A reference as the store path it names — the one normalisation every walk
+ *  over a bucket's references applies, so no two of them disagree about what
+ *  a bare basename points at. */
+const referenced = (reference: string): string =>
+  reference.startsWith("/nix/store/") ? reference : `/nix/store/${reference}`;
+
+/**
+ * WHAT KEEPS ONE PATH IN ITS BUCKET — two independent facts, and no clock.
+ *
+ * `pins` names every pin whose closure reaches the path. `until` is when the
+ * last RETENTION clock holding it runs out: the latest `lastWanted + R days`
+ * over every row whose closure reaches it, the path itself included. `via`
+ * is the row that latest clock belongs to, or null when the path's own clock
+ * is as late as any — a push renews a whole closure to one instant, so its
+ * own clock is the common answer and a `via` means a dependent genuinely
+ * outlives it.
+ *
+ * `until` is absolute, which is what lets a hold be computed once and asked
+ * about at any moment: {@link released} and {@link keptBy} bring the clock.
+ */
+export interface Hold {
+  readonly pins: readonly string[];
+  readonly until: number;
+  readonly via: string | null;
+}
+
+const NO_PINS: readonly string[] = [];
+
+/**
+ * EVERY PATH'S HOLD, for one bucket — `objects` and `pins` are that bucket's.
+ *
+ * THE PIN SIDE is {@link closureOf} per pin — the walk a pin's own closure was
+ * resolved with — and the names land in the order the pins were made.
+ *
+ * THE CLOCK SIDE IS ONE WALK, latest clock first. Rows are taken in
+ * descending `lastWanted`, and each one not yet reached stamps everything it
+ * reaches (over the bucket's own references) with its own `until`. A row
+ * already stamped is not walked again: whatever it reaches was stamped by a
+ * root at least as late. So every row is stamped exactly once, by the latest
+ * clock that reaches it — O(rows + references) after the sort, and a cycle or
+ * a self-reference ends on the stamp.
+ */
+export function holdsOf(
+  bucket: Pick<BucketRow, "retentionDays">,
+  objects: readonly ObjectRow[],
+  pins: readonly PinRow[],
+): Map<string, Hold> {
+  const keep = bucket.retentionDays * DAY_MS;
+  const byPath = new Map(objects.map((row) => [row.storePath, row]));
+
+  const pinned = new Map<string, string[]>();
+  for (const pin of pins) {
+    for (const path of closureOf(pin.rootPaths, byPath)) {
+      const names = pinned.get(path);
+      if (names === undefined) pinned.set(path, [pin.name]);
+      else names.push(pin.name);
+    }
+  }
+
+  const holds = new Map<string, Hold>();
+  const latestFirst = [...objects].sort(
+    (a, b) =>
+      b.lastWanted - a.lastWanted ||
+      (a.storePath < b.storePath ? -1 : a.storePath > b.storePath ? 1 : 0),
+  );
+  for (const root of latestFirst) {
+    if (holds.has(root.storePath)) continue;
+    const until = root.lastWanted + keep;
+    const queue = [root.storePath];
+    while (queue.length > 0) {
+      const path = queue.pop() as string;
+      const row = byPath.get(path);
+      if (row === undefined || holds.has(path)) continue;
+      holds.set(path, {
+        pins: pinned.get(path) ?? NO_PINS,
+        until,
+        via: row.lastWanted === root.lastWanted ? null : root.storePath,
+      });
+      for (const reference of row.references) queue.push(referenced(reference));
+    }
+  }
+  return holds;
+}
+
+/** NOTHING HOLDS IT NOW: no pin, and every clock that held it has run out.
+ *  The strict `>` is retention's own — a path is still kept at the instant
+ *  its clock reads zero. This is the collector's whole predicate. */
+export function released(hold: Hold, now: number): boolean {
+  return hold.pins.length === 0 && now > hold.until;
+}
+
+/**
+ * WHAT KEEPS IT, as the wire says it. A pin wins, because it has no end
+ * date; then the clock — the path's own (`retention`) or a dependent's
+ * (`reference`); and `nothing` is exactly {@link released}.
+ */
+export function keptBy(hold: Hold, now: number): CacheKeptBy {
+  const kind =
+    hold.pins.length > 0
+      ? "pin"
+      : now > hold.until
+        ? "nothing"
+        : hold.via === null
+          ? "retention"
+          : "reference";
+  return { kind, pins: hold.pins, via: hold.via, until: hold.until };
+}
+
+/** THE HOLD THAT LASTS LONGEST among several — a package's versions. Any
+ *  pinned one beats every clock (the latest `until` among the pinned), and
+ *  otherwise the latest `until`. Null for none. */
+export function longestHeld(holds: Iterable<Hold>): Hold | null {
+  let best: Hold | null = null;
+  for (const hold of holds) {
+    if (best === null) {
+      best = hold;
+      continue;
+    }
+    const pinned = hold.pins.length > 0;
+    if (pinned !== best.pins.length > 0) {
+      if (pinned) best = hold;
+      continue;
+    }
+    if (hold.until > best.until) best = hold;
+  }
+  return best;
 }
 
 /**
@@ -138,26 +273,12 @@ function freedBytes(evict: readonly ObjectRow[], kept: readonly ObjectRow[]): nu
 export function planGc(input: GcInput): GcBucketPlan[] {
   return input.buckets.map((bucket) => {
     const objects = input.objects.filter((row) => row.bucket === bucket.name);
-    const byPath = new Map(objects.map((row) => [row.storePath, row]));
-    const expired = (row: ObjectRow): boolean =>
-      input.now - row.lastWanted > bucket.retentionDays * DAY_MS;
-
-    // Everything a LIVE object keeps alive: the live objects themselves, and
-    // whatever they reference inside this bucket.
-    const live = objects.filter((row) => !expired(row));
-    const protectedByReference = closureOf(
-      live.map((row) => row.storePath),
-      byPath,
-    );
-
     const pins = input.pins.filter((pin) => pin.bucket === bucket.name);
-    const pinnedRoots = pins.flatMap((pin) => pin.rootPaths);
-    const protectedByPin = closureOf(pinnedRoots, byPath);
-
+    // EXPIRED, UNREFERENCED BY ANYTHING LIVE AND UNPINNED is one fact about a
+    // hold: no pin, and the latest clock reaching the path has run out.
+    const holds = holdsOf(bucket, objects, pins);
     const doomed = (row: ObjectRow): boolean =>
-      expired(row) &&
-      !protectedByReference.has(row.storePath) &&
-      !protectedByPin.has(row.storePath);
+      released(holds.get(row.storePath) as Hold, input.now);
     const evict = objects.filter(doomed);
     return {
       bucket: bucket.name,
