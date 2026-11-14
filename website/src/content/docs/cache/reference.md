@@ -16,25 +16,36 @@ Commands are written with the [`odu` shorthand](/docs/#quick-start).
 | `odu cache use <bucket>` | `bucket_describe` | a bucket's **Set up** block | Prints the substituter and key settings, the `nixConfig` block and the netrc lines. No account for a public bucket. |
 | `odu cache login <origin>` | — | — (a machine's disk) | Saves a cache token for an origin in `~/.config/odu/cache/credentials`. |
 | [`odu cache push`](#odu-cache-push) | — | — (a build machine's job) | Uploads only the paths the bucket is missing. |
-| `odu cache target` | — | — (reads this checkout) | Prints the one odu substituter `./flake.nix`'s `nixConfig` names, and nothing else. `-o json` gives `{cache, origin, bucket}`. The push action uses it when `cache:` is left out. |
+| `odu cache target` | — | — (reads this checkout) | Prints the one odu substituter `./flake.nix`'s `nixConfig` names, and nothing else, refusing no flake, none or two. `-o json` gives `{cache, origin, bucket}`. The push action uses it when `cache:` is left out. |
 
 ### `odu cache push`
 
-Uploads only the paths the bucket is missing. The bucket keeps what it takes.
+Uploads only the paths the bucket is missing, and the bucket keeps what it takes. It talks to the cache directly, so it runs on the machine that holds the paths.
 
 ```
 odu cache push <bucket> <paths…> [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA]
 odu cache push --cache <substituter> <paths…>
+odu cache push <path>…
 ```
+
+| You name | It pushes to | Cache token it sends |
+| --- | --- | --- |
+| `<bucket>` | that bucket, on the origin you logged in to or name with `--origin` | `--token-file`, then `$ODU_CACHE_TOKEN`, then the saved credential |
+| `--cache <substituter>` | the origin and bucket that cache states in its `nix-cache-info` | the same |
+| nothing | the one odu substituter in `./flake.nix`'s `nixConfig`; two is refused | only a credential saved for that origin with `odu cache login` |
+
+- With nothing named, odu probes the substituter without a token, so a private bucket must be named with `--cache`.
+- To send your own cache token to the flake's cache, name it: `odu cache target` prints the URL to pass to `--cache`.
 
 | Flag | What it does |
 | --- | --- |
-| `--cache <substituter>` | Reads the origin and the bucket from the cache's own `nix-cache-info`, instead of being told them. |
 | `--pin NAME` | Re-points that pin at the closure this push landed, unless a path was refused. |
-| `--run ID`, `--commit SHA` | State what built the paths. |
+| `--run ID`, `--commit SHA` | State what built the paths. The bucket keeps both on every path this push stores, and its page shows them. A push that states neither leaves what a run stated. |
 | `--part-size MiB` | Sets the size of each part of a large upload. |
+| `--concurrency N` | Sets how many paths upload at once. |
+| `-o json` | Prints the result as JSON. |
 
-The [CLI reference](/docs/cli/#odu-cache-push) has every flag, and [Push](/docs/cache/push/) has how and why.
+Why the cache token is withheld, and the rest of the push: [Push](/docs/cache/push/).
 
 ## API verbs
 
@@ -66,13 +77,15 @@ Every verb is typed after `cache`, as in `odu surface cache bucket_create`. Over
 
 Creates a bucket, and returns its substituter URL, public key and store.
 
-| Field | What it sets |
-| --- | --- |
-| `name` | the bucket's name |
-| `public` | whether it is read without a cache token |
-| `retentionDays` | how long it keeps what nobody wants. 90 when absent. |
-| `upstreamKeys` | the keys whose paths it skips. `[]` takes everything, including upstream-signed closures, which costs disk, for clients that cannot reach cache.nixos.org. The board's **Skip upstream paths** switched off sends `[]`. |
-| `store` | the declared store for its objects. `local` by default. |
+| Field | Board control | What it sets |
+| --- | --- | --- |
+| `name` | **name** | the bucket's name, in its URL |
+| `public` | — (the board creates public buckets) | whether it is read without a cache token |
+| `retentionDays` | — (set it afterwards under **Retention**) | how long it keeps what nobody wants. 90 when absent. |
+| `upstreamKeys` | **Skip upstream paths** | the keys whose paths it skips, `cache.nixos.org-1` by default. `[]` takes everything, which costs disk, for clients that cannot reach cache.nixos.org. The switch off sends `[]`. |
+| `store` | **where its objects live** | the declared store for its objects. `local` by default. See [Keep a bucket on S3](/docs/cache/s3/). |
+
+Behind a proxy, the URL is under the address you published the service at, `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you.
 
 ### `bucket_delete`
 

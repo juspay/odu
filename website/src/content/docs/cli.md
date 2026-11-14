@@ -30,15 +30,12 @@ The board and the API do everything the `ci` commands do. The cache, auth and we
 | [`odu ci wait`](#odu-ci-wait) | `run_wait` | a run's page, live | Waits, bounded, for the first failure you can act on. |
 | `odu ci rerun [--run R] SELECTOR` | `run_retry` | a node's **Retry** | Retries with unchanged inputs. `--expect-attempt N`, `--request-id ID`. |
 | `odu ci cancel [--run R] [node\|@platform]` | `run_cancel` | **Cancel run**, **Cancel node**, a lane's cancel | Cancels the whole run by default. `--request-id ID`. |
-| `odu ci logs KEY` | `log_read` | a node's log | `-f` follows, `--offset B`, `--limit B`. Tail with `--offset=-4096`. `--stream push` reads the node's push. |
+| `odu ci logs KEY` | `log_read` | a node's log | `-f` follows, `--offset B`, `--limit B`. Tail with `--offset=-4096`. `--stream push` reads the node's push. `--wait-ms N` waits up to N ms for more of the log. |
 | `odu ci history list\|show\|import\|prune` | `catalog_import`, `catalog_prune` | **History**, **Maintenance** | Lists the run history, and imports or expires it. |
-| `odu ci hosts`, `odu ci lease`, `odu ci release` | `venue_probe`, `venue_hold`, `venue_release` | **Machines** | Shows the machines and who holds them, and holds or releases one. |
+| `odu ci hosts [PLAT…]`, `odu ci lease`, `odu ci release` | `venue_probe`, `venue_hold`, `venue_release` | **Machines** | Shows the machines and who holds them, and holds or releases one. Naming platforms probes only those. `lease --no-wait` does not queue behind a holder. |
 | `odu ci dump`, `odu ci graph` | `pipeline_read` | **New run** → **Preview pipeline** | Prints the resolved pipeline, as JSON or as Mermaid. |
-| `odu ci protect` | `protect_apply` | **Maintenance** → **Apply protection** | Sets GitHub's required checks. Preview with `--dry-run`. |
-| `odu cache use <bucket>` | `cache_bucket_describe` | a bucket's **Set up** block | Prints the `nix.conf` settings, a `nixConfig` block and netrc lines for a bucket. |
-| `odu cache login <origin>` | — | — (a machine's disk) | Saves a cache token for an origin in `~/.config/odu/cache/credentials`. |
-| [`odu cache push`](#odu-cache-push) | — | — (a build machine's job) | Uploads the paths a bucket is missing. |
-| `odu cache target` | — | — (reads this checkout) | Prints the one odu substituter `./flake.nix`'s `nixConfig` names, refusing no flake, none or two. `-o json` gives `{cache, origin, bucket}`. The push action uses it when `cache:` is left out. |
+| `odu ci protect` | `protect_apply` | **Maintenance** → **Apply protection** | Sets GitHub's required checks. Preview with `--dry-run`. `--branch B` picks another branch than the default, `--platform P` the platforms, and `--create` makes the branch's ruleset if it has none. |
+| `odu cache use`, `login`, `push`, `target` | — | — | The cache's four shell commands. See the cache's [command reference](/docs/cache/reference/#commands). |
 | `odu auth login <origin>` | — | — (a machine's disk) | Saves a personal token in `~/.config/odu/auth/credentials`. |
 | `odu web` | — | — | Serves the board. See [The web service and the board](/docs/web-service/). |
 | `odu surface <row> <verb…>` | every verb | — | Calls any API verb from a shell. |
@@ -68,6 +65,9 @@ odu ci run [recipe[@platform]…] [flags]
 | `--no-wait` | Starts the run and returns. |
 | `--linger` | Keeps the run answerable after it settles. |
 | `--supersede` | Cancels the checkout's live run and starts this one. |
+| `--request-id ID` | Names the request, so a retry after a lost reply is not a second run. |
+| `--progress json` | Prints the run's progress as JSON lines instead of watching. |
+| `-o json` | Prints the result as JSON. |
 
 - odu pushes every recipe's `result*` closure to the odu cache your `flake.nix` already reads from. See [What a run pushes](/docs/your-repository/#what-a-run-pushes).
 - `--checkout`, `--sha` and `--branch` are explained in [Run the server's CI from your shell](/docs/remote-runs/).
@@ -82,35 +82,6 @@ odu ci wait [--run R] [--after CURSOR] [--deadline-ms N] [--settle] [--expected-
 ```
 
 `--timeout-ms` is another name for `--deadline-ms`. Its exit codes are in [Exit codes](#exit-codes).
-
-### `odu cache push`
-
-Uploads only the paths the bucket is missing. It talks to the cache directly, so it runs on the machine that holds the paths.
-
-```
-odu cache push <bucket> <path>…
-odu cache push --cache <substituter> <path>…
-odu cache push <path>…
-```
-
-| You name | It pushes to | Cache token it sends |
-| --- | --- | --- |
-| `<bucket>` | that bucket, on the origin you logged in to or name with `--origin` | `--token-file`, then `$ODU_CACHE_TOKEN`, then the saved credential |
-| `--cache <substituter>` | the origin and bucket that cache states in its `nix-cache-info` | the same |
-| nothing | the one odu substituter in `./flake.nix`'s `nixConfig`; two is refused | only a credential saved for that origin with `odu cache login` |
-
-- With nothing named, odu probes the substituter without a token, so a private bucket must be named with `--cache`.
-- To send your own cache token to the flake's cache, name it: `odu cache target` prints the URL to pass to `--cache`.
-
-| Flag | What it does |
-| --- | --- |
-| `--pin NAME` | Re-points that pin at the closure this push landed. |
-| `--run ID`, `--commit SHA` | State what built the paths. The bucket's page shows both. A push that states neither leaves what a run stated. |
-| `--part-size MiB` | Sets the size of each part of a large upload. |
-| `--concurrency N` | Sets how many paths upload at once. |
-| `-o json` | Prints the result as JSON. |
-
-Why the token is withheld, and the rest of the push: [Push](/docs/cache/push/).
 
 ## API verbs without a command
 

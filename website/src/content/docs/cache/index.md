@@ -17,15 +17,7 @@ odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","nam
 
 On the board, an admin creates one under **Cache** → **New bucket** → **Create bucket**. The CLI has no command for it.
 
-| Input | Board control | What it sets |
-| --- | --- | --- |
-| `name` | **name** | the bucket's name, in its URL |
-| `public` | — (the board creates public buckets) | whether anyone may read it without a cache token |
-| `retentionDays` | — (set it afterwards under **Retention**) | how long it keeps what nobody wants. 90 when absent. See [Keep and reclaim](/docs/cache/retention/). |
-| `upstreamKeys: []` | **Skip upstream paths**, switched off | keep paths an upstream key signed too. Switched on, the default, the bucket skips paths `cache.nixos.org-1` signed. |
-| `store` | **where its objects live** | a declared S3 store. See [Keep a bucket on S3](/docs/cache/s3/). |
-
-`bucket_create` returns the substituter URL and the bucket's public key. Behind a proxy, the URL is under the address you published the service at, `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you.
+`bucket_create` returns the substituter URL and the bucket's public key. Its inputs (whether the bucket is public, its retention, whether it skips upstream-signed paths, and its store) are in the [command reference](/docs/cache/reference/#bucket_create).
 
 ## Use it
 
