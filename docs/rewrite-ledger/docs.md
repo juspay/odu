@@ -16,6 +16,7 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | 1. Declare the cache once | `your-repository` "1. Declare the cache once" |
 | 2. Tag the pipeline | `your-repository` "2. Tag the pipeline", "Shard a leaf", "What a run pushes", "Keep your default branch's build" |
 | 3. Run it | `your-repository` "3. Run it" |
+| The machines it runs on (h4) | `machines` |
 
 ## index
 
@@ -89,3 +90,23 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | `--concurrency N` on `odu cache push` | `packages/cache/src/cli.ts` (`CACHE_USAGE`, `pushCommand` options) |
 | `odu surface` exit 3 is "nothing is serving: run `odu web --background`" (the old page said "unreachable") | `packages/cli/src/serviceCli.ts` header comment |
 | `metrics` verbs in the table of verbs without a command | `packages/host` metrics verbs, as listed on the old "Metrics" section |
+
+## machines
+
+- Kind: how-to. Reader: a developer setting up the machines a run uses.
+- Written from: "The machines it runs on", and the hosts row of "Troubleshooting" (linked from `troubleshooting`).
+
+### Moved
+
+- `$ODU_HOSTS` with `--checkout` → `remote-runs` "Which machines it uses" (linked).
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "which odu resolves from the build that shipped its own coordinator" | implementation; kept as "odu takes it from the same build as itself" |
+| "lane host" | private word; now "machine" (a lane is defined on `your-repository`) |
+
+### Changed for the word table
+
+- "venue" is not used; `ci hosts` "shows the machines and who holds them".

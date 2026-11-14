@@ -31,40 +31,6 @@ The checkout must be clean. To run uncommitted changes, see [Run uncommitted cha
 
 The examples on these pages use `odu` as shorthand for `nix run github:juspay/odu --`.
 
-#### The machines it runs on
-
-Pass `--host SYSTEM=localhost` for an explicit local run, or create `~/.config/odu/hosts.json`:
-
-```json
-{
-  "x86_64-linux": ["ci@linux-a", "ci@linux-b"],
-  "aarch64-darwin": "ci@mac"
-}
-```
-
-A remote pool leases one available machine per platform. Builders need SSH access, Nix and outbound HTTPS. Each lane host also needs the lane runner built for its Nix system, which odu resolves from the build that shipped its own coordinator: a published revision reaches a Linux host on Nix 2.17–2.34 with **no cache key on the host** (the host pulls the content-addressed build itself), while macOS and other Nix lines need the binary cache odu's flake declares to be trusted. Do not mix localhost and remote machines in one pool.
-
-That cache is odu's own, declared in its flake's `nixConfig`. A macOS lane, or one on another Nix line, trusts it in its `nix.conf`:
-
-```ini
-extra-substituters = https://cache.kolu.dev/kolu-r2
-extra-trusted-public-keys = kolu-r2-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=
-```
-
-`--accept-flake-config` reads the same two settings from the flake, but Nix honours them only for a trusted user.
-
-Hosts are read from the first existing file: `$ODU_HOSTS`, `~/.config/odu/hosts.json`, then the legacy `~/.config/justci/hosts.json`. No configured host means a refusal, never an implicit local build.
-
-On the board: **Machines** shows the service's last probe of the same inventory and its age — opening the page dials nothing — and **Probe machines** takes a fresh one, narrowed by platform if you name one.
-
-```sh
-odu ci hosts                    # what each platform has, and who holds it
-odu ci lease x86_64-linux       # hold one across several runs
-odu ci release x86_64-linux
-```
-
-A lease belongs to the **checkout** and survives the calling shell, so release it when you are finished; `lease` reports `held`, `already` or `waiting`. The CLI forwards your shell's `$ODU_HOSTS`. A browser or MCP caller can supply `hostsFile`; omitted uses the service's configuration, while `""` bypasses its override. Retries preserve the parent's recorded inventory choice and host pins.
-
 #### Running the server's checkout
 
 Every `odu ci` command talks to the odu service for the machine you are on unless you name another with `--origin`. To run the **server's** clone of your repository from any shell — no checkout of your own — name the server, hand it a personal token from your profile page, and say which commit:
