@@ -1,6 +1,6 @@
 ---
 title: Nix binary cache
-description: Serve a Nix binary cache from odu: create a bucket, point Nix at it, and read a private bucket.
+description: Serve a Nix binary cache from odu, point Nix at a bucket, and read a private one.
 section: Binary cache
 order: 0
 ---
