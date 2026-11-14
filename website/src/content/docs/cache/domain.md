@@ -17,7 +17,7 @@ In Cloudflare, **My Profile → API Tokens → Create Token → Custom token**:
 | --- | --- |
 | Token name | `odu` |
 | Permissions | **Zone → DNS → Edit**, **Zone → Zone → Read**, **Account → Cloudflare Tunnel → Edit** |
-| Zone Resources | Include → Specific zone → `kolu.dev` (one line per zone you will use) |
+| Zone Resources | Include → Specific zone → `example.com` (one line per zone you will use) |
 | Account Resources | Include → your account |
 
 ## Give it to odu
@@ -35,7 +35,7 @@ On the bucket's page, type the domain under **Domain** and save it. Or use the A
 
 ```sh
 odu surface cache bucket_domain --origin https://odu.example.com \
-  --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"kolu","domain":"cache.kolu.dev"}' --json
+  --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","domain":"cache.example.com"}' --json
 ```
 
 odu then:
@@ -55,7 +55,7 @@ odu then:
 
 The bucket's page and the board's **Tunnel** page show the state, and `odu surface cloudflare status_read --json` returns it in a terminal. **Tunnel** also shows the connector: running, connected, stopped, or failed with the last words `cloudflared` said.
 
-Once live, the bucket's **Set up** block and `odu cache use kolu` print the new URL, and the old `/cache/kolu` URL keeps working. Pushes are the same: `odu cache push kolu` finds the bucket by name.
+Once live, the bucket's **Set up** block and `odu cache use main` print the new URL, and the old `/cache/main` URL keeps working. Pushes are the same: `odu cache push main` finds the bucket by name.
 
 ## What the domain serves
 
@@ -70,7 +70,7 @@ When the server's own host is in a zone the token can edit, the same tunnel carr
 
 ## Remove it
 
-Clear the **Domain** field, or send `bucket_domain` with no `domain` (`'{"rootToken":"…","bucket":"kolu"}'`). odu removes the route and the DNS record. The tunnel is this server's and stays, and the connector stops when the last domain goes.
+Clear the **Domain** field, or send `bucket_domain` with no `domain` (`'{"rootToken":"…","bucket":"main"}'`). odu removes the route and the DNS record. The tunnel is this server's and stays, and the connector stops when the last domain goes.
 
 ## What a domain does not do
 

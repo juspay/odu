@@ -49,7 +49,7 @@ GitHub's banner also asks for a private key before the App can be installed. odu
 An App is owned by one account and installed on organizations or accounts, separately. Your personal account may own it.
 
 - For an `org:<name>` or `team:<org>/<slug>` rule, an owner of that organization installs the App on it. Selected repositories are enough, because odu reads membership, not code.
-- For a list of logins, such as `ODU_GITHUB_ALLOW=srid,octocat`, no installation is needed.
+- For a list of logins, such as `ODU_GITHUB_ALLOW=alice,bob`, no installation is needed.
 
 ## Configure odu
 
@@ -95,10 +95,10 @@ Its callback is `http://localhost:18440/auth/github/callback`. GitHub allows a `
 `ODU_GITHUB_ALLOW` takes a comma-separated list. One example of each form:
 
 ```sh
-ODU_GITHUB_ALLOW='org:juspay'                  # anyone in the organisation
-ODU_GITHUB_ALLOW='team:juspay/platform'        # anyone on that team
-ODU_GITHUB_ALLOW='srid,octocat'                # these logins, by name
-ODU_GITHUB_ALLOW='org:juspay,srid'             # any rule may let you in
+ODU_GITHUB_ALLOW='org:example'                 # anyone in the organization
+ODU_GITHUB_ALLOW='team:example/platform'       # anyone on that team
+ODU_GITHUB_ALLOW='alice,bob'                   # these logins, by name
+ODU_GITHUB_ALLOW='org:example,alice'           # any rule may let you in
 ```
 
 ## Sign in and make the first owner
@@ -118,7 +118,7 @@ The root token creates the first owner, and only that. On a new server, once:
 ```sh
 # On the server, with $ODU_ROOT_TOKEN set in its environment.
 odu surface auth user_grant --origin https://odu.example.com \
-  --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","login":"srid","role":"owner"}' --json
+  --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","login":"alice","role":"owner"}' --json
 ```
 
 After that, a grant made with the root token is refused, whatever the role. Every further grant is an owner's, made with that owner's personal token:
@@ -126,7 +126,7 @@ After that, a grant made with the root token is refused, whatever the role. Ever
 ```sh
 odu auth login https://odu.example.com        # paste the owner's personal token
 odu surface auth user_grant --origin https://odu.example.com \
-  --input '{"login":"alice","role":"admin","rootToken":""}' --json   # or People on the board
+  --input '{"login":"bob","role":"admin","rootToken":""}' --json   # or People on the board
 ```
 
 On the board, an owner has **People**. It lists every grant and every login that has signed in, with its role, and grants or changes a role. Signing out does not remove you. `odu surface auth grant_list` prints the same list.

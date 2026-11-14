@@ -21,7 +21,7 @@ Commands are written with the [`odu` shorthand](/docs/#quick-start).
 3. Name the checkout on the server and the commit:
 
    ```sh
-   odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
+   odu ci run --checkout /data/checkouts/<repo> --sha "$(git rev-parse HEAD)" --no-post
    ```
 
 `--origin https://odu.example.com` on the command does the same as `ODU_WEB_ORIGIN`:
@@ -64,7 +64,7 @@ Every run records who started it: the personal token's login, or `@local` on a s
 | Where | What it shows |
 | --- | --- |
 | the run's page | `started by <login>` |
-| `odu ci history list --all` | the runs of checkouts on the server, which are not yours, so `--all` |
+| `odu ci history list --all` | the run, among every checkout's runs. Pass `--all`, because the checkout is on the server, not yours. |
 | `run_read` | `actor` |
 
 It records who started the run, not who may control it. Revoking a personal token stops the next call, not a run already started.

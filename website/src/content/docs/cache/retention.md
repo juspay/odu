@@ -86,7 +86,7 @@ A push lands while a collection runs, without waiting for it.
 ## Delete a bucket
 
 ```sh
-odu surface cache bucket_delete --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"r2test"}' --json
+odu surface cache bucket_delete --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main"}' --json
 ```
 
 On the board, it is the **Delete this bucket** panel under **Danger zone**, last on a bucket's page. Type the bucket's name into the field, and **Delete bucket** becomes clickable. Nothing else confirms it, and the board returns to the bucket list when it is done. There is no CLI command.
