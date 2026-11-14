@@ -1,13 +1,13 @@
 ---
 title: Nix binary cache
-description: "odu binary cache: buckets, tokens, pushing, private reads, and garbage collection."
+description: Serve a Nix binary cache from odu: create a bucket, point Nix at it, and read a private bucket.
 section: Binary cache
 order: 0
 ---
 
-`odu web` also serves Nix binary caches. The same loopback service that runs CI answers the standard Nix HTTP binary cache protocol, so every Nix client works unchanged.
+`odu web` also serves Nix binary caches. It speaks the standard Nix HTTP binary cache protocol, so every Nix client works unchanged. A **bucket** is one cache: one substituter URL under the service's origin, and one public key the service signs with.
 
-A bucket is one cache: one substituter URL under the service's origin and one ed25519 public key. The server generates the keypair and signs each narinfo on ingest; a pusher never holds a signing key. Client signatures are kept. By default the cache binds loopback, like the board: `$ODU_WEB_ORIGIN` is the address it listens on, and the NixOS module puts nginx in front of it — proxying the cache's protocol paths only, unless [server mode](../#server-mode) is configured, where the board and `/mcp` are behind the same door. The cache keeps the compressed NAR a pusher sent (like Cachix and Attic) and no Nix store of its own — on the server's disk, or in any S3-compatible bucket ([Keep a bucket on S3](#keep-a-bucket-on-s3)); see [Where the data lives](#where-the-data-lives).
+Commands are written with the [`odu` shorthand](/docs/#quick-start).
 
 ## Create a bucket
 
@@ -15,11 +15,21 @@ A bucket is one cache: one substituter URL under the service's origin and one ed
 odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30}' --json
 ```
 
-The CLI does not create buckets: a bucket is made on the board's Cache view — the **Create bucket** form, with the same upstream switch — or with the API verb above, whose input is `packages/cache/src/surface.ts`'s `bucket_create` (`upstreamKeys: []` is the old `--no-upstream`; `store` names a declared S3 store). `bucket_create` answers the substituter URL and the bucket's public key. Behind a proxy that URL is the address you published the service at, not the loopback one — `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you. `odu cache use main` prints the same as two Nix settings, ready for `nix.conf` — and needs no token at all, because a bucket's URL and public key are what it publishes to every client that talks to it. On a server with a door that is a PROTOCOL read, not a session: `GET /cache/<bucket>/` answers a public bucket's facts with no account (a small page for `curl`, add `Accept: application/json` for a terminal). A private bucket's facts need a reader, and `odu cache use` says so:
+On the board, an admin creates one under **Cache** → **New bucket** → **Create bucket**. The CLI has no command for it.
+
+| Input | Board control | What it sets |
+| --- | --- | --- |
+| `name` | **name** | the bucket's name, in its URL |
+| `public` | — (the board creates public buckets) | whether anyone may read it without a cache token |
+| `retentionDays` | — (set it afterwards under **Retention**) | how long it keeps what nobody wants. 90 when absent. See [Keep and reclaim](/docs/cache/retention/). |
+| `upstreamKeys: []` | **Skip upstream paths**, switched off | keep paths an upstream key signed too. Switched on, the default, the bucket skips paths `cache.nixos.org-1` signed. |
+| `store` | **where its objects live** | a declared S3 store. See [Keep a bucket on S3](/docs/cache/s3/). |
+
+`bucket_create` returns the substituter URL and the bucket's public key. Behind a proxy, the URL is under the address you published the service at, `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you.
 
 ## Use it
 
-The bucket's page shows these as separate, titled blocks — one per thing you paste somewhere. Trust the key, then a build substitutes from the bucket instead of the network.
+Trust the key, and a build substitutes from the bucket instead of building. The bucket's **Set up** block on the board shows each setting in its own tab, and `odu cache use main` prints them in a terminal.
 
 `nix.conf`:
 
@@ -48,7 +58,7 @@ nix.settings = {
 }
 ```
 
-GitHub Actions — inside the step that installs Nix:
+GitHub Actions, inside the step that installs Nix:
 
 ```yaml
 extra_nix_config: |
@@ -56,7 +66,7 @@ extra_nix_config: |
   extra-trusted-public-keys = main-1:<public-key>
 ```
 
-A **private** bucket's page also carries the netrc block, because reading it needs a credential:
+A private bucket's **Set up** block also has the netrc lines, because reading it needs a cache token:
 
 ```sh
 # netrc — an absolute path, no ~
@@ -64,7 +74,19 @@ netrc-file = <home>/.netrc
 machine 127.0.0.1:18440 password <your-read-token>
 ```
 
-Or let a terminal print them: `odu cache use main`.
+`odu cache use` needs no account for a public bucket, because a bucket's URL and public key are what it publishes to every client. It reads them from `GET /cache/<bucket>/`, which also returns a small page for `curl`, or JSON with `Accept: application/json`.
+
+## Private buckets
+
+A public bucket is read without a cache token. A private bucket is read with a cache token of read scope or wider, and every write needs one.
+
+| Client | How it sends the cache token |
+| --- | --- |
+| `nix copy`, substitution | the netrc lines above |
+| any HTTP client | `Authorization: Bearer <token>` |
+
+- An anonymous read of a private bucket returns 404, and a wrong, revoked, expired or other bucket's cache token returns 403. [How the cache works](/docs/cache/how-it-works/#why-a-private-bucket-answers-404) says why.
+- `odu cache use` on a private bucket, without a credential, is refused: "if it is private, sign in (`odu auth login`) or set $ODU_TOKEN to a read token". With `$ODU_TOKEN` set to a read token, it prints the block.
 
 ## Tokens
 
@@ -258,12 +280,6 @@ What changes in behaviour, not just in spelling:
 | What a maintainer reads after a run | attic's log | a table in the step summary, from the push's JSON |
 
 Chutney's `attic` cache is `chutney:oss` — a cache and a sub-cache. An odu bucket is one cache, so the migration is a bucket named for the project (`chutney`), and its upstream filter is what `oss` was for.
-
-## Private buckets
-
-A public bucket reads without a token. Reads from a private bucket need the same credential as a write: netrc for `nix copy` and substitution, or `Authorization: Bearer <token>` for HTTP clients. Writes always need a token.
-
-An unauthenticated read of a private bucket answers **404**, not 401: "you need a token" would confirm the bucket exists, and a private name must not be enumerable. A caller who presents a token that is wrong, revoked, expired or scoped elsewhere gets 403.
 
 ## Keep and reclaim
 
@@ -637,3 +653,18 @@ The CLI keeps the four cache commands a shell is the natural place for. Everythi
 | What the next collection would take, without taking it. `retentionDays` plans at a retention of your own (absent is the bucket's; `0` is what nothing references and no pin holds), and writes nothing — `gc_run` has no such field | — | `gc_plan` | bucket → **Dry run**, and the **retention** field beside it |
 | Evict objects past retention that nothing references and no pin holds — the daily pass, asked for now | — | `gc_run` | bucket → **Run GC** |
 | Show storage and hit counts | — | `stats_read` | a bucket's facts line, drawn from the bucket's own published row |
+
+## Find your page
+
+| You want to | Read |
+| --- | --- |
+| <span id="tokens"></span>mint, list or revoke a cache token | [Tokens](/docs/cache/tokens/) |
+| <span id="push"></span>push paths to a bucket | [Push](/docs/cache/push/) |
+| <span id="push-from-github-actions"></span>push from a GitHub workflow | [Push from GitHub Actions](/docs/cache/github-actions/) |
+| <span id="keep-and-reclaim"></span>keep a closure, see why a path is still here, or collect garbage | [Keep and reclaim](/docs/cache/retention/) |
+| <span id="keep-a-bucket-on-s3"></span>keep a bucket's objects on R2 or another S3 store | [Keep a bucket on S3](/docs/cache/s3/) |
+| <span id="a-domain-for-a-bucket"></span>give a bucket a domain of its own | [A domain for a bucket](/docs/cache/domain/) |
+| <span id="reads-leave-odu"></span>understand why reads go to the store, and other choices | [How the cache works](/docs/cache/how-it-works/) |
+| <span id="where-the-data-lives"></span><span id="operating-it"></span>find the files, size the disk, back up, or read the log | [Operate the cache](/docs/cache/operations/) |
+| <span id="protocol"></span>write a client against the cache's routes | [Protocol](/docs/cache/protocol/) |
+| <span id="command-reference"></span><span id="the-cache-view"></span>look up a cache command, API verb or board control | [Command reference](/docs/cache/reference/) |

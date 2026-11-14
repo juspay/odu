@@ -11,6 +11,10 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Old heading | New home |
 | --- | --- |
 | Reads leave odu | `cache/how-it-works` "Reads leave odu"; the narinfo backfill → `cache/operations` |
+| Nix binary cache (h1) and the intro | `cache/index` (title kept); signing and the kept NAR → `cache/how-it-works`; loopback and nginx → `self-host` |
+| Create a bucket | `cache/index` "Create a bucket" (same anchor) |
+| Use it | `cache/index` "Use it" (same anchor) |
+| Private buckets | `cache/index` "Private buckets" (same anchor); the 404 reason → `cache/how-it-works` |
 | A NAR is a redirect | `cache/how-it-works` "Why a NAR is a redirect"; the `endpoint` caution → `cache/s3` |
 
 ## cache/how-it-works
@@ -38,3 +42,30 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | "rather than refreshing a URL" | implementation |
 | "Its 100 MB request cap is why pushes are chunked" (in the serving bullet) | duplicate (stated with `--part-size`) |
 | "An anonymous read of a private bucket is still 404" (end of "A NAR is a redirect") | duplicate ("Why a private bucket answers 404") |
+
+## cache/index
+
+- Kind: how-to. Reader: someone who wants a cache.
+- Written from: the intro, "Create a bucket", "Use it" and "Private buckets", plus the page map. The five bound "Use it" blocks are unchanged (`useCopy.test.ts` passes).
+
+### Moved
+
+- The service binding loopback, `$ODU_WEB_ORIGIN`, and nginx proxying only the cache's paths → `self-host`.
+- "keeps the compressed NAR … like Cachix and Attic" → `cache/how-it-works`.
+- `packages/cache/src/surface.ts`'s `bucket_create` input → the "Create a bucket" table and `cache/reference` "`bucket_create`".
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "ed25519" | implementation (the key's type is in its value) |
+| "On a server with a door that is a PROTOCOL read, not a session" | private word; the fact (no account needed) stays |
+| "`upstreamKeys: []` is the old `--no-upstream`" | history; the flag never existed in the code |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "A private bucket's facts need a reader, and `odu cache use` says so:" (nothing after the colon) | the refusal, quoted: "if it is private, sign in (`odu auth login`) or set $ODU_TOKEN to a read token", and that a read token in `$ODU_TOKEN` makes it print the block | `packages/cache/src/cli.ts` `useCommand` (both refusal sentences end with that clause) |
+| The board's create form sets `public` and `retentionDays` | it creates public buckets only, and leaves retention to the **Retention** panel | `packages/cache/src/face.tsx` (`public: true`; "RETENTION IS NOT A CREATION FORM'S BUSINESS") |
+| "the **Create bucket** form, with the same upstream switch" | **Cache** → **New bucket** → **Create bucket**, with **Skip upstream paths** and **where its objects live** | `packages/cache/src/face.tsx` |
