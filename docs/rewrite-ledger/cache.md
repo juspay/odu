@@ -21,6 +21,8 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Push from GitHub Actions | `cache/github-actions` (title verbatim); the anchor is a map row on `/docs/cache/` |
 | From `attic push` | `cache/github-actions` "From `attic push`" (same heading) |
 | Tokens | `cache/tokens`; the anchor is a map row on `/docs/cache/` |
+| Keep and reclaim | `cache/retention`; the anchor is a map row on `/docs/cache/`. The bucket page's layout paragraph → `cache/reference` "The board's Cache view" |
+| Delete a bucket | `cache/retention` "Delete a bucket" (same heading) |
 
 ## cache/how-it-works
 
@@ -156,3 +158,40 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Old | New | Decided by |
 | --- | --- | --- |
 | "a bucket page's **Tokens** section mints one" | the **Tokens** panel's **Mint token** button | `packages/cache/src/face.tsx` |
+
+## cache/retention
+
+- Kind: how-to. Reader: a bucket's administrator.
+- Written from: "Keep and reclaim", "Delete a bucket", the "Kept by" paragraph of "The Cache view", and "Disk does not grow forever" from `docs.md` "Self-host on NixOS".
+- Fact homes: retention, the dry run, the daily collection, and what a pin is.
+
+### Moved
+
+- Why a read does not renew retention → `cache/how-it-works` (linked).
+- The bucket page's two-column layout → `cache/reference` "The board's Cache view".
+- `bucket_delete` returning objects and bytes, and its refusals → also one entry in `cache/reference`.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "the override is a row the plan makes up for the length of the answer" | implementation |
+| "so a dry run at a retention nobody agreed to cannot become a collection by another name" | rationale |
+| "never a service's XML" | implementation |
+| "drawn as the red line in the GC box" | visible on screen; kept as "shown in red in the **Garbage collection** panel" |
+| "The write lock is held for the plan and for each batch's decision, never across a delete" | implementation; the reader's fact stays: "A push lands while a collection runs, without waiting for it" |
+| "and with no CDN in front nothing is purged because nothing was cached" | duplicate |
+| "goes solid red once you have" (delete button), "lights up" | visible on screen |
+| "a temp a dead put left" | implementation |
+| "because it was never this bucket's token" | rationale |
+| "or the delete would race it" | rationale |
+| "(closing any open package, whose versions were read beside the old answer)" | implementation |
+| "because every cell is a sentence about that number" | rationale |
+| "the column and `cache_gc_run` read one function" | implementation; kept as "the same one `gc_run` acts on" |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "the **dry run retention days** field beside the button, placeholder 'its own'" (both pages) | the **retention** field, placeholder `bucket's (90d)` (the bucket's own number) | `packages/cache/src/face.tsx` (field label `retention`, placeholder `` `bucket's (${retentionDays}d)` ``) |
+| Kept-by cell "**pin release**" | `pin <name>`, as in `pin release` | `packages/cache/src/face.tsx` (`` `pin ${name}` ``) |
