@@ -345,3 +345,12 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | "roots folded behind *what it holds*" | a pin's roots, ten until **show all** | `packages/cache/src/face.tsx` (no "what it holds" label; `show all ${n}` after `PIN_ROOTS_SHOWN = 10`) |
 | "Cache → **Create bucket**, … the **store** field" | **Cache** → **New bucket** → **Create bucket**; the store is chosen under **where its objects live** | `packages/cache/src/face.tsx` |
 | "Press **group by name**" | "Click **group by name**" | rule 23 (a control is clicked) |
+
+## Review round 1
+
+- `cache/s3`: the `endpoint` caution names the line odu logs (`cache.store.endpoint.unreachable`, at start, for a loopback or link-local endpoint), as the old page did. Decided by `packages/cache/src/server.ts`.
+- `cache/reference` holds the whole `odu cache push` entry and the `bucket_create` field table with its board controls; `cli` and `cache/index` link to them.
+- `cache/domain`, `cache/retention`: example names follow rule 26 (`main`, `cache.example.com`, `example.com`).
+- `cache/retention` "Pins": who may re-point or delete a pin, in one line, linking to `cache/protocol`.
+- `cache/tokens`: how a pusher and a reader send a cache token, linking to `cache/push` and `cache/index`.
+- `cache/operations`: `cache.migration.object_failed`, `cache.nar.uploaded` and `cache.narinfo.served` are added, so the table is every line the cache logs. Source: `packages/cache/src/cache.ts`, `staging.ts`, `routes.ts`.

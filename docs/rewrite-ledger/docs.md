@@ -354,3 +354,12 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | Old | New | Decided by |
 | --- | --- | --- |
 | 2.6 `actor`: "a login or `local`" | "a login, or `@local`" | `packages/run-history/src/schema.ts` and `packages/execution/src/coordinator/run.ts` (the reserved `"@local"`), as the old "Run the server's CI from your shell" also said |
+
+## Review round 1
+
+- `contract-versions`: `ci` is 2.7, not 2.6, and the 2.7 row is added (the optional `branch` on `run_start`). Decided by `packages/service-client/src/surface.ts` (`CI_CONTRACT_VERSION = "2.7"`) and `packages/ci/src/contract.test.ts`. The old page was stale too.
+- `cli`: the four cache commands are one row linking to `cache/reference`, which now holds the whole `odu cache push` entry (one fact, one home).
+- `cli`: flags from `CI_USAGE` the old page never listed are added: `ci run --request-id`, `--progress json`, `-o json`; `ci logs --wait-ms`; `ci hosts [PLAT…]`; `ci lease --no-wait`; `ci protect --branch`, `--platform`, `--create`. Source: `packages/cli/src/ciCli.ts`.
+- `server-mode`, `remote-runs`: example names follow rule 26 inside code blocks too (`alice`, `bob`, `org:example`, `team:example/platform`, `/data/checkouts/<repo>`), and the allow-list comment says "organization".
+- `web-service`: `odu surface <row> <verb>`, as the CLI's usage writes it.
+- The standard's two "Before" samples are whole, from `21bb94d`.
