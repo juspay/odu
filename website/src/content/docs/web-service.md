@@ -38,7 +38,7 @@ The board does everything the CLI does, and more:
 | **People** | see who is in, and grant or change a role (an owner) |
 | **Tunnel** | see the Cloudflare tunnel and its names |
 
-Anything the board does, `odu surface <part> <verb> --input '{…}' --json` does from a shell. The [CLI reference](/docs/cli/) maps each control to its API verb.
+Anything the board does, `odu surface <row> <verb> --input '{…}' --json` does from a shell. The [CLI reference](/docs/cli/) maps each control to its API verb.
 
 The board shows a control only to a role that may use it, and the service checks the role again on its own, so a hidden button is never the only check. A required field left empty is refused when you click, with the reason.
 

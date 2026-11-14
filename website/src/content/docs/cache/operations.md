@@ -73,8 +73,11 @@ A service in the foreground (`odu web`) prints these lines, and keeps its other 
 | Line | Fields | What it means |
 | --- | --- | --- |
 | `cache.migration.start`, `.progress`, `.pause`, `.resume`, `.complete`, `.incomplete` | objects, NAR bytes, free space | The one-time migration. After `incomplete`, the paths it names have no object and no copy in the old store, and return 404 until pushed again. |
+| `cache.migration.object_failed` | `bucket`, `path`, `reason` | One path the migration could not move, such as one the old store does not have, or has with another `NarHash`. |
 | `cache.self_ca.start`, `.progress`, `.complete` | paths, bytes, proved, refused, unreadable | The one-time pass that proves `CA:` for paths that refer to themselves. |
 | `cache.nar.served` | path, bytes written, ms, `source`, `cancelled` | A NAR served. `source` is `object` from the bucket's store, `transition` from the old Nix store, or `redirect` for a 307 to an S3 store, always with `bytes: 0`. |
+| `cache.nar.uploaded` | `bucket`, `file`, `mode`, `parts`, `bytes` | A NAR upload completed, direct or staged, with the bytes odu measured itself. |
+| `cache.narinfo.served` | `bucket`, `hash`, `hit` | A narinfo asked of odu, and whether the bucket had it. |
 | `cache.nar.unavailable` | path | No object, and the old store lacks it. Served as 404, logged once per path. |
 | `cache.boot.orphans`, `cache.boot.ca` | counts | The sweep and the metadata `CA:` counts at start. |
 | `cache.import.recorded`, `cache.request.refused`, `cache.object.put_failed` | — | A path recorded, a request refused, an object that could not be written. |

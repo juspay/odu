@@ -36,6 +36,7 @@ A pin is a name over a closure. A pinned closure is never collected.
 - Garbage collection follows the bucket's own references out from a pin's roots, so a path pushed later under a pinned root is held too.
 - A push pins with `--pin NAME`, or `pin: true` in the push action. That is how a repository keeps its default branch's closure: see [Keep your default branch's build](/docs/your-repository/#keep-your-default-branchs-build).
 - On the board, a bucket's **Pins** tab lists each pin's name, system, paths, when it was made and by whom, and pins a closure with **Pin closure**. Click a pin's name to see its roots.
+- A write cache token may make a pin, and re-point one a write cache token made, never an admin's. Deleting a pin needs an admin. [Protocol](/docs/cache/protocol/#pin) has the rule.
 
 ## Why a path is still here
 

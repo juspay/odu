@@ -27,6 +27,8 @@ On the board, a bucket's **Tokens** panel mints one with **Mint token**, with wr
 
 A refusal for an expired cache token names the date it expired.
 
+A pusher hands `odu cache push` the cache token as [Push](/docs/cache/push/#give-it-a-cache-token) says. A reader of a private bucket sends it in netrc or as `Authorization: Bearer`: see [Private buckets](/docs/cache/#private-buckets).
+
 ## List and revoke
 
 ```sh
