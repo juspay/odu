@@ -33,6 +33,8 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Set the domain | `cache/domain` "Set the domain", "Check that it is live" |
 | Remove it | `cache/domain` "Remove it" (same heading) |
 | What it does not do | `cache/domain` "What a domain does not do" |
+| Where the data lives | the model → `cache/how-it-works`; files, `<state>`, the service's home, sizing, backup and the migration → `cache/operations`. The anchor is a map row on `/docs/cache/` |
+| Operating it | `cache/operations` "Log lines"; the anchor is a map row on `/docs/cache/` |
 
 ## cache/how-it-works
 
@@ -260,3 +262,32 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | --- | --- | --- |
 | "Private buckets — read with a token — come with teams." | "To limit who reads a bucket, make it private", linking `cache/index` "Private buckets". Private buckets work now, and nothing named teams exists. | `packages/cache/src/cache.ts` (a read of a non-public bucket needs a cache token), `packages/cache/src/surface.ts` (`public` on `bucket_create`); a search of the repository finds "teams" only in GitHub's team membership probe and the `team-*` glob example |
 | "refuses the row with Cloudflare's own sentence" | "stops the tunnel part of the service from starting, with Cloudflare's own sentence" | word table ("row"); the behaviour is the old page's |
+
+## cache/operations
+
+- Kind: reference. Reader: an operator.
+- Written from: the file layout, `<state>`, the service's own home, sizing, backup and migration parts of "Where the data lives", the narinfo backfill paragraph of "Reads leave odu", the object rewrite of "The cache describes itself", and "Operating it".
+- Fact home: the state directory, file layout and what to back up. Every log line, field and `verify_failed` reason is kept, as a table.
+
+### Moved
+
+- "The service needs no `trusted-users` entry and no Nix store" → `cache/how-it-works` "A bucket keeps the NAR it was sent".
+- The upgrade steps → `self-host` "Upgrade from a store-backed cache"; this page keeps what the service does.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "the singleton's gate" | implementation; now "the service's lock" |
+| "a SIBLING of `odu` rather than a child of it, and deliberately" | capitals and rationale; the fact stays ("beside `odu` rather than inside it") |
+| "skipped on one HEAD" | implementation |
+| "(it prints a row's operational `info`, and drops host narration)" | private words; now "keeps its other logging quiet" |
+| "since reads left odu" | history |
+| "a PRIVATE bucket" | capitals |
+| "The one record of a bucket whose own rows are gone, so it is what an operator reads afterwards" | kept, shortened to "It is the only record left of the bucket" |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "A `--no-upstream` bucket also stores every upstream-signed closure" | "A bucket created with `upstreamKeys: []`" | `packages/cache/src/cli.ts`, `packages/cache/src/face.tsx` (no such flag) |
