@@ -26,6 +26,7 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | CLI (under Coding agents) | `agents` "Use the CLI" |
 | MCP (under Coding agents) | `agents` "Use MCP"; the cache verb rename table → `cache/reference` |
 | 6. Agents (Use odu) | `your-repository` "6. Agents", which links to `agents` |
+| Troubleshooting | `troubleshooting`; the anchor is a map row on `/docs/` |
 
 ## index
 
@@ -186,3 +187,20 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 ### Added
 
 - A link from "Use MCP" to `server-mode` for an agent's personal token, which "A token for a machine or an agent" already covers.
+
+## troubleshooting
+
+- Kind: how-to. Reader: anyone with a refusal.
+- Written from: the symptom table of "Troubleshooting". Each row now links to the page that owns its fix.
+
+### Added
+
+- "A node is red but its recipe passed": from "The push is its own step" (a failed push turns the node red), for the reader who meets it here.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "placement evidence" | private word; now "the record of where the run ran" |
+| "posting debt" | private word; now "what the run still owes GitHub" |
+| "That row moved a major" | private word ("row"); now "That part of the service moved a major version" |

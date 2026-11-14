@@ -366,18 +366,6 @@ One App per odu instance: the callback URL is a single address, and the client s
 
 The same rename reaches argv: `odu surface cache_create …` is `odu surface cache bucket_create …`, because a sibling's commands mount under its key — and that argv face is now how a cache is administered from a shell, the CLI's own `cache create`/`list`/`token`/`pin`/`gc`/`stats` having been retired. `odu cache push`/`login`/`use` — the shell-native commands — are unchanged. A service started without `$ODU_ROOT_TOKEN` refuses the token-taking verbs with `no_root_token` while the substituter keeps serving; `cache_bucket_describe` and `cache_bucket_paths` take no credential at all, because a bucket's URL, its key and its path list are what it publishes to every client that can read it. \*`cache_gc_plan` does take a `rootToken` like the other administrative verbs, but it is annotated read-only — an agent may ask what a collection would evict without a confirmation, and must not run one without.
 
-## Troubleshooting
-
-| Symptom | Next step |
-| --- | --- |
-| No hosts configured | Add a hosts file or explicitly use `--host SYSTEM=localhost` |
-| Dirty checkout refused | Commit changes, or use `--no-strict` to ship a working-tree snapshot |
-| Web service already running | Open its URL or use `web --upgrade` |
-| Proxied page refused as cross-origin | Set `ODU_WEB_ALLOWED_ORIGINS` to the browser origin when starting/replacing the server |
-| Service/build mismatch (`serves the <row> row at …`) | That row moved a major. Run `odu web --upgrade`, or use a build that reads that version |
-| Retry refused | Read the reason; check snapshot, placement evidence and checkout availability |
-| CI passed but GitHub is waiting | Inspect posting debt and the service's `gh` credentials |
-
 ## Find your page
 
 | You want to | Read |
