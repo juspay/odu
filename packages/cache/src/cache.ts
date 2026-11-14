@@ -435,8 +435,8 @@ export interface PathPageRow {
   run: string | null;
   commit: string | null;
   /** WHAT KEEPS IT, and until when — the collector's own answer, read as
-   *  the page was answered. Null only for a row the holds could not place. */
-  keptBy: CacheKeptBy | null;
+   *  the page was answered. */
+  keptBy: CacheKeptBy;
 }
 
 /** One PACKAGE, as a grouped `paths` lists it: every version of one store
@@ -454,7 +454,7 @@ export interface PathGroupPageRow {
   run: string | null;
   commit: string | null;
   /** What keeps the version held LONGEST among those the filter leaves. */
-  keptBy: CacheKeptBy | null;
+  keptBy: CacheKeptBy;
 }
 
 /** The verdict on a presented credential. `status` is what the route answers
@@ -1878,11 +1878,13 @@ export function createCache(options: CacheOptions): Cache {
         descending: input.descending ?? true,
       };
       // WHAT KEEPS EACH ROW, decided NOW: the holds are the bucket's as of its
-      // last write, and the clock is this answer's.
+      // last write, and the clock is this answer's. The holds and the page are
+      // read in one synchronous stretch at one revision, so every row the page
+      // names has a hold, and every group SQL counted has a version the same
+      // filter leaves — the casts below say that, and a broken one throws
+      // rather than answering an empty cell that reads as an older daemon.
       const { holds, byName } = holdsFor(bucket);
       const at = now();
-      const verdict = (hold: Hold | null | undefined): CacheKeptBy | null =>
-        hold === null || hold === undefined ? null : keptBy(hold, at);
       if (input.group === "name") {
         const grouped = repo.objectGroupsPage(bucket.name, page);
         // THE VERSIONS THE GROUP COUNTED: the same name, narrowed by the same
@@ -1900,7 +1902,7 @@ export function createCache(options: CacheOptions): Cache {
             paths: [],
             groups: grouped.rows.map((group) => ({
               ...group,
-              keptBy: verdict(longestHeld(versionsOf(group.name))),
+              keptBy: keptBy(longestHeld(versionsOf(group.name)) as Hold, at),
             })),
             next: grouped.next,
           },
@@ -1918,7 +1920,7 @@ export function createCache(options: CacheOptions): Cache {
             lastWanted: row.lastWanted,
             run: row.run,
             commit: row.commit,
-            keptBy: verdict(holds.get(row.storePath)),
+            keptBy: keptBy(holds.get(row.storePath) as Hold, at),
           })),
           groups: null,
           next: listed.next,

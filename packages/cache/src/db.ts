@@ -808,6 +808,7 @@ export function openCacheRepo(path: string): CacheRepo {
       }
     }
   }
+
   const all = <T>(sql: string, params: unknown[], map: (row: Row) => T): T[] =>
     (db.query(sql).all(...(params as never[])) as Row[]).map(map);
 

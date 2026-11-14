@@ -106,10 +106,8 @@ type CacheSpec = (typeof oduCacheSurface)["spec"];
 const DEFAULT_UPSTREAM_KEY = "cache.nixos.org-1";
 export type CacheSurfaceDeps = ImplementSurfaceDeps<CacheSpec>;
 
-/** A row's verdict as the wire carries it: ABSENT where the row has none,
- *  because the field is `optionalKey`, and its pins a copy the answer owns. */
-const keptByOf = (keptBy: CacheKeptBy | null): { keptBy?: CacheKeptBy } =>
-  keptBy === null ? {} : { keptBy: { ...keptBy, pins: [...keptBy.pins] } };
+/** A row's verdict as the wire carries it, its pins a copy the answer owns. */
+const keptByOf = (keptBy: CacheKeptBy): CacheKeptBy => ({ ...keptBy, pins: [...keptBy.pins] });
 
 /** The sibling's publishing half, as the composed bundle hands it over — the
  *  collection this row owns. */
@@ -831,14 +829,11 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 descending: input.descending ?? null,
               }),
             (page) => ({
-              paths: page.paths.map(({ keptBy, ...path }) => ({ ...path, ...keptByOf(keptBy) })),
+              paths: page.paths.map((path) => ({ ...path, keptBy: keptByOf(path.keptBy) })),
               ...(page.groups === null
                 ? {}
                 : {
-                    groups: page.groups.map(({ keptBy, ...group }) => ({
-                      ...group,
-                      ...keptByOf(keptBy),
-                    })),
+                    groups: page.groups.map((group) => ({ ...group, keptBy: keptByOf(group.keptBy) })),
                   }),
               ...(page.next === null ? {} : { next: page.next }),
             }),

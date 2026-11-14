@@ -50,14 +50,18 @@
      cut the rounded edge. */
   .cache-paths .paths-scroll:last-child { border-radius: 0 0 13px 13px; }
 
-  /* `separate` with no spacing draws the same hairlines — each cell carries
-     one edge — and keeps them ON the cell, so a sticky cell carries its own
-     line along rather than leaving a gap in the row's. */
+  /* `separate` with no spacing keeps each hairline ON a cell, so a sticky
+     cell carries its own line along rather than leaving a gap in the row's.
+     Between two body rows that is one line, as before; under the header it
+     would be two — the header's bottom edge AND the first row's top edge,
+     which `collapse` used to merge — so the first row gives its edge up and
+     the header (sticky name cell included) draws the one rule. */
   .paths-table {
     min-width: 60rem;
     border-collapse: separate;
     border-spacing: 0;
   }
+  .paths-table tbody > tr:first-child > td { border-top: 0; }
 
   /* THE NAME STAYS IN VIEW. A reader scrolled across to `kept by` is asking
      about a path, and a row with no name says nothing about which. Header,

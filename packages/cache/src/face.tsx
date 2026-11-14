@@ -565,12 +565,18 @@ function BucketList(
 
 /** What a read of one bucket answered: the page, or the sentence explaining why
  *  there is none. A refusal is an ANSWER (`CacheRefused` is a typed failure),
- *  not an outage, so it travels as the value rather than as a resource error. */
+ *  not an outage, so it travels as the value rather than as a resource error.
+ *
+ *  `retentionDays` is the bucket's AS THIS PAGE WAS ASKED FOR, kept beside the
+ *  rows: a `kept by` sentence turns `until` back into a want with it, and a
+ *  retention read from the live row after a change would contradict the cell
+ *  it explains. A change to it is a new read (see `BucketPaths`). */
 type FirstPage =
   | {
       readonly ok: true;
       readonly rows: readonly PathRow[];
       readonly next: string | null;
+      readonly retentionDays: number;
     }
   | { readonly ok: false; readonly message: string };
 
@@ -869,6 +875,28 @@ function HashCell(props: { storePath: string }): JSX.Element {
   );
 }
 
+/**
+ * WHAT KEEPS ONE PATH, as a cell — made ONCE per row, the way {@link HashCell}
+ * is. The page's clock ticks every second and the "in 83d" moves with it, so
+ * the cell's two strings are bindings on one element rather than a new
+ * element per tick: the `title` a reader is hovering stays the node under
+ * the pointer.
+ */
+function KeptByCell(props: {
+  keptBy: CacheKeptBy;
+  now: number;
+  grouped: boolean;
+  retentionDays: number;
+}): JSX.Element {
+  const said = createMemo(() =>
+    keptByText(props.keptBy, props.now, {
+      grouped: props.grouped,
+      retentionDays: props.retentionDays,
+    }),
+  );
+  return <span title={said().title}>{said().cell}</span>;
+}
+
 /** The pages a reader asked for AFTER the first: what they held, and where
  *  the page after them starts. */
 interface AppendedPages {
@@ -1004,6 +1032,11 @@ function BucketPaths(props: {
     descending: descending(),
   });
 
+  /** THE BUCKET'S RETENTION, as a value that moves only when the NUMBER does:
+   *  the bucket row republishes on every push, and a read keyed on the row
+   *  would re-read the list each time somebody pushed. */
+  const retention = createMemo(() => props.retentionDays);
+
   /**
    * THE FIRST PAGE, AS A RESOURCE KEYED ON EVERY PART OF THE QUESTION.
    *
@@ -1026,9 +1059,12 @@ function BucketPaths(props: {
    */
   const [first, { refetch }] = createResource(
     // THE QUESTION IS THE KEY, and the same object is the payload: two
-    // spellings of one thing would be two things to keep in agreement.
-    () => ({ bucket: props.bucket, ...query() }),
-    async (asked): Promise<FirstPage> => {
+    // spellings of one thing would be two things to keep in agreement. The
+    // RETENTION rides beside it, not in it: `bucket.paths` does not take it,
+    // but every `kept by` on the page is a sentence about it, so a change to
+    // it is a new read and the answer keeps the number it was read under.
+    () => ({ asked: { bucket: props.bucket, ...query() }, retentionDays: retention() }),
+    async ({ asked, retentionDays }): Promise<FirstPage> => {
       setAppended(null);
       setFailure(null);
       setLoadingMore(false);
@@ -1036,12 +1072,18 @@ function BucketPaths(props: {
       supersede();
       try {
         const page = await props.call(props.client.procedures.bucket.paths(asked));
-        return { ok: true, rows: pathRows(page), next: page.next ?? null };
+        return { ok: true, rows: pathRows(page), next: page.next ?? null, retentionDays };
       } catch (err) {
         return { ok: false, message: refusalText(err) };
       }
     },
   );
+  /** The retention the rows on screen were READ under — what every `kept by`
+   *  sentence turns `until` back into a want with. */
+  const answeredRetention = createMemo(() => {
+    const answer = first();
+    return answer !== undefined && answer.ok ? answer.retentionDays : retention();
+  });
 
   /** A later page. Not a resource: it is a click, and it appends to what the
    *  resource already answered for the SAME question — which is exactly why it
@@ -1285,19 +1327,24 @@ function BucketPaths(props: {
      * `wanted` clock it is mostly derived from. Not sortable: the verdict
      * comes from the reference graph, which no column in SQL holds. The cell
      * is short enough to scan; the sentence is its `title`.
+     *
+     * A COMPONENT, so the cell reads nothing that ticks: the clock and the
+     * retention are read inside {@link KeptByCell}'s own bindings, and the
+     * element is made once per row rather than once per second.
      */
     {
       key: "keptBy",
       label: "kept by",
       width: "11rem",
-      cell: (row) => {
-        if (row.keptBy === null) return null;
-        const said = keptByText(row.keptBy, props.now, {
-          grouped: row.versions > 1,
-          retentionDays: props.retentionDays,
-        });
-        return <span title={said.title}>{said.cell}</span>;
-      },
+      cell: (row) =>
+        row.keptBy === null ? null : (
+          <KeptByCell
+            keptBy={row.keptBy}
+            now={props.now}
+            grouped={row.versions > 1}
+            retentionDays={answeredRetention()}
+          />
+        ),
     },
   ];
   /**
@@ -1338,16 +1385,20 @@ function BucketPaths(props: {
       </button>
     );
   };
+  /** CLOSE EVERY PACKAGE, forgetting what its versions answered. */
+  const forgetVersions = (): void => {
+    setOpened(new Set<string>());
+    setVersions(new Map());
+  };
   // A NEW QUESTION IS A NEW SET OF PACKAGES, and a new answer under each: the
   // filter decides which versions count, so a list read under the old one is
-  // not this one's.
+  // not this one's. A RETENTION CHANGE is the same: every version's `kept by`
+  // was read against the old number, and a package row re-read above a
+  // version that was not would say two things about one path.
   createEffect(
     on(
-      () => [props.bucket, filter()] as const,
-      () => {
-        setOpened(new Set<string>());
-        setVersions(new Map());
-      },
+      () => [props.bucket, filter(), retention()] as const,
+      forgetVersions,
       { defer: true },
     ),
   );
@@ -1390,7 +1441,14 @@ function BucketPaths(props: {
             type="button"
             class="text-action"
             disabled={first.loading}
-            onClick={() => refetch()}
+            onClick={() => {
+              // THE TABLE IS ONE READ: what the open packages' versions said
+              // before the refresh goes with the pages it was read beside.
+              // (A sort click and the grouping switch keep them — they change
+              // which rows are on the page, not what any version says.)
+              forgetVersions();
+              void refetch();
+            }}
           >
             {first.loading ? "reading…" : "refresh paths"}
           </button>
