@@ -22,7 +22,7 @@ Each part of the service is a **row**: the host, and the parts named `ci`, `cach
 | Row | Contract | Who reads it |
 | --- | --- | --- |
 | host (control, identity, admission) | 2.5 | every client |
-| `ci` (runs) | 2.6 | `odu ci run`, `ci wait`, `ci logs`, MCP, the board, kolu |
+| `ci` (runs) | 2.7 | `odu ci run`, `ci wait`, `ci logs`, MCP, the board, kolu |
 | `cache` | 4.9 | `odu cache`, `odu surface cache`, the board |
 | `auth` | 2.4 | `odu auth login`, `odu surface auth`, the board in server mode |
 | `cloudflare` | 2.4 | `odu surface cloudflare`, the board when there is a tunnel |
@@ -53,3 +53,4 @@ What each field does is on the page that uses it: [Push](/docs/cache/push/), [Ke
 | --- | --- |
 | 2.5 | Adds a run's `push` (where it pushes, and what it pushed) on the run list and on `run_read` and `run_wait`, and `pushed` on a node. |
 | 2.6 | Adds a run's `actor` (who started it: a login, or `@local`) on the run list and on `run_read` and `run_wait`. |
+| 2.7 | Adds an optional `branch` to `run_start`, so the service fetches its clone and moves it onto that branch at the commit it is handed. See [Hand the server a new commit](/docs/remote-runs/#hand-the-server-a-new-commit). |
