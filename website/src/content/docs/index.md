@@ -1,4 +1,9 @@
-# Docs
+---
+title: Docs
+description: "odu documentation: quick start, configuration, CLI, and MCP for coding agents."
+section: Start
+order: 0
+---
 
 Odu runs a `just` CI pipeline across local or remote machines. One local service lets you watch and control every run from a browser, terminal, or coding agent. The same service also serves a Nix binary cache; see [the binary cache docs](cache/).
 

@@ -9,7 +9,7 @@
  * placeholder and all.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import {
@@ -27,10 +27,14 @@ import {
   WRITE_TOKEN_PLACEHOLDER,
 } from "./surface";
 
-const DOCS = readFileSync(
-  join(import.meta.dirname, "..", "..", "..", "website", "src", "content", "cache.md"),
-  "utf-8",
+const CACHE_DOCS = join(
+  import.meta.dirname, "..", "..", "..", "website", "src", "content", "docs", "cache",
 );
+const DOCS = readdirSync(CACHE_DOCS)
+  .filter((file) => file.endsWith(".md"))
+  .sort()
+  .map((file) => readFileSync(join(CACHE_DOCS, file), "utf-8"))
+  .join("\n");
 
 const URL = "http://127.0.0.1:18440/cache/main";
 const KEY = "main-1:<public-key>";

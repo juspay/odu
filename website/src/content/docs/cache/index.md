@@ -1,4 +1,9 @@
-# Nix binary cache
+---
+title: Nix binary cache
+description: "odu binary cache: buckets, tokens, pushing, private reads, and garbage collection."
+section: Binary cache
+order: 0
+---
 
 `odu web` also serves Nix binary caches. The same loopback service that runs CI answers the standard Nix HTTP binary cache protocol, so every Nix client works unchanged.
 
