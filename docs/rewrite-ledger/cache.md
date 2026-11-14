@@ -18,6 +18,8 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | A NAR is a redirect | `cache/how-it-works` "Why a NAR is a redirect"; the `endpoint` caution → `cache/s3` |
 | Push | `cache/push`; the anchor is a map row on `/docs/cache/` |
 | Compared with `cachix push` and `attic push` | `cache/push` "Compared with `cachix push` and `attic push`" (same heading) |
+| Push from GitHub Actions | `cache/github-actions` (title verbatim); the anchor is a map row on `/docs/cache/` |
+| From `attic push` | `cache/github-actions` "From `attic push`" (same heading) |
 
 ## cache/how-it-works
 
@@ -101,3 +103,30 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | --- | --- | --- |
 | `--no-upstream` in the comparison table | `upstreamKeys: []` | `packages/cache/src/cli.ts` (no such flag), `packages/cache/src/surface.ts` (`upstreamKeys`) |
 | "`odu cache use main` prints … the credential line": `machine 127.0.0.1 password <your-write-token>` | the netrc lines `odu cache use` prints (on `cache/index` "Use it"), with a write cache token in place of `<your-read-token>`. The old block is not repeated: `use` prints `machine <host:port> password <your-read-token>` | `packages/cache/src/surface.ts` `netrcBlock` (the URL's `host`, port included, and `READ_TOKEN_PLACEHOLDER`) |
+
+## cache/github-actions
+
+- Kind: how-to. Reader: a workflow author.
+- Written from: "Push from GitHub Actions", "From `attic push`", and the step 4 bullets of `docs.md` "Use odu from your repository". The bound Actions push block is unchanged.
+- Fact home: the action's `pin:` input. What a pin is → `cache/retention`; `odu:pin` in recipes → `your-repository`.
+
+### Moved
+
+- "[Use odu from your repository] is the consumer's whole of it" → the link to `your-repository` sits in "`pin`".
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "`check.sh`" | implementation |
+| "They cannot be derived any more: a bucket whose reads are served from a store answers `GET` at an address that takes no push at all" | history ("any more") and rationale |
+| "The action holds none of its own beyond a default" | rationale |
+| "Where *odu itself* comes from is decided by odu's flake, which the pusher build accepts and does not overrule" | implementation |
+| "not from its human output" | implementation |
+| "the pin is the pusher" | duplicate (the revision you pin builds the pusher) |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "minted on the bucket's page (**Tokens → Mint**, scope *write*)" (`docs.md` step 4) | **Tokens** → **Mint token**, with scope `write` | `packages/cache/src/face.tsx` (button `Mint token`) |
