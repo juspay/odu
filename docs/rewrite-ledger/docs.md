@@ -40,6 +40,7 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | A token for a machine or an agent | `server-mode` "A token for a machine or an agent" (same heading) |
 | Two instances | `server-mode` "Two servers" |
 | Metrics | `metrics`; the anchor is a map row on `/docs/` |
+| Contract versions | `contract-versions`; the anchor is a map row on `/docs/` |
 
 ## index
 
@@ -320,3 +321,30 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | "Each row contributes its own numbers; the host renders them" | private word ("row"); now "Each part of the service contributes its own numbers to one exposition" |
 | "SQL", "the on-disk catalog", "the last venue probe" | implementation and private words; now "the database", "the history on disk", "the last probe of the machines" |
 | "that is standard" | rationale |
+
+## contract-versions
+
+- Kind: reference. Reader: anyone upgrading.
+- Written from: "Contract versions". The 462-word changelog paragraph became one table per row, one row per version. "row" is glossed once here, as the plan allows.
+
+### Moved
+
+- What each field does now → the page that uses it: `run` and `commit` (4.7) → `cache/push` "Say what built a path"; `stopped` (4.8) and the batch order → `cache/retention` "When a collection stops"; `keptBy` (4.9) → `cache/retention` "Why a path is still here"; `writesTo` (4.2) → `cache/how-it-works`.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "the deprecated" (`held`) | history |
+| "used to carry" (the last-access field) | history ("drops" stays) |
+| "what it warmed" (2.5) | private word; now "what it pushed" |
+| "identity cell (`rows`)" | implementation; now "on its identity" |
+| "the board when there is a door" | private word; now "the board in server mode" |
+| "(the host's own fragment)" | implementation |
+| "two opaque strings the cache keeps and never resolves" (4.7) | duplicate (`cache/push`) |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| 2.6 `actor`: "a login or `local`" | "a login, or `@local`" | `packages/run-history/src/schema.ts` and `packages/execution/src/coordinator/run.ts` (the reserved `"@local"`), as the old "Run the server's CI from your shell" also said |
