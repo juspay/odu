@@ -37,6 +37,8 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Operating it | `cache/operations` "Log lines"; the anchor is a map row on `/docs/cache/` |
 | Protocol | `cache/protocol`; the anchor is a map row on `/docs/cache/`. Priority 41 and the `/cache` literal → `cache/how-it-works` |
 | The cache describes itself | `cache/protocol` "The cache describes itself" (same heading); "Naming a cache is trusting it" → `cache/push`; the object rewrite → `cache/operations` |
+| The Cache view | `cache/reference` "The board's Cache view"; "Kept by" → `cache/retention`. The anchor is a map row on `/docs/cache/` |
+| Command reference | `cache/reference`; the anchor is a map row on `/docs/cache/` |
 
 ## cache/how-it-works
 
@@ -310,3 +312,35 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | "ONE multipart upload", "the cache row's 404", "WRITE token" in prose | capitals and private words |
 | "in both spellings of it" | kept as "both from odu and in the copy the store holds" |
 | "compared by the stored sha256 rather than by length" | implementation |
+
+## cache/reference
+
+- Kind: reference. Reader: anyone.
+- Written from: "Command reference", "The Cache view" (what each control does), the bucket page layout paragraph of "Keep and reclaim", and, from `docs.md` "MCP", the cache verb table and the paragraph after it.
+- Fact home: the cache's CLI ≡ API verb ≡ board mapping. Cells over 40 words became `###` entries (`odu cache push`, `bucket_create`, `bucket_delete`, `gc_plan`). The rename table is kept as "Verbs renamed since odu 1.5".
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "`#/cache`", "`#/cache/<bucket>`" | implementation (URL fragments of the board) |
+| "(again to reverse; the header says which way, and so does `aria-sort`)" | visible on screen; kept as "again to reverse" |
+| "the order and the paging are the row's too … rather than re-sorting what arrived" | implementation; kept as "**Show 20 more** continues in the same order" |
+| "`cache_bucket_paths` takes `group: \"name\"`, and opening a row reads that package's versions with `name`" | duplicate (`contract-versions` 4.5 names `group` and `name`) |
+| "because a bucket is mostly one package over and over" | rationale |
+| "since the admin CLI retired", "having been retired" | history; the old command names stay in the rename table's lead |
+| "Every one was renamed when the cache became a surface served beside the runs rather than behind the service" | history |
+| "because a sibling's commands mount under its key — and that argv face" | private words |
+| "'what am I about to lose' is a question a report answers too late, and a question nobody asked must not answer in red" | rationale |
+| "The bucket rows arrive over the wire the page already holds" | private word ("the wire"); kept as "A push updates it without a reload" |
+| "rather than once per NAR" | implementation |
+| "drawn from the bucket's own published row" | private words |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "**A name of its own**" (a settings panel) | **Domain** | `packages/cache/src/face.tsx` (panel `Domain`) |
+| "roots folded behind *what it holds*" | a pin's roots, ten until **show all** | `packages/cache/src/face.tsx` (no "what it holds" label; `show all ${n}` after `PIN_ROOTS_SHOWN = 10`) |
+| "Cache → **Create bucket**, … the **store** field" | **Cache** → **New bucket** → **Create bucket**; the store is chosen under **where its objects live** | `packages/cache/src/face.tsx` |
+| "Press **group by name**" | "Click **group by name**" | rule 23 (a control is clicked) |

@@ -88,42 +88,6 @@ A public bucket is read without a cache token. A private bucket is read with a c
 - An anonymous read of a private bucket returns 404, and a wrong, revoked, expired or other bucket's cache token returns 403. [How the cache works](/docs/cache/how-it-works/#why-a-private-bucket-answers-404) says why.
 - `odu cache use` on a private bucket, without a credential, is refused: "if it is private, sign in (`odu auth login`) or set $ODU_TOKEN to a read token". With `$ODU_TOKEN` set to a read token, it prints the block.
 
-## The Cache view
-
-`odu web`'s page has **Runs** and **Cache** in the header. `#/cache` lists the buckets — name, public or private, how many paths, how much space, when it last took a push, how many reads — and `#/cache/<bucket>` is one bucket: its substituter URL, its public key, the `nix.conf` / netrc block above ready to copy, and its paths as a table of **name · hash · size · pushed · reads · commit · run · wanted · kept by**. The facts line says who answers a read of it — **reads served from cache.example.com**, or **reads served by odu**.
-
-**The paths table is grouped by name by default**, because a bucket is mostly one package over and over: `odu-base-0.1.0` with six builds in it is one row carrying the count, their total size, the newest push and the summed reads — **counted by the row over the whole bucket**, not over the page on screen (`cache_bucket_paths` takes `group: "name"`, and opening a row reads that package's versions with `name`, and its own **show N more** pages within the group from the same cursor). Press **group by name** to turn it off for a row per path. Click **name**, **size**, **pushed** or **reads** in the header to order by it (again to reverse; the header says which way, and so does `aria-sort`) — the order and the paging are the row's too, so **Show 20 more** continues the same order rather than re-sorting what arrived. The filter box narrows what the bucket answers, and a hash is the first eight characters, with the whole store path in its `title` and on the clipboard when you click it.
-
-**The view does everything the cache row serves**, except push, which is a build box's job — and since the admin CLI retired, the view and `odu surface cache <verb>` are the two ways to administer a bucket. Anyone may read: the page asks `cache_bucket_describe` and `cache_bucket_paths`, which take no credential, because a bucket's URL, its key and its path list are what the substituter already publishes. An admin is also drawn the administration: **Create bucket** (with **Skip upstream paths** — off is `upstreamKeys: []`) on the list, and on a bucket page a **Pins** tab beside **Paths** (pin a closure; what each pin holds, roots folded behind *what it holds* with a **show all** when there are more than the row draws; delete one) and a settings column — **Tokens** (mint write or read, shown once; list; revoke), **Retention**, **A name of its own**, **Move to another store**, **Garbage collection** (**Run GC**, and a **Dry run** with its own **retention** field beside it, which the button says back: *Dry run at 0 days*) and, behind a **Danger zone** rule, **Delete this bucket** — which asks you to type the bucket's name before its button will do anything, and goes solid red once you have, returning to the list when the bucket is gone. The dry run is asked for rather than taken on arrival, and is asked again after every collection — "what am I about to lose" is a question a report answers too late, and a question nobody asked must not answer in red. The retention field is the dry run's alone: blank is the bucket's own (the placeholder says which number that is), and nothing you type there changes what the bucket keeps or what **Run GC** would evict. The controls are drawn by role and refused by the row on its own, so a hidden button is never the only check.
-
-The bucket rows arrive over the wire the page already holds, so a push from a build box moves a bucket's counters — on the list and in its facts line — without a reload; reads are folded into those counters at most once a second rather than once per NAR. The path list and the pin list are pages read when you open them, which is what **refresh paths** and **refresh pins** ask again.
-
-## Command reference
-
-The CLI keeps the four cache commands a shell is the natural place for. Everything else is the board or the API verb — `odu surface cache <verb> --input '{…}' --json`, with `rootToken` a field of the input.
-
-| What it does | CLI | API verb | On the board |
-| --- | --- | --- | --- |
-| Print the substituter and key settings, the `nixConfig` block, and the netrc lines. No account for a public bucket | `odu cache use <bucket>` | `bucket_describe` | a bucket page's block |
-| Save a token for an origin in `~/.config/odu/cache/credentials` | `odu cache login <origin>` | — | — (a machine's disk) |
-| Upload only the paths the bucket is missing; the bucket keeps what it takes. `--cache <substituter>` reads the origin and the bucket off the cache's own `nix-cache-info` instead of being told them. `--pin NAME` re-points that pin at the closure this push landed, unless a path was refused. `--run ID` and `--commit SHA` state what built the paths (see [Push](#push)) | `odu cache push <bucket> <paths…> [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA]`, or `odu cache push --cache <substituter> <paths…>` | — | — (a build box's job) |
-| Print the one odu substituter `./flake.nix`'s `nixConfig` names, and nothing else (`-o json` → `{cache, origin, bucket}`). The push action resolves an omitted `cache:` with it | `odu cache target` | — | — (reads this checkout) |
-| Create a bucket; answer its substituter URL, public key and store. `retentionDays` is how long it keeps what nobody wants (90 when absent). `upstreamKeys: []` takes everything, including upstream-signed closures (costs disk; for consumers that cannot reach cache.nixos.org). `store` keeps its objects in a declared store (default `local`) | — | `bucket_create` | Cache → **Create bucket**, **Skip upstream paths** off, the **store** field |
-| List buckets | — | `bucket_list` | Cache |
-| Give a bucket a DNS name of its own, or take it away (omit `domain`) | — | `bucket_domain` | bucket → **Domain** |
-| Change how long a bucket keeps what nobody wants | — | `bucket_retention` | bucket → **Retention** |
-| Move a bucket's objects to another declared store; answers the row, and `migration` on it is the progress. Serves from the old store until the copy is done | — | `bucket_migrate` | bucket → **Move to another store** → **Start move** |
-| Delete a bucket: its objects out of its store first, then the bucket, its paths, its pins and the tokens scoped to exactly its name. Answers the objects removed and their bytes. Refused while a domain is bound to it or a move is in flight | — | `bucket_delete` | bucket → **Delete this bucket** |
-| Mint a token, answered once (`scope`: `read`, `write` or `admin`) | — | `token_mint` | bucket → **Mint token** (write or read) |
-| List tokens with scope, expiry and last use | — | `token_list` | bucket → Tokens |
-| Revoke one token | — | `token_revoke` | bucket → Tokens → **revoke** |
-| Pin a closure against garbage collection; a name that exists is re-pointed | — | `pin_create` | bucket → **Pin closure** |
-| What each pin holds, and who made it | — | `pin_list` | bucket → Pins |
-| Let a pin go | — | `pin_delete` | bucket → Pins → **unpin** |
-| What the next collection would take, without taking it. `retentionDays` plans at a retention of your own (absent is the bucket's; `0` is what nothing references and no pin holds), and writes nothing — `gc_run` has no such field | — | `gc_plan` | bucket → **Dry run**, and the **retention** field beside it |
-| Evict objects past retention that nothing references and no pin holds — the daily pass, asked for now | — | `gc_run` | bucket → **Run GC** |
-| Show storage and hit counts | — | `stats_read` | a bucket's facts line, drawn from the bucket's own published row |
-
 ## Find your page
 
 | You want to | Read |
