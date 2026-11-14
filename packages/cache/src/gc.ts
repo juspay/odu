@@ -153,6 +153,9 @@ const NO_PINS: readonly string[] = [];
 /**
  * EVERY PATH'S HOLD, for one bucket — `objects` and `pins` are that bucket's.
  *
+ * THE PIN SIDE is {@link closureOf} per pin — the walk a pin's own closure was
+ * resolved with — and the names land in the order the pins were made.
+ *
  * THE CLOCK SIDE IS ONE WALK, latest clock first. Rows are taken in
  * descending `lastWanted`, and each one not yet reached stamps everything it
  * reaches (over the bucket's own references) with its own `until`. A row
@@ -160,9 +163,6 @@ const NO_PINS: readonly string[] = [];
  * root at least as late. So every row is stamped exactly once, by the latest
  * clock that reaches it — O(rows + references) after the sort, and a cycle or
  * a self-reference ends on the stamp.
- *
- * THE PIN SIDE is {@link closureOf} per pin — the walk a pin's own closure was
- * resolved with — and the names land in the order the pins were made.
  */
 export function holdsOf(
   bucket: Pick<BucketRow, "retentionDays">,
@@ -172,32 +172,9 @@ export function holdsOf(
   const keep = bucket.retentionDays * DAY_MS;
   const byPath = new Map(objects.map((row) => [row.storePath, row]));
 
-  const clocks = new Map<string, { until: number; via: string | null }>();
-  const latestFirst = [...objects].sort(
-    (a, b) =>
-      b.lastWanted - a.lastWanted ||
-      (a.storePath < b.storePath ? -1 : a.storePath > b.storePath ? 1 : 0),
-  );
-  for (const root of latestFirst) {
-    if (clocks.has(root.storePath)) continue;
-    const until = root.lastWanted + keep;
-    const queue = [root.storePath];
-    while (queue.length > 0) {
-      const path = queue.pop() as string;
-      const row = byPath.get(path);
-      if (row === undefined || clocks.has(path)) continue;
-      clocks.set(path, {
-        until,
-        via: row.lastWanted === root.lastWanted ? null : root.storePath,
-      });
-      for (const reference of row.references) queue.push(referenced(reference));
-    }
-  }
-
   const pinned = new Map<string, string[]>();
   for (const pin of pins) {
     for (const path of closureOf(pin.rootPaths, byPath)) {
-      if (!byPath.has(path)) continue;
       const names = pinned.get(path);
       if (names === undefined) pinned.set(path, [pin.name]);
       else names.push(pin.name);
@@ -205,13 +182,26 @@ export function holdsOf(
   }
 
   const holds = new Map<string, Hold>();
-  for (const row of objects) {
-    const clock = clocks.get(row.storePath) as { until: number; via: string | null };
-    holds.set(row.storePath, {
-      pins: pinned.get(row.storePath) ?? NO_PINS,
-      until: clock.until,
-      via: clock.via,
-    });
+  const latestFirst = [...objects].sort(
+    (a, b) =>
+      b.lastWanted - a.lastWanted ||
+      (a.storePath < b.storePath ? -1 : a.storePath > b.storePath ? 1 : 0),
+  );
+  for (const root of latestFirst) {
+    if (holds.has(root.storePath)) continue;
+    const until = root.lastWanted + keep;
+    const queue = [root.storePath];
+    while (queue.length > 0) {
+      const path = queue.pop() as string;
+      const row = byPath.get(path);
+      if (row === undefined || holds.has(path)) continue;
+      holds.set(path, {
+        pins: pinned.get(path) ?? NO_PINS,
+        until,
+        via: row.lastWanted === root.lastWanted ? null : root.storePath,
+      });
+      for (const reference of row.references) queue.push(referenced(reference));
+    }
   }
   return holds;
 }

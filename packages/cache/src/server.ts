@@ -90,7 +90,6 @@ import {
 } from "./staging";
 import {
   type CacheBucket,
-  type CacheKeptBy,
   CACHE_KEY,
   CacheRefused,
   type CacheStore,
@@ -105,9 +104,6 @@ type CacheSpec = (typeof oduCacheSurface)["spec"];
  *  none — nixpkgs', which is what a bucket almost always means. */
 const DEFAULT_UPSTREAM_KEY = "cache.nixos.org-1";
 export type CacheSurfaceDeps = ImplementSurfaceDeps<CacheSpec>;
-
-/** A row's verdict as the wire carries it, its pins a copy the answer owns. */
-const keptByOf = (keptBy: CacheKeptBy): CacheKeptBy => ({ ...keptBy, pins: [...keptBy.pins] });
 
 /** The sibling's publishing half, as the composed bundle hands it over — the
  *  collection this row owns. */
@@ -829,12 +825,10 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
                 descending: input.descending ?? null,
               }),
             (page) => ({
-              paths: page.paths.map((path) => ({ ...path, keptBy: keptByOf(path.keptBy) })),
+              paths: page.paths.map((path) => ({ ...path })),
               ...(page.groups === null
                 ? {}
-                : {
-                    groups: page.groups.map((group) => ({ ...group, keptBy: keptByOf(group.keptBy) })),
-                  }),
+                : { groups: page.groups.map((group) => ({ ...group })) }),
               ...(page.next === null ? {} : { next: page.next }),
             }),
           ),

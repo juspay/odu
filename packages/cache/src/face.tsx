@@ -801,43 +801,40 @@ export function keptByText(
 ): { cell: string; title: string } {
   const leaves = `leaves at the first collection after ${new Date(keptBy.until).toISOString().slice(0, 10)}`;
   const wanted = ago(keptBy.until - options.retentionDays * DAY_MS, now);
-  const said = ((): { cell: string; title: string } => {
-    switch (keptBy.kind) {
-      case "pin": {
-        const [first, ...rest] = keptBy.pins;
-        const one = rest.length === 0;
-        return {
-          cell: `pin ${first ?? ""}${one ? "" : ` +${rest.length}`}`,
-          title:
-            `held by ${one ? "the pin" : "the pins"} ${keptBy.pins.join(", ")}; ` +
-            `it stays until ${one ? "the pin is" : "every one of them is"} deleted or re-pointed; ` +
-            `after that: ${now > keptBy.until ? "the next collection" : ahead(keptBy.until, now)}`,
-        };
-      }
-      case "retention":
-        return {
-          cell: `retention · ${ahead(keptBy.until, now)}`,
-          title:
-            `wanted ${wanted}; the bucket keeps a path ${options.retentionDays} ` +
-            `day${options.retentionDays === 1 ? "" : "s"} after the last want; ${leaves}`,
-        };
-      case "reference":
-        return {
-          cell: `reference · ${ahead(keptBy.until, now)}`,
-          title: `${keptBy.via ?? "a path"} still needs it, and was wanted ${wanted}; ${leaves}`,
-        };
-      case "nothing":
-        return {
-          cell: "nothing · next collection",
-          title:
-            `expired ${ago(keptBy.until, now)}; nothing references it and no pin holds it; ` +
-            "the daily collection or Run GC takes it",
-        };
+  // A PACKAGE ROW says whose verdict it is showing; a path's says nothing more.
+  const said = (cell: string, title: string): { cell: string; title: string } => ({
+    cell,
+    title: options.grouped ? `${title} — the version held longest; open the row for each` : title,
+  });
+  switch (keptBy.kind) {
+    case "pin": {
+      const [first, ...rest] = keptBy.pins;
+      const one = rest.length === 0;
+      return said(
+        `pin ${first ?? ""}${one ? "" : ` +${rest.length}`}`,
+        `held by ${one ? "the pin" : "the pins"} ${keptBy.pins.join(", ")}; ` +
+          `it stays until ${one ? "the pin is" : "every one of them is"} deleted or re-pointed; ` +
+          `after that: ${now > keptBy.until ? "the next collection" : ahead(keptBy.until, now)}`,
+      );
     }
-  })();
-  return options.grouped
-    ? { cell: said.cell, title: `${said.title} — the version held longest; open the row for each` }
-    : said;
+    case "retention":
+      return said(
+        `retention · ${ahead(keptBy.until, now)}`,
+        `wanted ${wanted}; the bucket keeps a path ${options.retentionDays} ` +
+          `day${options.retentionDays === 1 ? "" : "s"} after the last want; ${leaves}`,
+      );
+    case "reference":
+      return said(
+        `reference · ${ahead(keptBy.until, now)}`,
+        `${keptBy.via ?? "a path"} still needs it, and was wanted ${wanted}; ${leaves}`,
+      );
+    case "nothing":
+      return said(
+        "nothing · next collection",
+        `expired ${ago(keptBy.until, now)}; nothing references it and no pin holds it; ` +
+          "the daily collection or Run GC takes it",
+      );
+  }
 }
 
 /**
