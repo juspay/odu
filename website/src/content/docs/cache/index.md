@@ -88,36 +88,6 @@ A public bucket is read without a cache token. A private bucket is read with a c
 - An anonymous read of a private bucket returns 404, and a wrong, revoked, expired or other bucket's cache token returns 403. [How the cache works](/docs/cache/how-it-works/#why-a-private-bucket-answers-404) says why.
 - `odu cache use` on a private bucket, without a credential, is refused: "if it is private, sign in (`odu auth login`) or set $ODU_TOKEN to a read token". With `$ODU_TOKEN` set to a read token, it prints the block.
 
-## Tokens
-
-```sh
-odu surface cache token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","scope":"write"}' --json
-odu surface cache token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","bucketGlob":"team-*","scope":"write"}' --json
-```
-
-On the board: a bucket page's **Tokens** section mints one (write or read scope), lists them, and revokes one. The token is printed once; the server keeps only its hash, in the database described under [Where the data lives](#where-the-data-lives). A token carries a bucket glob, a scope (`read`, `write` or `admin`), an expiry, and its last use. The board's forms default to **ninety days**, with **never** a visible choice; the verb takes `expiresDays` and an absent one is the explicit never — the shape a CI secret wants. An expired token's refusal names the date it expired. Revoke one without touching the rest:
-
-```sh
-odu surface cache token_list --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main"}' --json
-odu surface cache token_revoke --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","id":"<id>"}' --json
-```
-
-Administration — creating buckets, minting and revoking tokens, pinning and collecting — is the board or these verbs, never the CLI, and needs the root token, which the service reads from `$ODU_ROOT_TOKEN` and each verb takes as a field of its input:
-
-```sh
-export ODU_ROOT_TOKEN=...
-odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30}' --json
-```
-
-**On a server with a door, the rule is your role.** Once [server mode](../#server-mode) is configured, the root token is not an administrator — it exists to grant the first owner — and administration needs an `admin` or an `owner`:
-
-```sh
-odu surface auth user_whoami --json   # who this machine's token belongs to, and its role
-odu surface cache bucket_create --input '{"rootToken":"","name":"main","public":true,"retentionDays":30}' --json   # as an admin, through the token odu auth login stored
-```
-
-A `member` sees every bucket and may read a bucket's URL, key and paths, but `bucket_create`, `token_mint` and `gc_run` are refused with `not_permitted` — and the board draws them none of those controls. On a daemon with no door the Cache view asks for the root token once per visit (kept in the page, never stored), because that is what this daemon's administration checks. Pushing does not change: a write token from `cache token_mint` is what a pusher carries, whoever minted it.
-
 ## Keep and reclaim
 
 ```sh

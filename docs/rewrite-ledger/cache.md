@@ -20,6 +20,7 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Compared with `cachix push` and `attic push` | `cache/push` "Compared with `cachix push` and `attic push`" (same heading) |
 | Push from GitHub Actions | `cache/github-actions` (title verbatim); the anchor is a map row on `/docs/cache/` |
 | From `attic push` | `cache/github-actions` "From `attic push`" (same heading) |
+| Tokens | `cache/tokens`; the anchor is a map row on `/docs/cache/` |
 
 ## cache/how-it-works
 
@@ -130,3 +131,28 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Old | New | Decided by |
 | --- | --- | --- |
 | "minted on the bucket's page (**Tokens → Mint**, scope *write*)" (`docs.md` step 4) | **Tokens** → **Mint token**, with scope `write` | `packages/cache/src/face.tsx` (button `Mint token`) |
+
+## cache/tokens
+
+- Kind: how-to. Reader: a bucket's administrator.
+- Written from: "Tokens".
+
+### Moved
+
+- Where the database is → `cache/operations` (the old link to "Where the data lives").
+- Roles in server mode → one table on `server-mode`; this page keeps what a member may and may not do in the cache.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "On a server with a door", "On a daemon with no door" | private words; now "in server mode", "without server mode" |
+| "because that is what this daemon's administration checks" | rationale |
+| "the board draws them none of those controls" | private word ("draws"); now "shows a member none of those controls" |
+| "Pushing does not change" | history; now "Pushing is the same in both" |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "a bucket page's **Tokens** section mints one" | the **Tokens** panel's **Mint token** button | `packages/cache/src/face.tsx` |
