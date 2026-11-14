@@ -73,7 +73,9 @@ For every path the bucket serves, the step asks `<substituter>/<hash>.narinfo`, 
 2. It requires the NAR to return `200` with a matching `Content-Length`, following a redirect to the store as a client would.
 3. A path the cache does not serve turns the step red, and is named.
 
-It uses plain HTTP throughout, so no local narinfo cache answers for the bucket, and an object a proxy truncated is caught. The step summary is a table read from the push's own JSON: pushed, already present, skipped as upstream, and failed. Each path records `$GITHUB_SHA` as the commit that built it, and no run, because a workflow is not an odu run.
+It uses plain HTTP throughout, so no local narinfo cache answers for the bucket, and an object a proxy truncated is caught. The step summary is a table read from the push's own JSON: pushed, already present, skipped as upstream, and failed.
+
+Each path records the commit that built it, and no run, because a workflow is not an odu run. The commit is `$GITHUB_SHA`, except on a `pull_request` event, where it is the pull request's head commit.
 
 ## From `attic push`
 

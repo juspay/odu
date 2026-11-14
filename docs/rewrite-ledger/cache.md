@@ -149,6 +149,7 @@ Every heading of the old page (`.waterfall/old-anchors-cache.txt`), and where it
 | Old | New | Decided by |
 | --- | --- | --- |
 | "minted on the bucket's page (**Tokens → Mint**, scope *write*)" (`docs.md` step 4) | **Tokens** → **Mint token**, with scope `write` | `packages/cache/src/face.tsx` (button `Mint token`) |
+| "Each row it stores records `$GITHUB_SHA` as the commit that built it" (`docs.md` step 4) | `$GITHUB_SHA`, except on `pull_request`, where it is the pull request's head commit | `.github/actions/push/push.sh` (reads `.pull_request.head.sha` from the event), `src/pushAction.test.ts` ("states the pull request's HEAD sha") |
 
 ## cache/tokens
 
