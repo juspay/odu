@@ -31,40 +31,6 @@ The checkout must be clean. To run uncommitted changes, see [Run uncommitted cha
 
 The examples on these pages use `odu` as shorthand for `nix run github:juspay/odu --`.
 
-## Every run at once: the web service
-
-```sh
-odu web                 # serve in this terminal
-odu web --background    # explicitly start or reuse a daemon
-odu web --upgrade       # replace the existing service, serve here
-```
-
-The default address is **http://127.0.0.1:18440**. If a service already exists, bare `web` refuses; open its URL or replace it. Ctrl-C stops a foreground server, not its CI runs.
-
-Foreground `odu web` prints the cache row's operational `info` lines—migration, CA pass, NAR served, refusals—while keeping the host's own narration quiet; [The cache page](cache/#operating-it) lists them.
-
-
-The board lists runs across repositories. Open a run to inspect nodes, follow logs, select an earlier attempt, retry a failure, or cancel work. CLI and MCP clients use the same run IDs and state.
-
-### The board and the API do everything the CLI does
-
-The CLI keeps only what is shell-native: the `ci` commands, `odu cache push`/`login`/`use`/`target`, and `odu auth login`. **Cache, people and tunnel administration is the board or the API, not the CLI.** An admin creates a bucket from the Cache view — with the upstream switch that `"upstreamKeys": []` spells on the API — mints, lists and revokes its tokens, sets retention, pins and unpins a closure, reads what the next collection would take and runs GC without a terminal; an owner opens a people page, sees who is in, and grants or changes a role. Anything the board does, `odu surface <row> <verb> --input '{…}' --json` does from a shell.
-
-A control is **drawn** by the role the page reads off your connection and **refused** by the row on its own, so a hidden button is never the only check. An empty field is refused when you press, with the reason, rather than greying the button out.
-
-### Access through Tailscale or a proxy
-
-Configure forwarding separately; Odu can keep listening on loopback. The service answers to whatever name it is reached by, so an SSH forward, a Tailscale name, or a proxy that passes the Host header through needs no configuration. In the loopback shape, anyone who can reach the forwarded address can control CI; configure [Server mode](#server-mode) and they meet a sign-in page instead.
-
-A proxy that rewrites Host sends a browser Origin that no longer matches it. Admit that origin when starting the service — `services.odu.allowedOrigins` is the module's spelling of the same setting:
-
-```sh
-ODU_WEB_ALLOWED_ORIGINS=https://box.tailnet.ts.net \
-  nix run github:juspay/odu -- web --upgrade
-```
-
-This replaces the existing service in the foreground. The setting is read at server startup; separate multiple origins with commas. `ODU_WEB_ORIGIN` instead changes the listener's address and service identity, and `ODU_PUBLIC_ORIGIN` names the address a bucket is published under when a proxy stands in front — see [Self-host on NixOS](#self-host-on-nixos).
-
 ### Self-host on NixOS
 
 The board, the CI runs and the cache are one process, so the flake ships a NixOS module for all three. Add the flake and import it:

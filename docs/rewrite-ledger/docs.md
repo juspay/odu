@@ -27,6 +27,9 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | MCP (under Coding agents) | `agents` "Use MCP"; the cache verb rename table → `cache/reference` |
 | 6. Agents (Use odu) | `your-repository` "6. Agents", which links to `agents` |
 | Troubleshooting | `troubleshooting`; the anchor is a map row on `/docs/` |
+| Every run at once: the web service | `web-service` "Start the service", "Use the board"; the anchor is a map row on `/docs/` |
+| The board and the API do everything the CLI does | prose → `web-service` "Use the board"; the table → `cli` |
+| Access through Tailscale or a proxy | `web-service` "Access through Tailscale or a proxy" (same heading); the old anchor is a map row on `/docs/` |
 
 ## index
 
@@ -204,3 +207,29 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | "placement evidence" | private word; now "the record of where the run ran" |
 | "posting debt" | private word; now "what the run still owes GitHub" |
 | "That row moved a major" | private word ("row"); now "That part of the service moved a major version" |
+
+## web-service
+
+- Kind: how-to. Reader: whoever starts `odu web`.
+- Written from: "Every run at once: the web service", the prose of "The board and the API do everything the CLI does", and "Access through Tailscale or a proxy".
+
+### Moved
+
+- The CLI's shell-native commands → `cli` (its opening).
+- The upstream switch on **Create bucket** → `cache/index` "Create a bucket".
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "the cache row's operational `info` lines", "the host's own narration" | private words; now "the cache's operational lines" and "its other logging" |
+| "drawn by the role … refused by the row" | private words; now "shows a control only to a role that may use it, and the service checks the role again" |
+| "rather than greying the button out" | visible on screen |
+| "In the loopback shape" | private word; now "Without sign-in" (a blockquote caution) |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "`odu web`'s page has **Runs** and **Cache** in the header" (cache.md) | the board's rail | `packages/web-ui/src/app.tsx` (`<aside class="sidebar">` with `Runs`, `Cache`, `Machines`, `Tunnel`, `People`) |
+| **Maintenance** as a place in the board's navigation | **Maintenance** is a button on the run list | `packages/ci/src/face/board.tsx` |
