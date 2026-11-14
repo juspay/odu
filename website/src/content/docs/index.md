@@ -31,18 +31,6 @@ The checkout must be clean. To run uncommitted changes, see [Run uncommitted cha
 
 The examples on these pages use `odu` as shorthand for `nix run github:juspay/odu --`.
 
-#### Running the server's checkout
-
-Every `odu ci` command talks to the odu service for the machine you are on unless you name another with `--origin`. To run the **server's** clone of your repository from any shell — no checkout of your own — name the server, hand it a personal token from your profile page, and say which commit:
-
-```sh
-export ODU_TOKEN=odu_…
-nix run github:juspay/odu/<rev> -- ci run --origin https://odu.example.com \
-  --checkout /data/checkouts/<repo> --sha <sha>
-```
-
-Other verbs: `ci status`, `ci wait`, `ci attach`, `ci rerun`, `ci cancel`, `ci hosts`, `ci lease`/`ci release`, `ci protect`. Every one is also a control on the board and a verb on the API; nothing is CLI-only.
-
 ## Every run at once: the web service
 
 ```sh
@@ -361,24 +349,6 @@ ODU_TOKEN=odu_... odu mcp --origin https://odu.example.com
 
 Every `odu` command, and the MCP bridge, send the token as `Authorization: Bearer` on the connection they open. `ODU_TOKEN` wins over a stored credential, so one shell can be somebody else.
 
-### Run the server's CI from your shell
-
-The token above is all a run needs. What a shell must add is WHICH checkout: your cwd is a fact about your laptop, and the server's filesystem is not yours — so name the path on the server, and the commit you believe is there.
-
-```sh
-export ODU_TOKEN=odu_… ODU_WEB_ORIGIN=https://odu.example.com
-odu ci run --checkout /data/checkouts/kolu --sha "$(git rev-parse HEAD)" --no-post
-```
-
-`--sha` is **required** with `--checkout`: it is the strict gate, and a checkout that has moved on is refused rather than quietly run at a different commit. `--checkout` is refused unless a service is **named** (`--origin`, or `ODU_WEB_ORIGIN` as above) — the check is naming, not distance, so an explicit `http://127.0.0.1:18440` is accepted; what is refused is the default, which is the daemon for the directory you are standing in. Without the flags `odu ci run` means this checkout, as it always has.
-
-`--branch NAME` is how a caller hands the server a commit its clone has not got yet — a workflow naming the sha it has just pushed. The service fetches `origin/NAME`, refuses a dirty tree or a sha that branch does not contain (it says both shas), then puts the clone on NAME at that commit and runs it; the run's `_ci-setup` log says it moved. Without `--branch` nothing is ever moved: a clone that is not already on the commit is refused. The clone is left **on the branch**, never on a detached HEAD, because a run's pins are read from the branch its checkout is on.
-
-Your `$ODU_HOSTS` is sent when it names a **path**, `--checkout` included: a face does not decide that your fleet stops applying to your own run, and a path the server has not got is skipped by its resolution chain, which falls through to the server's own `~/.config/odu/hosts.json`. A shell with **no** `$ODU_HOSTS` sends nothing at all for a `--checkout` run — saying "mine is empty" about a world you are not in would blank the server's own variable, and on a pod whose Deployment sets the fleet that is the only inventory there is.
-
-Every run records **who started it** — the token's person, or `@local` on a loopback daemon (a login cannot contain `@`, so the reserved word can never be mistaken for a person). It appears as `started by <login>` on the run's header and in `odu ci history list --all` (`--all`, because such a run's checkout is a path on the server, not yours), and `run_read` answers it as `actor`. It is provenance, not authority: revoking a token stops the next call, not a run already launched.
-
-Revoking a token on the profile page, signing out, or a session expiring ends every connection that credential opened: nothing further is served on it, the socket itself is closed, and an open board tab meets the sign-in page.
 
 Sessions last 30 days from the sign-in; using one does not extend it. The cache protocol does not change: public buckets are read without an account — and `odu cache use` reads a public bucket's facts from `GET /cache/<bucket>`, so it works before anybody has signed in — while pushes carry a bucket token as before.
 

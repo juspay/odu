@@ -17,6 +17,8 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | 2. Tag the pipeline | `your-repository` "2. Tag the pipeline", "Shard a leaf", "What a run pushes", "Keep your default branch's build" |
 | 3. Run it | `your-repository` "3. Run it" |
 | The machines it runs on (h4) | `machines` |
+| Running the server's checkout (h4) | `remote-runs` "Start the run" |
+| Run the server's CI from your shell (under Server mode) | `remote-runs` (title kept as the page's) |
 
 ## index
 
@@ -110,3 +112,23 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 ### Changed for the word table
 
 - "venue" is not used; `ci hosts` "shows the machines and who holds them".
+
+## remote-runs
+
+- Kind: how-to. Reader: a developer with a personal token.
+- Written from: "Running the server's checkout" (Use odu §3) and "Run the server's CI from your shell" (Server mode).
+- Fact home: `--checkout`, `--sha`, `--branch`.
+
+### Moved
+
+- Revoking a token, signing out and session expiry closing connections; sessions last 30 days; the cache protocol unchanged by sign-in → `server-mode` "Sessions and revoking".
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "your cwd is a fact about your laptop, and the server's filesystem is not yours" | rationale |
+| "a face does not decide that your fleet stops applying to your own run" | rationale |
+| "saying 'mine is empty' about a world you are not in would blank the server's own variable, and on a pod whose Deployment sets the fleet that is the only inventory there is" | rationale |
+| "it is the strict gate" | private word |
+| "as it always has" | history |
