@@ -50,7 +50,7 @@ const onThisPage = headings.filter((h) => h.depth === 2);
     <SiteChrome active="docs">
       <main class="shell docs-page">
         <div class="docs-layout">
-          <nav class="docs-nav" aria-label="Documentation">
+          <nav class="docs-nav" id="docs-nav" aria-label="Documentation">
             {
               groups.map(({ section, pages }) => (
                 <div class="docs-nav-group">
@@ -80,6 +80,7 @@ const onThisPage = headings.filter((h) => h.depth === 2);
             }
           </nav>
           <div class="docs-content">
+            <a class="docs-nav-jump" href="#docs-nav">All docs pages ↓</a>
             <h1>{title}</h1>
             <slot />
           </div>
