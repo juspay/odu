@@ -104,7 +104,7 @@ Rule 7 gives a reference page its shape: one `###` entry per command, verb group
 
 **Before** (`docs.md`, under "Self-host on NixOS", one paragraph, 145 words):
 
-> **The push is its own step.** On a run's page each node that pushes grows a second segment under its bar — `pushed → <bucket> · N pushed · M present · X MiB · T`, the paths this node sent told apart from the ones the bucket already had (the `present` clause is omitted when there were none) — starting where the recipe's bar ends, amber while the closure is going up and red if it does not land. The node's own duration stays the RECIPE's. The push's `[odu] …` lines are a log of their own, not appended to the recipe's: the page offers **Recipe** and **Push** tabs, and `log_read` takes `stream: "recipe" | "push"` (absent is the recipe, so every existing caller reads what it always read) against the same log key. A push that fails makes the node R…
+> **The push is its own step.** On a run's page each node that pushes grows a second segment under its bar — `pushed → <bucket> · N pushed · M present · X MiB · T`, the paths this node sent told apart from the ones the bucket already had (the `present` clause is omitted when there were none) — starting where the recipe's bar ends, amber while the closure is going up and red if it does not land. The node's own duration stays the RECIPE's. The push's `[odu] …` lines are a log of their own, not appended to the recipe's: the page offers **Recipe** and **Push** tabs, and `log_read` takes `stream: "recipe" | "push"` (absent is the recipe, so every existing caller reads what it always read) against the same log key. A push that fails makes the node RED, because green means warmed.
 
 **After** (`daily-workflow`, about 45 words and a table):
 
@@ -125,7 +125,7 @@ A smaller case, showing rule 2. Before (`cache.md`): "Every byte used to cross t
 
 **Before** (`docs.md`, CLI reference, one table cell, 158 words):
 
-> | `cache push <bucket> <path>…`, `cache push --cache <substituter> <path>…`, `cache push <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--cache` reads the push origin and the bucket off that cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`, probed ANONYMOUSLY, and pushed to with only a credential SAVED for that origin (`odu cache login`) — a repository named that URL, so the origin-agnostic `--token-file` and `$ODU_CACHE_TOKEN` stay out of scope for it, and a caller that wants its token sent names the target instead: `odu cache target` prints that URL, and `push --cache <that>` is a named one; a private bucket must be named with `--cach…
+> | `cache push <bucket> <path>…`, `cache push --cache <substituter> <path>…`, `cache push <path>…` | Upload only what the bucket is missing; talks to the cache directly. `--cache` reads the push origin and the bucket off that cache's own `nix-cache-info`; with NEITHER a `--cache` nor a bucket, the substituter is read from `./flake.nix`'s `nixConfig`, probed ANONYMOUSLY, and pushed to with only a credential SAVED for that origin (`odu cache login`) — a repository named that URL, so the origin-agnostic `--token-file` and `$ODU_CACHE_TOKEN` stay out of scope for it, and a caller that wants its token sent names the target instead: `odu cache target` prints that URL, and `push --cache <that>` is a named one; a private bucket must be named with `--cache` (two odu caches there is a refusal). `--pin NAME` re-points that pin at the closure it landed. `--run ID` and `--commit SHA` state what built the paths, kept on every row this push stores and drawn on the bucket page; a push that states neither leaves what a run already stated alone | — (a build box's job) |
 
 **After**: one row in the index table, and an entry.
 
@@ -153,7 +153,7 @@ A smaller case, showing rule 2. Before (`cache.md`): "Every byte used to cross t
 > | Flag | What it does |
 > | --- | --- |
 > | `--pin NAME` | Re-points that pin at the closure this push landed. |
-> | `--run ID`, `--commit SHA` | State what built the paths. The bucket's page shows both. A push that states neither leaves what a run stated. |
+> | `--run ID`, `--commit SHA` | State what built the paths. The bucket keeps both on every path this push stores, and its page shows them. A push that states neither leaves what a run stated. |
 
 Every fact and every code span of the old cell is still there, and the reason the token is withheld has its home in `cache/push`.
 
