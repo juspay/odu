@@ -22,6 +22,10 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | Daily workflow | `daily-workflow`; the anchor is a map row on `/docs/` |
 | History and GitHub | `daily-workflow` "History", "GitHub statuses and required checks" |
 | Working-tree snapshots (under Troubleshooting) | `daily-workflow` "Run uncommitted changes", "What a snapshot leaves out" |
+| Coding agents (and the `coding-agents-mcp` span) | `agents`; both anchors are map rows on `/docs/` |
+| CLI (under Coding agents) | `agents` "Use the CLI" |
+| MCP (under Coding agents) | `agents` "Use MCP"; the cache verb rename table → `cache/reference` |
+| 6. Agents (Use odu) | `your-repository` "6. Agents", which links to `agents` |
 
 ## index
 
@@ -158,3 +162,27 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | `ODU_SNAPSHOT_TRANSPORT=always`, `ODU_LANE_CONNECT_TIMEOUT_MS` | implementation (the old page: "a test seam, not a user mode") |
 | "over the real lane stdio surface", "deterministic Git commit" | implementation |
 | "posting debt" | private word; now "statuses odu still owes GitHub" (the `ci status` usage text says "what it still owes GitHub") |
+
+## agents
+
+- Kind: how-to. Reader: someone wiring an agent.
+- Written from: "Coding agents", "CLI", "MCP" (without the cache verb table and "Other shared verbs").
+
+### Moved
+
+- "Other shared verbs" (`run_list` and the rest) → `cli` "API verbs without a command".
+- The cache verb rename table, `no_root_token`, and `cache_gc_plan` being read-only → `cache/reference`.
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "No separate `odu web` step is needed" | duplicate (the opening says both interfaces start the service) |
+| "unified" (skill) | implementation |
+| "Tool" as the table's column name, "tools" | word table: "API verb" (MCP tools kept once, where MCP is the subject) |
+| "posting debt" | private word; now "statuses odu still owes GitHub" |
+| "A sibling row's verbs mount under its key" | private word ("row"); now "typed after their part's name" |
+
+### Added
+
+- A link from "Use MCP" to `server-mode` for an agent's personal token, which "A token for a machine or an agent" already covers.

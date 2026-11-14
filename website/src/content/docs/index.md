@@ -343,61 +343,6 @@ Sessions last 30 days from the sign-in; using one does not extend it. The cache 
 
 One App per odu instance: the callback URL is a single address, and the client secret is the App's. Two servers need two Apps — each owned by the same personal account is fine, and transferring an App to an organisation later keeps its Client ID, so the secret and `ODU_GITHUB_CLIENT_ID` survive the move.
 
-<span id="coding-agents-mcp"></span>
-
-## Coding agents
-
-Agents can use **CLI or MCP**. Both start the local web service in the background if needed, reuse it otherwise, and act on the same runs you see at **http://127.0.0.1:18440**. No separate `odu web` step is needed. Disconnecting an agent stops its observation, not CI.
-
-Use the [unified Odu skill](https://github.com/juspay/odu/tree/master/skills/odu) for either interface. The workflow is the same:
-
-| Step | Tool | Keep or check |
-| --- | --- | --- |
-| Start | `run_start` | Absolute checkout, expected SHA, unique request ID; retain run ID and cursor |
-| Observe | `run_wait` | Send `after` from the previous cursor; use a bounded deadline |
-| Diagnose | `log_read` | Echo the failure's log key; page with `nextOffset`; `stream: "push"` for a push that failed |
-| Retry unchanged inputs | `run_retry` | Track the returned effective run and cursor |
-| Test a source fix | `run_start` | New commit, new request ID |
-| Finish | `run_read` / `run_wait` | SHA, scope, verdict, posting debt |
-
-Reuse the same mutation request ID and input after a lost reply. A conflict means the input changed; an unresolved request requires inspection before any fresh mutation.
-
-### CLI
-
-An agent with shell access can use `odu surface` directly; no MCP configuration is required. Run it through Nix:
-
-```sh
-nix run --accept-flake-config github:juspay/odu -- surface --help
-nix run --accept-flake-config github:juspay/odu -- surface run_start --input '{"checkout":"/absolute/repo","expectedSha":"COMMIT_SHA","requestId":"ci-1"}' --json
-```
-
-Substitute the checkout and commit, then retain the returned run ID and cursor. Using the `odu` shorthand:
-
-```sh
-odu surface run_wait --input '{"runId":"RUN_ID","after":"CURSOR","deadlineMs":30000}' --json
-odu surface log_read --input '{"key":"LOG_KEY","offset":0}' --json
-odu surface run_retry --input '{"runId":"RUN_ID","selector":"test","requestId":"retry-1"}' --json
-```
-
-Replace placeholders with the previous responses. `odu ci run`, `ci wait`, `ci logs`, and `ci rerun` are convenience commands over the same service; use `surface` for the shared structured verb interface. A sibling row's verbs mount under its key: `odu surface cache …`, `odu surface auth …`, `odu surface cloudflare …`.
-
-### MCP
-
-For agents with an MCP client, odu ships the unified skill and its MCP server together as an [Agent Plugin](https://agent-plugins.org/) at the [repository root](https://github.com/juspay/odu). With [agent-distro](https://agent-distro.nixos.asia/#profiles), add it to your profile's `plugins` as `"github:juspay/odu"`. Or configure stdio manually:
-
-```json
-{
-  "mcpServers": {
-    "odu": {
-      "command": "nix",
-      "args": ["run", "--accept-flake-config", "github:juspay/odu", "--", "mcp"]
-    }
-  }
-}
-```
-
-The stdio bridge bootstraps the service and exposes the same verbs as tools (`run_start`, `run_wait`, `log_read`, and so on). HTTP MCP clients can instead connect to **http://127.0.0.1:18440/mcp** once the service is running; an HTTP connection itself cannot start it.
-
 **The cache's verbs are a row of their own**, and their names carry its word — `cache_` — then the thing and the act. Every one was renamed when the cache became a surface served beside the runs rather than behind the service, so a script written against odu 1.5 needs this table:
 
 | was | now | takes `rootToken` |
