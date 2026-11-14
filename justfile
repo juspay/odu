@@ -103,6 +103,17 @@ web *args: (run "web" args)
 website *args:
     {{ nix_shell }} sh -c 'cd website && npm install && npm run dev -- {{ args }}'
 
+# Type-check the site and lint every docs page against the writing standard
+# (dev/skills/docs-writing/SKILL.md).
+website-check:
+    {{ nix_shell }} sh -c 'cd website && npm ci && npm run check && npm test'
+
+# Build the site, then fail on any internal link or #anchor that does not
+# resolve. lychee comes from the pinned nixpkgs, not the dev shell.
+website-linkcheck:
+    {{ nix_shell }} sh -c 'cd website && npm ci && npm run build'
+    nix shell --impure --expr '(import ./nix/nixpkgs.nix { }).lychee' -c website/linkcheck.sh website/dist
+
 # Format nix files
 fmt:
     {{ nix_shell }} nixpkgs-fmt *.nix nix/*.nix nix/packages/*.nix
