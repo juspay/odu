@@ -104,7 +104,7 @@
   font: .84em var(--mono);
 }
 .docs-content :not(pre) > code {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 .docs-content pre {
   margin: 1.1rem 0 1.5rem;
