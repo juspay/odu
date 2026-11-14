@@ -32,6 +32,13 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | Access through Tailscale or a proxy | `web-service` "Access through Tailscale or a proxy" (same heading); the old anchor is a map row on `/docs/` |
 | Self-host on NixOS | `self-host`; the anchor is a map row on `/docs/`. Its run-push paragraphs → `your-repository`, "The push is its own step" → `daily-workflow`, "Disk does not grow forever" → `cache/retention` |
 | Upgrading from a store-backed cache | `self-host` "Upgrade from a store-backed cache"; the `x-odu-upload` sentence → `cache/protocol` "Uploads" |
+| Server mode | `server-mode` (title verbatim); the anchor is a map row on `/docs/` |
+| Create the GitHub App | `server-mode` "Create the GitHub App" |
+| Install it | `server-mode` "Install the App" |
+| Configure odu | `server-mode` "Configure odu" |
+| First sign-in and the first owner | `server-mode` "Sign in and make the first owner" |
+| A token for a machine or an agent | `server-mode` "A token for a machine or an agent" (same heading) |
+| Two instances | `server-mode` "Two servers" |
 
 ## index
 
@@ -265,3 +272,37 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | --- | --- | --- |
 | "the board and `/mcp`, which have no authentication in this release, stay off the public internet" | "Without server mode, the board and `/mcp` have no authentication, so the module keeps them off the public internet. With `services.odu.github` set, nginx serves them too, behind GitHub sign-in." | `nix/module.nix` (`serverMode = cfg.github.clientId != null`; the vhost's `locations` serve `/` and `/rpc/ws` in server mode, and only `/cache/`, `/_odu/v1/` and `/metrics` otherwise) |
 | "a `--no-upstream` bucket" | a bucket created with `upstreamKeys: []` | `packages/cache/src/cli.ts` (no such flag; `push` parses only `token-file`, `concurrency`, `part-size`, `pin`, `run`, `commit`, `cache`, `origin`, `output`) and `packages/cache/src/face.tsx` (**Skip upstream paths** sends `upstreamKeys: []` when switched off) |
+
+## server-mode
+
+- Kind: how-to. Reader: an operator.
+- Written from: "Server mode" without "Run the server's CI from your shell", plus the revoking and session paragraphs that ended that subsection.
+- Fact home: roles (member, admin, owner), one table.
+
+### Moved
+
+- `ODU_GITHUB_*` stays here; every other environment variable → `self-host` "Without the module".
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "later releases use its installation token to post checks and sync membership" | roadmap |
+| "(no webhooks yet)" | roadmap |
+| "odu does not store refresh tokens in this release" | roadmap ("in this release"); the present fact stays |
+| "rather than holding a token that dies in eight hours" | rationale |
+| "keep the downloaded `.pem` somewhere safe for later releases" | roadmap |
+| "a daemon that silently stopped asking for sign-in would be a door that looks shut and is not" | rationale; now "so it never runs without sign-in when you meant it to have it" |
+| "a loopback `odu web` behaves exactly as it did before" | history; now "lets every caller do everything" |
+| "not a redirect and not an empty board" | visible on screen |
+| "door", "principal" | private words |
+| "the root token is spent" | duplicate (the next sentence says a second grant is refused) |
+
+### Changed because the code disagreed, or by rule 26
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "**The pod** (the project's own deployment)" with `ODU_PUBLIC_ORIGIN=https://odu-k3s.rooster-blues.ts.net` and `ODU_GITHUB_ALLOW=org:juspay` | "In a container", with `https://odu.example.com` and `org:example` | rule 26 (one cast for examples), as the plan directs for this block |
+| "Your name at the foot of the rail opens the profile page" | "Click your login in the rail" | `packages/auth/src/face.tsx` (the account card's login button opens the profile) |
+| "Create one" | **Create token** | `packages/auth/src/face.tsx` |
+| "Half a configuration is refused at startup" | kept; the service's sentence is "sign-in is half configured — … Set all three, or none" | `packages/auth/src/github.ts` |
