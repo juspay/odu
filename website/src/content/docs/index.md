@@ -31,84 +31,6 @@ The checkout must be clean. To run uncommitted changes, see [Run uncommitted cha
 
 The examples on these pages use `odu` as shorthand for `nix run github:juspay/odu --`.
 
-### Self-host on NixOS
-
-The board, the CI runs and the cache are one process, so the flake ships a NixOS module for all three. Add the flake and import it:
-
-```nix
-{
-  inputs.odu.url = "github:juspay/odu";
-}
-```
-
-```nix
-{ config, inputs, ... }:
-{
-  imports = [ inputs.odu.nixosModules.default ];
-
-  # `cache.enableACME` is on by default, and Let's Encrypt wants both of these.
-  # Accepting the terms is your act, not the module's.
-  security.acme = {
-    acceptTerms = true;
-    defaults.email = "you@example.com";
-  };
-
-  # Any secret file works. agenix is the example.
-  age.secrets.odu-root-token = {
-    file = ./secrets/odu-root-token.age;
-    owner = "odu";
-    mode = "0400";
-  };
-
-  services.odu = {
-    enable = true;
-    cache.domain = "cache.example.com";
-    rootTokenFile = config.age.secrets.odu-root-token.path;
-    openFirewall = true;
-  };
-}
-```
-
-What that does, in five sentences. The daemon binds loopback and runs as the `odu` system user, with its state in `/var/lib/odu` at mode 0700 — the cache's signing keys are in there. The root token arrives as a systemd credential and is exported into the unit's environment, never written into the Nix store. nginx serves one virtual host that proxies `/cache/`, `/_odu/v1/` and `/metrics` and answers 404 to everything else, so **the board and `/mcp`, which have no authentication in this release, stay off the public internet**. `cache.domain` also sets the origin a bucket publishes, so the URL `odu cache use` prints is the one your clients can reach.
-
-Reach the board over a tailnet or an SSH forward to `127.0.0.1:18440`, then create the bucket and mint a token:
-
-```sh
-export ODU_ROOT_TOKEN=...
-odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","name":"main","public":true,"retentionDays":30}' --json
-odu surface cache token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","scope":"write"}' --json
-```
-
-On a client, trust the bucket — the key `bucket_create` printed:
-
-```nix
-{
-  nix.settings = {
-    extra-substituters = [ "https://cache.example.com/cache/main" ];
-    extra-trusted-public-keys = [ "main-1:<public-key>" ];
-  };
-}
-```
-
-A bucket can keep its objects **on S3 instead of the server's disk** — Cloudflare R2, AWS, Garage or versitygw. Declare the store and name it at creation:
-
-```nix
-services.odu.cache.stores.r2 = {
-  endpoint = "https://<account>.r2.cloudflarestorage.com";
-  bucket = "odu-cache";
-  region = "auto";
-  credentialsFile = config.age.secrets.odu-r2.path; # AWS_ACCESS_KEY_ID=… / AWS_SECRET_ACCESS_KEY=…
-};
-```
-
-then add `"store":"r2"` to the `bucket_create` input. The credentials are a systemd credential, like the root token; [Keep a bucket on S3](cache/#keep-a-bucket-on-s3) has the rest.
-
-A bucket can also have **a name of its own** — `https://cache.kolu.dev` — served at the root of that name through a Cloudflare Tunnel, with no port opened. That needs a Cloudflare API token (`services.odu.cloudflare.apiTokenFile`) and the name set on the bucket (`cache.bucketDomains` gives it a vhost and a certificate on a module host); [A domain for a bucket](cache/#a-domain-for-a-bucket) has the whole walk. The same tunnel carries `ODU_PUBLIC_ORIGIN`'s host when the token can edit its zone, which is what lets a Funnel retire — and the App's callback then moves with `publicOrigin`.
-
-`ODU_PUBLIC_ORIGIN` is the setting behind that URL: it names the address a bucket is published under when a proxy stands in front, and defaults to what `cache.domain` and `cache.enableACME` imply. The module requires a loopback `listen`, because the daemon has to sit behind a proxy: without `services.odu.github` nothing authenticates a request at all, and with it the session cookie wants TLS. Those are the two shapes — the second is [Server mode](#server-mode).
-
-**Without the module.** A container or any non-systemd host runs the same one process from the environment the module sets, and needs nothing else. `ODU_STATE_DIR` holds everything — the run catalog, the cache, and the daemon's own gate and socket, which is what a read-only `$HOME` otherwise breaks. `ODU_WEB_ORIGIN` is the address it binds, `ODU_PUBLIC_ORIGIN` the one a bucket's URL is published at, and `ODU_ROOT_TOKEN` the administration secret; `ODU_OBJECT_STORES` names a JSON file of declared S3 stores, the shape the module writes. The cache stores the compressed NARs under `<state>/cache/objects`; disk is those objects plus staging for the largest in-flight NAR, memory is constant per NAR, and a `--no-upstream` bucket also stores the upstream closures it is pushed.
-
 **Disk does not grow forever.** A bucket keeps what nobody wants for 90 days by default (`retentionDays` at `cache bucket_create`, and the bucket page's **Retention** afterwards), counted from the last time somebody *wanted* a path — a push of it, or the `missing` query a push asks first. A read never renews that clock, because reads are leaving odu and a clock a read wound would make the busiest paths the first to look idle. The row collects every bucket once a day on its own, and nothing is evicted while retention holds, something retained references it, or a pin holds it; **Dry run** on a bucket page says what the next collection would take, and **dry run retention days** beside it asks that question at a retention of your own (`retentionDays` on `cache_gc_plan`; blank is the bucket's own, `0` is what nothing references and no pin holds). The plan writes nothing, and `cache_gc_run` takes no such field, so an answer the dry run gave can never become a collection by another name. A pin holds a closure by name and a push re-points it (`pin: true` in the push action, `--pin NAME` from a shell), which is how a repository keeps its default branch's closure. [Keep and reclaim](cache/#keep-and-reclaim) has the rest.
 
 ### Metrics
@@ -142,16 +64,6 @@ Each row contributes its own numbers; the host renders them.
 
 **Counters are process-local** and reset when the daemon restarts; that is standard, and `rate()` handles it. The numbers that must survive a restart are gauges read from storage. The catalog walk is bounded (the 200 newest runs, repeated at most every ten seconds), so a scrape costs the same on a catalog of ten thousand runs as on one of two hundred — and what it *publishes* is not that window: each run and each journal entry is folded **once** into totals that only grow, because a counter read off a sliding window falls every time a run leaves it, and a scraper reads a fall as a reset. The run totals therefore start at whatever the window held when the daemon started.
 
-
-### Upgrading from a store-backed cache
-
-1. **Module deployment:** leave `ODU_CACHE_STORE` unset — the old objects are the host's `/nix/store`. **Container:** point `ODU_CACHE_STORE` at the old chroot store.
-2. Boot starts serving at once; the migration and the CA pass are row-scoped background tasks. Watch `cache.migration.*` and `cache.self_ca.*`.
-3. Wait for `cache.migration.complete`.
-4. **Module:** delete the abandoned roots under `<state>/cache/gcroots`, then run `nix-collect-garbage`. **Container:** delete the old store directory. Never delete `/nix/store` itself.
-5. Rows the old store lacks stay objectless and answer 404 until re-pushed: each is named by a `cache.migration.object_failed` line, and `cache.migration.incomplete` carries the counts.
-
-A chunked upload that sends `x-odu-upload` owns its parts, so concurrent pushers of one path never mix them; one that does not keeps the shared part names.
 
 ### Contract versions
 

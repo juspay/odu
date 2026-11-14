@@ -30,6 +30,8 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | Every run at once: the web service | `web-service` "Start the service", "Use the board"; the anchor is a map row on `/docs/` |
 | The board and the API do everything the CLI does | prose → `web-service` "Use the board"; the table → `cli` |
 | Access through Tailscale or a proxy | `web-service` "Access through Tailscale or a proxy" (same heading); the old anchor is a map row on `/docs/` |
+| Self-host on NixOS | `self-host`; the anchor is a map row on `/docs/`. Its run-push paragraphs → `your-repository`, "The push is its own step" → `daily-workflow`, "Disk does not grow forever" → `cache/retention` |
+| Upgrading from a store-backed cache | `self-host` "Upgrade from a store-backed cache"; the `x-odu-upload` sentence → `cache/protocol` "Uploads" |
 
 ## index
 
@@ -233,3 +235,33 @@ Every heading of the old page (`.waterfall/old-anchors-docs.txt`), and where its
 | --- | --- | --- |
 | "`odu web`'s page has **Runs** and **Cache** in the header" (cache.md) | the board's rail | `packages/web-ui/src/app.tsx` (`<aside class="sidebar">` with `Runs`, `Cache`, `Machines`, `Tunnel`, `People`) |
 | **Maintenance** as a place in the board's navigation | **Maintenance** is a button on the run list | `packages/ci/src/face/board.tsx` |
+
+## self-host
+
+- Kind: how-to. Reader: an operator.
+- Written from: what is left of "Self-host on NixOS" (the module, what it sets up, the first bucket, the S3 and domain pointers, `ODU_PUBLIC_ORIGIN`, "Without the module"), and "Upgrading from a store-backed cache".
+- Fact home: environment variables for a host without the module, one table. `ODU_GITHUB_*` stays on `server-mode`.
+
+### Moved
+
+- The S3 store and the bucket domain: two sentences and a link each stay; the rest is on `cache/s3` and `cache/domain`.
+- The tunnel carrying `ODU_PUBLIC_ORIGIN`'s host, and the App's callback moving with `publicOrigin` → `cache/domain` "The server's own address".
+- Disk use ("disk is those objects plus staging…", the `upstreamKeys: []` disk cost) → `cache/operations` "How much disk and memory".
+- `<state>/cache/objects` → `cache/operations` "Where the files are".
+- What the migration does in the background → `cache/operations` "The one-time migration".
+
+### Cut
+
+| Fact | Tag |
+| --- | --- |
+| "What that does, in five sentences" | implementation (a list now) |
+| "Those are the two shapes" | duplicate |
+| "row-scoped background tasks" | implementation |
+| Step 5 of the upgrade as a step | duplicate; it is the paragraph after the steps, since it is not something the reader does |
+
+### Changed because the code disagreed
+
+| Old | New | Decided by |
+| --- | --- | --- |
+| "the board and `/mcp`, which have no authentication in this release, stay off the public internet" | "Without server mode, the board and `/mcp` have no authentication, so the module keeps them off the public internet. With `services.odu.github` set, nginx serves them too, behind GitHub sign-in." | `nix/module.nix` (`serverMode = cfg.github.clientId != null`; the vhost's `locations` serve `/` and `/rpc/ws` in server mode, and only `/cache/`, `/_odu/v1/` and `/metrics` otherwise) |
+| "a `--no-upstream` bucket" | a bucket created with `upstreamKeys: []` | `packages/cache/src/cli.ts` (no such flag; `push` parses only `token-file`, `concurrency`, `part-size`, `pin`, `run`, `commit`, `cache`, `origin`, `output`) and `packages/cache/src/face.tsx` (**Skip upstream paths** sends `upstreamKeys: []` when switched off) |
