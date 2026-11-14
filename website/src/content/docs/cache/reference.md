@@ -23,8 +23,8 @@ Commands are written with the [`odu` shorthand](/docs/#quick-start).
 Uploads only the paths the bucket is missing, and the bucket keeps what it takes. It talks to the cache directly, so it runs on the machine that holds the paths.
 
 ```
-odu cache push <bucket> <paths…> [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA]
-odu cache push --cache <substituter> <paths…>
+odu cache push <bucket> <path>… [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA]
+odu cache push --cache <substituter> <path>…
 odu cache push <path>…
 ```
 
