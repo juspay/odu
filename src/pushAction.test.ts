@@ -14,7 +14,7 @@
  * may name `inputs.` and nothing else. `inputs` is the one context an
  * action's own `runs:` is evaluated with; everything a CALLER writes —
  * `github`, `secrets`, `matrix` — belongs in a workflow, and in the docs
- * (`website/src/content/cache.md`) where it can be read.
+ * (`website/src/content/docs/cache/github-actions.md`) where it can be read.
  *
  * **Two: an omitted `cache:` pushes to a NAMED target, with the token** (#163).
  * The documented spelling used to resolve the substituter inside

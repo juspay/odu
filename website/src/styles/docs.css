@@ -13,12 +13,22 @@
   position: sticky;
   top: 1.25rem;
   display: grid;
-  gap: .55rem;
-  padding: .25rem 0;
+  align-content: start;
+  gap: 1.1rem;
+  max-height: calc(100vh - 2.5rem);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  padding: .25rem .5rem .25rem 0;
   font: .75rem/1.4 var(--mono);
 }
+.docs-nav-group {
+  display: grid;
+  gap: .4rem;
+}
+.docs-nav-jump { display: none; }
 .docs-nav-label {
-  margin-bottom: .35rem;
+  margin-bottom: .1rem;
   color: var(--green);
   font-size: .65rem;
   letter-spacing: .08em;
@@ -29,6 +39,19 @@
   text-decoration: none;
 }
 .docs-nav a:hover { color: var(--ink); }
+.docs-nav a[aria-current="page"] {
+  color: var(--ink);
+  font-weight: 600;
+}
+.docs-nav-headings {
+  display: grid;
+  gap: .4rem;
+  margin: 0 0 .2rem;
+  padding: 0 0 0 .7rem;
+  border-left: 1px solid var(--line-strong);
+  list-style: none;
+  font-size: .7rem;
+}
 
 .docs-content { min-width: 0; }
 .docs-content > h1 {
@@ -80,6 +103,9 @@
   background: var(--panel-2);
   font: .84em var(--mono);
 }
+.docs-content :not(pre) > code {
+  overflow-wrap: break-word;
+}
 .docs-content pre {
   margin: 1.1rem 0 1.5rem;
   overflow-x: auto;
@@ -123,16 +149,40 @@
   margin: .4rem 0;
   color: var(--muted);
 }
+.docs-content kbd {
+  padding: .08rem .35rem;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--ink);
+  background: var(--panel-2);
+  font: .8em var(--mono);
+}
 
 @media (max-width: 800px) {
-  .docs-layout { grid-template-columns: 1fr; }
-  .docs-nav {
-    position: static;
-    grid-template-columns: repeat(2, 1fr);
-    margin-bottom: 1.5rem;
-    padding-bottom: 1rem;
-    border-bottom: 1px solid var(--line);
+  .docs-layout {
+    grid-template-columns: 1fr;
+    gap: 0;
   }
-  .docs-nav-label { grid-column: 1 / -1; }
+  /* The page first, the list of pages after it, reached from a link above
+     the title. */
+  .docs-content { order: 1; }
+  .docs-nav {
+    order: 2;
+    position: static;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    max-height: none;
+    overflow: visible;
+    margin-top: 2.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+  }
+  .docs-nav-jump {
+    display: inline-block;
+    margin-bottom: 1rem;
+    font: .75rem var(--mono);
+    text-decoration: none;
+  }
   .docs-content table { display: block; overflow-x: auto; }
 }

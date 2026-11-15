@@ -295,7 +295,7 @@ What each step delivers:
   one PR at a time through 2.4–2.9, and `odu surface <row> <verb>` is the full
   API by derivation.[^retire]
 
-- **2.11 ✅ One page for repos using odu** (#168). `website/src/content/docs.md`
+- **2.11 ✅ One page for repos using odu** (#168). `website/src/content/docs/your-repository.md`
   "Use odu from your repository": declare the cache once in `flake.nix`,
   tag the pipeline, run it, the one workflow you may still need, require it,
   agents, what you see, what odu promises, what to ask your operator for.

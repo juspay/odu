@@ -172,8 +172,8 @@ interface Binding {
   /** The `keyId`s that trigger this. */
   keys: readonly string[];
   /** What the status bar calls it, `null` for a binding already covered by a
-   *  sibling's slot. The status bar reads this list. `docs.md`'s key table is
-   *  hand-maintained prose and can drift — nothing generates or checks it. */
+   *  sibling's slot. The status bar reads this list. The docs carry no key
+   *  table, so this list is the only record of the bindings. */
   hint: string | null;
   act: (v: LiveView, id: string) => void;
 }

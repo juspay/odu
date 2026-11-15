@@ -9,11 +9,16 @@ nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix
 
 [parallel]
 [metadata("ci")]
-default: typecheck unit fmt nix agent-flake-nix e2e-cli e2e-web bun-nix-fresh nixos-module
+default: typecheck unit fmt nix agent-flake-nix e2e-cli e2e-web bun-nix-fresh nixos-module website
 
 install:
     {{ nix_shell }} bun install --frozen-lockfile
     {{ nix_shell }} sh scripts/hydrate-pins.sh
+
+# The site, by the same two recipes a contributor runs: `astro check` and the
+# docs lint, then the build and the link check. No OS attribute, as `nixos-module`.
+website:
+    just website-check website-linkcheck
 
 typecheck: install
     {{ nix_shell }} bun run typecheck

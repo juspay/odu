@@ -99,6 +99,6 @@ refuses a grant that would leave the daemon with no owner.
 
 ## Docs
 
-- The door from the operator's side: [`website/src/content/docs.md`](../../website/src/content/docs.md) ("Server mode")
+- The door from the operator's side: [`website/src/content/docs/server-mode.md`](../../website/src/content/docs/server-mode.md) ("Server mode")
 - The vocabulary it shares: [`@odu/cordis`](../cordis/src/principal.ts)
 - The other rows: [`packages/cache/README.md`](../cache/README.md), [`packages/ci/README.md`](../ci/README.md)
