@@ -12,7 +12,13 @@ export const SECTIONS = [
 ] as const;
 
 const docs = defineCollection({
-  loader: glob({ pattern: "**/*.md", base: "./src/content/docs" }),
+  // A page's id is its path under the base without `.md`: `index`,
+  // `cache/index`, `cache/push`. `slugOf` turns it into the URL.
+  loader: glob({
+    pattern: "**/*.md",
+    base: "./src/content/docs",
+    generateId: ({ entry }) => entry.replace(/\.md$/, ""),
+  }),
   schema: z.object({
     title: z.string(),
     description: z.string(),

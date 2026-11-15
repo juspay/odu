@@ -7,9 +7,10 @@
 // There is no exemption list and no per-page override: every page is held to
 // every limit.
 //
-// Pages are parsed with satteri's `markdownToMdast`, resolved through
-// astro → @astrojs/markdown-satteri → satteri, so a table, a list item or a
-// raw HTML tag is exactly what the build sees.
+// Pages are read with the parsers the build uses, resolved through astro:
+// its frontmatter parser (@astrojs/internal-helpers), and satteri's
+// `markdownToMdast` (through @astrojs/markdown-satteri), so a table, a list
+// item or a raw HTML tag is exactly what the build sees.
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -21,9 +22,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const fromAstro = createRequire(
   createRequire(import.meta.url).resolve("astro/package.json"),
 );
-const fromSatteri = createRequire(fromAstro.resolve("@astrojs/markdown-satteri"));
-const { markdownToMdast } = await import(
-  pathToFileURL(fromSatteri.resolve("satteri")).href
+const load = async (require, name) =>
+  import(pathToFileURL(require.resolve(name)).href);
+const { parseFrontmatter } = await load(
+  fromAstro,
+  "@astrojs/internal-helpers/frontmatter",
+);
+const { markdownToMdast } = await load(
+  createRequire(fromAstro.resolve("@astrojs/markdown-satteri")),
+  "satteri",
 );
 
 const LIMITS = {
@@ -47,33 +54,6 @@ function pagesUnder(dir) {
     .filter((e) => e.isFile() && e.name.endsWith(".md"))
     .map((e) => relative(dir, join(e.parentPath, e.name)))
     .sort();
-}
-
-// The frontmatter is four flat `key: value` lines (the collection's schema
-// checks their types at build), so a YAML library is not needed to read them.
-function parseFlatYaml(text) {
-  const data = {};
-  for (const line of text.split(/\r?\n/)) {
-    const match = /^([A-Za-z][\w-]*):\s*(.*)$/.exec(line);
-    if (!match) continue;
-    let value = match[2].trim();
-    if (/^".*"$/.test(value)) value = JSON.parse(value);
-    else if (/^'.*'$/.test(value)) value = value.slice(1, -1).replace(/''/g, "'");
-    data[match[1]] = value;
-  }
-  return data;
-}
-
-/** Split `---` frontmatter from the body; `offset` is the body's first line. */
-function splitFrontmatter(source) {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(source);
-  if (!match) throw new Error("page has no frontmatter");
-  const offset = match[0].split("\n").length - 1;
-  return {
-    data: parseFlatYaml(match[1]),
-    body: source.slice(match[0].length),
-    offset,
-  };
 }
 
 // Inline code stands in as one neutral token per word, so its words count but
@@ -111,15 +91,19 @@ function sentencesOf(text) {
     .filter(Boolean);
 }
 
-/** Every violation on one page, as `line N: message` strings. */
-function lintPage({ data, body, offset }) {
+/**
+ * Every violation on one page, as `line N: message` strings. The frontmatter
+ * is blanked to empty lines, so a node's line is its line in the file.
+ */
+function lintPage(source) {
+  const { frontmatter, content } = parseFrontmatter(source, {
+    frontmatter: "empty-with-lines",
+  });
   const problems = [];
-  const at = (node) =>
-    node.position ? node.position.start.line + offset : "?";
   const report = (node, message) =>
-    problems.push(`line ${at(node)}: ${message}`);
+    problems.push(`line ${node.position.start.line}: ${message}`);
 
-  const description = data?.description;
+  const description = frontmatter.description;
   if (typeof description !== "string" || description.trim() === "") {
     problems.push("frontmatter: description is missing");
   } else {
@@ -166,7 +150,7 @@ function lintPage({ data, body, offset }) {
   const closeSection = () => {
     if (section.words > LIMITS.sectionWords)
       problems.push(
-        `line ${section.node ? at(section.node) : offset + 1}: ${section.words} words of running text under "${section.title}" (limit ${LIMITS.sectionWords})`,
+        `line ${section.node ? section.node.position.start.line : 1}: ${section.words} words of running text under "${section.title}" (limit ${LIMITS.sectionWords})`,
       );
   };
 
@@ -186,8 +170,7 @@ function lintPage({ data, body, offset }) {
   };
 
   const walk = (node) => {
-    if (node.type === "code" || node.type === "html" || node.type === "yaml")
-      return;
+    if (node.type === "code" || node.type === "html") return;
     switch (node.type) {
       case "heading": {
         closeSection();
@@ -235,7 +218,7 @@ function lintPage({ data, body, offset }) {
     }
   };
 
-  walk(markdownToMdast(body, { position: true }));
+  walk(markdownToMdast(content, { position: true }));
   closeSection();
 
   if (pageWords > LIMITS.pageWords)
@@ -247,10 +230,9 @@ function lintPage({ data, body, offset }) {
 }
 
 for (const file of pagesUnder(contentDir)) {
-  const slug = file.replace(/\.md$/, "").split("\\").join("/");
+  const slug = file.replace(/\.md$/, "");
   test(slug, () => {
-    const page = splitFrontmatter(readFileSync(join(contentDir, file), "utf8"));
-    const problems = lintPage(page);
+    const problems = lintPage(readFileSync(join(contentDir, file), "utf8"));
     assert.deepEqual(
       problems,
       [],

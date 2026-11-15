@@ -3,14 +3,9 @@ import { SECTIONS } from "../content.config";
 
 export type DocsEntry = CollectionEntry<"docs">;
 
-/**
- * The page's path under /docs/, from its file: `index.md` is the root,
- * `cache/index.md` is `cache`, `cache/push.md` is `cache/push`.
- */
+/** The page's path under /docs/: `index` is the root, `cache/index` is `cache`. */
 export function slugOf(entry: DocsEntry): string {
-  const file = entry.filePath ?? entry.id;
-  const rel = file.replace(/^.*src\/content\/docs\//, "").replace(/\.md$/, "");
-  return rel === "index" ? "" : rel.replace(/\/index$/, "");
+  return entry.id === "index" ? "" : entry.id.replace(/\/index$/, "");
 }
 
 export const hrefOf = (entry: DocsEntry): string => {
@@ -26,5 +21,5 @@ export async function docsBySection() {
     pages: entries
       .filter((e) => e.data.section === section)
       .sort((a, b) => a.data.order - b.data.order),
-  })).filter((group) => group.pages.length > 0);
+  }));
 }

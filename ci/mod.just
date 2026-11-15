@@ -15,11 +15,10 @@ install:
     {{ nix_shell }} bun install --frozen-lockfile
     {{ nix_shell }} sh scripts/hydrate-pins.sh
 
-# The site: `astro check`, the docs lint, the build, and an offline link check.
-# No OS attribute, for the reason `nixos-module` gives.
+# The site, by the same two recipes a contributor runs: `astro check` and the
+# docs lint, then the build and the link check. No OS attribute, as `nixos-module`.
 website:
-    {{ nix_shell }} sh -c 'cd website && npm ci && npm run check && npm test && npm run build'
-    nix shell --impure --expr '(import ./nix/nixpkgs.nix { }).lychee' -c website/linkcheck.sh website/dist
+    just website-check website-linkcheck
 
 typecheck: install
     {{ nix_shell }} bun run typecheck
