@@ -11,7 +11,7 @@
     "test": "node --test \"test/**/*.test.mjs\""
   },
   "dependencies": {
-    "astro": "^7.4.3"
+    "astro": "^7.4.7"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.6",
