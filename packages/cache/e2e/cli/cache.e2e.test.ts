@@ -791,6 +791,72 @@ describe("odu serves a Nix binary cache", () => {
     expect(pushed.stdout).toContain("skipped-upstream 0");
   });
 
+  it("pushes a closure whole with `--whole`, so `nix copy --from` the bucket alone takes it", () => {
+    // THE CONSUMER READS ONE CACHE. `nix copy --from <bucket>` walks the
+    // closure inside that bucket and stops at the first path it lacks, so a
+    // closure whose nixpkgs half was skipped as upstream cannot be fetched
+    // from `main` alone. `--whole` stores that half too, in a bucket that
+    // keeps its default upstream keys.
+    const { parent, child } = buildPair("odu-cache-e2e-whole");
+    const keyFile = join(storeRoot, "whole-upstream-key");
+    const generated = spawnSync(
+      "nix",
+      ["key", "generate-secret", "--key-name", "cache.nixos.org-1"],
+      { encoding: "utf-8" },
+    );
+    expect(generated.status).toBe(0);
+    writeFileSync(keyFile, generated.stdout, { mode: 0o600 });
+    expect(nix(["store", "sign", "--store", builderStore, "--key-file", keyFile, child]).status).toBe(0);
+
+    /** The consumer's command, into a store that has never seen either path,
+     *  with a narinfo cache of its own so no earlier answer stands in for the
+     *  bucket's. */
+    const fetchAlone = (name: string): Ran => {
+      const xdg = scratchDir(`odu-e2e-xdg-${name}-`);
+      dirs.push(xdg);
+      return nix(
+        [
+          "copy",
+          "--extra-trusted-public-keys",
+          main.publicKey,
+          "--from",
+          main.url,
+          "--to",
+          `local?root=${join(storeRoot, name)}`,
+          parent,
+        ],
+        { NIX_REMOTE: "", XDG_CACHE_HOME: xdg },
+      );
+    };
+
+    const filtered = cli(["cache", "push", "main", parent], {
+      ODU_CACHE_TOKEN: writeToken,
+      NIX_REMOTE: builderStore,
+    });
+    expect(filtered.status).toBe(0);
+    expect(filtered.stdout).toContain("pushed 1, skipped-upstream 1");
+    const partial = fetchAlone("whole-before");
+    console.log(`nix copy --from main, after a push without --whole:\n${partial.stderr}`);
+    expect(partial.status).not.toBe(0);
+
+    const whole = cli(["cache", "push", "main", parent, "--whole"], {
+      ODU_CACHE_TOKEN: writeToken,
+      NIX_REMOTE: builderStore,
+    });
+    expect(whole.stderr).not.toContain("odu:");
+    expect(whole.status).toBe(0);
+    expect(whole.stdout).toContain("pushed 1, skipped-upstream 0");
+    const fetched = fetchAlone("whole-after");
+    console.log(`nix copy --from main, after a push with --whole:\n${fetched.stderr}`);
+    expect({ status: fetched.status, stderr: fetched.stderr }).toMatchObject({ status: 0 });
+    const landed = spawnSync(
+      "nix",
+      ["path-info", "--store", `local?root=${join(storeRoot, "whole-after")}`, child],
+      { encoding: "utf-8" },
+    );
+    expect(landed.status).toBe(0);
+  });
+
   it("refuses an unauthenticated read of a private bucket, and serves with netrc", async () => {
     const created = surface("bucket_create", {
       rootToken: ROOT_TOKEN,

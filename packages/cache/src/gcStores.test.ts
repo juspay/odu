@@ -286,7 +286,7 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
       travel(100 * DAY);
       const bucket = cache.bucket("main");
       if (bucket === null) throw new Error("no bucket");
-      expect(cache.missing(bucket, [{ path: asked }], { run: null, commit: null })).toEqual({
+      expect(cache.missing(bucket, [{ path: asked }], { run: null, commit: null }, false)).toEqual({
         missing: [],
         skipped: [],
       });
@@ -415,7 +415,7 @@ function gcCases(name: string, make: () => Promise<Subject>): void {
     const ask = (cache: Cache, storePath: string, provenance: Provenance) => {
       const bucket = cache.bucket("main");
       if (bucket === null) throw new Error("no bucket main");
-      return cache.missing(bucket, [{ path: storePath }], provenance);
+      return cache.missing(bucket, [{ path: storePath }], provenance, false);
     };
 
     it("claims a path it already holds from the query that asked about it", async () => {

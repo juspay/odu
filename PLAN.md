@@ -531,7 +531,7 @@ Commits and PR bodies use the earlier names.
     GET  /cache/<bucket>/nar/<narHash>.<ext>     Content-Length, Range
     PUT  /cache/<bucket>/nar/<narHash>.<ext>     chunked under a proxy's body cap
     PUT  /cache/<bucket>/<hash>.narinfo          re-signed with the bucket key
-    POST /_odu/v1/buckets/<bucket>/missing       batch query; drops upstream-signed paths
+    POST /_odu/v1/buckets/<bucket>/missing       batch query; drops upstream-signed paths unless `whole`
     ```
     A bucket domain is answered by `Host`.
 

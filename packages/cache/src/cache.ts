@@ -605,6 +605,12 @@ export interface Cache {
    *  take because an upstream key signed it — reported separately so `odu cache
    *  push` can say "upstream" rather than "already there".
    *
+   *  `whole` is a pusher storing a closure that will be FETCHED ALONE: `nix
+   *  copy --from <this bucket>` reads no other cache and stops at the first
+   *  path the bucket lacks. It answers an absent upstream-signed path as
+   *  missing, so `skipped` is empty. The bucket's `upstreamKeys` are not
+   *  touched: the next push that does not ask is filtered as before.
+   *
    *  `provenance` is what the asker says built them, and it lands on the paths
    *  the bucket ALREADY holds — the ones that get no narinfo PUT. Only a null
    *  column is filled and none is ever overwritten, so the first builder to
@@ -614,6 +620,7 @@ export interface Cache {
     bucket: BucketRow,
     paths: readonly { path: string; sigs?: readonly string[] }[],
     provenance: Provenance,
+    whole: boolean,
   ): { missing: readonly string[]; skipped: readonly string[] };
   /**
    * EVERY BUCKET'S ROW, without a credential — what a SUBSCRIBER reads.
@@ -2599,7 +2606,7 @@ export function createCache(options: CacheOptions): Cache {
       return outcome;
     },
 
-    missing(bucket, paths, provenance) {
+    missing(bucket, paths, provenance, whole) {
       const missing: string[] = [];
       const skipped: string[] = [];
       /** The paths this bucket HAS and the asker wants. */
@@ -2609,10 +2616,15 @@ export function createCache(options: CacheOptions): Cache {
           wanted.push(path);
           continue;
         }
-        const upstream = (sigs ?? []).some((sig) => {
-          const key = keyNameOf(sig);
-          return key !== null && bucket.upstreamKeys.includes(key);
-        });
+        // A WHOLE PUSH IS ANSWERED BEFORE THE KEYS ARE READ: the asker said
+        // the closure will be fetched from this bucket alone, so a path an
+        // upstream key signed is as missing as any other.
+        const upstream =
+          !whole &&
+          (sigs ?? []).some((sig) => {
+            const key = keyNameOf(sig);
+            return key !== null && bucket.upstreamKeys.includes(key);
+          });
         (upstream ? skipped : missing).push(path);
       }
       // THE QUESTION IS THE RENEWAL, AND THE CLAIM. A pusher asking "do you

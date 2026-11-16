@@ -101,7 +101,7 @@ use <bucket>                  the nix.conf settings, the nixConfig block and the
                               bucket's URL and public key are public
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
-push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA] [-o json]
+push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA] [--whole] [-o json]
 push --cache <substituter> <path>…
 push <path>…                  with neither, the substituter is read from
                               ./flake.nix's nixConfig — the one declaration a
@@ -137,6 +137,11 @@ push <path>…                  with neither, the substituter is read from
                               the cache never learns what a run is. A push
                               that states neither leaves whatever a run
                               already stated about these paths alone
+                              --whole stores the closure's upstream-signed
+                              paths too, for a closure that is fetched from
+                              this bucket alone (\`nix copy --from\` reads one
+                              cache). Without it they are skipped as upstream.
+                              A cache too old to take them is a refusal
 target [-o json]              print the one odu substituter ./flake.nix's
                               nixConfig names — the same reading \`push\` makes
                               with no --cache, said out loud instead of acted
@@ -404,6 +409,7 @@ async function pushCommand(rest: string[]): Promise<number> {
       run: { type: "string" },
       commit: { type: "string" },
       cache: { type: "string" },
+      whole: { type: "boolean" },
       origin: originOption,
       output: outputOption,
     },
@@ -582,6 +588,9 @@ async function pushCommand(rest: string[]): Promise<number> {
       // erase the provenance a run wrote.
       ...(values.run === undefined ? {} : { run: values.run }),
       ...(values.commit === undefined ? {} : { commit: values.commit }),
+      // THE WHOLE CLOSURE, upstream-signed paths included, when the caller
+      // will fetch it from this bucket alone.
+      ...(values.whole === true ? { whole: true } : {}),
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
       },

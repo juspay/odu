@@ -34,6 +34,7 @@ import {
   type PushPlatform,
 } from "./push";
 import type { PathInfo } from "./store";
+import { WHOLE_PUSH_SINCE } from "./surface";
 
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
 const GLIBC = "/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57";
@@ -1054,6 +1055,53 @@ describe("pushing a closure", () => {
       expect(asked[0]?.path).toBe("/_odu/v1/buckets/main/missing");
       const sent = JSON.parse(asked[0]?.body as string) as { paths: { path: string }[] };
       expect(sent.paths.map((entry) => entry.path).sort()).toEqual([GLIBC, HELLO, LIBC].sort());
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("asks for the whole closure only when told to", async () => {
+    const server = startServer();
+    try {
+      server.missing = [];
+      const push = (whole?: boolean) =>
+        pushToCache({
+          bucket: `${server.origin}/main`,
+          paths: ["."],
+          env: envOf({ ODU_CACHE_TOKEN: "t" }),
+          platform: PLATFORM,
+          ...(whole === undefined ? {} : { whole }),
+        });
+      await push(true);
+      await push();
+      const sent = server.seen
+        .filter((seen) => seen.path.endsWith("/missing"))
+        .map((seen) => (JSON.parse(seen.body) as { whole?: unknown }).whole);
+      expect(sent).toEqual([true, undefined]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("refuses to carry on when a whole push comes back filtered", async () => {
+    // A SERVICE THAT NEVER READ `whole` answers the way it always did, with
+    // the nixpkgs paths under `skippedUpstream`. Uploading the rest would land
+    // a closure nobody can fetch from this bucket alone and call it done.
+    const server = startServer();
+    try {
+      server.missing = [HELLO];
+      server.skipped = [LIBC];
+      const pushing = pushToCache({
+        bucket: `${server.origin}/main`,
+        paths: ["."],
+        env: envOf({ ODU_CACHE_TOKEN: "t" }),
+        platform: PLATFORM,
+        whole: true,
+      });
+      await expect(pushing).rejects.toThrow(
+        `skipped 1 upstream-signed paths on a whole push: it predates ${WHOLE_PUSH_SINCE}`,
+      );
+      expect(server.seen.filter((seen) => seen.method === "PUT")).toEqual([]);
     } finally {
       server.stop();
     }

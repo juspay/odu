@@ -725,7 +725,7 @@ describe("paths say what keeps them", () => {
 
     // A BUILD ASKING ABOUT THE PATH WANTS IT, and that winds its clock.
     travel(3 * DAY);
-    cache.missing(cache.bucket("main") as never, [{ path: pinned }], NOTHING_SAID);
+    cache.missing(cache.bucket("main") as never, [{ path: pinned }], NOTHING_SAID, false);
     expect((await keptOf(cache)).get(pinned)?.until).toBe(NOW + 2 * DAY + 3 * DAY + 7 * DAY);
 
     // AND THE VERDICT IS THE ANSWER'S CLOCK, not the holds': no write, and
@@ -799,11 +799,34 @@ describe("missing", () => {
         { path: "/nix/store/22222222222222222222222222222222-b", sigs: ["cache.nixos.org-1:AAAA"] },
       ],
       { run: null, commit: null },
+      false,
     );
     expect(answer).toEqual({
       missing: ["/nix/store/11111111111111111111111111111111-a"],
       skipped: ["/nix/store/22222222222222222222222222222222-b"],
     });
+    await cache.close();
+  });
+
+  it("asks a whole push for what an upstream key signed, and only that push", async () => {
+    // A CLOSURE FETCHED FROM THIS BUCKET ALONE needs its nixpkgs paths here
+    // too. The bucket's upstream keys stay as they are: the next push that
+    // does not ask is filtered exactly as before.
+    const cache = cacheWith(ROOT);
+    await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
+    const bucket = cache.bucket("main");
+    if (bucket === null) throw new Error("no bucket");
+    const upstream = "/nix/store/22222222222222222222222222222222-b";
+    const asked = [{ path: upstream, sigs: ["cache.nixos.org-1:AAAA"] }];
+    expect(cache.missing(bucket, asked, { run: null, commit: null }, true)).toEqual({
+      missing: [upstream],
+      skipped: [],
+    });
+    expect(cache.missing(bucket, asked, { run: null, commit: null }, false)).toEqual({
+      missing: [],
+      skipped: [upstream],
+    });
+    expect(cache.bucket("main")?.upstreamKeys).toEqual(["cache.nixos.org-1"]);
     await cache.close();
   });
 });

@@ -1029,7 +1029,9 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
      * The batched "which of these are you missing" query. Not part of the Nix
      * protocol — it is what makes `odu cache push` cheaper than `nix copy`,
      * which probes one path at a time. It also drops paths signed by an
-     * upstream key, which is how nixpkgs stays out of a bucket.
+     * upstream key, which is how nixpkgs stays out of a bucket — unless the
+     * asker says `"whole": true`, because the closure will be fetched from
+     * this bucket alone.
      */
     HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/missing`, (request) =>
       Effect.gen(function* () {
@@ -1040,11 +1042,24 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
         if (paths === null) {
           return refused(cache, request, 'expected {"paths": [{"path": "/nix/store/…", "sigs": […]}]}');
         }
+        const whole = wholeOf(body);
+        if (whole === null) {
+          return refused(
+            cache,
+            request,
+            '"whole" is true or false: true asks for every path the bucket lacks, upstream-signed ones included',
+          );
+        }
         // WHAT THE ASKER SAYS BUILT THEM, on the same request: a path the
         // bucket already holds gets no narinfo PUT, so this is where its row
         // learns where its bytes came from — filling a null column, never
         // overwriting one.
-        const answer = cache.missing(admitted.bucket, paths, provenanceStated(request.headers));
+        const answer = cache.missing(
+          admitted.bucket,
+          paths,
+          provenanceStated(request.headers),
+          whole,
+        );
         return HttpServerResponse.jsonUnsafe({
           missing: answer.missing,
           // Additive, and the reason `odu cache push` can print "skipped
@@ -1165,6 +1180,17 @@ function missingRequestOf(body: unknown): MissingRequest[] | null {
     out.push({ path: entry.path, sigs: entry.sigs as string[] });
   }
   return out;
+}
+
+/**
+ * The `missing` body's optional `whole`: absent is `false`, a boolean is
+ * itself, and anything else is `null` — a refusal, so a pusher that misspells
+ * its intent is told rather than quietly filtered.
+ */
+function wholeOf(body: unknown): boolean | null {
+  if (body === null || typeof body !== "object") return null;
+  if (!("whole" in body) || body.whole === undefined) return false;
+  return typeof body.whole === "boolean" ? body.whole : null;
 }
 
 /**
