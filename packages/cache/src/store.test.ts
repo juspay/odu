@@ -9,7 +9,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -27,6 +27,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { s3ObjectStore } from "@odu/objects";
 import { type Gateway, shortWindowFrom, startGateway } from "@odu/objects/testing";
 import { fifoStream } from "./fifo";
+import { base32 } from "./narinfo";
 import {
   type NarCheck,
   narHashModuloHasher,
@@ -232,7 +233,7 @@ describe("an upload's bytes", () => {
     });
   });
 
-  it("carries a split hash part across any chunk boundary", () => {
+  it("carries a split hash part across any chunk boundary, offsets included", () => {
     const hashPart = "0123456789abcdfghijklmnpqrsvwxyz";
     const payload = Buffer.from(
       `nar:${hashPart}:middle:${hashPart}:tail:${hashPart}`,
@@ -241,10 +242,17 @@ describe("an upload's bytes", () => {
     const whole = narHashModuloHasher(hashPart);
     whole.update(payload);
     const expected = whole.finish();
+    // THE OFFSETS ARE THE NAR'S, not a chunk's: 4, 44 and 82 here, so a
+    // positioned hash computed from chunk-relative offsets differs below.
+    const zeroed = Buffer.from(payload);
+    for (const at of [4, 44, 82]) zeroed.fill(0, at, at + 32);
+    expect(expected.withOffsets).toBe(
+      `sha256:${base32(createHash("sha256").update(zeroed).update("|4|44|82").digest())}`,
+    );
 
     const oneByte = narHashModuloHasher(hashPart);
     for (const byte of payload) oneByte.update(Uint8Array.of(byte));
-    expect(oneByte.finish()).toBe(expected);
+    expect(oneByte.finish()).toEqual(expected);
 
     for (let split = 0; split <= payload.length; split++) {
       const hasher = narHashModuloHasher(hashPart);
@@ -253,6 +261,68 @@ describe("an upload's bytes", () => {
       expect({ split, hash: hasher.finish() }).toEqual({ split, hash: expected });
     }
   });
+
+  /**
+   * WHAT EACH NIX LINE WROTE, recorded rather than computed: each NAR is
+   * `nix store dump-path` of the path `nix store make-content-addressed`
+   * produced, and each `CA` is what that Nix's `path-info` said, for
+   * `echo $out > $out` (one occurrence, at NAR offset 107) and
+   * `echo $out $out $out > $out` (three), on x86_64-linux. Nix 2.34 hashes the
+   * zeroed bytes alone; Nix 2.35 follows them with `|<offset>` per occurrence.
+   */
+  const RECORDED = [
+    {
+      nix: "2.34.9",
+      form: "withoutOffsets",
+      storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
+      ca: "fixed:r:sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl",
+      nar: "DQAAAAAAAABuaXgtYXJjaGl2ZS0xAAAAAQAAAAAAAAAoAAAAAAAAAAQAAAAAAAAAdHlwZQAAAAAHAAAAAAAAAHJlZ3VsYXIACAAAAAAAAABjb250ZW50czQAAAAAAAAAL25peC9zdG9yZS82Z3ljNGsxaWxjdzFrOTdrZjNkbnp3aWEzcnE2dmFrZC1zZWxmcmVmCgAAAAABAAAAAAAAACkAAAAAAAAA",
+    },
+    {
+      nix: "2.35.6",
+      form: "withOffsets",
+      storePath: "/nix/store/j9xpm5a9yzp9v5slnxsgvay2lnwqi2l6-selfref",
+      ca: "fixed:r:sha256:14869lj9vs5fmpd0f1p5msrn1jdl7hd146xaimv4l6zivgmc71zl",
+      nar: "DQAAAAAAAABuaXgtYXJjaGl2ZS0xAAAAAQAAAAAAAAAoAAAAAAAAAAQAAAAAAAAAdHlwZQAAAAAHAAAAAAAAAHJlZ3VsYXIACAAAAAAAAABjb250ZW50czQAAAAAAAAAL25peC9zdG9yZS9qOXhwbTVhOXl6cDl2NXNsbnhzZ3ZheTJsbndxaTJsNi1zZWxmcmVmCgAAAAABAAAAAAAAACkAAAAAAAAA",
+    },
+    {
+      nix: "2.34.9",
+      form: "withoutOffsets",
+      storePath: "/nix/store/a47j6cb8nb8k2zl4b7xiddhsvp9k28h4-selfref3",
+      ca: "fixed:r:sha256:021cdpl2sqz8w99901sqd6lkmpmk1ffk77i2g8zyn1zdyv7kl9bh",
+      nar: "DQAAAAAAAABuaXgtYXJjaGl2ZS0xAAAAAQAAAAAAAAAoAAAAAAAAAAQAAAAAAAAAdHlwZQAAAAAHAAAAAAAAAHJlZ3VsYXIACAAAAAAAAABjb250ZW50c58AAAAAAAAAL25peC9zdG9yZS9hNDdqNmNiOG5iOGsyemw0Yjd4aWRkaHN2cDlrMjhoNC1zZWxmcmVmMyAvbml4L3N0b3JlL2E0N2o2Y2I4bmI4azJ6bDRiN3hpZGRoc3ZwOWsyOGg0LXNlbGZyZWYzIC9uaXgvc3RvcmUvYTQ3ajZjYjhuYjhrMnpsNGI3eGlkZGhzdnA5azI4aDQtc2VsZnJlZjMKAAEAAAAAAAAAKQAAAAAAAAA=",
+    },
+    {
+      nix: "2.35.6",
+      form: "withOffsets",
+      storePath: "/nix/store/sqgmachsw321zm4lk82jah8672n21kdw-selfref3",
+      ca: "fixed:r:sha256:137bh2gvlyga38r1y1hvi82gix280pmv1mcw1672kd8sidw8wj5y",
+      nar: "DQAAAAAAAABuaXgtYXJjaGl2ZS0xAAAAAQAAAAAAAAAoAAAAAAAAAAQAAAAAAAAAdHlwZQAAAAAHAAAAAAAAAHJlZ3VsYXIACAAAAAAAAABjb250ZW50c58AAAAAAAAAL25peC9zdG9yZS9zcWdtYWNoc3czMjF6bTRsazgyamFoODY3Mm4yMWtkdy1zZWxmcmVmMyAvbml4L3N0b3JlL3NxZ21hY2hzdzMyMXptNGxrODJqYWg4NjcybjIxa2R3LXNlbGZyZWYzIC9uaXgvc3RvcmUvc3FnbWFjaHN3MzIxem00bGs4MmphaDg2NzJuMjFrZHctc2VsZnJlZjMKAAEAAAAAAAAAKQAAAAAAAAA=",
+    },
+  ] as const;
+
+  for (const vector of RECORDED) {
+    it(`proves the CA Nix ${vector.nix} wrote for ${vector.storePath.slice(44)}`, async () => {
+      scratch = mkdtempSync(join(tmpdir(), "odu-self-ca-"));
+      const narFile = join(scratch, "self.nar");
+      writeFileSync(narFile, Buffer.from(vector.nar, "base64"));
+      const hashPart = vector.storePath.slice("/nix/store/".length, "/nix/store/".length + 32);
+      const checked = await verifyNarFile(narFile, "none", hashPart);
+      if (!checked.ok || checked.selfHash === null) throw new Error("no modulo hash");
+      // The form that Nix line writes is the CA's own hash; the other is not.
+      const other = vector.form === "withOffsets" ? "withoutOffsets" : "withOffsets";
+      expect(checked.selfHash[vector.form]).toBe(`sha256:${vector.ca.slice("fixed:r:sha256:".length)}`);
+      expect(checked.selfHash[other]).not.toBe(checked.selfHash[vector.form]);
+      expect(
+        contentAddressOf({
+          storePath: vector.storePath,
+          narHash: checked.narHash,
+          references: [vector.storePath],
+          selfHash: checked.selfHash,
+        }),
+      ).toBe(vector.ca);
+    });
+  }
 
   it("computes Nix's modulo-self hash from a make-content-addressed NAR", async () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-self-ca-"));
@@ -288,10 +358,12 @@ describe("an upload's bytes", () => {
       writeFileSync(narFile, nar.stdout);
       const hashPart = storePath.split("/").at(-1)!.slice(0, 32);
       const checked = await verifyNarFile(narFile, "none", hashPart);
-      expect(checked).toMatchObject({
-        ok: true,
-        selfHash: `sha256:${facts.ca.replace("fixed:r:sha256:", "")}`,
-      });
+      expect(checked.ok).toBe(true);
+      if (!checked.ok || checked.selfHash === null) throw new Error("no modulo hash");
+      // WHICHEVER NIX THIS MACHINE HAS: its CA is one of the two forms.
+      expect(Object.values(checked.selfHash)).toContain(
+        `sha256:${facts.ca.replace("fixed:r:sha256:", "")}`,
+      );
       expect(
         contentAddressOf({
           storePath,

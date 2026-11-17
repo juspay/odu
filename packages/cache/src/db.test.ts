@@ -514,4 +514,49 @@ describe("upgrading an existing database", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("sends a self-referencing row judged not content-addressed back to be proved", () => {
+    // A ROW JUDGED WITH ONE FORM OF TWO: before migration 19 odu knew only the
+    // Nix 2.34 modulo hash, so a self-referencing path Nix 2.35 rewrote was
+    // stored `not-content-addressed` and would never be judged again. Every
+    // other verdict stands.
+    const dir = mkdtempSync(join(tmpdir(), "odu-cache-upgrade-"));
+    const file = join(dir, "cache.sqlite");
+    const self = "/nix/store/j9xpm5a9yzp9v5slnxsgvay2lnwqi2l6-selfref";
+    const proved = "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref";
+    const plain = "/nix/store/00000000000000000000000000000000-plain";
+    const other = "/nix/store/11111111111111111111111111111111-other";
+    try {
+      const old = new Database(file);
+      for (const sql of MIGRATIONS.slice(0, 18)) old.exec(sql);
+      old.exec("PRAGMA user_version = 18;");
+      const insert = old.prepare(
+        "INSERT INTO object (bucket, store_path, hash, nar_hash, nar_size, refs, sigs, created, " +
+          "last_wanted, ca, ca_proof) VALUES ('main', ?, ?, 'sha256:x', 1, ?, '[]', 0, 0, ?, ?)",
+      );
+      const hashOf = (path: string) => path.slice("/nix/store/".length, "/nix/store/".length + 32);
+      insert.run(self, hashOf(self), JSON.stringify([other, self]), null, "not-content-addressed");
+      insert.run(proved, hashOf(proved), JSON.stringify([proved]), "fixed:r:sha256:x", "content-addressed");
+      insert.run(plain, hashOf(plain), JSON.stringify([other]), null, "not-content-addressed");
+      old.close();
+
+      openCacheRepo(file).close();
+
+      const check = new Database(file);
+      const verdicts = Object.fromEntries(
+        (check.query("SELECT store_path, ca_proof FROM object").all() as {
+          store_path: string;
+          ca_proof: string;
+        }[]).map((row) => [row.store_path, row.ca_proof]),
+      );
+      check.close();
+      expect(verdicts).toEqual({
+        [self]: "unknown",
+        [proved]: "content-addressed",
+        [plain]: "not-content-addressed",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

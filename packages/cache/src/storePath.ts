@@ -56,15 +56,32 @@ export function storePathHashOf(type: string, hash: Uint8Array, name: string): s
 }
 
 /**
+ * A self-referencing NAR's hash modulo its own hash part, in both forms
+ * released Nix writes (see `narHashModuloHasher`): Nix 2.17 through 2.34 hash
+ * the zeroed bytes alone, Nix 2.35 and later follow them with each
+ * occurrence's `|<offset>`. Each is `sha256:<nix base32>`.
+ */
+export interface SelfHashes {
+  withoutOffsets: string;
+  withOffsets: string;
+}
+
+/**
  * The row's `CA:` line, PROVED by recomputing the path it must have produced;
  * `null` when Nix's formula does not reproduce the row's path. Never guesses.
+ *
+ * A self-referencing row is tried with both forms of its modulo hash. That is
+ * not a preference between them: the store path is a hash of the CA hash, the
+ * references and the name, so a form that yields the wrong hash cannot rebuild
+ * the path, and at most one of them does. Which Nix wrote the path is not
+ * read from anywhere; the path is the only witness of it.
  */
 export function contentAddressOf(input: {
   storePath: string;
   narHash: string;
   references: readonly string[];
-  /** The modulo-self hash computed from the NAR (self-referencing rows). */
-  selfHash?: string | null;
+  /** The modulo-self hashes computed from the NAR (self-referencing rows). */
+  selfHash?: SelfHashes | null;
 }): string | null {
   const path = input.storePath;
   if (!path.startsWith("/nix/store/")) return null;
@@ -92,8 +109,14 @@ export function contentAddressOf(input: {
     return candidate === path ? `fixed:r:sha256:${nar}` : null;
   };
   if (self) {
-    const modulo = /^sha256:([0-9abcdfghijklmnpqrsvwxyz]{52})$/.exec(input.selfHash ?? "");
-    return modulo === null ? null : proves(modulo[1] as string);
+    const selfHash = input.selfHash;
+    if (selfHash === undefined || selfHash === null) return null;
+    for (const form of [selfHash.withoutOffsets, selfHash.withOffsets]) {
+      const modulo = /^sha256:([0-9abcdfghijklmnpqrsvwxyz]{52})$/.exec(form);
+      const proved = modulo === null ? null : proves(modulo[1] as string);
+      if (proved !== null) return proved;
+    }
+    return null;
   }
   let nar: string;
   try {

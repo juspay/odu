@@ -996,6 +996,47 @@ describe("CA is proved from the path", () => {
     }
   });
 
+  it("proves a Nix 2.35 self-referencing path it once judged with the 2.34 form alone", async () => {
+    // RECORDED FROM NIX 2.35.6: `echo $out > $out`, made content-addressed;
+    // its CA follows the zeroed bytes with `|107`. A row odu stored
+    // `not-content-addressed` before it knew that form is set back to
+    // `unknown` (migration 19); a retried PUT, which has no bytes to prove
+    // from, keeps that verdict; and the startup pass proves it.
+    const path = "/nix/store/j9xpm5a9yzp9v5slnxsgvay2lnwqi2l6-selfref";
+    const ca = "fixed:r:sha256:14869lj9vs5fmpd0f1p5msrn1jdl7hd146xaimv4l6zivgmc71zl";
+    const payload = {
+      bytes: new Uint8Array(
+        Buffer.from(
+          "DQAAAAAAAABuaXgtYXJjaGl2ZS0xAAAAAQAAAAAAAAAoAAAAAAAAAAQAAAAAAAAAdHlwZQAAAAAHAAAAAAAAAHJlZ3VsYXIACAAAAAAAAABjb250ZW50czQAAAAAAAAAL25peC9zdG9yZS9qOXhwbTVhOXl6cDl2NXNsbnhzZ3ZheTJsbndxaTJsNi1zZWxmcmVmCgAAAAABAAAAAAAAACkAAAAAAAAA",
+          "base64",
+        ),
+      ),
+      narHash: canonicalNarHash("sha256-XUFNQ9+fHf+Zow3TLUYxj/5FPxAn9wKBcq+ia2Q3PRM="),
+    };
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    await putNar(cache, "main", payload);
+    const put = () =>
+      cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(path),
+        stream(narinfoText(path, payload, [path])),
+        NOTHING_SAID,
+      );
+    expect(await put()).toMatchObject({ ok: true, status: 200 });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(`CA: ${ca}`);
+
+    // WHAT AN OLDER odu LEFT, and what migration 19 makes of it.
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET ca = NULL, ca_proof = 'unknown'");
+    db.close();
+    expect(await put()).toMatchObject({ ok: true, status: 200 });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
+    expect(await cache.proveSelf()).toMatchObject({ rows: 1, proved: 1, refused: 0 });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(`CA: ${ca}`);
+    await cache.close();
+  });
+
   it("migrates a row whose object was never kept, then serves the object file", async () => {
     const path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-migrated";
     const payload = nar("bytes the old store still has");

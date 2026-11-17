@@ -37,6 +37,7 @@ import { ObjectChanged } from "@odu/objects";
 import { fifoStream } from "./fifo";
 import { describeFailure } from "./failure";
 import { base32, canonicalNarHash, NarinfoError, storePathHash } from "./narinfo";
+import type { SelfHashes } from "./storePath";
 
 /** What the store knows about one path. `narHash` is canonical
  *  (`sha256:<base32>`), references are FULL store paths, and `sigs` are the
@@ -341,18 +342,32 @@ export function nixDump(storePath: string, store: string | null): ReadableStream
  *  hash part with 32 zero bytes and sha256 the result. Matches can straddle
  *  read chunks, so the last 31 bytes wait for the next one.
  *
- *  Nix 2.34's `RewritingSink` calls `rewriteStrings` and records no match
- *  positions (`matches` stays empty), so there is NO `|pos` fold — pinned by a
- *  `nix store make-content-addressed` vector in the suite. Matching the Nix
- *  that produces the CA is the only useful definition. */
+ *  RELEASED NIX WRITES TWO FORMS, and both kinds of path exist:
+ *
+ *  - Nix 2.17 through 2.34: the zeroed bytes and nothing else. Its
+ *    `RewritingSink` records no match positions, so nothing follows them.
+ *  - Nix 2.35 and later: the same zeroed bytes, then `|<offset>` for each
+ *    occurrence, in order, where the offset is the occurrence's byte position
+ *    in the uncompressed NAR (`HashModuloSink::finish`, now that
+ *    `rewriteStrings` records `matches`).
+ *
+ *  The form belongs to the Nix that WROTE the path, and the path is the only
+ *  witness of it, so both are computed here, in one pass: the offsets come
+ *  after every byte, so `finish` copies the running hash and feeds the copy
+ *  the offsets. {@link contentAddressOf} keeps the one that rebuilds the path.
+ *  Both are pinned by vectors recorded from each Nix line in the suite. */
 export function narHashModuloHasher(hashPart: string): {
   update(chunk: Uint8Array): void;
-  finish(): string;
+  finish(): SelfHashes;
 } {
   const hash = createHash("sha256");
   const pattern = Buffer.from(hashPart, "utf8");
   const zeros = Buffer.alloc(pattern.length);
   let pending = Buffer.alloc(0);
+  /** Bytes of the NAR already hashed: where `pending` begins in it. */
+  let hashed = 0;
+  /** Each occurrence's offset in the uncompressed NAR, ascending. */
+  const offsets: number[] = [];
   return {
     update(chunk) {
       const data = pending.length === 0 ? Buffer.from(chunk) : Buffer.concat([pending, chunk]);
@@ -360,6 +375,7 @@ export function narHashModuloHasher(hashPart: string): {
       for (;;) {
         const found = data.indexOf(pattern, at);
         if (found === -1) break;
+        offsets.push(hashed + found);
         hash.update(data.subarray(at, found));
         hash.update(zeros);
         at = found + pattern.length;
@@ -367,11 +383,17 @@ export function narHashModuloHasher(hashPart: string): {
       // A match may begin in the last 31 bytes; keep them for the next chunk.
       const safe = Math.max(at, data.length - (pattern.length - 1));
       hash.update(data.subarray(at, safe));
+      hashed += safe;
       pending = data.subarray(safe);
     },
     finish() {
       hash.update(pending);
-      return `sha256:${base32(hash.digest())}`;
+      const positioned = hash.copy();
+      for (const offset of offsets) positioned.update(`|${offset}`);
+      return {
+        withoutOffsets: `sha256:${base32(hash.digest())}`,
+        withOffsets: `sha256:${base32(positioned.digest())}`,
+      };
     },
   };
 }
@@ -395,8 +417,9 @@ export type NarCheck =
       /** The COMPRESSED file's sha256 and size, learned as it streamed. */
       fileHash: string;
       fileSize: number;
-      /** The self-reference modulo hash, when one was requested. */
-      selfHash: string | null;
+      /** The self-reference modulo hash in both of Nix's forms, when one was
+       *  requested; `null` when none was. */
+      selfHash: SelfHashes | null;
     }
   | {
       ok: false;

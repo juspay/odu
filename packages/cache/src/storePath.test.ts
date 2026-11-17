@@ -53,23 +53,42 @@ describe("contentAddressOf", () => {
     ).toBeNull();
   });
 
-  it("proves a self-reference from its computed modulo hash", () => {
+  it("proves a self-reference from whichever form of its modulo hash rebuilds it", () => {
+    // NIX 2.34 wrote 6gyc…'s CA from the zeroed bytes alone; Nix 2.35 wrote
+    // j9xp…'s, from the same derivation, with `|107` after them. Each is
+    // proved by its own form, in either slot: the path decides, not the slot.
+    const zero = `sha256:${"0".repeat(52)}`;
+    const v234 = {
+      storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
+      narHash: "sha256:0nhllj6n6swi6w1b8290hj2jdpn14q44552mr1lz3xc634azh3ng",
+      references: ["/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref"],
+    };
+    const ca234 = "163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl";
+    expect(
+      contentAddressOf({ ...v234, selfHash: { withoutOffsets: `sha256:${ca234}`, withOffsets: zero } }),
+    ).toBe(`fixed:r:sha256:${ca234}`);
+    expect(
+      contentAddressOf({ ...v234, selfHash: { withoutOffsets: zero, withOffsets: `sha256:${ca234}` } }),
+    ).toBe(`fixed:r:sha256:${ca234}`);
+
+    const v235 = {
+      storePath: "/nix/store/j9xpm5a9yzp9v5slnxsgvay2lnwqi2l6-selfref",
+      narHash: "sha256-XUFNQ9+fHf+Zow3TLUYxj/5FPxAn9wKBcq+ia2Q3PRM=",
+      references: ["/nix/store/j9xpm5a9yzp9v5slnxsgvay2lnwqi2l6-selfref"],
+    };
+    const ca235 = "14869lj9vs5fmpd0f1p5msrn1jdl7hd146xaimv4l6zivgmc71zl";
+    expect(
+      contentAddressOf({ ...v235, selfHash: { withoutOffsets: zero, withOffsets: `sha256:${ca235}` } }),
+    ).toBe(`fixed:r:sha256:${ca235}`);
+    // ONE PATH'S HASH DOES NOT PROVE ANOTHER PATH, and neither form proving
+    // it is `null`, not a guess.
     expect(
       contentAddressOf({
-        storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
-        narHash: "sha256:0nhllj6n6swi6w1b8290hj2jdpn14q44552mr1lz3xc634azh3ng",
-        references: ["/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref"],
-        selfHash: "sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl",
-      }),
-    ).toBe("fixed:r:sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl");
-    expect(
-      contentAddressOf({
-        storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
-        narHash: "sha256:0nhllj6n6swi6w1b8290hj2jdpn14q44552mr1lz3xc634azh3ng",
-        references: ["/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref"],
-        selfHash: `sha256:${"0".repeat(52)}`,
+        ...v235,
+        selfHash: { withoutOffsets: `sha256:${ca234}`, withOffsets: zero },
       }),
     ).toBeNull();
+    expect(contentAddressOf({ ...v234, selfHash: { withoutOffsets: zero, withOffsets: zero } })).toBeNull();
   });
 
   it("matches Nix's makeStorePath for the self vector's own hash", () => {

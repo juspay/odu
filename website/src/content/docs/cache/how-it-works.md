@@ -26,7 +26,7 @@ odu never signs a hash a client claimed:
 
 - On a direct upload, odu reads the object back out of the store and verifies its `NarHash`, size and `CA:` before it records the path.
 - `CA:` is proved from the object odu holds. odu recomputes Nix's `fixed:r:sha256` store path from the name, the references and the bytes, and serves the line only when the formula reproduces the path.
-- A path that refers to itself is proved with Nix's hash modulo self-references, computed while the NAR streams through verification.
+- A path that refers to itself is proved with Nix's hash modulo self-references, computed while the NAR streams through verification. Nix writes it two ways: up to 2.34 it hashes the bytes with each copy of the path's own hash blanked out, and from 2.35 it also hashes the position of each copy. odu computes both and serves the `CA:` line of the one that reproduces the path.
 
 ## Direct and staged uploads
 

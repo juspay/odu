@@ -104,7 +104,7 @@ import {
   type UploadedPart,
 } from "@odu/objects";
 import { type KeptFile, keptFileOf } from "./fileHash";
-import { contentAddressOf } from "./storePath";
+import { contentAddressOf, type SelfHashes } from "./storePath";
 import { verifyNarStream } from "./store";
 import { createSlots } from "./slots";
 import {
@@ -1221,7 +1221,7 @@ export function createCache(options: CacheOptions): Cache {
     bucket: BucketRow,
     info: NarInfo,
     file: KeptFile,
-    selfHash: string | null,
+    selfHash: SelfHashes | null,
     provenance: Provenance,
   ): Promise<boolean> {
     const existing = repo.object(bucket.name, info.storePath);
@@ -1237,16 +1237,18 @@ export function createCache(options: CacheOptions): Cache {
       references: info.references,
       selfHash,
     });
-    // A SECOND narinfo PUT for a self-referencing CA row has no staged NAR to
-    // prove from; `selfHash` is null. The SAME NarHash means the bytes the row
-    // already proved are the bytes being named — keep that verdict rather than
-    // flipping it to a final "not content-addressed".
+    // A SECOND narinfo PUT for a self-referencing row has no staged NAR to
+    // prove from; `selfHash` is null, which means NO HASH WAS COMPUTED, never
+    // that neither form matched. The SAME NarHash means the bytes the row
+    // already judged are the bytes being named — keep that verdict, whatever
+    // it is, rather than judging the path without its bytes. That includes
+    // `unknown`, which the startup pass then proves from the kept object.
     const keep =
       computed === null &&
       selfHash === null &&
+      info.references.includes(info.storePath) &&
       existing !== null &&
-      existing.narHash === info.narHash &&
-      existing.ca !== null;
+      existing.narHash === info.narHash;
     const ca = keep ? existing.ca : computed;
     const caProof = keep
       ? existing.caProof
