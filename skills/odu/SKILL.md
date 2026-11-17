@@ -888,7 +888,7 @@ declares.
   serves after the push, by name — and `substituter`, the URL a Nix client is
   told to use. A caller proving a push checks that list at that address, not
   the closure: the closure still holds the upstream-signed paths a bucket
-  refuses by design.
+  refuses by design (unless the push was `--whole`).
 - The repository ships a GitHub Actions push step
   (`juspay/odu/.github/actions/push@<rev>`), which verifies its own push. Its
   `cache:` input is the substituter URL and is OPTIONAL FOR REAL (#163):
@@ -926,6 +926,15 @@ declares.
   bucket page; a push that states neither leaves what a run already stated
   alone, which is why the push action states `--commit` only. Do NOT add these
   to a justfile recipe to get provenance on a run: a run states both itself.
+- `odu cache push --whole` stores the closure's upstream-signed paths too, for
+  a closure that is FETCHED FROM THIS BUCKET ALONE: `nix copy --from <bucket>`
+  reads one cache and stops at the first path it lacks, so a bucket that
+  skipped nixpkgs cannot serve it. It is per push — the bucket's
+  `upstreamKeys` are untouched — and it is the `whole: true` field of the
+  `missing` query. A cache that predates it answers filtered, and the push
+  refuses before sending anything, naming juspay/odu#182. Use it for a
+  publisher whose closure is fetched with `--from`; an ordinary CI push stays
+  filtered.
 
 - **The admin CLI is retired.** The CLI is `odu ci <verb>` (every run command
   now carries the `ci` word: `odu ci run`, `odu ci wait`, `odu ci logs`,

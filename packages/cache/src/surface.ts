@@ -710,6 +710,18 @@ export const UPLOAD_NEGOTIATION_SINCE = "4.2";
  */
 export const PRESIGN_SECONDS = 600;
 
+/**
+ * WHICH CHANGE TAUGHT THE `missing` QUERY TO ANSWER A WHOLE PUSH — what a push
+ * client names when a bucket asked for `"whole": true` still lists paths under
+ * `skippedUpstream`, the answer of a service that never read the field.
+ *
+ * A CHANGE, not a version like {@link UPLOAD_NEGOTIATION_SINCE}: `whole` is a
+ * field of the push wire, which this row's contract version does not cover,
+ * so no version moved with it. The fixed fact an operator can check is the
+ * change itself.
+ */
+export const WHOLE_PUSH_SINCE = "juspay/odu#182";
+
 /** What stands where a write token goes, in every block a page or a doc
  *  prints — the netrc line and the push block say the same thing. */
 export const WRITE_TOKEN_PLACEHOLDER = "<your-write-token>";

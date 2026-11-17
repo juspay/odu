@@ -31,6 +31,7 @@ import { base32Bytes, storePathHashOf } from "./storePath";
 import { type Cache, createCache } from "./cache";
 import type { NarinfoOutcome } from "./staging";
 import { hashOf } from "../test/fakeStore";
+import { NIX_RECORDED } from "../test/nixRecorded";
 import { openCacheRepo } from "./db";
 import { diskObjectStore } from "@odu/objects";
 
@@ -725,7 +726,7 @@ describe("paths say what keeps them", () => {
 
     // A BUILD ASKING ABOUT THE PATH WANTS IT, and that winds its clock.
     travel(3 * DAY);
-    cache.missing(cache.bucket("main") as never, [{ path: pinned }], NOTHING_SAID);
+    cache.missing(cache.bucket("main") as never, [{ path: pinned }], NOTHING_SAID, false);
     expect((await keptOf(cache)).get(pinned)?.until).toBe(NOW + 2 * DAY + 3 * DAY + 7 * DAY);
 
     // AND THE VERDICT IS THE ANSWER'S CLOCK, not the holds': no write, and
@@ -799,11 +800,34 @@ describe("missing", () => {
         { path: "/nix/store/22222222222222222222222222222222-b", sigs: ["cache.nixos.org-1:AAAA"] },
       ],
       { run: null, commit: null },
+      false,
     );
     expect(answer).toEqual({
       missing: ["/nix/store/11111111111111111111111111111111-a"],
       skipped: ["/nix/store/22222222222222222222222222222222-b"],
     });
+    await cache.close();
+  });
+
+  it("asks a whole push for what an upstream key signed, and only that push", async () => {
+    // A CLOSURE FETCHED FROM THIS BUCKET ALONE needs its nixpkgs paths here
+    // too. The bucket's upstream keys stay as they are: the next push that
+    // does not ask is filtered exactly as before.
+    const cache = cacheWith(ROOT);
+    await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
+    const bucket = cache.bucket("main");
+    if (bucket === null) throw new Error("no bucket");
+    const upstream = "/nix/store/22222222222222222222222222222222-b";
+    const asked = [{ path: upstream, sigs: ["cache.nixos.org-1:AAAA"] }];
+    expect(cache.missing(bucket, asked, { run: null, commit: null }, true)).toEqual({
+      missing: [upstream],
+      skipped: [],
+    });
+    expect(cache.missing(bucket, asked, { run: null, commit: null }, false)).toEqual({
+      missing: [],
+      skipped: [upstream],
+    });
+    expect(cache.bucket("main")?.upstreamKeys).toEqual(["cache.nixos.org-1"]);
     await cache.close();
   });
 });
@@ -971,6 +995,172 @@ describe("CA is proved from the path", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  /** What Nix 2.35.6 wrote for `echo $out > $out` (`test/nixRecorded.ts`):
+   *  its CA follows the zeroed bytes with `|107`. */
+  const SELFREF_235 = {
+    path: NIX_RECORDED.selfref235.storePath,
+    ca: NIX_RECORDED.selfref235.ca,
+    payload: {
+      bytes: new Uint8Array(Buffer.from(NIX_RECORDED.selfref235.nar, "base64")),
+      narHash: canonicalNarHash(NIX_RECORDED.selfref235.narHash),
+    },
+  };
+
+  /** One row's verdict, read from the database the cache writes. */
+  const caProofOf = (storePath: string): string | null => {
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    try {
+      const row = db.query("SELECT ca_proof FROM object WHERE store_path = ?").get(storePath) as {
+        ca_proof: string;
+      } | null;
+      return row?.ca_proof ?? null;
+    } finally {
+      db.close();
+    }
+  };
+
+  /** The narinfo OBJECT in the bucket's store: what a client reading the
+   *  store gets, as opposed to odu's own rendering. */
+  const storedNarinfo = async (storePath: string): Promise<string> => {
+    const object = await diskObjectStore({ dir: join(scratch, "cache") }).get(
+      `main/${hashOf(storePath)}.narinfo`,
+    );
+    if (object === null) throw new Error(`no narinfo object for ${storePath}`);
+    return new Response(object.stream).text();
+  };
+
+  it("proves a Nix 2.35 self-referencing path it once judged with the 2.34 form alone", async () => {
+    // A row odu stored `not-content-addressed` before it knew the 2.35 form
+    // is set back to `unknown` (migration 19); a retried PUT, which has no
+    // bytes to prove from, keeps that verdict; and the startup pass proves it
+    // and rewrites the narinfo object a store-read bucket serves.
+    const { path, ca, payload } = SELFREF_235;
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    await putNar(cache, "main", payload);
+    const put = () =>
+      cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(path),
+        stream(narinfoText(path, payload, [path])),
+        NOTHING_SAID,
+      );
+    expect(await put()).toMatchObject({ ok: true, status: 200 });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(`CA: ${ca}`);
+
+    // WHAT AN OLDER odu LEFT, and what migration 19 makes of it.
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET ca = NULL, ca_proof = 'unknown'");
+    db.close();
+    expect(await put()).toMatchObject({ ok: true, status: 200 });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).not.toContain("CA:");
+    expect(await storedNarinfo(path)).not.toContain("CA:");
+    expect(await cache.proveSelf()).toMatchObject({ rows: 1, proved: 1, refused: 0, skipped: 0 });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(`CA: ${ca}`);
+    // THE OBJECT IN THE STORE TOO, in the same pass: no second restart.
+    expect(await storedNarinfo(path)).toContain(`CA: ${ca}`);
+    await cache.close();
+  });
+
+  it("does not put back a row removed while the startup pass was reading it", async () => {
+    // THE PASS READS FROM A SNAPSHOT for minutes. A collection that takes the
+    // row while its bytes are being read must win: the verdict lands on the
+    // row as it is now, and there is none.
+    const { path, payload } = SELFREF_235;
+    const disk = diskObjectStore({ dir: join(scratch, "cache") });
+    let armed = false;
+    const cache = createCache({
+      stateRoot: scratch,
+      rootToken: ROOT,
+      publicOrigin: "http://cache.test",
+      now: () => NOW,
+      stores: new Map([
+        [
+          "local",
+          {
+            ...disk,
+            async get(key: string, range?: Parameters<typeof disk.get>[1]) {
+              if (armed && key.includes("/nar/")) {
+                armed = false;
+                const db = new Database(join(scratch, "cache", "cache.sqlite"));
+                db.run("DELETE FROM object WHERE store_path = ?", [path]);
+                db.close();
+              }
+              return disk.get(key, range);
+            },
+          },
+        ],
+      ]),
+    });
+    await cache.admin.create(createInput);
+    await putNar(cache, "main", payload);
+    await cache.acceptNarinfo(
+      cache.bucket("main") as never,
+      hashOf(path),
+      stream(narinfoText(path, payload, [path])),
+      NOTHING_SAID,
+    );
+    const db = new Database(join(scratch, "cache", "cache.sqlite"));
+    db.run("UPDATE object SET ca = NULL, ca_proof = 'unknown'");
+    db.close();
+
+    armed = true;
+    expect(await cache.proveSelf()).toMatchObject({ rows: 1, proved: 0, skipped: 1 });
+    expect(armed).toBe(false);
+    expect(caProofOf(path)).toBeNull();
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toBeNull();
+    await cache.close();
+  });
+
+  it("never judges a self-referencing path it has no hash for", async () => {
+    // A NARINFO PUT WITH NO STAGED NAR is proved by an object the bucket
+    // already keeps, and computes no modulo hash. With no row naming the same
+    // bytes, the path is `unknown` for the startup pass, never
+    // `not-content-addressed` — whether there is no row at all, or one naming
+    // other bytes.
+    const { path, ca, payload } = SELFREF_235;
+    const cache = cacheWith(ROOT);
+    await cache.admin.create(createInput);
+    await putNar(cache, "main", payload);
+    const putFor = (storePath: string) =>
+      cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(storePath),
+        stream(narinfoText(storePath, payload, [storePath])),
+        NOTHING_SAID,
+      );
+    expect(await putFor(path)).toMatchObject({ ok: true, status: 200 });
+    expect(caProofOf(path)).toBe("content-addressed");
+
+    // NO ROW AT ALL: a twin naming the kept bytes, under a path never seen.
+    const twin = "/nix/store/2222222222222222222222222222222z-selfref";
+    expect(await putFor(twin)).toMatchObject({ ok: true, status: 200 });
+    expect(caProofOf(twin)).toBe("unknown");
+
+    // A ROW NAMING OTHER BYTES: judged from its own NAR, then named again
+    // with the kept bytes and no NAR of its own.
+    const other = "/nix/store/3333333333333333333333333333333z-selfref";
+    const otherBytes = nar("other bytes");
+    await putNar(cache, "main", otherBytes);
+    expect(
+      await cache.acceptNarinfo(
+        cache.bucket("main") as never,
+        hashOf(other),
+        stream(narinfoText(other, otherBytes, [other])),
+        NOTHING_SAID,
+      ),
+    ).toMatchObject({ ok: true, status: 200 });
+    expect(caProofOf(other)).toBe("not-content-addressed");
+    expect(await putFor(other)).toMatchObject({ ok: true, status: 200 });
+    expect(caProofOf(other)).toBe("unknown");
+
+    // And the pass then judges both from the kept object. Neither is the path
+    // those bytes were made content-addressed as, so neither proves.
+    expect(await cache.proveSelf()).toMatchObject({ rows: 2, proved: 0, refused: 2 });
+    expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(`CA: ${ca}`);
+    await cache.close();
   });
 
   it("migrates a row whose object was never kept, then serves the object file", async () => {

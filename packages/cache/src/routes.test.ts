@@ -1017,6 +1017,47 @@ describe("missing", () => {
     await h.dispose();
   });
 
+  it("asks a whole push for what an upstream key signed", async () => {
+    // THE SAME QUESTION as the case above, from a pusher whose closure is
+    // fetched from this bucket alone: the upstream-signed path is missing like
+    // any other, and the path the bucket holds is still not asked for.
+    const h = await harness(true);
+    const other = "/nix/store/00000000000000000000000000000000-unbuilt";
+    const response = await h.raw("/_odu/v1/buckets/main/missing", {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      headers: { ...bearer(h.tokens.write).headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        paths: [
+          { path: HELLO },
+          { path: GLIBC, sigs: ["cache.nixos.org-1:AAAA"] },
+          { path: other },
+        ],
+        whole: true,
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      missing: [GLIBC, other],
+      skippedUpstream: [],
+      substituter: "/cache/main",
+    });
+    await h.dispose();
+  });
+
+  it("refuses a `whole` that is not true or false, with a sentence", async () => {
+    const h = await harness(true);
+    const response = await h.raw("/_odu/v1/buckets/main/missing", {
+      ...bearer(h.tokens.write),
+      method: "POST",
+      headers: { ...bearer(h.tokens.write).headers, "content-type": "application/json" },
+      body: JSON.stringify({ paths: [{ path: GLIBC }], whole: "yes" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain('"whole" is true or false');
+    await h.dispose();
+  });
+
   it("takes everything when the bucket has no upstream keys", async () => {
     // A server whose store is not the machine that built the paths — a chroot
     // store on a volume, a fresh host — never holds nixpkgs, so a bucket that

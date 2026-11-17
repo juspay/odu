@@ -94,6 +94,19 @@ One summary line, then one line per path as the bucket answers:
 - The two are independent, so the GitHub action states only `--commit`.
 - `odu ci run` states both without being asked. A path pushed by hand, with neither, shows neither.
 
+## Push a closure that is fetched from this bucket alone
+
+By default a bucket skips the paths an upstream key signed, because cache.nixos.org already serves them. A client that runs `nix copy --from <bucket> <path>` reads that one cache, and stops at the first path the bucket lacks. For such a client, push with `--whole`:
+
+```sh
+odu cache push --cache https://odu.example.com/cache/main --whole <paths>
+```
+
+- `--whole` stores every path of the closure the bucket lacks, upstream-signed ones included. The summary then says `skipped-upstream 0`.
+- It applies to this push only. The bucket's `upstreamKeys` stay as they are, so a push without the flag still skips those paths.
+- If the service is too old to store the whole closure, the push stops before sending anything and says so.
+- The upstream paths cost disk in the bucket. Each is stored once, however many closures share it.
+
 ## Push with plain Nix
 
 `nix copy --to` works with no odu on the client:
@@ -117,7 +130,7 @@ Plain `nix copy --to` compresses each NAR in memory on the client before it uplo
 | | cachix push | attic push | `odu cache push` |
 | --- | --- | --- | --- |
 | Closure, batched missing query, retries | yes | yes | yes |
-| Skips paths cache.nixos.org already has | yes | yes | yes: the bucket drops paths an upstream key signed, `cache.nixos.org-1` by default, or none with `upstreamKeys: []` |
+| Skips paths cache.nixos.org already has | yes | yes | yes: the bucket drops paths an upstream key signed, `cache.nixos.org-1` by default, or none with `upstreamKeys: []`. `--whole` keeps them for one push. |
 | Streams NARs, parallel uploads | yes | yes | yes: `nix store dump-path` through zstd, several paths at a time, retried per path |
 | Uploads bypass the server | yes, straight to S3 | no | yes on an S3 store: odu signs the URLs, then reads the object back and verifies it. A disk store takes them through the service. |
 | Dedup | per NAR | per chunk | per `NarHash`, per bucket |

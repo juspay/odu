@@ -53,6 +53,7 @@ import { type DirectStore, directUploads, type ObjectStore, TEMP, type UploadedP
 import { type KeptFile, keptFileOf, objectFactsOf } from "./fileHash";
 import { writeAll } from "./sink";
 import { verifyNarFile, verifyNarStream } from "./store";
+import type { SelfHashes } from "./storePath";
 import type { BucketRow } from "./db";
 import {
   ODU_BUCKET_FIELD,
@@ -302,7 +303,7 @@ export interface StagingDeps {
     bucket: BucketRow,
     info: NarInfo,
     file: KeptFile,
-    selfHash: string | null,
+    selfHash: SelfHashes | null,
     provenance: Provenance,
   ) => Promise<boolean>;
   /** One line per operational fact; the cache's logger. */
@@ -1016,7 +1017,7 @@ export function createStaging(deps: StagingDeps): Staging {
   function recordSerially(
     bucket: BucketRow,
     info: NarInfo,
-    selfHash: string | null,
+    selfHash: SelfHashes | null,
     provenance: Provenance,
     keep: (bucket: BucketRow) => Promise<KeptFile | Refusal>,
   ): Promise<NarinfoOutcome> {

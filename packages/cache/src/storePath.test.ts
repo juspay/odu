@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import { contentAddressOf, storePathHashOf, base32Bytes } from "./storePath";
+import { NIX_RECORDED } from "../test/nixRecorded";
 
 const RUNNER = {
   storePath: "/nix/store/0ng8ghb7myw4mlmf0kv3w8wzy80n4w3n-odu-runner",
@@ -53,23 +54,34 @@ describe("contentAddressOf", () => {
     ).toBeNull();
   });
 
-  it("proves a self-reference from its computed modulo hash", () => {
-    expect(
-      contentAddressOf({
-        storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
-        narHash: "sha256:0nhllj6n6swi6w1b8290hj2jdpn14q44552mr1lz3xc634azh3ng",
-        references: ["/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref"],
-        selfHash: "sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl",
-      }),
-    ).toBe("fixed:r:sha256:163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl");
-    expect(
-      contentAddressOf({
-        storePath: "/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref",
-        narHash: "sha256:0nhllj6n6swi6w1b8290hj2jdpn14q44552mr1lz3xc634azh3ng",
-        references: ["/nix/store/6gyc4k1ilcw1k97kf3dnzwia3rq6vakd-selfref"],
-        selfHash: `sha256:${"0".repeat(52)}`,
-      }),
-    ).toBeNull();
+  it("proves a self-reference from whichever form of its modulo hash rebuilds it", () => {
+    // NIX 2.34 wrote 6gyc…'s CA from the zeroed bytes alone; Nix 2.35 wrote
+    // j9xp…'s, from the same derivation, with `|107` after them
+    // (`test/nixRecorded.ts`). Each is proved by its own form, in either
+    // slot: the path decides, not the slot.
+    const zero = `sha256:${"0".repeat(52)}`;
+    const facts = (vector: { storePath: string; narHash: string }) => ({
+      storePath: vector.storePath,
+      narHash: vector.narHash,
+      references: [vector.storePath],
+    });
+    const v234 = facts(NIX_RECORDED.selfref234);
+    const v235 = facts(NIX_RECORDED.selfref235);
+    const hash234 = `sha256:${NIX_RECORDED.selfref234.ca.slice("fixed:r:sha256:".length)}`;
+    const hash235 = `sha256:${NIX_RECORDED.selfref235.ca.slice("fixed:r:sha256:".length)}`;
+    expect(contentAddressOf({ ...v234, selfHash: { withoutOffsets: hash234, withOffsets: zero } })).toBe(
+      NIX_RECORDED.selfref234.ca,
+    );
+    expect(contentAddressOf({ ...v234, selfHash: { withoutOffsets: zero, withOffsets: hash234 } })).toBe(
+      NIX_RECORDED.selfref234.ca,
+    );
+    expect(contentAddressOf({ ...v235, selfHash: { withoutOffsets: zero, withOffsets: hash235 } })).toBe(
+      NIX_RECORDED.selfref235.ca,
+    );
+    // ONE PATH'S HASH DOES NOT PROVE ANOTHER PATH, and neither form proving
+    // it is `null`, not a guess.
+    expect(contentAddressOf({ ...v235, selfHash: { withoutOffsets: hash234, withOffsets: zero } })).toBeNull();
+    expect(contentAddressOf({ ...v234, selfHash: { withoutOffsets: zero, withOffsets: zero } })).toBeNull();
   });
 
   it("matches Nix's makeStorePath for the self vector's own hash", () => {

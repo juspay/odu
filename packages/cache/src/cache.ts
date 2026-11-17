@@ -104,7 +104,7 @@ import {
   type UploadedPart,
 } from "@odu/objects";
 import { type KeptFile, keptFileOf } from "./fileHash";
-import { contentAddressOf } from "./storePath";
+import { contentAddressOf, type SelfHashes } from "./storePath";
 import { verifyNarStream } from "./store";
 import { createSlots } from "./slots";
 import {
@@ -518,6 +518,9 @@ export interface SelfProofReport {
   proved: number;
   refused: number;
   unreadable: number;
+  /** Rows read and judged, then left alone: by the time the verdict was
+   *  ready the row was gone, named other bytes, or had a verdict already. */
+  skipped: number;
 }
 
 /** What the narinfo backfill wrote: every bucket's rows walked, the objects
@@ -605,6 +608,12 @@ export interface Cache {
    *  take because an upstream key signed it — reported separately so `odu cache
    *  push` can say "upstream" rather than "already there".
    *
+   *  `whole` is a pusher storing a closure that will be FETCHED ALONE: `nix
+   *  copy --from <this bucket>` reads no other cache and stops at the first
+   *  path the bucket lacks. It answers an absent upstream-signed path as
+   *  missing, so `skipped` is empty. The bucket's `upstreamKeys` are not
+   *  touched: the next push that does not ask is filtered as before.
+   *
    *  `provenance` is what the asker says built them, and it lands on the paths
    *  the bucket ALREADY holds — the ones that get no narinfo PUT. Only a null
    *  column is filled and none is ever overwritten, so the first builder to
@@ -614,6 +623,7 @@ export interface Cache {
     bucket: BucketRow,
     paths: readonly { path: string; sigs?: readonly string[] }[],
     provenance: Provenance,
+    whole: boolean,
   ): { missing: readonly string[]; skipped: readonly string[] };
   /**
    * EVERY BUCKET'S ROW, without a credential — what a SUBSCRIBER reads.
@@ -1214,7 +1224,7 @@ export function createCache(options: CacheOptions): Cache {
     bucket: BucketRow,
     info: NarInfo,
     file: KeptFile,
-    selfHash: string | null,
+    selfHash: SelfHashes | null,
     provenance: Provenance,
   ): Promise<boolean> {
     const existing = repo.object(bucket.name, info.storePath);
@@ -1230,22 +1240,24 @@ export function createCache(options: CacheOptions): Cache {
       references: info.references,
       selfHash,
     });
-    // A SECOND narinfo PUT for a self-referencing CA row has no staged NAR to
-    // prove from; `selfHash` is null. The SAME NarHash means the bytes the row
-    // already proved are the bytes being named — keep that verdict rather than
-    // flipping it to a final "not content-addressed".
-    const keep =
-      computed === null &&
-      selfHash === null &&
-      existing !== null &&
-      existing.narHash === info.narHash &&
-      existing.ca !== null;
+    // A SECOND narinfo PUT for a self-referencing row has no staged NAR to
+    // prove from; `selfHash` is null, which means NO HASH WAS COMPUTED, never
+    // that neither form matched. Such a path is never judged without its
+    // bytes. The SAME NarHash means the bytes the row already judged are the
+    // bytes being named — keep that verdict, whatever it is. With no such row
+    // (none, or one naming other bytes) the path is `unknown`, and the
+    // startup pass proves it from the kept object.
+    const unjudged =
+      computed === null && selfHash === null && info.references.includes(info.storePath);
+    const keep = unjudged && existing !== null && existing.narHash === info.narHash;
     const ca = keep ? existing.ca : computed;
     const caProof = keep
       ? existing.caProof
-      : ca === null
-        ? "not-content-addressed"
-        : "content-addressed";
+      : unjudged
+        ? "unknown"
+        : ca === null
+          ? "not-content-addressed"
+          : "content-addressed";
     repo.putObject({
       bucket: bucket.name,
       storePath: info.storePath,
@@ -2110,7 +2122,7 @@ export function createCache(options: CacheOptions): Cache {
       (row) => row.caProof === "unknown" && row.references.includes(row.storePath),
     );
     if (rows.length === 0) {
-      return { rows: 0, proved: 0, refused: 0, unreadable: 0 };
+      return { rows: 0, proved: 0, refused: 0, unreadable: 0, skipped: 0 };
     }
     options.log?.("cache.self_ca.start", {
       rows: rows.length,
@@ -2121,6 +2133,7 @@ export function createCache(options: CacheOptions): Cache {
     let refused = 0;
     let unreadable = 0;
     let done = 0;
+    let skipped = 0;
     const worker = async (): Promise<void> => {
       for (;;) {
         if (stopping) return;
@@ -2146,24 +2159,49 @@ export function createCache(options: CacheOptions): Cache {
         if (!checked.ok || checked.selfHash === null) {
           unreadable += 1;
         } else {
-          const ca = contentAddressOf({
-            storePath: row.storePath,
-            narHash: row.narHash,
-            references: row.references,
-            selfHash: checked.selfHash,
+          const selfHash = checked.selfHash;
+          // THE ROW AS IT IS NOW, under the lock every other writer holds. The
+          // rows are a snapshot taken at pass start and this pass reads every
+          // one from the store, for minutes: a collection or a
+          // `bucket.delete` may have taken the row meanwhile, a push may
+          // have replaced its bytes or judged it. Writing the snapshot back
+          // would put back a path nothing lists, naming an object that is
+          // gone. So the verdict is computed from, and lands on, a row that
+          // still names the bytes read and is still unknown, and only the two
+          // verdict fields change on it.
+          const outcome = await withWriteLock(async () => {
+            const bucket = repo.bucket(row.bucket);
+            const current = bucket === null ? null : repo.object(bucket.name, row.storePath);
+            if (
+              bucket === null ||
+              current === null ||
+              current.narHash !== row.narHash ||
+              current.caProof !== "unknown"
+            ) {
+              return "skipped" as const;
+            }
+            const ca = contentAddressOf({
+              storePath: current.storePath,
+              narHash: current.narHash,
+              references: current.references,
+              selfHash,
+            });
+            const judged: ObjectRow = {
+              ...current,
+              ca,
+              caProof: ca === null ? "not-content-addressed" : "content-addressed",
+            };
+            repo.putObject(judged);
+            if (ca === null) return "refused" as const;
+            // THE NARINFO CLIENTS READ. A bucket read from its store serves the
+            // object written there, not odu's own rendering, so a proved path
+            // gets its `CA:` line only once that object is rewritten. A row
+            // that stays not content-addressed renders the same text.
+            await keepNarinfoObject(bucket, judged);
+            return "proved" as const;
           });
-          // NOT INTO A BUCKET THAT WENT. `putObject` INSERTS, and these rows
-          // are a snapshot taken at pass start: a `bucket.delete` between
-          // this row's read and this write would put back a path nothing
-          // lists — invisible to the pins and to every collection, counted
-          // by `objectTotals`, and a 404 if the name is ever re-created.
-          if (repo.bucket(row.bucket) === null) continue;
-          repo.putObject({
-            ...row,
-            ca,
-            caProof: ca === null ? "not-content-addressed" : "content-addressed",
-          });
-          if (ca === null) refused += 1;
+          if (outcome === "skipped") skipped += 1;
+          else if (outcome === "refused") refused += 1;
           else proved += 1;
         }
         if (done % 100 === 0) {
@@ -2178,8 +2216,9 @@ export function createCache(options: CacheOptions): Cache {
       proved,
       refused,
       unreadable,
+      skipped,
     });
-    return { rows: rows.length, proved, refused, unreadable };
+    return { rows: rows.length, proved, refused, unreadable, skipped };
   }
 
   async function migrateNow(): Promise<MigrationReport> {
@@ -2599,7 +2638,7 @@ export function createCache(options: CacheOptions): Cache {
       return outcome;
     },
 
-    missing(bucket, paths, provenance) {
+    missing(bucket, paths, provenance, whole) {
       const missing: string[] = [];
       const skipped: string[] = [];
       /** The paths this bucket HAS and the asker wants. */
@@ -2609,10 +2648,15 @@ export function createCache(options: CacheOptions): Cache {
           wanted.push(path);
           continue;
         }
-        const upstream = (sigs ?? []).some((sig) => {
-          const key = keyNameOf(sig);
-          return key !== null && bucket.upstreamKeys.includes(key);
-        });
+        // A WHOLE PUSH IS ANSWERED BEFORE THE KEYS ARE READ: the asker said
+        // the closure will be fetched from this bucket alone, so a path an
+        // upstream key signed is as missing as any other.
+        const upstream =
+          !whole &&
+          (sigs ?? []).some((sig) => {
+            const key = keyNameOf(sig);
+            return key !== null && bucket.upstreamKeys.includes(key);
+          });
         (upstream ? skipped : missing).push(path);
       }
       // THE QUESTION IS THE RENEWAL, AND THE CLAIM. A pusher asking "do you

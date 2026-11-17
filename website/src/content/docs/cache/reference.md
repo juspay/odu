@@ -23,7 +23,7 @@ Commands are written with the [`odu` shorthand](/docs/#quick-start).
 Uploads only the paths the bucket is missing, and the bucket keeps what it takes. It talks to the cache directly, so it runs on the machine that holds the paths.
 
 ```
-odu cache push <bucket> <path>… [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA]
+odu cache push <bucket> <path>… [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA] [--whole]
 odu cache push --cache <substituter> <path>…
 odu cache push <path>…
 ```
@@ -41,6 +41,7 @@ odu cache push <path>…
 | --- | --- |
 | `--pin NAME` | Re-points that pin at the closure this push landed, unless a path was refused. |
 | `--run ID`, `--commit SHA` | State what built the paths. The bucket keeps both on every path this push stores, and its page shows them. A push that states neither leaves what a run stated. |
+| `--whole` | Stores the closure's upstream-signed paths too, for a client that fetches it from this bucket alone. If the service is too old to store the whole closure, the push stops before sending anything and says so. |
 | `--part-size MiB` | Sets the size of each part of a large upload. |
 | `--concurrency N` | Sets how many paths upload at once. |
 | `-o json` | Prints the result as JSON. |
@@ -82,7 +83,7 @@ Creates a bucket, and returns its substituter URL, public key and store.
 | `name` | **name** | the bucket's name, in its URL |
 | `public` | — (the board creates public buckets) | whether it is read without a cache token |
 | `retentionDays` | — (set it afterwards under **Retention**) | how long it keeps what nobody wants. 90 when absent. |
-| `upstreamKeys` | **Skip upstream paths** | the keys whose paths it skips, `cache.nixos.org-1` by default. `[]` takes everything, which costs disk, for clients that cannot reach cache.nixos.org. The switch off sends `[]`. |
+| `upstreamKeys` | **Skip upstream paths** | the keys whose paths it skips, `cache.nixos.org-1` by default. `[]` takes everything, which costs disk, for clients that cannot reach cache.nixos.org. The switch off sends `[]`. A push with `--whole` stores them anyway. |
 | `store` | **where its objects live** | the declared store for its objects. `local` by default. See [Keep a bucket on S3](/docs/cache/s3/). |
 
 Behind a proxy, the URL is under the address you published the service at, `$ODU_PUBLIC_ORIGIN`, which the NixOS module derives for you.

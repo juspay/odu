@@ -55,7 +55,12 @@ import {
   type UploadMode,
   type UploadPlan,
 } from "./paths";
-import { DEFAULT_NAR_PART_BYTES, MAX_NAR_PART_BYTES, UPLOAD_NEGOTIATION_SINCE } from "./surface";
+import {
+  DEFAULT_NAR_PART_BYTES,
+  MAX_NAR_PART_BYTES,
+  UPLOAD_NEGOTIATION_SINCE,
+  WHOLE_PUSH_SINCE,
+} from "./surface";
 import { type PathInfo, nixClosure, nixDump } from "./store";
 
 /** The environment slice this client reads. Passed in rather than reached for:
@@ -889,6 +894,14 @@ export interface PushOptions {
    */
   pin?: string;
   /**
+   * STORE THE WHOLE CLOSURE, upstream-signed paths included — for a closure
+   * that will be fetched from this bucket ALONE. `nix copy --from <bucket>`
+   * reads no other cache and stops at the first path the bucket lacks, so a
+   * bucket that skipped nixpkgs cannot serve it. Absent or `false` keeps the
+   * bucket's own rule: what an upstream key signed stays upstream.
+   */
+  whole?: boolean;
+  /**
    * WHAT BUILT THESE PATHS — the run that produced them and the commit they
    * were built from. Pass what the caller has, empty or absent included:
    * {@link provenanceHeaders} is what decides which of them was STATED, and a
@@ -966,7 +979,7 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
         // paths this answer calls present get no PUT at all, and this is the
         // one request that touches their rows. The bucket fills a null column
         // and overwrites none.
-        await askMissing(resolved, { ...headers, ...provenance }, closure);
+        await askMissing(resolved, { ...headers, ...provenance }, closure, options.whole === true);
   const present = closure.size - answer.missing.length;
   const alreadyPresent = present - answer.skippedUpstream.length;
   // ONE PREAMBLE, then a line per path: what the closure is, what the bucket
@@ -1109,6 +1122,7 @@ async function askMissing(
   bucket: ResolvedBucket,
   headers: Record<string, string>,
   closure: Map<string, ClosureEntry>,
+  whole: boolean,
   only?: ReadonlySet<string>,
 ): Promise<MissingAnswer> {
   const sending = only === undefined
@@ -1126,6 +1140,8 @@ async function askMissing(
         path: entry.storePath,
         sigs: entry.sigs,
       })),
+      // Only when asked, so a push without `--whole` sends what it always did.
+      ...(whole ? { whole: true } : {}),
     }),
   });
   if (!dialed.ok) throw new Error(dialed.refusal.message);
@@ -1152,11 +1168,22 @@ async function askMissing(
     : [];
   const substituter =
     "substituter" in body && typeof body.substituter === "string" ? body.substituter : null;
-  return {
+  const answer = {
     missing: missing.filter((path): path is string => typeof path === "string"),
     skippedUpstream: skipped.filter((path): path is string => typeof path === "string"),
     substituter,
   };
+  // A WHOLE PUSH THAT CAME BACK FILTERED was answered by a service that never
+  // read `whole`. Carrying on would land a closure the bucket cannot serve
+  // alone and call it a success, which is the one thing `--whole` exists to
+  // rule out.
+  if (whole && answer.skippedUpstream.length > 0) {
+    throw new Error(
+      `${url} skipped ${answer.skippedUpstream.length} upstream-signed paths on a whole push: ` +
+        `it predates ${WHOLE_PUSH_SINCE}, which added whole pushes — upgrade the cache`,
+    );
+  }
+  return answer;
 }
 
 /**

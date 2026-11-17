@@ -49,7 +49,12 @@ Writes, and reads of a private bucket, take `Authorization: Bearer <token>`, or 
 
 ### `missing`
 
-The `missing` route backs `odu cache push`. It is not part of the Nix protocol. It returns `missing`, the paths to send, and `skippedUpstream`, the paths the bucket never takes because an upstream key signed them, so a push can report the two apart.
+The `missing` route backs `odu cache push`. It is not part of the Nix protocol. The body is `{paths: [{path, sigs}], whole?}`, and it returns two lists, so a push can report them apart:
+
+- `missing`: the paths to send.
+- `skippedUpstream`: the paths the bucket does not take because an upstream key signed them.
+
+With `whole: true`, an upstream-signed path the bucket lacks is listed under `missing` instead, and `skippedUpstream` is empty. A `whole` that is not `true` or `false` is refused with a 400 and a sentence. Either way, asking renews the paths the bucket already holds.
 
 ### Uploads
 

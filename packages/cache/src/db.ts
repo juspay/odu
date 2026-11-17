@@ -584,6 +584,19 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE object ADD COLUMN run TEXT;
   ALTER TABLE object ADD COLUMN commit_sha TEXT;
   `,
+  // Migration 19 — A SELF-REFERENCING ROW WAS JUDGED WITH ONE FORM OF TWO.
+  // Nix 2.35 hashes a self-referencing path's occurrence offsets after its
+  // zeroed bytes, and odu knew only the 2.34 form, so a 2.35 rewrite was
+  // stored `not-content-addressed`. A path the bucket holds is never uploaded
+  // again, so nothing would judge it again: its honest state is `unknown`, and
+  // the startup pass (`proveSelf`) proves it from the kept object with both
+  // forms. That costs one read of every such row, once — the cost the pass
+  // had when it first ran.
+  `
+  UPDATE object SET ca_proof = 'unknown'
+  WHERE ca_proof = 'not-content-addressed'
+    AND EXISTS (SELECT 1 FROM json_each(object.refs) WHERE json_each.value = object.store_path);
+  `,
 ];
 
 /** The schema this build writes. A file carrying a HIGHER number was written by
