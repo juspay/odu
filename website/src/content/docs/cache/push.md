@@ -104,7 +104,7 @@ odu cache push --cache https://odu.example.com/cache/main --whole <paths>
 
 - `--whole` stores every path of the closure the bucket lacks, upstream-signed ones included. The summary then says `skipped-upstream 0`.
 - It applies to this push only. The bucket's `upstreamKeys` stay as they are, so a push without the flag still skips those paths.
-- A cache too old to take a whole push is refused by name, before any path is sent.
+- If the service is too old to store the whole closure, the push stops before sending anything and says so.
 - The upstream paths cost disk in the bucket. Each is stored once, however many closures share it.
 
 ## Push with plain Nix

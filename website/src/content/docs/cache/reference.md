@@ -41,7 +41,7 @@ odu cache push <path>…
 | --- | --- |
 | `--pin NAME` | Re-points that pin at the closure this push landed, unless a path was refused. |
 | `--run ID`, `--commit SHA` | State what built the paths. The bucket keeps both on every path this push stores, and its page shows them. A push that states neither leaves what a run stated. |
-| `--whole` | Stores the closure's upstream-signed paths too, for a client that fetches it from this bucket alone. A cache too old to take them is refused. |
+| `--whole` | Stores the closure's upstream-signed paths too, for a client that fetches it from this bucket alone. If the service is too old to store the whole closure, the push stops before sending anything and says so. |
 | `--part-size MiB` | Sets the size of each part of a large upload. |
 | `--concurrency N` | Sets how many paths upload at once. |
 | `-o json` | Prints the result as JSON. |

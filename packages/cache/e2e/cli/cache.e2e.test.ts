@@ -838,6 +838,9 @@ describe("odu serves a Nix binary cache", () => {
     const partial = fetchAlone("whole-before");
     console.log(`nix copy --from main, after a push without --whole:\n${partial.stderr}`);
     expect(partial.status).not.toBe(0);
+    // THE MISSING PIECE, and not any other failure: the upstream-signed child
+    // the bucket skipped is what the copy could not find.
+    expect(partial.stderr).toContain(`path '${child}' is not valid`);
 
     const whole = cli(["cache", "push", "main", parent, "--whole"], {
       ODU_CACHE_TOKEN: writeToken,

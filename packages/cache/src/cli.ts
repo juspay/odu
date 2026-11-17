@@ -141,7 +141,9 @@ push <path>…                  with neither, the substituter is read from
                               paths too, for a closure that is fetched from
                               this bucket alone (\`nix copy --from\` reads one
                               cache). Without it they are skipped as upstream.
-                              A cache too old to take them is a refusal
+                              If the service is too old to store the whole
+                              closure, the push stops before sending anything
+                              and says so
 target [-o json]              print the one odu substituter ./flake.nix's
                               nixConfig names — the same reading \`push\` makes
                               with no --cache, said out loud instead of acted
