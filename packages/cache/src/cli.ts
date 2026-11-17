@@ -592,7 +592,7 @@ async function pushCommand(rest: string[]): Promise<number> {
       ...(values.commit === undefined ? {} : { commit: values.commit }),
       // THE WHOLE CLOSURE, upstream-signed paths included, when the caller
       // will fetch it from this bucket alone.
-      ...(values.whole === true ? { whole: true } : {}),
+      whole: values.whole === true,
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
       },

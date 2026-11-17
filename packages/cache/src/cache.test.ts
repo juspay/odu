@@ -31,6 +31,7 @@ import { base32Bytes, storePathHashOf } from "./storePath";
 import { type Cache, createCache } from "./cache";
 import type { NarinfoOutcome } from "./staging";
 import { hashOf } from "../test/fakeStore";
+import { NIX_RECORDED } from "../test/nixRecorded";
 import { openCacheRepo } from "./db";
 import { diskObjectStore } from "@odu/objects";
 
@@ -996,19 +997,14 @@ describe("CA is proved from the path", () => {
     }
   });
 
-  /** RECORDED FROM NIX 2.35.6: `echo $out > $out`, made content-addressed;
+  /** What Nix 2.35.6 wrote for `echo $out > $out` (`test/nixRecorded.ts`):
    *  its CA follows the zeroed bytes with `|107`. */
   const SELFREF_235 = {
-    path: "/nix/store/j9xpm5a9yzp9v5slnxsgvay2lnwqi2l6-selfref",
-    ca: "fixed:r:sha256:14869lj9vs5fmpd0f1p5msrn1jdl7hd146xaimv4l6zivgmc71zl",
+    path: NIX_RECORDED.selfref235.storePath,
+    ca: NIX_RECORDED.selfref235.ca,
     payload: {
-      bytes: new Uint8Array(
-        Buffer.from(
-          "DQAAAAAAAABuaXgtYXJjaGl2ZS0xAAAAAQAAAAAAAAAoAAAAAAAAAAQAAAAAAAAAdHlwZQAAAAAHAAAAAAAAAHJlZ3VsYXIACAAAAAAAAABjb250ZW50czQAAAAAAAAAL25peC9zdG9yZS9qOXhwbTVhOXl6cDl2NXNsbnhzZ3ZheTJsbndxaTJsNi1zZWxmcmVmCgAAAAABAAAAAAAAACkAAAAAAAAA",
-          "base64",
-        ),
-      ),
-      narHash: canonicalNarHash("sha256-XUFNQ9+fHf+Zow3TLUYxj/5FPxAn9wKBcq+ia2Q3PRM="),
+      bytes: new Uint8Array(Buffer.from(NIX_RECORDED.selfref235.nar, "base64")),
+      narHash: canonicalNarHash(NIX_RECORDED.selfref235.narHash),
     },
   };
 

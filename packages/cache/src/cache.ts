@@ -2159,21 +2159,16 @@ export function createCache(options: CacheOptions): Cache {
         if (!checked.ok || checked.selfHash === null) {
           unreadable += 1;
         } else {
-          const ca = contentAddressOf({
-            storePath: row.storePath,
-            narHash: row.narHash,
-            references: row.references,
-            selfHash: checked.selfHash,
-          });
+          const selfHash = checked.selfHash;
           // THE ROW AS IT IS NOW, under the lock every other writer holds. The
           // rows are a snapshot taken at pass start and this pass reads every
           // one from the store, for minutes: a collection or a
           // `bucket.delete` may have taken the row meanwhile, a push may
           // have replaced its bytes or judged it. Writing the snapshot back
           // would put back a path nothing lists, naming an object that is
-          // gone. So the verdict lands only on a row that still names the
-          // bytes read and is still unknown, and only the two verdict fields
-          // change on it.
+          // gone. So the verdict is computed from, and lands on, a row that
+          // still names the bytes read and is still unknown, and only the two
+          // verdict fields change on it.
           const outcome = await withWriteLock(async () => {
             const bucket = repo.bucket(row.bucket);
             const current = bucket === null ? null : repo.object(bucket.name, row.storePath);
@@ -2185,20 +2180,25 @@ export function createCache(options: CacheOptions): Cache {
             ) {
               return "skipped" as const;
             }
-            repo.putObject({
+            const ca = contentAddressOf({
+              storePath: current.storePath,
+              narHash: current.narHash,
+              references: current.references,
+              selfHash,
+            });
+            const judged: ObjectRow = {
               ...current,
               ca,
               caProof: ca === null ? "not-content-addressed" : "content-addressed",
-            });
+            };
+            repo.putObject(judged);
+            if (ca === null) return "refused" as const;
             // THE NARINFO CLIENTS READ. A bucket read from its store serves the
             // object written there, not odu's own rendering, so a proved path
             // gets its `CA:` line only once that object is rewritten. A row
             // that stays not content-addressed renders the same text.
-            if (ca !== null) {
-              const recorded = repo.object(bucket.name, row.storePath);
-              if (recorded !== null) await keepNarinfoObject(bucket, recorded);
-            }
-            return ca === null ? ("refused" as const) : ("proved" as const);
+            await keepNarinfoObject(bucket, judged);
+            return "proved" as const;
           });
           if (outcome === "skipped") skipped += 1;
           else if (outcome === "refused") refused += 1;
