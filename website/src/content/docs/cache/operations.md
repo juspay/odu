@@ -53,7 +53,7 @@ The cache serves at once, then does its upkeep in the background:
 
 - It sweeps objects that no path names, such as one left by a crash between upload and record, or by a collection that stopped between two deletes. The sweep knows all three kinds of key, so it never takes a narinfo for an orphan.
 - It writes any narinfo object a path lacks, two at a time. An object already there with the right length is skipped, so a restart halfway costs a walk, not a rewrite. When the `nix-cache-info` text changes, such as after a move to a new public origin, it rewrites that object and purges its address at the edge.
-- It proves `CA:` once for paths that have not been proved, with two workers, and keeps each verdict. A path that refers to itself is proved by reading its object from the store. An upgrade that adds a way to prove such a path sets every one not proved back to unproved, so the first start after it reads each of them once.
+- It proves `CA:` once for paths that have not been proved, with two workers, and keeps each verdict. A path that refers to itself is proved by reading its object from the store, and once proved, its narinfo in the store is rewritten with the `CA:` line. An upgrade that adds a way to prove such a path sets every one not proved back to unproved, so the first start after it reads each once.
 - It aborts S3 multipart uploads that a killed service left behind.
 
 ### The one-time migration
@@ -74,7 +74,7 @@ A service in the foreground (`odu web`) prints these lines, and keeps its other 
 | --- | --- | --- |
 | `cache.migration.start`, `.progress`, `.pause`, `.resume`, `.complete`, `.incomplete` | objects, NAR bytes, free space | The one-time migration. After `incomplete`, the paths it names have no object and no copy in the old store, and return 404 until pushed again. |
 | `cache.migration.object_failed` | `bucket`, `path`, `reason` | One path the migration could not move, such as one the old store does not have, or has with another `NarHash`. |
-| `cache.self_ca.start`, `.progress`, `.complete` | paths, bytes, proved, refused, unreadable | The pass that proves `CA:` for paths that refer to themselves: once per path, and once more for those not proved after an upgrade that adds a way to prove them. |
+| `cache.self_ca.start`, `.progress`, `.complete` | paths, bytes, proved, refused, unreadable, skipped | Proves `CA:` for paths that refer to themselves: once per path, and again after an upgrade that adds a way to prove them. `skipped`: paths a push or a collection changed meanwhile. |
 | `cache.nar.served` | path, bytes written, ms, `source`, `cancelled` | A NAR served. `source` is `object` from the bucket's store, `transition` from the old Nix store, or `redirect` for a 307 to an S3 store, always with `bytes: 0`. |
 | `cache.nar.uploaded` | `bucket`, `file`, `mode`, `parts`, `bytes` | A NAR upload completed, direct or staged, with the bytes odu measured itself. |
 | `cache.narinfo.served` | `bucket`, `hash`, `hit` | A narinfo asked of odu, and whether the bucket had it. |
