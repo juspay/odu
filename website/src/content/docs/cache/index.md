@@ -23,7 +23,18 @@ On the board, an admin creates one under **Cache** → **New bucket** → **Crea
 
 Trust the key, and a build substitutes from the bucket instead of building. The bucket's **Set up** block on the board shows each setting in its own tab, and `odu cache use main` prints them in a terminal.
 
-`nix.conf`:
+On a machine with the Nix daemon, put the two lines in the machine's Nix configuration: `/etc/nix/nix.conf`, or `nix.settings` on NixOS and nix-darwin. The daemon takes them from anywhere else only for a user in its `trusted-users`.
+
+| Where the two lines are | Who gets the bucket |
+| --- | --- |
+| the machine's Nix configuration | every user on the machine |
+| a user's own `~/.config/nix/nix.conf`, or `--option` on the command line | only a user in the daemon's `trusted-users` |
+| a flake's `nixConfig`, accepted with `--accept-flake-config` | a trusted user, or any user once the machine lists the address under `trusted-substituters` and the key under `trusted-public-keys` |
+| the address in the machine's configuration, without the key | nobody: Nix refuses the bucket's build outputs as unsigned |
+
+A line Nix will not use is a warning, not an error, and Nix then builds the path itself. Without the key, the warning says the path is not signed by any of the keys in `trusted-public-keys`.
+
+`/etc/nix/nix.conf`, then restart the Nix daemon:
 
 ```sh
 extra-substituters = http://127.0.0.1:18440/cache/main
@@ -39,7 +50,7 @@ nix.settings = {
 };
 ```
 
-`flake.nix`:
+`flake.nix`, for the users the table above names:
 
 ```nix
 {

@@ -69,7 +69,7 @@ odu surface cache bucket_create --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","nam
 odu surface cache token_mint --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","scope":"write"}' --json
 ```
 
-On a client, trust the bucket with the key `bucket_create` printed:
+On each client machine, put the bucket's address and the key `bucket_create` printed in the machine's Nix configuration. On NixOS:
 
 ```nix
 {
@@ -79,6 +79,8 @@ On a client, trust the bucket with the key `bucket_create` printed:
   };
 }
 ```
+
+On a machine with the Nix daemon, these lines belong in the machine's configuration, where they work for every user. [Use it](/docs/cache/#use-it) has the other forms and who each one works for.
 
 What a bucket keeps, and for how long, is on [Keep and reclaim](/docs/cache/retention/).
 

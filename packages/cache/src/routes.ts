@@ -60,7 +60,9 @@ import type { BucketRow, Scope } from "./db";
 import { isStagedFileName, isStorePathHash } from "./narinfo";
 import {
   actionsBlock,
+  FLAKE_CONFIG_NOTE,
   flakeBlock,
+  MACHINE_CONFIG_NOTE,
   MAX_NAR_PART_BYTES,
   netrcBlock,
   nixConfBlock,
@@ -479,18 +481,20 @@ function consumerPage(facts: ConsumerFacts): string {
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
   // ONE BLOCK PER THING A PERSON PASTES SOMEWHERE. netrc only when reading
-  // needs a credential: a public bucket is read with no account at all.
-  const blocks: ReadonlyArray<readonly [string, string]> = [
+  // needs a credential: a public bucket is read with no account at all. A
+  // block may carry a sentence that says who it works for.
+  const blocks: ReadonlyArray<readonly [string, string, string?]> = [
     ["nix.conf", nixConfBlock(facts)],
     ["NixOS / nix-darwin", nixOsBlock(facts)],
-    ["flake.nix", flakeBlock(facts)],
+    ["flake.nix", flakeBlock(facts), FLAKE_CONFIG_NOTE],
     ["GitHub Actions", actionsBlock(facts)],
     ...(facts.public
       ? []
       : [["netrc", netrcBlock({ url: facts.url, home: null })] as const]),
   ];
-  const block = (title: string, text: string): string =>
-    `<h3>${escape(title)}</h3>
+  const block = (title: string, text: string, note?: string): string =>
+    `<h3>${escape(title)}</h3>${note === undefined ? "" : `
+<p class="hint">${escape(note)}</p>`}
 <div class="block"><button type="button" data-copy>copy</button><pre>${escape(text)}</pre></div>`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -552,7 +556,8 @@ pre{margin:0;padding:1rem 1.1rem;background:var(--sunken);color:#c9d4ce;font:.78
 <dt>Upstream keys</dt><dd><code>${escape(facts.upstreamKeys.join(" ") || "(none)")}</code></dd>
 </dl>
 <h2>Use it</h2>
-${blocks.map(([title, text]) => block(title, text)).join("\n")}
+<p class="hint">${escape(MACHINE_CONFIG_NOTE)}</p>
+${blocks.map(([title, text, note]) => block(title, text, note)).join("\n")}
 <p class="hint">Or let a terminal print them: <code>${escape(facts.command)}</code></p>
 <h2>Push to it</h2>
 <p class="hint">A write token comes from this bucket's page on the board — an admin mints one. The push exports it where the build runs.</p>
