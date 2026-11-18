@@ -97,23 +97,22 @@ export interface Service {
 export const ROOT_TOKEN = "acceptance-root-token";
 
 /**
- * A port for THIS worker.
+ * PORTS THE KERNEL VOUCHES FOR, reserved once per cucumber worker, and the
+ * ONLY ports this suite uses.
  *
- * Two bands are being kept apart. `tests/e2e/webHarness.ts` derives its port as
- * `18500 + (pid % 900)`, so 18500–19399 belongs to that suite and a developer
- * running both at once must not collide with it. Within this suite the WORKER ID
- * is a separate hundred rather than another modulus of the pid: two cucumber
- * workers are forked back to back and their pids are usually consecutive, so a
- * pid-only derivation is one unlucky spawn away from two daemons racing one
- * origin — and because odu derives the daemon home FROM the origin, the loser
- * would not fail to bind, it would yield to its sibling's gate and every
- * scenario behind it would grade the wrong service.
+ * The suite used to derive them from the worker id and the pid
+ * (`19500 + worker * 100 + pid % 100`, the door 40 above it). On a persistent
+ * CI host that band met a PREVIOUS run's daemon, left behind by a run that
+ * never reached its teardown, still holding the port: the next sign-in
+ * scenario could not bind and failed for a reason that had nothing to do with
+ * odu. Binding `0` and reading the assigned port cannot hit a bound port,
+ * because the kernel excludes every listener that is actually there.
+ *
+ * There is no fallback. A caller that asks for a port before
+ * {@link reserveWorldPorts} is refused with a sentence, rather than handed the
+ * old band, which is what had happened: the reservation existed, and the
+ * suite's own `BeforeAll` never called it.
  */
-/** PORTS THE KERNEL VOUCHES FOR, reserved once per cucumber worker. The old
- *  pid-derived band collided with a PREVIOUS run's daemon on a persistent CI
- *  host: the pid landed on the same band and the stale service held the port.
- *  Binding `0` and reading the assigned port cannot hit a bound port — the
- *  kernel excludes every listener that is actually there. */
 const reservedPorts = new Map<string, number>();
 
 async function freePort(): Promise<number> {
@@ -136,43 +135,39 @@ export async function reserveWorldPorts(): Promise<void> {
   }
 }
 
-function reserved(key: string, fallback: () => number): number {
-  return reservedPorts.get(key) ?? fallback();
+function reserved(key: string): number {
+  const port = reservedPorts.get(key);
+  if (port === undefined) {
+    throw new Error(
+      `web-acceptance: the ${key} port was asked for before reserveWorldPorts() ran. ` +
+        "Call it first (BeforeAll does): every port this suite binds is one the kernel " +
+        "picked, so a daemon an earlier run left behind cannot be holding it.",
+    );
+  }
+  return port;
 }
 
+/** The loopback world's port. */
 export function workerPort(): number {
-  return reserved("worker", () => {
-    const worker = Number(process.env.CUCUMBER_WORKER_ID ?? 0);
-    return 19500 + worker * 100 + (process.pid % 100);
-  });
+  return reserved("worker");
 }
 
-/** THE DOOR'S WORLD, beside the loopback one.
- *
- * Two services per worker, because the two worlds cannot share one: a daemon
- * with `ODU_GITHUB_*` set HAS a door, and a scenario tagged with no world at all
- * asserts today's loopback page — which that daemon would refuse to draw. The
- * offsets are inside the worker's own hundred (see `workerPort`) so two workers
- * still cannot collide. */
-export const DOOR_PORT_OFFSET = 40;
-/** The GitHub stub both origins point at. */
-export const STUB_PORT_OFFSET = 45;
-
-/** THE TUNNEL'S WORLD — a third daemon, because the cloudflare row mounts only
- *  when its token file is configured, and the loopback page a scenario without
- *  that row asserts must stay exactly as it is. */
-export const TUNNEL_PORT_OFFSET = 50;
-
+/** THE DOOR'S WORLD, beside the loopback one: a daemon with `ODU_GITHUB_*` set
+ *  HAS a door, and a scenario tagged with no world at all asserts the loopback
+ *  page, which that daemon would refuse to draw. */
 export function doorPort(): number {
-  return reserved("door", () => workerPort() + DOOR_PORT_OFFSET);
+  return reserved("door");
 }
 
+/** The GitHub stub both origins point at. */
 export function stubPort(): number {
-  return reserved("stub", () => workerPort() + STUB_PORT_OFFSET);
+  return reserved("stub");
 }
 
+/** THE TUNNEL'S WORLD: a third daemon, because the cloudflare row mounts only
+ *  when its token file is configured. */
 export function tunnelPort(): number {
-  return reserved("tunnel", () => workerPort() + TUNNEL_PORT_OFFSET);
+  return reserved("tunnel");
 }
 
 /** Poll until `ask` answers, or fail with a sentence naming what was waited on. */
@@ -205,11 +200,15 @@ export function daemonLog(service: Pick<Service, "logPath">): string {
 
 /** Start a service in a private world and wait for it to SAY it is ready.
  *  Readiness is asked for, never slept on: the service publishes its own state
- *  and this reads it. */
+ *  and this reads it. A service that never says so is KILLED before the error
+ *  is thrown, process group and all: a daemon that came up late, after the
+ *  suite gave up on it, would otherwise hold its port long after this worker
+ *  is gone. */
 export async function startService(
   odu: string,
   port: number,
   extraEnv: NodeJS.ProcessEnv = {},
+  readyTimeoutMs = 120_000,
 ): Promise<Service> {
   const root = mkdtempSync(join(tmpdir(), "odu-wa-"));
   const state = join(root, "state");
@@ -254,6 +253,9 @@ export async function startService(
   });
   daemon.stdout?.pipe(sink);
   daemon.stderr?.pipe(sink);
+  // From here until it is stopped, a signal that ends this worker ends it too.
+  live.add(daemon);
+  sweepOnSignal();
 
   const partial: Pick<Service, "odu" | "env" | "logPath"> = { odu, env, logPath };
   try {
@@ -273,9 +275,11 @@ export async function startService(
       } catch {
         return null;
       }
-    });
+    }, readyTimeoutMs);
     return { ...partial, origin, daemon, root, daemonHome: cell.identity.home };
   } catch (err) {
+    killGroup(daemon);
+    live.delete(daemon);
     // A daemon that never answered has usually SAID why, and a bare "did not
     // happen within 120000ms" throws that away — which on a CI runner is the
     // whole of what a failure gets to say.
@@ -283,18 +287,50 @@ export async function startService(
   }
 }
 
-/** Stop a service and remove everything it owns. */
-export function stopService(service: Service): void {
+/** Every daemon this process started and has not stopped yet. */
+const live = new Set<ChildProcess>();
+
+/** SIGTERM the daemon's whole process GROUP: the daemon is detached, and a
+ *  coordinator it started is detached from IT, so a plain kill would leave one
+ *  behind holding a fixture's lock and the machine's cores. */
+function killGroup(daemon: ChildProcess): void {
   try {
-    // The whole process GROUP: the daemon is detached, and a coordinator it
-    // started is detached from IT, so a plain kill would leave one behind
-    // holding a fixture's lock and the machine's cores.
-    if (service.daemon.pid !== undefined) {
-      process.kill(-service.daemon.pid, "SIGTERM");
-    }
+    if (daemon.pid !== undefined) process.kill(-daemon.pid, "SIGTERM");
   } catch {
     // Already gone. Nothing to do, and nothing worth failing a teardown for.
   }
+}
+
+/**
+ * A WORKER KILLED PART-WAY THROUGH TAKES ITS DAEMONS WITH IT, as the CLI
+ * suite's harness does (`tests/e2e/harness.ts`).
+ *
+ * `AfterAll` is the ordinary teardown, and it never runs for a worker that is
+ * interrupted, cancelled or timed out. Its daemons are in process groups of
+ * their own, so the signal that reached the worker did not reach them, and on
+ * a persistent CI host one lived on for weeks holding a port. On SIGINT,
+ * SIGTERM or SIGHUP this stops every live daemon, then re-raises the signal so
+ * whoever waits on this process learns how it really died. SIGKILL cannot be
+ * caught, which is why the ports come from {@link reserveWorldPorts} too.
+ */
+let sweeping = false;
+function sweepOnSignal(): void {
+  if (sweeping) return;
+  sweeping = true;
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => {
+      for (const daemon of live) killGroup(daemon);
+      live.clear();
+      process.removeAllListeners(signal);
+      process.kill(process.pid, signal);
+    });
+  }
+}
+
+/** Stop a service and remove everything it owns. */
+export function stopService(service: Service): void {
+  killGroup(service.daemon);
+  live.delete(service.daemon);
   for (const dir of [service.root, service.daemonHome]) {
     try {
       rmSync(dir, { recursive: true, force: true });
