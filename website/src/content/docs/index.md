@@ -45,6 +45,7 @@ The examples on these pages use `odu` as shorthand for `nix run github:juspay/od
 | <span id="access-through-tailscale-or-a-proxy"></span>reach the board through Tailscale or a proxy | [Access through Tailscale or a proxy](/docs/web-service/#access-through-tailscale-or-a-proxy) |
 | <span id="self-host-on-nixos"></span>run odu on a NixOS server | [Self-host on NixOS](/docs/self-host/) |
 | <span id="server-mode"></span>put GitHub sign-in in front of the board | [Server mode](/docs/server-mode/) |
+| run odu and one bucket for a team on a tailnet machine | [A team server on a tailnet](/docs/tailnet/) |
 | <span id="metrics"></span>scrape odu with Prometheus | [Metrics](/docs/metrics/) |
 | serve a Nix binary cache | [Nix binary cache](/docs/cache/) |
 | <span id="cli-reference"></span>look up a command, its API verb and its exit codes | [CLI reference](/docs/cli/) |
