@@ -14,7 +14,7 @@ Your repository declares the Nix cache it reads from and tags one `just` recipe 
 | a GitHub workflow, only if you need one | a cache token, for a system odu has no lane for |
 | `plugin.json` | odu for your coding agents |
 
-Nothing else in your repository mentions odu. [`examples/consumer/`](https://github.com/juspay/odu/tree/master/examples/consumer) shows these files whole, and the snippets below are excerpts of them. Every developer and every CI machine then substitutes from the cache.
+Nothing else in your repository mentions odu. [`examples/consumer/`](https://github.com/juspay/odu/tree/master/examples/consumer) shows these files whole, and the snippets below are excerpts of them. Every developer and every CI machine whose Nix configuration has the cache then substitutes from it.
 
 ## 1. Declare the cache once
 
@@ -26,9 +26,11 @@ nixConfig = {
 };
 ```
 
-Both lines come from the bucket's **Set up** block on the board, or from `odu cache use main`. A reader of your flake needs this `nixConfig` anyway. odu reads it; it is not an odu setting.
+Both lines come from the bucket's **Set up** block on the board, or from `odu cache use main`. odu reads them to know where a run pushes; they are not an odu setting.
 
-odu applies these rules to it:
+For Nix itself, these lines take effect only for a trusted user who accepts them with `--accept-flake-config`, or on a machine whose own Nix configuration already trusts the address and the key. So each developer's machine and each CI machine needs the two lines in its Nix configuration. [Use it](/docs/cache/#use-it) says where, and who each form works for.
+
+odu applies these rules to the `nixConfig`:
 
 - The substituter must be a bucket your odu service serves: the bucket's URL under the service's public origin, or a domain bound to the bucket. odu decides from the URL alone and believes nothing another server says about itself.
 - A URL the service does not serve is left alone. The run still runs without pushing, its `_ci-setup` node says so once, and its page says `not pushing`.

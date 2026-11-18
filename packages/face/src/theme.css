@@ -806,6 +806,13 @@
     border-radius: 0 0 13px 13px;
   }
 
+  /* Who a snippet works for, under it: the panel's own inset, so the
+     sentence lines up with the rows above instead of touching the card's
+     edge. */
+  .panel > .use-block + .hint {
+    padding: 0.8rem 1.1rem 1rem;
+  }
+
   /* The three parts of a YAML snippet that are not prose. Hue is NOT spent
      here — a key is not a status — so these are greys and one warm ink that
      exists only to separate a value from its key. */

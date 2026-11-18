@@ -37,14 +37,14 @@ No configured machine means a refusal, never an implicit local build.
 - Outbound HTTPS.
 - odu's runner for its Nix system, which odu takes from the same build as itself.
 
-A published odu revision reaches a Linux machine on Nix 2.17–2.34 with no cache key on the machine, because the machine pulls the content-addressed build itself. A macOS machine, or one on another Nix version, must trust odu's own binary cache in its `nix.conf`:
+A published odu revision reaches a Linux machine on Nix 2.17–2.34 with no cache key on the machine, because the machine pulls the content-addressed build itself. A macOS machine, or one on another Nix version, must trust odu's own binary cache in the machine's Nix configuration (`/etc/nix/nix.conf`, or `nix.settings`):
 
 ```ini
 extra-substituters = https://cache.kolu.dev/kolu-r2
 extra-trusted-public-keys = kolu-r2-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=
 ```
 
-These are the two settings in odu's own flake. `--accept-flake-config` reads them from the flake too, but Nix honours them only for a trusted user.
+These are the two settings in odu's own flake. `--accept-flake-config` reads them from the flake too, but Nix honours them only for a trusted user. [Use it](/docs/cache/#use-it) has the rules for where the two lines go.
 
 ## See and hold the machines
 

@@ -729,6 +729,43 @@ export const WRITE_TOKEN_PLACEHOLDER = "<your-write-token>";
 /** What stands where a READ token goes: the netrc line of a private bucket. */
 export const READ_TOKEN_PLACEHOLDER = "<your-read-token>";
 
+/**
+ * WHERE THE TWO LINES GO, said once for every face that prints them.
+ *
+ * The Nix daemon takes `substituters` and `trusted-public-keys` only from the
+ * machine's configuration and from a user in its `trusted-users`. Pasted into
+ * anyone else's own `nix.conf`, they are a warning and nothing more, and Nix
+ * builds what the bucket holds instead (the NixOS VM test's `zlaptop`
+ * machine is the proof).
+ */
+export const MACHINE_CONFIG_NOTE =
+  "On a machine with the Nix daemon, these lines go in the machine's Nix configuration: " +
+  "/etc/nix/nix.conf, or nix.settings on NixOS and nix-darwin. For a user not in the " +
+  "daemon's trusted-users, it ignores them in that user's own nix.conf or on the command " +
+  "line, and Nix then builds everything itself.";
+
+/** WHO A FLAKE'S `nixConfig` WORKS FOR, which is fewer people than it looks. */
+export const FLAKE_CONFIG_NOTE =
+  "A flake's nixConfig takes effect only for a trusted user who accepts it " +
+  "(--accept-flake-config), or when the machine's Nix configuration already lists this " +
+  "substituter under trusted-substituters and its key under trusted-public-keys.";
+
+/** A sentence as `#` lines a person can paste beside the settings, wrapped
+ *  so a terminal shows it whole. */
+function commentLines(text: string): string {
+  const lines: string[] = [];
+  let line = "#";
+  for (const word of text.split(" ")) {
+    if (line.length + 1 + word.length > 78 && line !== "#") {
+      lines.push(line);
+      line = "#";
+    }
+    line = `${line} ${word}`;
+  }
+  lines.push(line);
+  return lines.join("\n");
+}
+
 /** The `nix.conf` pair — the two `extra-` lines a Nix client reads. */
 export function nixConfBlock(input: { readonly url: string; readonly publicKey: string }): string {
   return `extra-substituters = ${input.url}
@@ -797,9 +834,10 @@ export function useBlock(input: {
   readonly home: string | null;
 }): string {
   return [
+    commentLines(MACHINE_CONFIG_NOTE),
     `# nix.conf\n${nixConfBlock(input)}`,
     `# NixOS / nix-darwin\n${nixOsBlock(input)}`,
-    `# flake.nix\n${flakeBlock(input)}`,
+    `# flake.nix\n${commentLines(FLAKE_CONFIG_NOTE)}\n${flakeBlock(input)}`,
     `# GitHub Actions\n${actionsBlock(input)}`,
     netrcBlock(input),
   ].join("\n\n");

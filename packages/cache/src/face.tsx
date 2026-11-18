@@ -100,7 +100,9 @@ import {
   type CachePaths,
   type CachePin,
   type CacheToken,
+  FLAKE_CONFIG_NOTE,
   flakeBlock,
+  MACHINE_CONFIG_NOTE,
   netrcBlock,
   nixConfBlock,
   nixOsBlock,
@@ -637,6 +639,8 @@ interface SetupDestination {
    *  client's lines, a push, or a workflow step. */
   readonly blockClass: string;
   readonly text: (facts: SetupFacts) => string;
+  /** Who the block works for, shown under it, when that is not everybody. */
+  readonly note?: string;
 }
 
 /** EVERYTHING ANY DESTINATION COULD NEED, gathered once: the two facts a
@@ -656,9 +660,10 @@ const SETUP_TABS: readonly [SetupDestination, ...SetupDestination[]] = [
     name: "nix.conf",
     blockClass: "consume-block",
     text: (facts) => `${nixConfBlock(facts)}\n\n${netrcBlock({ url: facts.url, home: null })}`,
+    note: MACHINE_CONFIG_NOTE,
   },
-  { name: "NixOS", blockClass: "consume-block", text: nixOsBlock },
-  { name: "flake.nix", blockClass: "consume-block", text: flakeBlock },
+  { name: "NixOS", blockClass: "consume-block", text: nixOsBlock, note: MACHINE_CONFIG_NOTE },
+  { name: "flake.nix", blockClass: "consume-block", text: flakeBlock, note: FLAKE_CONFIG_NOTE },
   { name: "odu CLI", blockClass: "consume-block", text: (facts) => useCommand(facts.bucket) },
   {
     name: "push",
@@ -1784,6 +1789,7 @@ function BucketPage(
                 >
                   {setupText()}
                 </pre>
+                <Show when={tab().note}>{(note) => <p class="hint">{note()}</p>}</Show>
               </Panel>
             </div>
 
