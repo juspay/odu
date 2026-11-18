@@ -30,7 +30,7 @@ On a machine with the Nix daemon, put the two lines in the machine's Nix configu
 | the machine's Nix configuration | every user on the machine |
 | a user's own `~/.config/nix/nix.conf`, or `--option` on the command line | only a user in the daemon's `trusted-users` |
 | a flake's `nixConfig`, accepted with `--accept-flake-config` | a trusted user, or any user once the machine lists the address under `trusted-substituters` and the key under `trusted-public-keys` |
-| the address in the machine's configuration, without the key | nobody: Nix refuses the bucket's paths as unsigned |
+| the address in the machine's configuration, without the key | nobody: Nix refuses the bucket's build outputs as unsigned |
 
 A line Nix will not use is a warning, not an error, and Nix then builds the path itself. Without the key, the warning says the path is not signed by any of the keys in `trusted-public-keys`.
 

@@ -653,8 +653,13 @@ the repository mentions odu. `examples/consumer/` here shows them, and a
 
 - **`flake.nix`: one `extra-substituters` line names the bucket** (with its
   `extra-trusted-public-keys`; `odu cache use <bucket>` and the bucket's page
-  print both). That line is the CACHE DECLARATION — what every reader
-  substitutes from, and where the run pushes what it builds. Name ONE odu
+  print both). That line is the CACHE DECLARATION: it tells odu where a run
+  pushes what it builds. It does NOT make a machine read from the cache:
+  Nix honours a flake's lines only when they are accepted, and then only for
+  a trusted user, or on a machine that already lists the substituter under
+  `trusted-substituters` and its key under `trusted-public-keys`. So each
+  developer's machine and each CI machine needs the same two lines in its own
+  Nix configuration (`/etc/nix/nix.conf`, or `nix.settings`). Name ONE odu
   cache; two is refused at start. A URL this daemon does not serve is left
   alone: the run still runs, and says `not pushing`.
 - **`justfile`: `[metadata("ci")]` on the root recipe.** That recipe's

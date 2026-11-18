@@ -739,16 +739,19 @@ export const READ_TOKEN_PLACEHOLDER = "<your-read-token>";
  * machine is the proof).
  */
 export const MACHINE_CONFIG_NOTE =
-  "On a machine with the Nix daemon, these lines go in the machine's Nix configuration: " +
-  "/etc/nix/nix.conf, or nix.settings on NixOS and nix-darwin. For a user not in the " +
-  "daemon's trusted-users, it ignores them in that user's own nix.conf or on the command " +
-  "line, and Nix then builds everything itself.";
+  "On a machine with the Nix daemon, the bucket's address and key (extra-substituters and " +
+  "extra-trusted-public-keys) go in the machine's Nix configuration: /etc/nix/nix.conf, or " +
+  "nix.settings on NixOS and nix-darwin. For a user not in the daemon's trusted-users, it " +
+  "ignores them in that user's own nix.conf or on the command line, and Nix then builds " +
+  "everything itself.";
 
-/** WHO A FLAKE'S `nixConfig` WORKS FOR, which is fewer people than it looks. */
+/** WHO A FLAKE'S `nixConfig` WORKS FOR, which is fewer people than it looks.
+ *  Accepting it is needed in BOTH cases: an ordinary user on a machine that
+ *  trusts the substituter still has to pass `--accept-flake-config`. */
 export const FLAKE_CONFIG_NOTE =
-  "A flake's nixConfig takes effect only for a trusted user who accepts it " +
-  "(--accept-flake-config), or when the machine's Nix configuration already lists this " +
-  "substituter under trusted-substituters and its key under trusted-public-keys.";
+  "A flake's nixConfig takes effect only when it is accepted (--accept-flake-config), and " +
+  "then only for a trusted user, or on a machine whose Nix configuration already lists " +
+  "this substituter under trusted-substituters and its key under trusted-public-keys.";
 
 /** A sentence as `#` lines a person can paste beside the settings, wrapped
  *  so a terminal shows it whole. */

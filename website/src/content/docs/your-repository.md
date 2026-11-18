@@ -28,7 +28,7 @@ nixConfig = {
 
 Both lines come from the bucket's **Set up** block on the board, or from `odu cache use main`. odu reads them to know where a run pushes; they are not an odu setting.
 
-For Nix itself, these lines take effect only for a trusted user who accepts them with `--accept-flake-config`, or on a machine whose own Nix configuration already trusts the address and the key. So each developer's machine and each CI machine needs the two lines in its Nix configuration. [Use it](/docs/cache/#use-it) says where, and who each form works for.
+For Nix itself, these lines take effect only when they are accepted with `--accept-flake-config`, and then only for a trusted user, or on a machine whose own Nix configuration already trusts the address and the key. So each developer's machine and each CI machine needs the two lines in its Nix configuration. [Use it](/docs/cache/#use-it) says where, and who each form works for.
 
 odu applies these rules to the `nixConfig`:
 

@@ -80,7 +80,7 @@ On each client machine, put the bucket's address and the key `bucket_create` pri
 }
 ```
 
-On a machine with the Nix daemon, these lines work only in the machine's configuration. [Use it](/docs/cache/#use-it) has the other forms and who each one works for.
+On a machine with the Nix daemon, these lines belong in the machine's configuration, where they work for every user. [Use it](/docs/cache/#use-it) has the other forms and who each one works for.
 
 What a bucket keeps, and for how long, is on [Keep and reclaim](/docs/cache/retention/).
 
