@@ -258,6 +258,21 @@ function surface(verb: string, input: unknown, env: NodeJS.ProcessEnv = {}): Ran
 const surfaceAsync = (verb: string, input: unknown): Promise<Ran> =>
   cliAsync(["surface", "cache", verb, "--input", JSON.stringify(input), "--json"]);
 
+/**
+ * THE NETRC LINE AS `odu cache use` PRINTS IT, with the reader's token where
+ * the placeholder stands — never a line this suite spells for itself. A suite
+ * that wrote its own `machine <host>` passed while odu printed
+ * `machine <host>:<port>`, a line Nix matches against nothing, so it sent no
+ * credential and the bucket answered "not found".
+ */
+function printedNetrc(bucket: string, token: string): string {
+  const used = cli(["cache", "use", bucket, "--origin", world.origin], { ODU_TOKEN: token });
+  expect({ status: used.status, stderr: used.stderr }).toMatchObject({ status: 0 });
+  const machine = used.stdout.split("\n").filter((line) => line.startsWith("machine "));
+  expect(machine).toHaveLength(1);
+  return `${(machine[0] as string).replace("<your-read-token>", token)}\n`;
+}
+
 /** `nix …` against the builder's store — the machine that built the paths. */
 function nix(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
   const res = spawnSync("nix", argv, {
@@ -527,6 +542,9 @@ describe("odu serves a Nix binary cache", () => {
     });
     expect({ status: used.status, stderr: used.stderr }).toMatchObject({ status: 0 });
     expect(used.stdout).toContain(main.publicKey);
+    // A public bucket is read with no credential, so it prints no netrc lines.
+    expect(used.stdout).not.toContain("netrc-file");
+    expect(used.stdout.split("\n").some((line) => line.startsWith("machine "))).toBe(false);
   });
 
   it("refuses administration without the root token", () => {
@@ -895,11 +913,10 @@ describe("odu serves a Nix binary cache", () => {
     });
     expect(authorised.status).toBe(200);
 
-    // The netrc file Nix actually reads — `netrc-file`, never `~/.netrc`.
+    // The netrc file Nix actually reads — `netrc-file`, never `~/.netrc` — with
+    // the line `odu cache use` prints for this bucket.
     const netrc = join(storeRoot, "netrc");
-    writeFileSync(netrc, `machine ${new URL(priv.url).hostname} password ${token}\n`, {
-      mode: 0o600,
-    });
+    writeFileSync(netrc, printedNetrc("private", token), { mode: 0o600 });
     const privateStore = `local?root=${join(storeRoot, "private")}`;
     const read = spawnSync(
       "nix",
@@ -1021,12 +1038,11 @@ describe("odu serves a Nix binary cache", () => {
     expect(location.port).toBe(gateway.endpoint.port);
     expect(location.searchParams.get("X-Amz-Expires")).toBe("600");
 
-    // AND A REAL CLIENT FOLLOWS IT. The netrc names odu's host only — the
-    // gateway is nowhere in it — so the hop is unauthenticated by construction.
+    // AND A REAL CLIENT FOLLOWS IT. The netrc is the line `odu cache use`
+    // prints, which names odu's host only — the gateway is nowhere in it — so
+    // the hop is unauthenticated by construction.
     const netrc = join(storeRoot, "fronted-netrc");
-    writeFileSync(netrc, `machine ${new URL(fronted.url).hostname} password ${token}\n`, {
-      mode: 0o600,
-    });
+    writeFileSync(netrc, printedNetrc("fronted", token), { mode: 0o600 });
     const clientStore = `local?root=${join(storeRoot, "fronted-client")}`;
     const read = spawnSync(
       "nix",

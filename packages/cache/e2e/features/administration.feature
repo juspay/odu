@@ -23,14 +23,14 @@ Feature: An admin administers the cache from the board
   @signed-in:admin
   Scenario: A bucket gets a name of its own from its page
     # THE NAME CHANGES WHAT THE PAGE SHOWS A CLIENT, and the push block is one
-    # of the things it changes: the substituter URL, the nix.conf block, the
-    # netrc machine and the push's `--cache` are the one name, because the
-    # cache states the push origin and the bucket itself.
+    # of the things it changes: the substituter URL, the nix.conf block and the
+    # push's `--cache` are the one name, because the cache states the push
+    # origin and the bucket itself. (A board bucket is public, so its nix.conf
+    # tab has no netrc line to carry the name.)
     Given a bucket created from the board
     When I name the bucket "cache.e2e.test"
     Then the page's substituter URL is "cache.e2e.test"
     And the domain answer says "Point its DNS record here."
-    And the page's netrc block names "cache.e2e.test"
     And the push block names the same cache the nix.conf block does
     And there should be no page errors
 

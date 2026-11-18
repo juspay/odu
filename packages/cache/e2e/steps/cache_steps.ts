@@ -458,10 +458,20 @@ Then("the page shows its public key", async function (this: OduWorld) {
   await this.saysThat(this.page.locator("pre.use-block"), "the use block", `${name}-1:`);
 });
 
-Then("the page offers the netrc lines a Nix client needs", async function (this: OduWorld) {
+// A PUBLIC BUCKET IS READ WITH NO CREDENTIAL, so its `nix.conf` tab is the two
+// settings and nothing else. The block is read once it shows the key, so the
+// absence is of a block that has rendered.
+Then("the page's nix.conf block carries no netrc lines", async function (this: OduWorld) {
+  const name = this.cacheBucket;
+  assert.ok(name !== undefined, "no bucket was arranged");
   const block = this.page.locator("pre.use-block");
-  await this.saysThat(block, "the use block", "netrc-file");
-  await this.saysThat(block, "the use block", "machine ");
+  await this.saysThat(block, "the use block", `${name}-1:`);
+  const text = await block.innerText();
+  assert.ok(!text.includes("netrc-file"), `a public bucket's nix.conf tab has netrc: ${text}`);
+  assert.ok(
+    !text.split("\n").some((line) => line.startsWith("machine ")),
+    `a public bucket's nix.conf tab has netrc: ${text}`,
+  );
 });
 
 Then("the pushed path is listed", async function (this: OduWorld) {
@@ -761,14 +771,6 @@ async function openSetupTab(world: OduWorld, name: string): Promise<void> {
   await tab.waitFor({ timeout: 30_000 });
   if ((await tab.getAttribute("aria-selected")) !== "true") await tab.click();
 }
-
-Then("the page's netrc block names {string}", async function (this: OduWorld, host: string) {
-  const text = await this.page.locator("pre.consume-block").innerText();
-  assert.ok(
-    text.includes(`machine ${host} password`),
-    `the netrc block does not name ${host}: ${text}`,
-  );
-});
 
 /** ONE FACT, AND IT IS THE ONE ABOVE IT. Since `--cache`, a push names the
  *  substituter URL and the cache states the rest in its own `nix-cache-info`
