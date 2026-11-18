@@ -31,11 +31,12 @@ Import odu's NixOS module and give it the root token from a secret file:
     enable = true;
     rootTokenFile = config.age.secrets.odu-root-token.path;
     publicOrigin = "https://odu.example.ts.net";
+    allowedOrigins = [ "https://odu.example.ts.net" ];
   };
 }
 ```
 
-The service listens on `http://127.0.0.1:18440` as the `odu` user. It keeps its runs and the bucket's objects on local disk, under `/var/lib/odu`. Leave `cache.domain` and `openFirewall` unset: the module then starts no nginx and opens no port. [Reach it through `tailscale serve`](#reach-it-through-tailscale-serve) explains `publicOrigin`.
+The service listens on `http://127.0.0.1:18440` as the `odu` user. It keeps its runs and the bucket's objects on local disk, under `/var/lib/odu`. Leave `cache.domain` and `openFirewall` unset: the module then starts no nginx and opens no port. [Reach it through `tailscale serve`](#reach-it-through-tailscale-serve) explains `publicOrigin` and `allowedOrigins`.
 
 ## Install odu without NixOS
 
@@ -43,7 +44,7 @@ The machine needs Nix with the Nix daemon, and `git`. Create the service user an
 
 ```sh
 sudo useradd --system --home-dir /var/lib/odu --shell /usr/sbin/nologin odu
-sudo nix build --out-link /opt/odu github:juspay/odu/<rev>#odu
+sudo nix build --accept-flake-config --out-link /opt/odu github:juspay/odu/<rev>#odu
 sudo install -D -m 0400 ./root-token /etc/odu/root-token   # a file holding the root token
 ```
 
@@ -63,6 +64,7 @@ Environment=ODU_STATE_DIR=/var/lib/odu
 Environment=HOME=/var/lib/odu
 Environment=ODU_WEB_ORIGIN=http://127.0.0.1:18440
 Environment=ODU_PUBLIC_ORIGIN=https://odu.example.ts.net
+Environment=ODU_WEB_ALLOWED_ORIGINS=https://odu.example.ts.net
 Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/bin:/bin
 LoadCredential=root-token:/etc/odu/root-token
 # The root token stays out of the unit: systemd copies the file into %d.
@@ -94,7 +96,7 @@ Set `publicOrigin` (or `ODU_PUBLIC_ORIGIN`) to exactly that address, with `https
 
 Use that one name everywhere: in each `flake.nix`, each Nix configuration, `odu cache login` and `--origin`. A run pushes only when the repository's `flake.nix` names a bucket under the service's public origin, so a short name or a tailnet IP address in a flake means a run that does not push.
 
-odu checks a browser's `Origin` against the `Host` of the request. If the board's live connection is refused as cross-origin, the proxy changed the `Host`: see [Troubleshooting](/docs/troubleshooting/).
+`allowedOrigins` (or `ODU_WEB_ALLOWED_ORIGINS`) is the same address. odu accepts the board's live connection and `/mcp` from a browser whose `Origin` matches the request's `Host`, and from the origins listed there, so the board keeps working if the proxy hands odu a different `Host`.
 
 ## Keep it tailnet-only
 
@@ -104,12 +106,11 @@ odu checks a browser's `Origin` against the `Host` of the request. If the board'
 | `cache.domain`, `cache.bucketDomains` and `openFirewall` unset | The module then starts no nginx and opens no port. |
 | `tailscale funnel` never run on this machine | Funnel would publish the board and the bucket to the internet. |
 
-Tailscale's documentation says Funnel is enabled for a tailnet by default, and that you can turn it off for a device that does not use it.
-
 To check:
 
 1. On the odu machine, `ss -ltn | grep 18440` lists `127.0.0.1:18440` and nothing else.
-2. From a machine that is not on the tailnet, `curl -sS --max-time 10 https://odu.example.ts.net/` fails.
+2. On the odu machine, `tailscale funnel status` shows no Funnel.
+3. From a machine that is not on the tailnet, `curl -sS --max-time 10 https://odu.example.ts.net/` fails.
 
 ## Sign in to the board
 
@@ -190,7 +191,9 @@ A run pushes what each recipe built to the bucket its `flake.nix` names, with a 
 ```sh
 odu auth login https://odu.example.ts.net        # paste your personal token
 odu ci run --origin https://odu.example.ts.net \
-  --checkout /var/lib/odu/checkouts/<repo> --sha "$(git rev-parse HEAD)"
+  --checkout /var/lib/odu/checkouts/<repo> --sha "$(git rev-parse HEAD)" --no-post
 ```
+
+`--no-post` keeps the run off GitHub. Posting its statuses needs GitHub credentials for the `odu` user, which this page does not set up.
 
 A run on your laptop's own odu does not push, because that odu serves no bucket. [Run the server's CI from your shell](/docs/remote-runs/) has the rest.
