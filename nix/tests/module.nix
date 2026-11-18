@@ -14,10 +14,11 @@
 #   * a token pushed over HTTP and a path built on the server lands in the
 #     bucket, and the client substitutes it back through the proxy with the
 #     bucket's own key;
-#   * an ORDINARY user on a machine with the Nix daemon fetches from the
-#     bucket only when the address and key are in the MACHINE's configuration —
-#     her own command line and her own `nix.conf` are ignored — and pushes a
-#     path of her own with `odu cache login` and `odu cache push`;
+#   * an ORDINARY user on a machine with the Nix daemon fetches a build output
+#     from the bucket only when the address AND the key are in the MACHINE's
+#     configuration — her own command line and her own `nix.conf` are
+#     ignored, and the address without the key is refused as unsigned — and
+#     pushes a build of her own with `odu cache login` and `odu cache push`;
 #   * a bucket on an S3 STORE — a versitygw on the same machine, declared in
 #     `cache.stores` — takes a push into the S3 bucket (not the local disk)
 #     and the client substitutes it back through the same proxy;
@@ -271,9 +272,22 @@
         surface(server, admin, "cache", "token_mint", {"bucket": "main", "scope": "write"})
     )["token"]
 
-    # ── a path on the server, pushed through the proxy ──────────────────────
-    server.succeed("echo odu-module-test > /tmp/payload")
-    path = server.succeed("nix store add-path /tmp/payload").strip()
+    # ── a path BUILT on the server, pushed through the proxy ────────────────
+    # A build output, not `nix store add-path`. A path named after its own
+    # contents carries a `CA:` line, and Nix takes it from any cache it may ask,
+    # signed or not; only a build output makes a fetch below depend on the
+    # bucket's key. `/bin/sh` is in the build sandbox on NixOS, so the
+    # derivation needs nothing from nixpkgs.
+    def derivation(name, content):
+        return (
+            f'derivation {{ name = "{name}"; system = builtins.currentSystem;'
+            f' builder = "/bin/sh"; args = [ "-c" "echo {content} > $out" ]; }}'
+        )
+
+    server.succeed(
+        f"echo {shlex.quote(derivation('payload', 'odu-module-test'))} > /tmp/payload.nix"
+    )
+    path = server.succeed("nix-build --no-out-link /tmp/payload.nix").strip()
     server.succeed(
         f"runuser -u odu -- env ODU_WEB_ORIGIN=http://127.0.0.1:18440"
         f" ODU_CACHE_TOKEN={token} {odu} cache push main {path}"
@@ -428,10 +442,19 @@
     assert bucket_url == "http://main.test", use
     assert settings["extra-trusted-public-keys"] == key, use
 
-    # The path exists only on the server and in the bucket. It was added, not
-    # built, so nothing on this machine can build it: having it means it was
-    # fetched.
+    # The path exists only on the server and in the bucket. It was built there,
+    # and this machine has no derivation for it, so nothing here can build it:
+    # having it means it was fetched. And the bucket serves it with no `CA:`
+    # line, so fetching it needs a signature this machine trusts.
     zlaptop.fail(f"nix-store --check-validity {path}")
+
+    def narinfo(machine, url, store_path):
+        """What the bucket serves for a path, which must be there."""
+        return machine.succeed(f"curl -sSf {url}/{store_path.split('/')[-1][:32]}.narinfo")
+
+    served = narinfo(zlaptop, bucket_url, path)
+    assert f"StorePath: {path}" in served, served
+    assert not any(line.startswith("CA:") for line in served.splitlines()), served
 
     # ── 1. HER OWN SETTINGS DO NOTHING ──────────────────────────────────────
     # The same address and key, on her command line and then in her own
@@ -446,6 +469,7 @@
     print(flags)
     assert flags[0] != 0, flags
     assert "ignoring untrusted substituter" in flags[1], flags[1]
+    zlaptop.fail(f"nix-store --check-validity {path}")
 
     zlaptop.succeed(
         "install -d -o alice /home/alice/.config /home/alice/.config/nix"
@@ -458,10 +482,27 @@
     zlaptop.succeed("rm -r /home/alice/.config/nix")
     zlaptop.fail(f"nix-store --check-validity {path}")
 
-    # ── 2. THE MACHINE'S CONFIGURATION DOES ─────────────────────────────────
-    # The same block, in the file the machine's `nix.conf` includes, and the
-    # daemon restarted to read it. Now an ordinary `nix build` fetches the path,
-    # signed with the bucket's key.
+    # ── 2. THE ADDRESS ALONE IN THE MACHINE'S CONFIGURATION DOES NOTHING ────
+    # The block followed halfway: the address in the file the machine's
+    # `nix.conf` includes, the key left out, and the daemon restarted to read
+    # it. The daemon asks the bucket now, and refuses what it answers, because
+    # no key it trusts signed it.
+    address_only = "\n".join(
+        line
+        for line in nix_conf.splitlines()
+        if not line.startswith("extra-trusted-public-keys")
+    )
+    zlaptop.succeed(f"echo {shlex.quote(address_only)} > /etc/nix/odu-bucket.conf")
+    zlaptop.succeed("systemctl restart nix-daemon.service")
+    unsigned = zlaptop.execute(as_alice(f"nix build --no-link {path} 2>&1"))
+    print(unsigned)
+    assert unsigned[0] != 0, unsigned
+    assert "not signed by any of the keys" in unsigned[1], unsigned[1]
+    zlaptop.fail(f"nix-store --check-validity {path}")
+
+    # ── 3. THE WHOLE BLOCK IN THE MACHINE'S CONFIGURATION DOES ──────────────
+    # The same file with the key in it too. Now an ordinary `nix build` fetches
+    # the path, signed with the bucket's key.
     zlaptop.succeed(f"echo {shlex.quote(nix_conf)} > /etc/nix/odu-bucket.conf")
     zlaptop.succeed("systemctl restart nix-daemon.service")
     fetched = zlaptop.execute(as_alice(f"nix build --no-link {path} 2>&1"))
@@ -471,19 +512,24 @@
     key_name = key.split(":")[0]
     zlaptop.succeed(f"nix path-info --sigs {path} | grep -F '{key_name}:'")
 
-    # ── 3. SHE PUSHES A PATH OF HER OWN ─────────────────────────────────────
-    # A write token saved with `odu cache login`, then `odu cache push` to the
-    # address from her `nix.conf`. The push talks to the cache itself, as her,
-    # so the daemon's rules are not in the way.
-    zlaptop.succeed(as_alice("echo made-on-the-laptop > ~/mine"))
-    mine = zlaptop.succeed(as_alice("nix store add-path ~/mine")).strip()
+    # ── 4. SHE PUSHES A PATH OF HER OWN ─────────────────────────────────────
+    # One she builds, so it has no `CA:` line either: another machine can only
+    # take it from the bucket with the signature odu adds on the push. A write
+    # token saved with `odu cache login`, then `odu cache push` to the address
+    # from her `nix.conf`. The push talks to the cache itself, as her, so the
+    # daemon's rules are not in the way.
+    mine_nix = shlex.quote(derivation("mine", "made-on-the-laptop"))
+    zlaptop.succeed(as_alice(f"echo {mine_nix} > ~/mine.nix"))
+    mine = zlaptop.succeed(as_alice("nix-build --no-out-link ~/mine.nix")).strip()
     zlaptop.succeed(as_alice(f"odu cache login http://cache.test --token {token}"))
     mine_pushed = json.loads(
         zlaptop.succeed(as_alice(f"odu cache push --cache {bucket_url} {mine} -o json"))
     )
     assert mine_pushed["pushed"] == 1 and mine_pushed["failed"] == 0, mine_pushed
-    # AND THE BUCKET SERVES IT: another machine fetches it, trusting only the
-    # bucket's key.
+    # AND THE BUCKET SERVES IT, with no `CA:` line: another machine fetches it,
+    # trusting only the bucket's key.
+    served_mine = narinfo(client, bucket_url, mine)
+    assert not any(line.startswith("CA:") for line in served_mine.splitlines()), served_mine
     from_laptop = client.execute(
         f"nix copy --from {bucket_url} --to local?root=/tmp/sub-laptop"
         f" --option trusted-public-keys '{key}' {mine}"
