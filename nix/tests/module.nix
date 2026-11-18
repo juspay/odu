@@ -1,6 +1,7 @@
 # THE VM TEST FOR `services.odu`, and the only place the whole story is one
-# machine: a server with the module, an nginx in front of it, and a client with
-# no substituters of its own that has never heard of odu.
+# machine: a server with the module, an nginx in front of it, a client with
+# no substituters of its own that has never heard of odu, and a team member's
+# machine where an ordinary user goes through the Nix daemon.
 #
 # What it proves, in order:
 #
@@ -13,6 +14,10 @@
 #   * a token pushed over HTTP and a path built on the server lands in the
 #     bucket, and the client substitutes it back through the proxy with the
 #     bucket's own key;
+#   * an ORDINARY user on a machine with the Nix daemon fetches from the
+#     bucket only when the address and key are in the MACHINE's configuration —
+#     her own command line and her own `nix.conf` are ignored — and pushes a
+#     path of her own with `odu cache login` and `odu cache push`;
 #   * a bucket on an S3 STORE — a versitygw on the same machine, declared in
 #     `cache.stores` — takes a push into the S3 bucket (not the local disk)
 #     and the client substitutes it back through the same proxy;
@@ -107,9 +112,9 @@
   nodes.client = { pkgs, ... }: {
     # `/etc/hosts` is a read-only copy of the store in a NixOS VM, so the name
     # has to be mapped at EVAL time. The test driver numbers the VLAN by node
-    # name in sorted order — `client`, `server`, `zdoor` — and the script
-    # asserts that below, so a machine added to this file breaks the assertion
-    # instead of the `nix copy` four steps later.
+    # name in sorted order — `client`, `server`, `zdoor`, `zlaptop` — and the
+    # script asserts that below, so a machine added to this file breaks the
+    # assertion instead of the `nix copy` four steps later.
     # TWO LINES, not one: `/etc/hosts` is `IP name [aliases…]`, so the one-line
     # form made `door.test` an ALIAS of 192.168.1.2 — the loopback machine —
     # and every door assertion then read nginx's 404 from the wrong vhost.
@@ -154,6 +159,41 @@
 
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
     networking.firewall.allowedTCPPorts = [ 80 ];
+  };
+
+  # A TEAM MEMBER'S MACHINE: NixOS with the Nix daemon, one ordinary user, and
+  # no cache of its own. What it shows is the rule an ordinary user lives by —
+  # the daemon takes `substituters` and `trusted-public-keys` only from the
+  # MACHINE's configuration, and ignores the user's own — against the bucket
+  # this file's `server` publishes.
+  #
+  # The bucket's key is minted while the test runs, so the machine's
+  # `nix.conf` cannot hold it at eval time. It includes a file instead, which
+  # the script writes and then restarts the daemon to read: the same two lines
+  # a person adds to `/etc/nix/nix.conf`, in a file the store does not own.
+  # `!include` skips a file that is not there yet, so until then the machine
+  # has no cache at all.
+  #
+  # Named `zlaptop` so it sorts LAST: the driver numbers machines by sorted
+  # name, and every other machine keeps the address `extraHosts` gives it.
+  nodes.zlaptop = { lib, ... }: {
+    networking.extraHosts = ''
+      192.168.1.2 cache.test main.test
+    '';
+    nix.settings = {
+      experimental-features = [ "nix-command" "flakes" ];
+      # Nothing but the bucket, once the script names it. FORCED, because
+      # NixOS adds cache.nixos.org to this list after whatever is set here, and
+      # a VM that cannot reach it retries it on every fetch.
+      substituters = lib.mkForce [ ];
+    };
+    nix.extraOptions = ''
+      !include /etc/nix/odu-bucket.conf
+    '';
+    # NOT in `trusted-users`, which is `root` alone by default — the whole
+    # point of this machine.
+    users.users.alice.isNormalUser = true;
+    environment.systemPackages = [ self.packages.x86_64-linux.odu ];
   };
 
   # The server is 192.168.1.1 in this test's network; the client resolves the
@@ -355,6 +395,103 @@
     assert by_name[0] == 0, by_name
     client.succeed(
         f"NIX_REMOTE=local?root=/tmp/sub-name nix store verify {path}"
+        f" --option trusted-public-keys '{key}'"
+    )
+
+    # ── A TEAM MEMBER'S MACHINE, through the Nix daemon ─────────────────────
+    # Every fetch above is root copying into a side store with the key named on
+    # the command line. A person's machine does neither: an ordinary user asks
+    # the daemon, and the daemon decides which caches and keys count.
+    def as_alice(command):
+        return f"runuser -l alice -c {shlex.quote(command)}"
+
+    zlaptop.wait_for_unit("multi-user.target")
+    assert zlaptop.succeed("getent hosts main.test").split()[0] == server_ip
+    # The daemon itself says alice is not trusted, so everything below is about
+    # an ordinary user.
+    alice_store = json.loads(zlaptop.succeed(as_alice("nix store info --json")))
+    assert alice_store["trusted"] in (0, False), alice_store
+
+    # THE LINES, as a team member gets them: `odu cache use`, from her own
+    # account, with no token. The `nix.conf` block is the one whose lines are
+    # the bare settings.
+    use = zlaptop.succeed(as_alice("odu cache use main --origin http://cache.test"))
+    nix_conf = next(
+        block
+        for block in use.split("\n\n")
+        if any(line.startswith("extra-substituters = ") for line in block.splitlines())
+    )
+    settings = dict(
+        line.split(" = ", 1) for line in nix_conf.splitlines() if not line.startswith("#")
+    )
+    bucket_url = settings["extra-substituters"]
+    assert bucket_url == "http://main.test", use
+    assert settings["extra-trusted-public-keys"] == key, use
+
+    # The path exists only on the server and in the bucket. It was added, not
+    # built, so nothing on this machine can build it: having it means it was
+    # fetched.
+    zlaptop.fail(f"nix-store --check-validity {path}")
+
+    # ── 1. HER OWN SETTINGS DO NOTHING ──────────────────────────────────────
+    # The same address and key, on her command line and then in her own
+    # `nix.conf`. The daemon ignores both, says so, and Nix has no way to get
+    # the path.
+    flags = zlaptop.execute(
+        as_alice(
+            f"nix build --no-link --option substituters {bucket_url}"
+            f" --option trusted-public-keys {key} {path} 2>&1"
+        )
+    )
+    print(flags)
+    assert flags[0] != 0, flags
+    assert "ignoring untrusted substituter" in flags[1], flags[1]
+
+    zlaptop.succeed(
+        "install -d -o alice /home/alice/.config /home/alice/.config/nix"
+        f" && echo {shlex.quote(nix_conf)} > /home/alice/.config/nix/nix.conf"
+    )
+    own = zlaptop.execute(as_alice(f"nix build --no-link {path} 2>&1"))
+    print(own)
+    assert own[0] != 0, own
+    assert "ignoring untrusted substituter" in own[1], own[1]
+    zlaptop.succeed("rm -r /home/alice/.config/nix")
+    zlaptop.fail(f"nix-store --check-validity {path}")
+
+    # ── 2. THE MACHINE'S CONFIGURATION DOES ─────────────────────────────────
+    # The same block, in the file the machine's `nix.conf` includes, and the
+    # daemon restarted to read it. Now an ordinary `nix build` fetches the path,
+    # signed with the bucket's key.
+    zlaptop.succeed(f"echo {shlex.quote(nix_conf)} > /etc/nix/odu-bucket.conf")
+    zlaptop.succeed("systemctl restart nix-daemon.service")
+    fetched = zlaptop.execute(as_alice(f"nix build --no-link {path} 2>&1"))
+    print(fetched)
+    assert fetched[0] == 0, fetched
+    zlaptop.succeed(f"nix-store --check-validity {path}")
+    key_name = key.split(":")[0]
+    zlaptop.succeed(f"nix path-info --sigs {path} | grep -F '{key_name}:'")
+
+    # ── 3. SHE PUSHES A PATH OF HER OWN ─────────────────────────────────────
+    # A write token saved with `odu cache login`, then `odu cache push` to the
+    # address from her `nix.conf`. The push talks to the cache itself, as her,
+    # so the daemon's rules are not in the way.
+    zlaptop.succeed(as_alice("echo made-on-the-laptop > ~/mine"))
+    mine = zlaptop.succeed(as_alice("nix store add-path ~/mine")).strip()
+    zlaptop.succeed(as_alice(f"odu cache login http://cache.test --token {token}"))
+    mine_pushed = json.loads(
+        zlaptop.succeed(as_alice(f"odu cache push --cache {bucket_url} {mine} -o json"))
+    )
+    assert mine_pushed["pushed"] == 1 and mine_pushed["failed"] == 0, mine_pushed
+    # AND THE BUCKET SERVES IT: another machine fetches it, trusting only the
+    # bucket's key.
+    from_laptop = client.execute(
+        f"nix copy --from {bucket_url} --to local?root=/tmp/sub-laptop"
+        f" --option trusted-public-keys '{key}' {mine}"
+    )
+    print(from_laptop)
+    assert from_laptop[0] == 0, from_laptop
+    client.succeed(
+        f"NIX_REMOTE=local?root=/tmp/sub-laptop nix store verify {mine}"
         f" --option trusted-public-keys '{key}'"
     )
 
