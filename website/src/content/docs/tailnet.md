@@ -9,6 +9,15 @@ This page sets up odu for a team on one Linux machine that only your tailnet can
 
 > Anyone on the tailnet can read everything in the bucket. There is no read access per person, and removing someone from the tailnet is the only way to stop them reading. Writing still needs a write cache token.
 
+The steps that rest on Tailscale and GitHub have not yet been run on a real tailnet:
+
+- `tailscale serve` answering HTTPS at the tailnet name, and still serving after a reboot ([Reach it](#reach-it-through-tailscale-serve)).
+- The name not answering off the tailnet, and `tailscale funnel status` ([Keep it tailnet-only](#keep-it-tailnet-only)).
+- GitHub sign-in at the tailnet name, and the board staying live ([Sign in to the board](#sign-in-to-the-board)).
+- A lane on the odu machine itself, reaching the bucket by its tailnet name ([Set up a CI lane](#set-up-a-ci-lane)).
+
+The [tailnet check](https://github.com/juspay/odu/pull/186#issuecomment-6994878439) on the pull request that added this page says how to run each one, and what it should show.
+
 Commands are written with the [`odu` shorthand](/docs/#quick-start). The machine is `odu` on the tailnet `example`, so its full name is `odu.example.ts.net`.
 
 ## Install odu on NixOS
