@@ -111,10 +111,28 @@ describe("the copy a bucket page and the docs share", () => {
   });
 
   it("names the credential each block needs", () => {
-    const use = useBlock({ url: URL, publicKey: KEY, home: null });
+    const use = useBlock({ url: URL, publicKey: KEY, public: false, home: null });
     // A private bucket READS with a read token; a push WRITES with a write one.
     expect(use).toContain(`password ${READ_TOKEN_PLACEHOLDER}`);
     expect(use).toContain("extra-substituters");
     expect(useCommand("main")).toBe("odu cache use main");
+  });
+
+  it("prints no netrc lines for a public bucket, which is read with no credential", () => {
+    const use = useBlock({ url: URL, publicKey: KEY, public: true, home: null });
+    expect(use).toContain("extra-substituters");
+    expect(use).not.toContain("netrc-file");
+    expect(use).not.toContain("\nmachine ");
+  });
+
+  it("names the netrc machine by its host alone, which is all a netrc matches", () => {
+    // `machine 127.0.0.1:18440` matches nothing, so Nix would send no
+    // credential at all.
+    expect(netrcBlock({ url: URL, home: null })).toContain(
+      `\nmachine 127.0.0.1 password ${READ_TOKEN_PLACEHOLDER}`,
+    );
+    expect(netrcBlock({ url: "https://cache.example.com/main", home: null })).toContain(
+      "\nmachine cache.example.com password",
+    );
   });
 });

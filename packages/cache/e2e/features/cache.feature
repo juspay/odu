@@ -32,7 +32,7 @@ Feature: The cache is a row of the board
     When I open that bucket
     Then the page shows its substituter URL
     And the page shows its public key
-    And the page offers the netrc lines a Nix client needs
+    And the page's nix.conf block carries no netrc lines
     And the pushed path is listed
     # WANTED, NOT READ: retention counts from the last push or `missing` query
     # that named this path, and the reads beside it never move it. The number

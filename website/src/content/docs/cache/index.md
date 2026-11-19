@@ -69,13 +69,15 @@ extra_nix_config: |
   extra-trusted-public-keys = main-1:<public-key>
 ```
 
-A private bucket's **Set up** block also has the netrc lines, because reading it needs a cache token:
+A private bucket's **Set up** block and `odu cache use` also print the netrc lines, because reading it needs a cache token. A public bucket's do not.
 
 ```sh
 # netrc — an absolute path, no ~
 netrc-file = <home>/.netrc
-machine 127.0.0.1:18440 password <your-read-token>
+machine 127.0.0.1 password <your-read-token>
 ```
+
+The `machine` line names the host without its port. Nix sends no cache token for a `machine host:port` entry, and the private bucket then answers 404.
 
 `odu cache use` needs no account for a public bucket, because a bucket's URL and public key are what it publishes to every client. It reads them from `GET /cache/<bucket>/`, which also returns a small page for `curl`, or JSON with `Accept: application/json`.
 

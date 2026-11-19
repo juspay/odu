@@ -808,14 +808,19 @@ export function actionsBlock(input: { readonly url: string; readonly publicKey: 
  * fails with `not an absolute path` — so a block printed with one is a block
  * that silently does nothing when pasted. The CLI knows `$HOME`; the page does
  * not, and prints a placeholder that says so.
+ *
+ * THE HOST, NEVER THE PORT. A netrc `machine` is matched against the host
+ * alone, so `machine 127.0.0.1:18440` matches nothing: Nix sends no
+ * credential, and a private bucket answers "not found". The private-bucket
+ * e2e tests read with this line exactly as `odu cache use` prints it.
  */
 export function netrcBlock(input: {
   readonly url: string;
   readonly home: string | null;
 }): string {
-  const authority = ((): string => {
+  const host = ((): string => {
     try {
-      return new URL(input.url).host;
+      return new URL(input.url).hostname;
     } catch {
       return input.url;
     }
@@ -823,17 +828,20 @@ export function netrcBlock(input: {
   return `# netrc — an absolute path, no ~${
     input.home === null ? "\nnetrc-file = <home>/.netrc" : `\nnetrc-file = ${input.home}/.netrc`
   }
-machine ${authority} password ${READ_TOKEN_PLACEHOLDER}`;
+machine ${host} password ${READ_TOKEN_PLACEHOLDER}`;
 }
 
 /**
  * EVERY BLOCK A CLIENT PASTES, from one function each — the page renders them
  * as separate titled blocks, `odu cache use` prints them one after another, and
  * the docs quote the same strings (`useCopy.test.ts` holds them together).
+ * The netrc lines only for a PRIVATE bucket: a public one is read with no
+ * credential, and lines it does not need are lines a reader pastes anyway.
  */
 export function useBlock(input: {
   readonly url: string;
   readonly publicKey: string;
+  readonly public: boolean;
   readonly home: string | null;
 }): string {
   return [
@@ -842,7 +850,7 @@ export function useBlock(input: {
     `# NixOS / nix-darwin\n${nixOsBlock(input)}`,
     `# flake.nix\n${commentLines(FLAKE_CONFIG_NOTE)}\n${flakeBlock(input)}`,
     `# GitHub Actions\n${actionsBlock(input)}`,
-    netrcBlock(input),
+    ...(input.public ? [] : [netrcBlock(input)]),
   ].join("\n\n");
 }
 

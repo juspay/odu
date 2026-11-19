@@ -12,9 +12,10 @@
  *   - **`login`** writes this machine's token for an origin, which is the
  *     credential `push` then reads. A credential store is a file on a disk,
  *     so there is nothing for a browser or an API verb to do here.
- *   - **`use`** prints the nix.conf, flake `nixConfig` and netrc lines for a
- *     bucket, for pasting into this machine's configuration. It needs no
- *     token: a bucket's URL and public key are what it publishes.
+ *   - **`use`** prints the nix.conf and flake `nixConfig` lines for a bucket,
+ *     and its netrc lines when it is private, for pasting into this machine's
+ *     configuration. It needs no token for a public bucket: its URL and public
+ *     key are what it publishes.
  *   - **`target`** prints the one odu substituter `./flake.nix` names — the
  *     same reading `push` makes with no `--cache`, said instead of acted on.
  *     It reads THIS checkout, which no daemon has a copy of, and it is what
@@ -96,9 +97,10 @@ export interface CacheCliPorts {
 
 export const CACHE_USAGE = `usage: odu cache <use|login|push|target> [args]
 
-use <bucket>                  the nix.conf settings, the nixConfig block and the
-                              netrc lines for a bucket. Needs NO token: a
-                              bucket's URL and public key are public
+use <bucket>                  the nix.conf settings and the nixConfig block for
+                              a bucket, and the netrc lines for a private one.
+                              Needs NO token for a public bucket: a bucket's URL
+                              and public key are public
 login <origin> [--token T]    save a token for an origin in
                               ~/.config/odu/cache/credentials (0600)
 push <bucket> <path>… [--token-file F] [--concurrency N] [--part-size MiB] [--pin NAME] [--run ID] [--commit SHA] [--whole] [-o json]
@@ -312,12 +314,19 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
     signal: AbortSignal.timeout(5_000),
   }).catch(() => null);
   if (publicFacts !== null && publicFacts.ok) {
-    const facts = (await publicFacts.json()) as { url?: unknown; publicKey?: unknown };
+    const facts = (await publicFacts.json()) as {
+      url?: unknown;
+      publicKey?: unknown;
+      public?: unknown;
+    };
     if (typeof facts.url === "string" && typeof facts.publicKey === "string") {
       process.stdout.write(
         useBlock({
           url: facts.url,
           publicKey: facts.publicKey,
+          // The netrc lines unless the bucket SAYS it is public: a private
+          // bucket answered here only because a token was sent, and needs them.
+          public: facts.public === true,
           home: process.env.HOME ?? null,
         }),
       );
@@ -361,6 +370,7 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
       useBlock({
         url: bucket.url,
         publicKey: bucket.publicKey,
+        public: bucket.public,
         home: process.env.HOME ?? null,
       }),
     );

@@ -644,11 +644,13 @@ interface SetupDestination {
 }
 
 /** EVERYTHING ANY DESTINATION COULD NEED, gathered once: the two facts a
- *  client trusts the bucket by, its name, the just-minted WRITE token while
- *  the page may still show it, and the commit the push action is pinned to. */
+ *  client trusts the bucket by, whether reading it needs a credential, its
+ *  name, the just-minted WRITE token while the page may still show it, and the
+ *  commit the push action is pinned to. */
 interface SetupFacts {
   readonly url: string;
   readonly publicKey: string;
+  readonly public: boolean;
   readonly bucket: string;
   readonly token: string | null;
   readonly ref: string;
@@ -659,7 +661,11 @@ const SETUP_TABS: readonly [SetupDestination, ...SetupDestination[]] = [
   {
     name: "nix.conf",
     blockClass: "consume-block",
-    text: (facts) => `${nixConfBlock(facts)}\n\n${netrcBlock({ url: facts.url, home: null })}`,
+    // The netrc lines only where reading needs a credential: a private bucket.
+    text: (facts) =>
+      facts.public
+        ? nixConfBlock(facts)
+        : `${nixConfBlock(facts)}\n\n${netrcBlock({ url: facts.url, home: null })}`,
     note: MACHINE_CONFIG_NOTE,
   },
   { name: "NixOS", blockClass: "consume-block", text: nixOsBlock, note: MACHINE_CONFIG_NOTE },
@@ -1592,6 +1598,7 @@ function BucketPage(
     return tab().text({
       url: row.url,
       publicKey: row.publicKey,
+      public: row.public,
       bucket: props.name,
       // A WRITE TOKEN AND ONLY A WRITE ONE: a read token dropped into a push
       // block would be a credential that cannot do what the block around it

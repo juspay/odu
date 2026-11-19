@@ -13,7 +13,7 @@ Commands are written with the [`odu` shorthand](/docs/#quick-start).
 
 | Command | API verb | On the board | What it does |
 | --- | --- | --- | --- |
-| `odu cache use <bucket>` | `bucket_describe` | a bucket's **Set up** block | Prints the substituter and key settings, the `nixConfig` block and the netrc lines, and says where they go ([Use it](/docs/cache/#use-it)). No account for a public bucket. |
+| `odu cache use <bucket>` | `bucket_describe` | a bucket's **Set up** block | Prints the substituter and key settings and the `nixConfig` block, the netrc lines for a private bucket, and says where they go ([Use it](/docs/cache/#use-it)). No account for a public bucket. |
 | `odu cache login <origin>` | — | — (a machine's disk) | Saves a cache token for an origin in `~/.config/odu/cache/credentials`. |
 | [`odu cache push`](#odu-cache-push) | — | — (a build machine's job) | Uploads only the paths the bucket is missing. |
 | `odu cache target` | — | — (reads this checkout) | Prints the one odu substituter `./flake.nix`'s `nixConfig` names, and nothing else, refusing no flake, none or two. `-o json` gives `{cache, origin, bucket}`. The push action uses it when `cache:` is left out. |
