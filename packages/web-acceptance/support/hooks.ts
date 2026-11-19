@@ -263,6 +263,9 @@ BeforeAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
     headless: process.env.HEADLESS !== "false",
     args: [...BROWSER_ARGS],
   });
+  // THE PORTS FIRST, from the kernel, before anything binds: a port picked any
+  // other way can be one a daemon from an earlier, killed run still holds.
+  await reserveWorldPorts();
   // THE STUB STANDS BESIDE EVERY WORKER, whether or not this worker's features
   // ever sign in: it is one tiny HTTP server, and starting it lazily would put
   // its port inside a scenario's first step. The loopback world is unchanged by
