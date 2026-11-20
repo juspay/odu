@@ -1,21 +1,7 @@
-/**
- * What a narrow viewport actually does, measured.
- *
- * Every assertion here is GEOMETRY read out of the live layout, never a class
- * name. A media query that stopped applying — a breakpoint edited, a rule moved
- * behind a more specific one — leaves every class exactly where it was, so a
- * test that read classes would go on passing over a board scrolling sideways.
- * Bounding boxes cannot be fooled that way.
- */
-
 import * as assert from "node:assert";
 import { Then } from "@cucumber/cucumber";
 import type { OduWorld } from "../support/world.ts";
 
-/** No horizontal overflow on the DOCUMENT. Scoped to the document on purpose:
- *  `pre.log-text` scrolls sideways by design, because wrapping a log line
- *  changes what it says, and that box is explicitly `overflow: auto` so its
- *  content never reaches this measurement. */
 Then("the page does not scroll sideways", async function (this: OduWorld) {
   const measured = await this.page.evaluate(() => ({
     scroll: document.documentElement.scrollWidth,
@@ -27,20 +13,7 @@ Then("the page does not scroll sideways", async function (this: OduWorld) {
   );
 });
 
-/**
- * The two facts a narrow row must not drop.
- *
- * `row-scope` is what a green actually covers and `row-attention` is whether
- * anything is waiting on you — the two columns a reflow is most tempted to hide,
- * and the two whose absence turns the board back into a thing you have to click
- * through. Both must be laid out AND inside the viewport, so a rule that moved
- * one off the right edge instead of onto its own line fails here.
- */
 Then("every run row's scope and attention are within the viewport", async function (this: OduWorld) {
-  // THE ROW IS THE PRECONDITION. A board's rows arrive from the wire a moment
-  // after its heading, and measuring before they land is a red that says
-  // nothing about the layout — the assertion below still fails when the row
-  // exists and is laid out wrongly.
   await this.page
     .locator("button.row")
     .first()
@@ -61,9 +34,6 @@ Then("every run row's scope and attention are within the viewport", async functi
   }
 });
 
-/** Stacked, not side by side — asserted as one box being BELOW the other rather
- *  than as a grid-template-columns value, because what a person cares about is
- *  that neither panel got squeezed to a column too narrow to read. */
 Then("the nodes and the output are stacked, not side by side", async function (this: OduWorld) {
   const nodes = await this.page.locator('[aria-label="Nodes"]').boundingBox();
   const output = await this.page.locator('[aria-label="Node output"]').boundingBox();
@@ -75,22 +45,6 @@ Then("the nodes and the output are stacked, not side by side", async function (t
   );
 });
 
-/**
- * ONE TRACK BOX, down the whole list and up to the axis.
- *
- * A timeline is a set of bars that share a scale. The share is geometric, not
- * notional: if two rows' tracks are different widths, `left: 50%` on one is a
- * different instant from `left: 50%` on the other, and the axis above them
- * labels neither. That is what shipped before this step existed — the track
- * lived inside the row's BUTTON, which is `flex: 1` beside a controls cell that
- * is empty on a pending row, one button wide on a settled one and wider again
- * on a running one.
- *
- * So this measures boxes (the file's doctrine: a rule that stopped applying
- * leaves every class exactly where it was) and demands the run show all three
- * row states, because a scenario that happened to hold only settled rows would
- * pass over the very defect it is here for.
- */
 Then(
   "every node's timeline track is the same box as the axis",
   async function (this: OduWorld) {
@@ -103,8 +57,6 @@ Then(
         const box = track?.getBoundingClientRect();
         return {
           id: node.querySelector(".node-id")?.textContent ?? "(unnamed)",
-          // What the row's CONTROLS cell holds — the thing that used to decide
-          // the track's width, read as what it is rather than as a status.
           controls: (node.querySelector(".node-controls")?.textContent ?? "").trim(),
           box: box === undefined ? null : { x: box.x, width: box.width },
         };
@@ -112,11 +64,6 @@ Then(
     );
     assert.ok(states.length > 0, "the run listed no nodes, so this asserted nothing");
 
-    // The three row shapes whose controls cell differs — the exact thing that
-    // used to vary the track: nothing (a node that has not started, and a node
-    // that passed), `Cancel node` (one still running), `Retry` (one that
-    // FAILED). A run holding only one of them cannot speak to the defect,
-    // which is what the fixture's fourth recipe is for.
     const shapes: Record<string, (controls: string) => boolean> = {
       "no controls": (controls) => controls === "",
       "a running node's Cancel": (controls) => controls.includes("Cancel node"),

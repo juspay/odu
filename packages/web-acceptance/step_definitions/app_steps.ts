@@ -1,41 +1,12 @@
-/**
- * The steps that belong to no one feature: opening a route, pressing a button by
- * its visible name, and the two assertions almost every scenario ends with.
- *
- * `I press {string}` is deliberately spelled as a ROLE and an accessible NAME
- * rather than a CSS selector. That is not a stylistic preference: a step that
- * found its button by `.btn:nth-child(3)` would go on passing after the label
- * changed to something nobody can read, which is the opposite of what a browser
- * acceptance suite is for. If a control cannot be found by the name a person
- * reads, that is a finding.
- */
-
 import * as assert from "node:assert";
 import { Given, Then, When } from "@cucumber/cucumber";
 import type { OduWorld } from "../support/world.ts";
 
-/**
- * Navigating by address is not a shortcut past a control: the URL hash IS this
- * app's router, so `#/` is a link a person can paste and this is the same
- * arrival they would get. Scenarios that are ABOUT the navigation press the
- * button instead — see create_run.feature's first scenario.
- *
- * Registered as a `Given` and read as either. Cucumber matches step TEXT and
- * ignores the keyword, so a second registration under `When` would not be a
- * synonym — it would be an ambiguity, and every scenario using the step would
- * fail rather than choose.
- */
 Given("I open the board", async function (this: OduWorld) {
   await this.open("#/");
   await this.page.getByRole("heading", { name: "Runs", exact: true }).waitFor();
 });
 
-/**
- * THE SAME NAVIGATION WITHOUT A PROMISE ABOUT WHAT IS THERE. `I open the board`
- * waits for the board, which an anonymous connection on a daemon with a door
- * never draws — it meets the sign-in page instead. A scenario whose subject IS
- * that page arrives here, and asserts what it sees itself.
- */
 Given("I open odu", async function (this: OduWorld) {
   await this.open("#/");
 });
@@ -49,14 +20,6 @@ When("I press {string}", async function (this: OduWorld, label: string) {
   await this.page.getByRole("button", { name: label, exact: true }).click();
 });
 
-/**
- * The address moved to a run — and the run is remembered.
- *
- * Registering it here rather than in a step of its own is what keeps the feature
- * files free of housekeeping: a scenario that starts a run is exactly a scenario
- * whose address ends up naming one, and every such run must be stopped in
- * teardown or a `sleep 300` outlives the leg holding a core.
- */
 Then("the address names a run", async function (this: OduWorld) {
   await this.waitUntil(
     async () => /^#\/run\/.+/.test(await this.page.evaluate(() => location.hash)),
@@ -71,14 +34,6 @@ Then("the wire reads {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.wire(), "the connection indicator", text);
 });
 
-/**
- * A control a page OFFERS, by the words a person reads — the presence half of
- * every "hide what the role cannot use" assertion. Absence is its own step,
- * because a missing button and a button that works are different failures.
- *
- * Matched by substring (`Retry` finds the node's own `Retry alpha@`), which is
- * what makes one step cover a page-level button and a per-node one.
- */
 Then("the run page offers {string}", async function (this: OduWorld, name: string) {
   await this.page.getByRole("button", { name }).first().waitFor({ timeout: 30_000 });
 });
@@ -95,10 +50,6 @@ Then("the alert reads {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.page.getByRole("alert"), "the refusal", text);
 });
 
-/** An ANSWER is not a refusal, and the difference is in the DOM: `role=status`
- *  is announced politely, `role=alert` interrupts. A page that reported "that
- *  checkout already has a live run" as an alert would be telling a person
- *  something went wrong when nothing did. */
 Then("there is no alert", async function (this: OduWorld) {
   assert.strictEqual(
     await this.page.getByRole("alert").count(),
@@ -107,20 +58,7 @@ Then("there is no alert", async function (this: OduWorld) {
   );
 });
 
-/**
- * Nothing threw in the page.
- *
- * The assertion a DOM snapshot cannot make. A Solid view whose effect throws
- * leaves the last rendered frame on screen, so a page that has stopped updating
- * looks exactly like a page with nothing to say — and the only evidence is on
- * the console this listener has been recording since before the first
- * navigation.
- */
 Then("there should be no page errors", function (this: OduWorld) {
-  // A SCENARIO MAY ASK FOR A FAILED NAVIGATION. The browser logs it as a
-  // console error like any other; exactly the status it asked for, on exactly
-  // the URL it asked, is allowed. Any other failed response, or any other
-  // error, still fails — the check is not dropped for such a scenario.
   const unexpected = this.failedResponses.filter(
     (failed) =>
       !this.expectedResponses.some(
@@ -154,16 +92,6 @@ Then("there should be no page errors", function (this: OduWorld) {
   );
 });
 
-/**
- * The same assertion, minus the ONE entry a scenario is about.
- *
- * A refused sign-in is a 403 DOCUMENT: the browser logs the navigation itself
- * as a failed resource, and that line is the answer, not a fault. Dropping the
- * whole check for such a scenario (which this suite did once) stops catching a
- * genuine script error on the very page a person meets when they are turned
- * away — so the check stays and exactly its own 403 is filtered. The filter is
- * a message this scenario produced, not a category: any OTHER error still fails.
- */
 Then("the page reports no errors other than the refused sign-in", function (this: OduWorld) {
   const others = this.errors.filter((one) => !one.includes("403 (Forbidden)"));
   assert.deepStrictEqual(

@@ -1,24 +1,10 @@
-/**
- * Operating the app without a mouse.
- *
- * These steps press Tab and Enter and then ask what the browser did, which is
- * the only way to check the property that matters. `aria-pressed` being present
- * in a DOM snapshot says nothing about whether a person can REACH the button
- * carrying it; a focus ring that never lands on a control is invisible to every
- * assertion except this one.
- */
-
 import * as assert from "node:assert";
 import { Then, When } from "@cucumber/cucumber";
 import { headOf } from "../support/service.ts";
 import type { OduWorld } from "../support/world.ts";
 
-/** How many Tabs to spend looking for one control. Generous relative to the
- *  handful of controls on any of these pages, and bounded so a control that is
- *  genuinely unreachable fails in a second rather than looping. */
 const TAB_BUDGET = 40;
 
-/** What has the focus, described the way a failure message needs it. */
 async function focused(world: OduWorld): Promise<string> {
   return await world.page.evaluate(() => {
     const el = document.activeElement;
@@ -28,9 +14,6 @@ async function focused(world: OduWorld): Promise<string> {
   });
 }
 
-/** Tab until `landed` says the focus is where it should be, from wherever it is
- *  now. The starting point is the document itself, so this is the sequence a
- *  person gets from a freshly loaded page. */
 async function tabUntil(
   world: OduWorld,
   landed: () => Promise<boolean>,
@@ -88,8 +71,6 @@ When("I press Space", async function (this: OduWorld) {
   await this.page.keyboard.press("Space");
 });
 
-/** A checkbox in the options fieldset, found by the words wrapped around it —
- *  which is what a person is reading when they decide to tick it. */
 When("I tab to the {string} option", async function (this: OduWorld, label: string) {
   await tabUntil(
     this,
@@ -114,9 +95,6 @@ Then("that option is ticked", async function (this: OduWorld) {
   assert.strictEqual(ticked, true, "Space did not tick the focused option");
 });
 
-/** Shift+Tab back to a named field. A `<label for=…>` is what binds the words to
- *  the control, so the label is resolved through that binding rather than
- *  through an id spelled here — the same binding a screen reader follows. */
 When("I shift-tab back to the {string} field", async function (this: OduWorld, label: string) {
   const id = await this.page.evaluate(
     (wanted) =>
@@ -143,11 +121,6 @@ When("I focus {string} and type the fixture path", async function (this: OduWorl
   await this.page.keyboard.type(dir);
 });
 
-/** Tab, then type — no `fill`, no click. This is the step the whole
- *  keyboard-submit fix exists for: the form has five text fields, so HTML's
- *  implicit submission needs a real submit button to reach `onSubmit`, and while
- *  every control here was hardcoded `type="button"` the Enter below did nothing
- *  at all. */
 When("I press Tab and type the fixture HEAD", async function (this: OduWorld) {
   const dir = this.checkout;
   assert.ok(dir !== undefined, "no fixture checkout has been made yet");
@@ -155,16 +128,6 @@ When("I press Tab and type the fixture HEAD", async function (this: OduWorld) {
   await this.page.keyboard.type(headOf(dir));
 });
 
-/**
- * Every control on the page is a real `<button>`.
- *
- * Two claims in one, and the second is the one a snapshot cannot make. First:
- * nothing carries an inline click handler outside a button. Second — and this is
- * the structural rule `@odu/face`'s `ui.tsx` exists to keep — everything
- * that LOOKS like a control (a run row, a `.btn`, a node opener) actually IS a
- * button element, so it is focusable, fires on Enter and Space, is announced as
- * a control, and carries a disabled state the browser enforces.
- */
 Then("every control on the page is a real button", async function (this: OduWorld) {
   const wrong = await this.page.evaluate(() =>
     [...document.querySelectorAll(".row, .btn, .node-open, [onclick]")]
@@ -178,15 +141,6 @@ Then("every control on the page is a real button", async function (this: OduWorl
   );
 });
 
-/**
- * Every visible control is REACHED by tabbing, not merely focusable in theory.
- *
- * Each candidate is stamped with a marker first, so what is counted is the same
- * element in both halves of the check — a comparison by text or by index would
- * be fooled by two buttons sharing a label, which the attempt picker and the
- * per-node controls both produce. The stamp is a `data-` attribute on a page
- * whose context is thrown away at the end of the scenario.
- */
 Then("every visible control can be reached by tabbing", async function (this: OduWorld) {
   const expected = await this.page.evaluate(() => {
     const controls = [...document.querySelectorAll("button, input, select, textarea")].filter(
@@ -201,9 +155,6 @@ Then("every visible control can be reached by tabbing", async function (this: Od
 
   await this.page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   const reached = new Set<string>();
-  // Two Tabs per control is the budget: one to land on it, and slack for the
-  // browser's own stops (the document, an address-bar hand-off) that are not
-  // controls at all.
   for (let press = 0; press < expected.length * 2 + 4; press += 1) {
     await this.page.keyboard.press("Tab");
     const mark = await this.page.evaluate(

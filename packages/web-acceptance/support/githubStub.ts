@@ -1,52 +1,19 @@
-/**
- * A GITHUB, SMALL ENOUGH TO BE ONE FILE.
- *
- * The door talks to four endpoints, so the stub answers those four and nothing
- * else: the authorisation page (which redirects straight back, as a person who
- * has already consented would), the token exchange, `/user`, and the two
- * membership probes. Pointing a world at it is `ODU_GITHUB_ORIGIN` /
- * `ODU_GITHUB_API`, which is why those two settings exist in the first place —
- * a GitHub Enterprise install needs them too.
- *
- * **What a scenario can vary**, and why each is a promise:
- *
- *   - `login` — who GitHub says you are;
- *   - `orgMember` / `teamMember` — whether the allow-list lets you in, which is
- *     the "a login outside the list is refused with a reason" scenario;
- *   - `expires` — the App was configured with token expiry on. The row must
- *     REFUSE that sign-in and say which setting to turn off.
- *
- * One server answers both origins because the flow's two halves share nothing
- * but a host; a test that needed two ports would be testing our URL handling
- * rather than the flow.
- */
-
 import { createServer, type Server } from "node:http";
 
 export interface StubMode {
-  /** The login GitHub will claim. */
   login: string;
-  /** Is that login an active member of the organisation the allow-list names? */
   orgMember: boolean;
-  /** …and of the team, when the allow-list names one? */
   teamMember: boolean;
-  /** Issue an expiring user token (the App misconfiguration the row refuses). */
   expires: boolean;
 }
 
 export interface GithubStub {
-  /** Both `ODU_GITHUB_ORIGIN` and `ODU_GITHUB_API`. */
   origin: string;
-  /** The mode the next request answers with. Mutated per scenario. */
   mode: StubMode;
-  /** The last authorisation URL a browser was redirected to — what a step reads
-   *  to prove the flow started with the App's client id and no scope. */
   lastAuthorize: URL | null;
   close(): Promise<void>;
 }
 
-/** What a plain GitHub says, before any scenario arranges otherwise — and what
- *  the harness resets to between scenarios, because the stub outlives them. */
 export const DEFAULT_STUB_MODE: StubMode = {
   login: "odu-e2e",
   orgMember: true,
@@ -54,7 +21,6 @@ export const DEFAULT_STUB_MODE: StubMode = {
   expires: false,
 };
 
-/** Listen on a free loopback port, and answer as GitHub would. */
 export async function startGithubStub(port: number): Promise<GithubStub> {
   const stub: GithubStub = {
     origin: `http://127.0.0.1:${port}`,

@@ -1,24 +1,9 @@
-/**
- * THE CLOUDFLARE STUB, and a `cloudflared` that reports a connection.
- *
- * One server answers both halves the row talks to: the API (verify, zone
- * lookup, tunnel create, ingress, DNS) and the PROBE endpoints the harness
- * points `ODU_CLOUDFLARE_PROBE_BASE` at — because a test's names do not resolve
- * on the public internet and a tunnel that cannot be confirmed would leave every
- * scenario waiting on a real DNS answer that will never come.
- *
- * The stub approves everything it is asked, with one zone (`tunnel.test`), and
- * records the requests so a scenario can assert what the row made. It is a
- * STUB, not a mock module: the row's real `fetch` reaches it.
- */
-
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export interface CloudflareStub {
   readonly origin: string;
-  /** A directory that holds the fake `cloudflared`; prepend it to PATH. */
   readonly binDir: string;
   readonly seen: { method: string; path: string }[];
   readonly stop: () => void;
@@ -34,11 +19,9 @@ export function startCloudflareStub(): CloudflareStub {
     async fetch(request) {
       const url = new URL(request.url);
       seen.push({ method: request.method, path: `${url.pathname}${url.search}` });
-      // ── what a name is confirmed with ──
       if (url.pathname === "/nix-cache-info" || url.pathname === "/_odu/door") {
         return new Response("ok");
       }
-      // ── the API ──
       if (url.pathname === "/user/tokens/verify") {
         return envelopes({ status: "active" });
       }
@@ -81,7 +64,6 @@ export function startCloudflareStub(): CloudflareStub {
   const binDir = mkdtempSync(join(tmpdir(), "odu-wa-cloudflared-"));
   const bin = join(binDir, "cloudflared");
   writeFileSync(bin, '#!/bin/sh\necho "Registered tunnel connection connIndex=0"\nexec sleep 600\n');
-  // 0755, so the daemon's PATH lookup finds a runnable program.
   Bun.spawnSync(["chmod", "0755", bin]);
 
   return {

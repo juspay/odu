@@ -1,38 +1,4 @@
 #!/usr/bin/env bun
-/**
- * REPRODUCIBLE SCREENSHOT EVIDENCE for the board — every screen, both themes,
- * desktop and phone.
- *
- * odu's other evidence is a terminal recording (`dev/skills/pr-evidence`),
- * because odu is a terminal tool. The BOARD is not, and a redesign's evidence
- * is what it looks like — so this is the same idea in the same shape: a script
- * committed beside the gifs' scripts, driving the REAL nix-built binary
- * against throwaway worlds, which anybody can re-run to regenerate the images
- * when the design moves.
- *
- *   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
- *   nix develop .#e2e -c bun tests/evidence/board-shots.ts "$odu" /tmp/shots after
- *
- * It reuses `packages/web-acceptance/support` rather than re-implementing a
- * harness: those modules already know how to start a private daemon, a door
- * daemon with a GitHub stub, a tunnel daemon with a Cloudflare stub, and how
- * to make a fixture checkout and run it. A second copy of that would be a
- * second thing to keep true.
- *
- * THREE WORLDS, because three facts cannot coexist in one daemon:
- *
- *   - **loopback** — no door, every caller its owner: the runs, a run, the new
- *     run form, machines, maintenance, the cache and a bucket;
- *   - **door** — `ODU_GITHUB_*` pointed at the stub: the sign-in screen (never
- *     signed in) and then the profile and people pages (signed in as owner);
- *   - **tunnel** — the cloudflare row mounted against its stub: the tunnel.
- *
- * Each shot is taken twice per viewport: once with the theme pinned `dark` and
- * once `light`. The pin is written into `localStorage` before the page's first
- * script runs, which is the same thing the toggle does — and `emulateMedia` is
- * set to match, so a build that has no toggle (the BEFORE half of this
- * comparison) still answers in both schemes.
- */
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -73,9 +39,6 @@ const outDir = outArg;
 const label = labelArg ?? "after";
 mkdirSync(outDir, { recursive: true });
 
-/** The two viewports the evidence is taken at: a 1440 desktop, which is what
- *  the design canvas was drawn at, and a 390 phone, which is the width the
- *  "no horizontal page scroll" gate is about. */
 const VIEWPORTS = [
   { name: "desktop", width: 1440, height: 1000 },
   { name: "phone", width: 390, height: 844 },
@@ -83,23 +46,14 @@ const VIEWPORTS = [
 
 const THEMES = ["dark", "light"] as const;
 
-/** One screenshot: a world's origin, a hash route, a name. */
 interface Shot {
   readonly name: string;
   readonly origin: string;
   readonly hash: string;
-  /** Something to wait for before the shutter — a selector that only exists
-   *  once the wire has delivered the screen. Without it the shot is of a page
-   *  mid-subscription, which is evidence of nothing. */
   readonly settle?: string;
-  /** Run before the shot, for a screen that needs a control pressed to exist
-   *  (a log pane needs a node chosen). */
   readonly act?: (page: Page) => Promise<void>;
 }
 
-/** PUT THE PAGE DOWN before the shutter: drop the focus ring and take the
- *  pointer off whatever was last pressed, so no tooltip is standing open over
- *  the screen being photographed. */
 async function rest(page: Page): Promise<void> {
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.mouse.move(0, 0);
@@ -115,16 +69,11 @@ async function shoot(browser: Browser, shots: ReadonlyArray<Shot>): Promise<void
         deviceScaleFactor: 2,
         reducedMotion: "reduce",
       });
-      // BEFORE THE PAGE'S FIRST SCRIPT. The shell's `<head>` reads this key to
-      // set `data-theme` before the first paint; writing it here is exactly
-      // what the toggle does, so the shot is of a real pinned theme rather
-      // than of a page somebody clicked.
       await context.addInitScript(
         ([key, value]) => {
           try {
             window.localStorage.setItem(key, value);
           } catch {
-            /* a build without a toggle ignores this and follows emulateMedia */
           }
         },
         ["odu.web.theme", theme] as const,
@@ -145,15 +94,7 @@ async function shoot(browser: Browser, shots: ReadonlyArray<Shot>): Promise<void
             });
         }
         await shot.act?.(page);
-        // THE PAGE AT REST. A control the script pressed keeps the pointer and
-        // the focus ring, and this design draws a real tooltip on both — so an
-        // un-rested shot is a picture of a hint floating over the thing it was
-        // meant to show. The hint is correct behaviour; it is just not what
-        // this evidence is of.
         await rest(page);
-        // One beat for the fonts: a shot taken before Geist arrives is a shot
-        // of the fallback face, which is the one thing this evidence must not
-        // show.
         await page.evaluate(() => document.fonts.ready).catch(() => undefined);
         const file = join(outDir, `${label}-${shot.name}-${theme}-${viewport.name}.png`);
         await page.screenshot({ path: file, fullPage: true });
@@ -164,10 +105,6 @@ async function shoot(browser: Browser, shots: ReadonlyArray<Shot>): Promise<void
   }
 }
 
-/** A bucket to photograph, made the way a person makes one — the CLI, which is
- *  the arrange step the cache feature already uses. A token is minted and a
- *  path pushed so the page has numbers on it: a bucket page of zeroes is
- *  evidence that the page renders, not evidence of what it looks like. */
 function makeBucket(service: Service, name: string, push: string | null): void {
   const made = oduCli(service, ["cache", "create", name, "-o", "json"]);
   if (made.status !== 0) {
@@ -193,7 +130,6 @@ let browser: Browser | undefined;
 try {
   await reserveWorldPorts();
 
-  // ── the loopback world ──
   const loopback = await startService(odu, workerPort());
   services.push(loopback);
 
@@ -211,13 +147,9 @@ try {
   });
   await waitSettled(loopback, redRun, 600_000);
   await waitSettled(loopback, greenRun, 600_000);
-  // The odu binary's own closure is a real store path with a real NAR, so it
-  // is the one thing every machine running this script is guaranteed to have
-  // to push.
   makeBucket(loopback, "kolu", odu);
   makeBucket(loopback, "localtest", null);
 
-  // ── the door world ──
   const github = await startGithubStub(stubPort());
   const secretDir = mkdtempSync(join(tmpdir(), "odu-shots-"));
   const secretFile = join(secretDir, "github-secret");
@@ -233,7 +165,6 @@ try {
   );
   services.push(door);
 
-  // ── the tunnel world ──
   const cloudflare = startCloudflareStub();
   const tokenFile = join(secretDir, "cloudflare-token");
   writeFileSync(tokenFile, "stub-cloudflare-token\n", { mode: 0o600 });
@@ -254,8 +185,6 @@ try {
       origin: loopback.origin,
       hash: `#/run/${redRun}`,
       settle: "li.node",
-      // THE LOG IS THE POINT of this screen, and it is empty until a node is
-      // chosen, so the shot opens the first failed one the way a person does.
       act: async (page) => {
         const failed = page.locator("button.node-open").first();
         await failed.click().catch(() => undefined);
@@ -271,8 +200,6 @@ try {
     { name: "tunnel", origin: tunnel.origin, hash: "#/tunnel", settle: "section.tunnel" },
   ]);
 
-  // THE SIGNED-IN SCREENS, in their own pass: the door world's browser has to
-  // complete a sign-in first, and a context that has is a different context.
   for (const theme of THEMES) {
     for (const viewport of VIEWPORTS) {
       const context = await browser.newContext({
@@ -286,13 +213,11 @@ try {
           try {
             window.localStorage.setItem(key, value);
           } catch {
-            /* see above */
           }
         },
         ["odu.web.theme", theme] as const,
       );
       const page = await context.newPage();
-      // The way a person signs in: follow the link and let the stub authorise.
       await page.goto(new URL("/auth/github", door.origin).href, {
         waitUntil: "domcontentloaded",
       });

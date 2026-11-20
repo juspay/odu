@@ -1,37 +1,4 @@
 /**
- * Lifecycle: one browser and one service per worker, one fresh context and page
- * per scenario.
- *
- * ## The browser is REQUIRED, and that is the whole point
- *
- * odu's previous browser coverage skipped itself where no browser was on PATH —
- * so on a CI runner it silently graded nothing, and the one environment where a
- * regression would be caught by somebody other than its author was the one
- * environment that never checked. This suite has no skip in it. If the browsers
- * are not there, {@link BeforeAll} throws once, before the first scenario, with
- * the sentence that gets them.
- *
- * ## The two gates, and why the second one exists
- *
- * The first gate is the browsers themselves: `PLAYWRIGHT_BROWSERS_PATH`, set by
- * the `e2e` devShell (`flake.nix`), which points at `pkgs.playwright-driver.browsers`.
- *
- * The second is the VERSION MATCH between the npm `playwright` package and that
- * nixpkgs driver, and it exists because nothing else enforces it. The npm side
- * ships only the driver's JavaScript; the browser binaries come from the Nix
- * store, and the driver refuses a build it was not compiled against. A drift
- * installs cleanly, typechecks cleanly, and then fails at `chromium.launch()`
- * with `Executable doesn't exist` naming a store path that IS there — the least
- * legible failure in the whole stack, reached minutes into a lane. Comparing two
- * strings before anything launches turns it into a sentence that names both
- * numbers and says to move them together.
- *
- * ## Isolation is by context, not by browser
- *
- * `After` closes the CONTEXT: storage, cookies and any in-flight WebSocket go
- * with it, so the next scenario's first frame is a genuine cold load. Closing
- * the browser instead would pay a launch per scenario for the same property.
- *
  * ## Teardown order
  *
  * `AfterAll` stops the service BEFORE closing the browser. A Chromium still
@@ -75,32 +42,23 @@ const HERE = import.meta.dirname;
 const REPORTS = join(HERE, "..", "reports");
 const workerId = (): string => process.env.CUCUMBER_WORKER_ID ?? "0";
 
-/** A desktop this app was designed for, and the phone-width viewport the
- *  `@narrow` scenarios ask for. 380 px is narrower than the 46 rem breakpoint
- *  `@odu/face`'s `theme.css` reflows the board at, so a scenario tagged
- *  `@narrow` is on the other side of that media query rather than near it. */
 const DESKTOP = { width: 1280, height: 900 } as const;
 const NARROW = { width: 380, height: 720 } as const;
 
 let browser: Browser | undefined;
-/** TODAY'S WORLD, and THE DOOR'S — two daemons per worker, started on demand.
- *  `service` is whichever the running scenario's tags named. */
 let loopback: Service | undefined;
 let door: Service | undefined;
 let tunnel: Service | undefined;
 let cloudflare: CloudflareStub | undefined;
 let service: Service | undefined;
 let github: GithubStub | undefined;
-/** Where the App's client secret file lives for this worker. */
 let secretDir: string | undefined;
 
-/** The loopback world: unchanged from what every scenario has always used. */
 async function loopbackService(odu: string): Promise<Service> {
   loopback ??= await startService(odu, workerPort());
   return loopback;
 }
 
-/** The door's world: the same daemon, configured against the stub. */
 async function doorService(odu: string): Promise<Service> {
   if (door !== undefined) return door;
   if (github === undefined) throw new Error("web-acceptance: the GitHub stub never started");
@@ -119,13 +77,6 @@ async function doorService(odu: string): Promise<Service> {
   return door;
 }
 
-/** THE TUNNEL'S WORLD: loopback, plus the cloudflare row pointed at the stub
- *  and a `cloudflared` that says it registered. Its names are
- *  `<something>.tunnel.test`, which is the stub's one zone.
- *
- *  The PROBE base is the stub too: a name in this suite does not resolve, so the
- *  row confirms it by asking the same server that stands for Cloudflare — which
- *  is what a deployment behind a proxy does, with a proxy. */
 async function tunnelService(odu: string): Promise<Service> {
   if (tunnel !== undefined) return tunnel;
   cloudflare ??= startCloudflareStub();
@@ -141,14 +92,6 @@ async function tunnelService(odu: string): Promise<Service> {
   return tunnel;
 }
 
-/** THE OPERATOR'S PERSONAL TOKEN, minted once per worker.
- *
- * The root token may bootstrap exactly ONE owner, so the harness spends it on an
- * account that never changes role (`odu-owner`) and then grants every scenario's
- * role with that account's token. Minting it is a person's route — sign in
- * through the stub, open the profile, create a token — because that is the only
- * way a token comes into existence.
- */
 let operatorToken: string | undefined;
 
 async function operator(odu: string, world: Service): Promise<string> {
@@ -156,9 +99,6 @@ async function operator(odu: string, world: Service): Promise<string> {
   if (browser === undefined || github === undefined) {
     throw new Error("web-acceptance: no browser or stub to mint the operator");
   }
-  // THE FIRST OWNER, through the API face: `user_grant` takes the operator's
-  // root token as a FIELD, and the row compares it only because this caller
-  // has no session yet (`packages/auth/src/server.ts`).
   const bootstrapped = oduCli(world, [
     "surface",
     "auth",
@@ -173,10 +113,6 @@ async function operator(odu: string, world: Service): Promise<string> {
         `${bootstrapped.stderr}\n--- daemon log ---\n${readFileSync(world.logPath, "utf-8").slice(-4000)}`,
     );
   }
-  // THE WHOLE MODE, not just the login: a scenario may have left the stub
-  // refusing this organisation (that is what "a login outside the allow-list is
-  // refused" arranges), and the harness's own bootstrap must not depend on what
-  // the previous scenario was proving. Restored whole, afterwards.
   const previous = { ...github.mode };
   github.mode = { ...DEFAULT_STUB_MODE, login: OPERATOR_LOGIN };
   const context = await browser.newContext({ baseURL: world.origin });
@@ -199,19 +135,12 @@ async function operator(odu: string, world: Service): Promise<string> {
   return operatorToken;
 }
 
-/** Whichever world a scenario's tags named, started if this worker has not
- *  needed it yet. */
 async function worldFor(odu: string, identity: ReturnType<typeof identityOf>): Promise<Service> {
   if (identity.kind === "loopback") return loopbackService(odu);
   if (identity.kind === "tunnel") return tunnelService(odu);
   return doorService(odu);
 }
 
-/** What the npm `playwright` in THIS tree says its version is. Read from the
- *  installed manifest rather than from our own `devDependencies`, because the
- *  question the gate asks is about the code that will run, not about what was
- *  asked for. (`pins.test.ts` asks the other half — that what was asked for is
- *  an exact version and cannot float.) */
 function installedPlaywrightVersion(): string {
   const resolve = createRequire(import.meta.url);
   const manifest = JSON.parse(
@@ -221,8 +150,6 @@ function installedPlaywrightVersion(): string {
 }
 
 BeforeAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
-  // Once, here, rather than per scenario: an unset ODU_BIN is a setup mistake,
-  // and reporting it twenty-six times buries it.
   const odu = readOduBin();
 
   const browsers = process.env.PLAYWRIGHT_BROWSERS_PATH;
@@ -258,21 +185,13 @@ BeforeAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
   }
 
   browser = await chromium.launch({
-    // `HEADLESS=false` is for a person watching a scenario fail, and is the one
-    // knob here that changes what the browser IS rather than where it runs.
     headless: process.env.HEADLESS !== "false",
     args: [...BROWSER_ARGS],
   });
   // THE PORTS FIRST, from the kernel, before anything binds: a port picked any
   // other way can be one a daemon from an earlier, killed run still holds.
   await reserveWorldPorts();
-  // THE STUB STANDS BESIDE EVERY WORKER, whether or not this worker's features
-  // ever sign in: it is one tiny HTTP server, and starting it lazily would put
-  // its port inside a scenario's first step. The loopback world is unchanged by
-  // it — only a door world points at it.
   github = await startGithubStub(stubPort());
-  // Started eagerly for the suite that has always run against it; the door's
-  // world is the one started on demand, because most scenarios never need it.
   service = await loopbackService(odu);
 });
 
@@ -290,8 +209,6 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
   this.identity = identity;
   this.signInLogin = STUB_LOGIN;
   if (identity.kind === "signed-in") {
-    // THE ROLE IS GRANTED BY AN OWNER, not by the root token: that token's one
-    // job was bootstrapping `OPERATOR_LOGIN`, above.
     const token = await operator(odu, world);
     const granted = oduCli(
       world,
@@ -300,8 +217,6 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
         "auth",
         "user_grant",
         "--input",
-        // A signed-in owner carries authority; the root token field is ignored
-        // for them, so it goes empty.
         JSON.stringify({ rootToken: "", login: STUB_LOGIN, role: identity.role }),
         "--json",
       ],
@@ -315,9 +230,6 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
     }
   }
   this.browser = browser;
-  // A stub answers ONE scenario at a time (a worker runs one at a time), and
-  // every scenario starts from the default account: the refusal scenario is the
-  // one that changes it, and a mode that survived it would fail the next.
   this.stub = github;
   github.mode = { login: STUB_LOGIN, orgMember: true, teamMember: true, expires: false };
   this.service = world;
@@ -351,8 +263,6 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
     this.requests.push(request.url());
   });
   this.page.on("response", (response) => {
-    // A 3xx is a NAVIGATION STEP, not a failed response: `ok()` excludes
-    // redirects, and counting them turned every sign-in into an "error".
     if (response.status() >= 400) {
       this.failedResponses.push({ status: response.status(), url: response.url() });
     }
@@ -365,10 +275,6 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
 
 After({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario) {
   const failed = scenario.result?.status === Status.FAILED;
-  // A screenshot of a FAILURE always, because a failure on a CI runner nobody
-  // can attach to is otherwise a locator and a timeout. `ODU_WA_SHOTS` adds the
-  // passing ones, which is how this suite produces evidence that the browser
-  // really drove the page rather than that the assertions merely agreed.
   if (this.page !== undefined && (failed || process.env.ODU_WA_SHOTS === "1")) {
     const slug =
       scenario.pickle.name
@@ -387,27 +293,13 @@ After({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario) 
     }
   }
 
-  // The CONTEXT, not the browser — see this file's header.
   if (this.context !== undefined) await this.context.close();
 
-  // A scenario's stub mode is that scenario's, and the STUB OUTLIVES it (one per
-  // worker). "A login outside the allow-list is refused" sets a refusing mode;
-  // left standing it refuses the NEXT scenario's sign-in, including the
-  // harness's own operator mint. Reset to what a plain GitHub says.
   if (github !== undefined) github.mode = { ...DEFAULT_STUB_MODE };
 
   // A private run goes down before its checkout does: `SLOW` and `FAST_RED` both
   // sleep for minutes, and a coordinator left running holds a core and a lock on
   // a directory this is about to remove.
-  //
-  // TWO SOURCES, because one is not enough. `ownRuns` is what the steps noticed
-  // — "the address names a run" registers a run the page navigated to — and it
-  // misses the run a BUTTON starts: "Run again" is a new run at the same commit
-  // and the page never moves, so nothing names it. The world is shared by every
-  // scenario a worker runs, so a run missing from that list sits on the next
-  // scenario's board and outlives the checkout it needs. The second source is
-  // the SERVICE: every run of a fixture this scenario made that is still
-  // active, by the board's own definition of active.
   const stopped = new Set(this.ownRuns);
   for (const dir of this.ownFixtures) {
     try {
