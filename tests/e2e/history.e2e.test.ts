@@ -104,9 +104,6 @@ describe("a bounded wait answers before the slow lane finishes", () => {
     ]);
     const elapsed = Date.now() - started;
 
-    // ORDERING, not a latency threshold: the sibling sleeps 120s, so returning
-    // at all means returning before it settled. The generous bound below only
-    // catches a wait that has stopped returning early altogether.
     expect(elapsed).toBeLessThan(90_000);
     expect(attention.settled).toBe(false);
     expect(attention.reason).toBe("failure");
@@ -114,8 +111,6 @@ describe("a bounded wait answers before the slow lane finishes", () => {
     const failure = attention.failures.find((f) => f.node.startsWith("quick@"));
     expect(failure, "the quick lane's failure should be reported").toBeDefined();
     expect(failure!.exitCode).toBe(1);
-    // The log BARRIER: a failure is only reported once its output is complete,
-    // so the excerpt carries the reason rather than a half-written line.
     expect(failure!.logComplete).toBe(true);
     expect(failure!.excerpt).toContain("BOOM: the quick lane failed");
     expect(failure!.excerptSource).toBe("attempt_log");

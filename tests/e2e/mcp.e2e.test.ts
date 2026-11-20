@@ -74,9 +74,6 @@ async function readServiceCell(client: Client): Promise<ServiceCellish> {
   return JSON.parse(first.text) as ServiceCellish;
 }
 
-/** As much of the service cell as this file reads. Mirrors — and is NOT
- *  imported from — `ServiceCellSchema`: black-box, so a shape imported from the
- *  code under test would agree with a mistake. */
 interface ServiceCellish {
   identity: { origin: string; pid: number; home: string };
   readiness: { state: string };
@@ -112,13 +109,6 @@ describe("odu mcp — the shared-service bridge", () => {
     try {
       const listed = await client.listTools();
       const names = listed.tools.map((t) => t.name).sort();
-      // Equality, not containment. A face that could do one more thing than the
-      // browser can is the second vocabulary growing back, and containment would
-      // not see it. The list has grown more than once — five verbs, then
-      // thirteen, then every verb the retired admin CLI used to own — and
-      // equality is what made each growth a reviewed change rather than a
-      // drift: a new verb has to be added here, in the shared list, at the
-      // same time as it reaches the contract.
       expect(names).toEqual([...SHARED_TOOLS]);
       for (const gone of [
         "run",
@@ -281,11 +271,6 @@ describe("odu mcp — cold bootstrap", () => {
     }
   }, 300_000);
 
-  // The ordinary morning, not an edge case: a person opens a terminal and an
-  // agent's host starts its MCP server, on a machine where nothing is
-  // running. Two services would be two truths about one run, and the loser of
-  // the race must not take the port from the winner — which is what
-  // `serveWebService` claiming the pid gate BEFORE it binds is for.
   it("two cold faces racing for one daemon converge on it", async () => {
     const world = coldWorld("race", suitePortFor("coldRace"));
     let daemonHome: string | null = null;
@@ -321,13 +306,6 @@ describe("odu mcp — cold bootstrap", () => {
           await close();
         }
       };
-      // FOUR AT ONCE, and two of each face — a terminal client and an agent's
-      // bridge bootstrap through the same seam but from different processes,
-      // and a race that only ever ran one kind would not have exercised it.
-      //
-      // `Bun.spawn`, never `spawnSync`: a synchronous spawn blocks this thread
-      // until the child exits, so a `Promise.all` over four of them would run
-      // them one after another and assert nothing about a race at all.
       const answers = await Promise.all([
         viaTerminal(),
         viaBridge(),
@@ -413,9 +391,6 @@ describe("odu mcp — the bridge redials", () => {
         world.adopt(cell.identity.pid);
         daemonHome = cell.identity.home;
         killDaemon(cell.identity.pid);
-        // THE PORT, FIRST. A bridge that dials while the dying daemon still
-        // holds the socket fails a dial it would have won a moment later, and
-        // the test would blame the redial for the kill's timing.
         await until(
           "the killed daemon's port to close",
           async () => ((await tcpListening(world.origin)) ? null : true),
@@ -455,15 +430,6 @@ describe("odu mcp — the bridge redials", () => {
   }, 300_000);
 });
 
-/**
- * A world with nothing in it: its own state root, its own origin, and a
- * teardown that reaps whatever it started.
- *
- * `adopt` rather than a return value because the pid is learned in the middle
- * of the test, and a daemon started by an attempt that then FAILED must still
- * be reaped — which is why the pid is recorded on the world the moment it is
- * known rather than at the end.
- */
 function coldWorld(
   name: string,
   port: number,

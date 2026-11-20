@@ -62,13 +62,6 @@ describe("a port that belongs to something else", () => {
       expect(fg.stderr).toContain("Another program is on that port");
 
       const began = Date.now();
-      // THE BACKGROUND, which was not. It spawned a daemon into a port it could
-      // not have, waited out the whole readiness deadline, and then said "it
-      // did not answer … Its own account of why is in the journal or on
-      // stderr" — a sentence that names no cause and asks the reader to go
-      // looking. The port is knowable BEFORE the spawn: nothing answered as an
-      // odu service and no odu daemon holds the gate, so anything the kernel
-      // still accepts at that address is somebody else's and always will be.
       const bg = spawnSync(oduBin, ["web", "--background"], {
         env: env as Record<string, string>,
         encoding: "utf-8",
@@ -99,16 +92,6 @@ describe("a client that walks away mid-wait", () => {
     world = await startWebServiceViaCommand(oduBin, suitePortFor("disconnect"));
     dir = makeWebFixture(SLOW);
     runId = await startRunning(world, dir, "disconnect-1");
-    // CANCEL THE RUN BEFORE THE SERVICE GOES, and in that order.
-    //
-    // These three gates all end by proving the run OUTLIVED whoever walked away
-    // — which is the point, and which also means nothing here has stopped it.
-    // A `sleep 600` coordinator is its own process group, so disposing the
-    // world does not reach it: it would sit on this machine's localhost lane
-    // for ten minutes after the suite finished, and the next test to claim a
-    // venue would queue behind a run whose test ended long ago. `trash` runs in
-    // reverse, so pushing the cancel LAST is what makes it run FIRST — the
-    // cancel has to travel through a service that is still up.
     trash.push(() => cleanup(dir));
     trash.push(() => world.dispose());
     trash.push(() => {
@@ -284,12 +267,6 @@ describe("a daemon that died between accepting a start and recording it", () => 
     ).toBe(1);
     expect(receipt.state).toBe("completed");
     expect(receipt.plannedRunId).toBe(runId);
-    // REWIND THE RECEIPT to what a crash inside markDispatched → launch →
-    // completeReceipt leaves: accepted, undispatched outcome, no result. Every
-    // other field — version, requestId, kind, digest, acceptedAt,
-    // plannedRunId, dispatchedAt, claimant — is left exactly as odu wrote it,
-    // and the claimant's pid is now a dead process, which is the real
-    // post-crash state.
     writeFileSync(
       receiptPath,
       `${JSON.stringify(
@@ -299,8 +276,6 @@ describe("a daemon that died between accepting a start and recording it", () => 
       )}\n`,
     );
 
-    // Restart, in the SAME world — same state root, same origin, so the same
-    // catalog and the same receipt store the crash left behind.
     const restarted = await stage.bringUp();
     expect(restarted.daemonHome).toBe(home);
 
@@ -406,15 +381,6 @@ describe("a daemon restarted under live runs", () => {
   }, 900_000);
 });
 
-/**
- * A world whose daemon can be killed and started again IN PLACE.
- *
- * {@link startWebServiceViaCommand} makes a fresh state root each time it is
- * called, which is right for a suite that wants isolation and wrong for a gate
- * whose whole subject is what a restart finds on disk. This keeps the one
- * origin, the one state root and the one daemon home across every tenure, so
- * "restart" means what it says.
- */
 function restartableWorld(port: number): {
   bringUp: () => Promise<WebWorld>;
   killIt: () => Promise<void>;

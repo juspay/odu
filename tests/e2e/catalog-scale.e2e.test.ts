@@ -20,11 +20,6 @@ import {
 } from "./harness";
 
 const CLONES = 1_000;
-/** Journal lines per clone. The `pass` fixture writes about twenty, and the
- *  daemon-side half of #113 — a poller that parsed every journal every tick —
- *  costs in proportion to this; at twenty lines the base build's tick is cheap
- *  and the responsiveness check below would pass against it. Same figure as
- *  `tests/evidence/big-catalog-demo.sh`. */
 const JOURNAL = 1_500;
 const BOUND_MS = 10_000;
 const TEST_MS = 3 * BOUND_MS;
@@ -132,11 +127,6 @@ beforeAll(async () => {
   }
   const runId = (JSON.parse(run.stdout) as { runId: string }).runId;
   seeded = { checkout, runId };
-  // Seeded with NO daemon running, then a fresh one started: `odu web
-  // --background` returns only once the service says `ready`, which it says
-  // after its first full projection of the catalog — so every assertion below
-  // meets a daemon that already holds all of it, and a slow cold start is the
-  // setup's cost rather than a test's.
   stopDaemon();
   seedCatalog(runId, checkout);
   const up = cli(checkout, ["web", "--background"], 600_000);

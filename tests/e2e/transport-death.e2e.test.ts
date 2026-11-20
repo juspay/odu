@@ -75,11 +75,6 @@ function descendants(root: number): Proc[] {
 }
 
 function isRunner(args: string): boolean {
-  // Two spellings, because the lane agent is reached two ways: the packaged
-  // `odu-runner` wrapper, and a raw `bun …/src/runner-main.ts` when a dev
-  // shell runs the entrypoint directly. Matched on the FILE rather than on a
-  // directory, since the worker's composition root sits beside `packages/execution/src/runner/`
-  // rather than inside it.
   return (
     args.includes("runner-main.ts") || /(^|[/\s])odu-runner(\s|$)/.test(args)
   );
@@ -117,9 +112,6 @@ function killIfAlive(pid: number): void {
   }
 }
 
-/** Resolves when the stream has closed — register at spawn, await after
- *  `exit`, so a crash footer that lands between `exit` and `close` is in
- *  the buffer before we grep. */
 function whenClosed(
   stream: NodeJS.ReadableStream | null | undefined,
 ): Promise<void> {
@@ -210,7 +202,6 @@ describe("odu lane transport death (black-box)", () => {
       );
 
       const runnerPid = findRunnerPid(runIdOf(stderr));
-      // Snapshot recipe children now: SIGKILL of the runner cannot reap them.
       const recipeTree = descendants(runnerPid);
       killIfAlive(runnerPid);
 
@@ -282,9 +273,6 @@ describe("odu lane transport death (black-box)", () => {
         child.on("error", () => resolve(-1));
       });
 
-      // The pass fixture's nodes (plus builtin `_ci-setup`). Wait on this
-      // set — not on whatever has arrived so far — or `_ci-setup` success
-      // alone would trip the predicate while alpha/beta are still pending.
       const recipes = ["_ci-setup", "alpha", "beta"];
       await waitUntil(
         () => recipes.every((r) => lastStatuses(stdout).get(r) === "success"),
@@ -301,16 +289,6 @@ describe("odu lane transport death (black-box)", () => {
       for (const p of recipeTree) killIfAlive(p.pid);
       killIfAlive(runnerPid);
 
-      // Positive evidence the coordinator observed the death — otherwise a
-      // linger that idle-reaped without noticing the kill would also exit 0
-      // and satisfy the negative greps. `die()` writes this line onto
-      // `_ci-setup` via `onSetupLine`.
-      //
-      // WAITED FOR, because the client's exit stopped being the signal that the
-      // coordinator has caught up. `odu ci run` is a client: `--progress json`
-      // returns the moment the run settles, which is BEFORE this test kills the
-      // runner, so `await exited` no longer bounds anything. The coordinator is
-      // a separate, lingering process and it notices the death on its own clock.
       await waitUntil(
         () =>
           /\[odu\] lane \S+ died:/.test(

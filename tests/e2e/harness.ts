@@ -90,10 +90,6 @@ export function hostsFile(root: string): string {
   return path;
 }
 
-
-/**
- * **`HOME` is deliberately NOT redirected.**
- */
 export function privateWorld(port: number): {
   root: string;
   origin: string;
@@ -163,38 +159,11 @@ function claimOrigin(odu: string): void {
   }
 }
 
-/**
- * TAKE THE ORIGIN BEFORE USING IT — evict anything already serving there.
- *
- * `ensureService` ADOPTS a daemon that answers at the right origin with a
- * compatible build, which is exactly right in production and silently voids
- * this world in a suite: a daemon left behind by a previous run of these tests
- * answers, is adopted, and then serves every call out of the PREVIOUS run's
- * environment — its catalog, its hosts file, its `$ODU_GH_BIN`. All three of
- * those point into a temp directory that has since been removed, so `protect`
- * failed with `ENOENT … posix_spawn` on a stand-in this process had written and
- * the daemon could not see.
- *
- * The port band is this suite's own (see {@link PORT_SLOT}), so anything on it
- * is by construction a leftover of ours, and stopping it is not a decision
- * about somebody else's process.
- */
 function claimPort(odu: string, port: number): void {
-  // ASKED OF THE KERNEL, NOT OF ODU. Every odu command bootstraps its own
-  // origin when nothing is serving it — that is the property `odu ci run` exists
-  // to have — so using one to check whether a port is free STARTS a daemon,
-  // and using one in a loop starts a daemon per iteration. This is what that
-  // mistake looks like from outside: the eviction below killed the incumbent,
-  // the probe brought it straight back, and fifteen seconds of that left a
-  // machine covered in services nobody had asked for.
   if (!portIsOpen(port)) return;
   const home = stopService(odu, `http://127.0.0.1:${port}`);
-  // Wait for the PORT, not for the pid: a successor cannot bind until the
-  // incumbent has let go, and that is the thing the next call is about to do.
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline && portIsOpen(port)) {
-    // Synchronous by design — this runs inside `beforeAll`, before any test has
-    // an opinion, and a spin here is cheaper than making every caller async.
     spawnSync("sleep", ["0.1"]);
   }
   if (home === null) return;
@@ -204,8 +173,6 @@ function claimPort(odu: string, port: number): void {
   }
 }
 
-/** Is anything accepting on this port? A raw connect, so it cannot start what
- *  it is asking about. */
 function portIsOpen(port: number): boolean {
   const probe = spawnSync(
     "bash",
@@ -229,15 +196,6 @@ function sweepUp(): void {
   sweepDaemonHomes();
 }
 
-/**
- * Daemon homes THIS process caused, removed.
- *
- * `~/.local/state/odu-web-<hash of origin>` is created by every service a test
- * starts, and several tests start their own on their own ports. Two conditions
- * together make removing one safe: its recorded pid is dead, and the directory
- * was created after this process began. The second is what keeps a developer's
- * own daemon home — which is alive anyway, and older — out of the sweep.
- */
 function sweepDaemonHomes(): void {
   const state = join(homedir(), ".local", "state");
   let entries: string[];
@@ -270,16 +228,6 @@ function alive(pid: number): boolean {
   }
 }
 
-// HANDED TO THE PRELOAD, because it is the only place that runs ONCE.
-//
-// Two hooks were tried and both were wrong. `process.on("exit")` never fires —
-// `bun test` ends its process without calling exit listeners, so a teardown
-// hung on it exists only in the source. And an `afterAll` from here registers
-// into the scope of whichever file imported this module FIRST, so it fired at
-// the end of file one and took the shared service away from the ten files that
-// still needed it.
-//
-// `bunfig.toml`'s preload registers a global `afterAll` and calls this from it.
 (globalThis as { ODU_TEST_TEARDOWN?: () => void }).ODU_TEST_TEARDOWN = sweepUp;
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(signal, () => {
@@ -295,10 +243,6 @@ export const repoRoot = execFileSync(
   { cwd: here, encoding: "utf-8" },
 ).trim();
 
-/**
- * Deliberately mirrors — and is NOT imported from — `ProgressEvent` in
- * packages/execution/src/coordinator/display.ts.
- */
 export interface ProgressEvent {
   node: string;
   recipe: string;
@@ -315,11 +259,6 @@ export interface RunResult {
   stderr: string;
 }
 
-/**
- * Build `odu` (and warm `odu-runner`) from the worktree and return the path to
- * the `odu` executable. Prebuilding the runner means the fixture's in-flight
- * `nix eval …odu-runner.drvPath` resolves to an already-realised store path.
- */
 export function buildOduBinary(): string {
   const build = (attr: string): string =>
     execFileSync(
@@ -338,23 +277,11 @@ export function buildOduBinary(): string {
   build(".#odu-runner");
   const bin = join(oduOut, "bin", "odu");
   driven = bin;
-  // And the origin is CLAIMED here, before any test has made a call: this is
-  // the one moment every suite in this directory passes through.
   claimOrigin(bin);
   return bin;
 }
 
-/**
- * Materialize a fixture into a fresh temp git repo: just the named fixture's
- * `justfile`, with NO flake. The fixture is a plain consumer that never
- * re-exports `odu-runner` — the runner comes from the agent source baked onto
- * the `.#odu` binary under test, so this exercises exactly the cross-repo path
- * (coordinator ships its own runner, consumer exports nothing) that issue #30
- * was about. The coordinator reads HEAD, so we commit before returning.
- */
 export function makeFixture(name: string): string {
-  // Registered before anything else can throw: a fixture that failed halfway
-  // through `git init` is still a directory somebody has to remove.
   const dir = scratchDir(`odu-e2e-${name}-`);
   cpSync(join(here, "fixtures", name), dir, { recursive: true });
 
@@ -405,10 +332,6 @@ export function terminalStatuses(
 }
 
 export function cleanup(dir: string): void {
-  // NOT deregistered. A run's coordinator is a detached process group that
-  // outlives the test which started it, and it goes on writing `.ci/` — so a
-  // directory removed here comes BACK, and the final sweep has to remove it
-  // again. Keeping the registration is what lets it.
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch (err) {
@@ -446,10 +369,6 @@ export function oduRunBackground(
   return { child, exited };
 }
 
-/** Block until the background coordinator has published its socket, so the
- *  first `odu ci wait` doesn't race the spawn and get the loud no-run refusal.
- *  Polls rather than watches: the file appears once, early, and a watcher on a
- *  directory that does not exist yet is its own race. */
 export async function awaitRunSocket(
   dir: string,
   timeoutMs = 120_000,

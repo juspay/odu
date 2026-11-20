@@ -47,10 +47,6 @@ describe("odu ci run (local, black-box)", () => {
       expect(shape(last.get(recipe)).status).toBe("success");
     }
     expect(status).toBe(0);
-    // juspay/odu#18: every green run tears down the lane pipe AFTER the
-    // nodes have already passed. That close used to crash with unhandled
-    // `write EPIPE` and pick exit 1; the summary is how we tell a clean
-    // verdict from a crash that happened on the way out.
     expect(stderr).toContain("ci run summary");
     expect(stderr).not.toContain("write EPIPE");
     expect(stderr).not.toContain("after its log ended");

@@ -44,8 +44,6 @@ function upstreamAndClone(): { upstream: string; clone: string; second: string }
   const upstream = realpathSync(scratchDir("odu-e2e-upstream-"));
   dirs.push(upstream);
   git(upstream, "init", "-q", "-b", "main");
-  // `.ci/` ignored, so odu's own per-checkout ledger does not make the clone's
-  // tree dirty — which the move refuses, correctly.
   writeFileSync(join(upstream, ".gitignore"), ".ci/\n");
   writeFileSync(join(upstream, "justfile"), PASS);
   git(upstream, "add", "-A");

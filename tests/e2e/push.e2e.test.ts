@@ -196,9 +196,6 @@ build:
     execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
   };
   git("remote", "add", "origin", `https://github.com/${PIN_REPO}.git`);
-  // THE BRANCH IS NAMED HERE rather than taken from `git init`'s default,
-  // which is a machine's `init.defaultBranch` and would put a different name
-  // in the pin on a different developer's laptop.
   git("checkout", "-q", "-B", PIN_REF);
   git("add", "-A");
   git(

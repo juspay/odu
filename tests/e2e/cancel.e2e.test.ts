@@ -23,9 +23,6 @@ beforeAll(() => {
 }, 600_000);
 
 const live: ChildProcess[] = [];
-// Fixture dirs are swept by the same hook, after the children that hold them
-// open are killed — bun:test has no per-test `onTestFinished`, so the creating
-// helper registers here instead.
 const created: string[] = [];
 afterEach(() => {
   for (const child of live.splice(0)) {
@@ -102,12 +99,6 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
       await waitUntil(() => runIsLive(dir), 600_000, "the run to serve its socket");
 
       const platform = currentNixSystem();
-      // Wait for the node to be RUNNING, not merely for the socket. Since
-      // juspay/odu#85 the socket is served *before* the venue claim, so a
-      // cancel here would land before the lane exists — nothing in
-      // `createdLanes`, nothing to drain, and the defect this test exists for
-      // never gets its chance. The durable log gaining bytes is the signal that
-      // the lane is up and the recipe is talking.
       const slowLog = (): string =>
         join(dir, ".ci", sha7Of(dir), platform, "slow.log");
       await waitUntil(
@@ -138,8 +129,6 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
     const out = execFileSync(oduBin, ["ci", "cancel"], { cwd: dir, encoding: "utf-8", env });
     expect(out).toMatch(/run cancelled/);
 
-    // The coordinator tore down: its process exits and the socket is gone, so a
-    // following run could re-bind the lock.
     const code = await Promise.race([
       exited,
       sleep(15_000).then(() => "timeout" as const),

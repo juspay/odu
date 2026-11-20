@@ -50,7 +50,6 @@ beforeAll(() => {
   const dir = fixture("noisy");
   expect(oduRun(oduBin, dir).status).toBe(0);
   firstLog = noisyLog(dir);
-  // Same fixture, same HEAD — so the same log path, deliberately.
   expect(oduRun(oduBin, dir).status).toBe(0);
   secondLog = noisyLog(dir);
 }, RUN_TIMEOUT * 2);

@@ -34,21 +34,6 @@ export interface WebWorld {
   dispose: () => void;
 }
 
-/**
- * THE WHOLE PUBLIC VOCABULARY, sorted — every verb the shared contract exposes
- * as a tool, and nothing else.
- *
- * Here rather than in each test file because two faces assert it: the bridge
- * this repo builds (`mcp.e2e.test.ts`) and the MCP server odu's Agent Plugin
- * declares (`install.e2e.test.ts`). Two copies would drift, and the drift would
- * be invisible — each file would still pass against its own stale list.
- *
- * Derived from TWO expose maps by the framework's own naming rule — `<key>_<ns>_<verb>`
- * for a row served as a sibling, `<ns>_<verb>` for the runs' core
- * (`packages/service-client/src/verbs.ts` and `packages/cache/src/surface.ts`).
- * It is deliberately NOT imported from either: this suite is black-box, and a
- * list imported from the code under test would agree with a mistake.
- */
 export const SHARED_TOOLS = [
   "cache_bucket_create",
   "cache_bucket_delete",
@@ -94,20 +79,6 @@ export function daemonLog(world: WebWorld): string {
   }
 }
 
-/**
- * IS ANYTHING ACCEPTING AT THIS ORIGIN? A raw TCP connect, and nothing more.
- *
- * The only honest way for a test to observe ABSENCE. Every odu face bootstraps
- * now, so asking odu whether a service is running STARTS one — a poll loop
- * written that way kills a daemon and immediately spawns its replacement,
- * forever. That is not a flaw in the bootstrap; it is what "no face reports
- * nothing-serving without trying to fix it" means, and a test that wants to see
- * an empty port has to look from outside odu.
- *
- * TCP rather than `fetch`: a listener that accepts and then says nothing (which
- * is exactly the foreign-program case the occupied-port gates set up) leaves a
- * `fetch` hanging on its own timeout, and answers a connect instantly.
- */
 export function tcpListening(origin: string, timeoutMs = 1_000): Promise<boolean> {
   const url = new URL(origin);
   return new Promise<boolean>((resolve) => {
@@ -125,14 +96,6 @@ export function tcpListening(origin: string, timeoutMs = 1_000): Promise<boolean
   });
 }
 
-/**
- * Stop a daemon and everything it leads.
- *
- * The GROUP first — a daemon is a session leader on either launch branch, and a
- * plain kill would leave a coordinator behind — then the pid, for a host where
- * it is not. Both throws are swallowed: "already gone" is a success here, and a
- * teardown that failed on it would turn a passing test red.
- */
 export function killDaemon(pid: number, signal: NodeJS.Signals = "SIGTERM"): void {
   for (const target of [-pid, pid]) {
     try {
@@ -189,8 +152,6 @@ export async function startWebService(
     root,
     dispose: () => {
       try {
-        // The whole process GROUP: the daemon is detached, and a coordinator it
-        // started is detached from IT, so a plain kill would leave one behind.
         if (daemon.pid !== undefined) process.kill(-daemon.pid, "SIGTERM");
       } catch {
       }
@@ -206,8 +167,6 @@ export async function startWebService(
     },
   };
 
-  // READINESS IS ASKED FOR, never slept on: the service publishes its own state
-  // and this reads it.
   try {
     const cell = await until("the web service to say it is ready", () => {
       const answer = surfaceCall(world, ["get", "service"]);
@@ -271,8 +230,6 @@ export async function startWebServiceViaCommand(
     root,
     daemonHome: cell.identity.home,
     dispose: () => {
-      // Its GROUP first — the daemon is a session leader on either branch — and
-      // then the pid, for a host where it is not.
       for (const target of [-cell.identity.pid, cell.identity.pid]) {
         try {
           process.kill(target, "SIGTERM");
@@ -344,10 +301,6 @@ export async function mcp(
  */
 export function makeWebFixture(justfile: string): string {
   const dir = realpathSync(scratchDir("odu-e2e-webrepo-"));
-  // `.ci/` is ignored so a SECOND run in the same checkout still sees a clean
-  // tree: odu writes its per-checkout ledger there, and strict mode refuses a
-  // dirty one — which is correct, and would otherwise make every fixture
-  // single-use.
   writeFileSync(join(dir, ".gitignore"), ".ci/\n");
   writeFileSync(join(dir, "justfile"), justfile);
   const git = (...args: string[]): void => {

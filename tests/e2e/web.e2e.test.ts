@@ -193,8 +193,6 @@ describe("start → wait → logs → retry, through the CLI face", () => {
     expect(b.status).toBe(0);
     const first = a.json as { cursor: string; failuresTotal: number };
     const second = b.json as { cursor: string; failuresTotal: number };
-    // A cursor is per CALLER and never a destructive global acknowledgement:
-    // one observer draining the journal must not blind the other.
     expect(second.cursor).toBe(first.cursor);
     expect(first.failuresTotal).toBe(1);
     expect(second.failuresTotal).toBe(1);
@@ -317,10 +315,6 @@ describe("the HTTP MCP face", () => {
   it("advertises exactly the shared verbs, under the same names", async () => {
     const answer = await mcp(world, "tools/list", undefined, 2);
     const tools = (answer.result as { tools: { name: string }[] }).tools.map((t) => t.name);
-    // Against `SHARED_TOOLS`, not a list written out here. This assertion held
-    // a copy of five verb names and went stale the moment the contract grew to
-    // thirteen — which made a test whose whole subject is "every face offers
-    // the same vocabulary" the one place a second vocabulary was written down.
     expect(tools.sort()).toEqual([...SHARED_TOOLS]);
   }, 60_000);
 
@@ -530,18 +524,6 @@ describe("cancelling, and outliving the caller", () => {
       300_000,
     );
 
-    // THE FALSE-READINESS CASE, end to end against the packaged binary.
-    //
-    // `.ci/odu.sock` belongs to the CHECKOUT, so while a run is live there the
-    // path answers immediately. A launcher that waited on the path therefore
-    // reported a replacement as started before it had reached its own DAG
-    // ingest — and `run.start` wrote an accepted receipt for a run that never
-    // registered. Both halves are here: a replacement that dies, and one that
-    // works.
-
-    // A justfile odu cannot read. The coordinator dies at ingest, which is
-    // BEFORE it would claim the checkout — so nothing is superseded and nothing
-    // registers, while the incumbent's socket goes on answering.
     writeFileSync(join(dir, "justfile"), "not : a : justfile {{{\n");
     const broken = verb(world, "run_start", {
       checkout: dir,
@@ -689,15 +671,6 @@ describe("`odu web` serves in this terminal", () => {
 
       server.kill("SIGINT");
       await server.exited;
-      // The SERVER is gone: nothing answers its address any more.
-      //
-      // **Probed over TCP, never through `odu surface`.** Every service client
-      // bootstraps now, so asking odu whether a service is running STARTS one —
-      // and a poll written that way waits for a daemon to go away while
-      // spawning its replacement on each tick, forever. That is not a flaw in
-      // the bootstrap; it is what "no face reports nothing-serving without
-      // trying to fix it" means. A test that wants to observe ABSENCE has to
-      // observe it from outside odu.
       await until(
         "the foreground server to stop serving",
         async () => ((await tcpListening(at.origin)) ? null : true),

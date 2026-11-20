@@ -40,8 +40,6 @@ beta: alpha
     exit 3
 `;
 
-/** The §6.1 fixed locations a client reading the root receives. One list,
- *  because the export and the equality below must name the same set. */
 const FIXED_LOCATIONS = ["mcp.json", "plugin.json", "skills"] as const;
 const ODU_SKILL = "skills/odu/SKILL.md";
 
@@ -78,14 +76,6 @@ function installPlugin(): string {
   return dir;
 }
 
-/**
- * A `nix` that refuses to be anything but the MCP server's one call.
- *
- * An argv the server was not supposed to send is recorded and exits 97, so a
- * regression in that line fails as "here is what it actually ran" rather than
- * as a hang or a network fetch. `PATH` is restored before the exec because odu
- * shells out to the real `nix` for every run it starts.
- */
 function writeNixShim(dir: string): void {
   const path = join(dir, "nix");
   writeFileSync(
@@ -253,8 +243,6 @@ describe("a client loading odu's Agent Plugin", () => {
     } finally {
       await client.close().catch(() => {});
       cleanup(dir);
-      // The shim's own verdict on the server's argv, checked last so an argv
-      // regression reports what was run rather than a connect that timed out.
       const offending = join(shimDir, "nix.argv");
       if (existsSync(offending)) {
         throw new Error(

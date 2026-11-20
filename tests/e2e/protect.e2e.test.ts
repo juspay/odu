@@ -122,13 +122,6 @@ describe("odu ci protect --dry-run (black-box)", () => {
   }, PROTECT_TIMEOUT);
 });
 
-/**
- * The fixture's origin. Deliberately a repo that does not exist on GitHub: this
- * suite drives the WRITE path, so if the `$ODU_GH_BIN` seam ever stops holding,
- * the calls it aims at a stand-in land on the real API under the developer's
- * own credentials. Naming a real repo here once rewrote that repo's live
- * ruleset. A slug that 404s makes such an escape fail loudly instead.
- */
 const SLUG = "odu-e2e-fixture/absent-repo";
 
 const FIXTURE_RULESET = {
@@ -195,9 +188,6 @@ function oduProtectWrite(opts: {
   writeFileSync(at("ruleset.json"), JSON.stringify(opts.ruleset ?? {}));
   writeFileSync(at("calls.txt"), "");
 
-  // Cases are ordered by specificity: a PUT's URL also contains `/rulesets/`.
-  // An unmatched call fails loudly — a silently empty answer would read as a
-  // GitHub quirk rather than protect calling somewhere unexpected.
   const script = `#!/bin/sh
 printf '%s\\n' "$*" >> '${at("calls.txt")}'
 case "$*" in
@@ -209,9 +199,6 @@ case "$*" in
   *) printf 'fake gh: unexpected call: %s\\n' "$*" >&2; exit 1 ;;
 esac
 `;
-  // Installed AS the world's fixed `gh` rather than passed as an env var:
-  // `protect` is a client, and the `gh` it means is spawned by the service,
-  // which cannot learn a path invented after it started. See `useGh`.
   useGh(script);
 
   const res = spawnSync(
@@ -301,8 +288,6 @@ describe("odu ci protect (ruleset write path)", () => {
       ruleset: FIXTURE_RULESET,
     });
     const body = putBody();
-    // The PUT replaces `rules` wholesale and GitHub has no per-rule endpoint,
-    // so anything protect fails to echo back is policy it silently deleted.
     expect((body?.rules as Rule[]).map((r) => r.type)).toEqual([
       "deletion",
       "non_fast_forward",

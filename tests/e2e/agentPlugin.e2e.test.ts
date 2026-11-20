@@ -27,9 +27,6 @@ describe("odu's Agent Plugin", () => {
     const manifest = readJson<Record<string, unknown>>(`${PLUGIN}/plugin.json`);
     expect(manifest.$schema).toBe(`${SPEC}/plugin.schema.json`);
     expect(manifest.name).toBe("odu");
-    // The spec's manifest schema is CLOSED. An unknown field is reported and
-    // ignored by a conformant client, which is a silent no-op for whoever
-    // added it — so it is refused here instead.
     const allowed = [
       "$schema",
       "name",
@@ -49,14 +46,9 @@ describe("odu's Agent Plugin", () => {
 
   it("declares exactly one MCP server, and it is the shared-service bridge", () => {
     const config = readJson<McpConfig>(`${PLUGIN}/mcp.json`);
-    // The spec requires mcp.json to target the same version as plugin.json, or
-    // a client disables MCP for the whole plugin.
     expect(config.$schema).toBe(`${SPEC}/mcp.schema.json`);
     expect(Object.keys(config).sort()).toEqual(["$schema", "mcpServers"]);
     expect(Object.keys(config.mcpServers)).toEqual(["odu"]);
-    // `command` is a single bare token and the rest is `args`: the spec forbids
-    // a shell string, and Nix is the only supported runtime — a server reaching
-    // for bun or a source entry point would be a second way to run odu.
     expect(config.mcpServers.odu).toEqual(ODU_SERVER);
   });
 
@@ -78,11 +70,6 @@ describe("odu's Agent Plugin", () => {
 
   it("teaches one vocabulary in the skill it does publish", () => {
     const skill = read(SKILL);
-    // THE WHOLE SHARED VOCABULARY, from the same list the MCP faces are
-    // asserted against. A verb that reached the contract without reaching the
-    // skill is a capability an agent has and cannot find, which is the same
-    // failure as not having it — and the list grew from five to thirteen
-    // precisely by people adding to one and not the other.
     for (const verb of SHARED_TOOLS) {
       expect(skill, `the skill never mentions ${verb}`).toContain(verb);
     }
