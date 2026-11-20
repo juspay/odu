@@ -1,8 +1,6 @@
 import { readFileSync } from "node:fs";
 
-/** GITHUB LOGINS ARE CASE-INSENSITIVE, and this is the one place that says so:
- *  a grant typed `Srid` must find the grant written by a sign-in as `srid`, and
- *  a rule written `Srid` must admit `srid`. */
+/** GitHub logins are case-insensitive. */
 export function normalizeLogin(login: string): string {
   return login.trim().toLowerCase();
 }
@@ -10,10 +8,7 @@ export function normalizeLogin(login: string): string {
 export interface GithubConfig {
   readonly clientId: string;
   readonly clientSecret: string;
-  /** The operator's WORDS — kept verbatim so a sentence can quote them. */
   readonly allow: string;
-  /** The same list, PARSED ONCE at startup: a sign-in may not re-read the
-   *  grammar, and a malformed entry was refused before the row mounted. */
   readonly rules: ReadonlyArray<AllowRule>;
   readonly origin: string;
   readonly api: string;
@@ -164,15 +159,13 @@ export function describeAllow(spec: string): string {
     .join(", ");
 }
 
-/** Where the callback lands — the URL registered on the App. */
 export function callbackUrl(config: GithubConfig): string {
   return `${config.publicOrigin}/auth/github/callback`;
 }
 
 /**
  * NO `scope`: the App's permissions are the scope, and GitHub ignores a scope
- * it does not grant. `state` is the CSRF cookie's value, checked at the
- * callback.
+ * it does not grant.
  */
 export function authorizeUrl(config: GithubConfig, state: string): string {
   const url = new URL("/login/oauth/authorize", config.origin);
@@ -293,9 +286,6 @@ export type Membership =
   | { readonly ok: true; readonly rule: AllowRule }
   | { readonly ok: false; readonly message: string };
 
-/**
- * Rules are tried in the order written, and the first match answers.
- */
 export async function membership(
   config: GithubConfig,
   token: string,

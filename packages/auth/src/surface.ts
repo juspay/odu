@@ -6,17 +6,8 @@ import { Schema } from "effect";
 
 export const AUTH_KEY = "auth";
 
-/**
- * THIS ROW'S OWN CONTRACT VERSION, `major.minor`. The rule is the host's: the MINOR when the
- * surface only grows, the MAJOR when something a reader uses changes.
- * `contract.test.ts` pins it to a fingerprint of the surface.
- */
 export const AUTH_CONTRACT_VERSION = "2.4";
 
-/** THE SIGN-IN PAGE'S WORDS, once — the server-rendered page (`./routes`) and
- *  the browser's own copy (`./face`) say the same three things, and a page an
- *  operator meets before JavaScript must not read differently from the one a
- *  tab draws a moment later. `title` is the heading AND the tab. */
 export const SIGN_IN_COPY = {
   title: "Sign in to odu",
   hint: "This server answers only to people its operator has allowed in.",
@@ -81,7 +72,6 @@ const REFUSES = AuthRefused;
 const WhoamiOutputSchema = Schema.Struct({ who: WhoSchema });
 
 const TokenCreateInputSchema = Schema.Struct({
-  /** Checked by the ROW (non-empty), not the schema — see `GrantInputSchema`. */
   name: Schema.String,
   /** Absent means the token does not expire. */
   expiresDays: Schema.optionalKey(Schema.Int),
@@ -100,8 +90,6 @@ const SessionEndInputSchema = Schema.Struct({ id: Schema.String });
 const SessionEndOutputSchema = Schema.Struct({ id: Schema.String, ended: Schema.Boolean });
 
 const GrantInputSchema = Schema.Struct({
-  /** Checked by the ROW (non-empty), not the schema: a schema check dies before
-   *  the row can say why, and the people page sends the field as typed. */
   login: Schema.String,
   role: RoleSchema,
   /** The operator's bootstrap. Compared only when the caller has no session;
@@ -125,12 +113,6 @@ export type AuthPerson = typeof AuthPersonSchema.Type;
 
 const GrantListOutputSchema = Schema.Struct({ people: Schema.Array(AuthPersonSchema) });
 
-/**
- * **Names are `row_noun_verb`, like every row.** The framework derives a tool
- * name as `<sibling>_<namespace>_<verb>` and a wire tag as
- * `surface/<sibling>/<namespace>/<verb>`, so a verb with no noun between them
- * cannot exist.
- */
 export const oduAuthSurface = defineSurface({
   procedures: {
     user: {
@@ -170,7 +152,6 @@ export const ODU_AUTH_EXPOSE = {
   "session.end": { tool: { mutates: true } },
 } as const satisfies ExposeMap<(typeof oduAuthSurface)["spec"]>;
 
-/** THE TAGS A CONNECTION WITH NO SESSION MAY STILL ASK. Every other tag stays shut. */
 export const AUTH_ANONYMOUS_TAGS: Readonly<Record<string, true>> = {
   "surface/auth/user/whoami": true,
   "surface/auth/user/grant": true,

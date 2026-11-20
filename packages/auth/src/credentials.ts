@@ -1,10 +1,3 @@
-/**
- * The order is the documented one: `--token` if given, then `$ODU_TOKEN`, then
- * the entry for the origin. CI sets the variable and never logs in, which is why
- * the variable beats the file — a machine's stored login must not shadow a
- * deliberate environment.
- */
-
 import {
   credentialsPath as sharedCredentialsPath,
   normalizeOrigin,
@@ -31,7 +24,6 @@ export async function saveAuthToken(
   return sharedSaveCredential(env, STORE, origin, token);
 }
 
-/** The token for an origin, in the documented order. */
 export async function readAuthToken(
   env: Record<string, string | undefined>,
   origin: string,

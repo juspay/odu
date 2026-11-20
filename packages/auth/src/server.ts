@@ -1,14 +1,3 @@
-/**
- *   - `apply` opens the database, builds the resolver, registers it on the
- *     broker, mounts the surface beside the runs and the cache, and adds the
- *     three OAuth routes.
- *   - The finalizers run in reverse and the order is the safe one: the sweep
- *     stops, the mount drops, the resolver withdraws, the database closes. A
- *     connection still holding a lease when the database closed would read a
- *     torn-down table; a resolver withdrawn while the mount stands is the ask
- *     it was built for.
- */
-
 import type { Row } from "@odu/cordis/services";
 import { AUTH_ROW } from "./surface";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
@@ -53,12 +42,6 @@ export type AuthSurfaceDeps = ImplementSurfaceDeps<AuthSpec>;
 
 export const SESSION_COOKIE = "odu_session";
 
-/** How long a sign-in lasts, measured FROM THE SIGN-IN to its expiry.
- *
- *  Using a session records `lastSeen` and does NOT extend it: a session has one
- *  end, so "signed in on Monday" is a session in four weeks and not a session
- *  that a tab left open keeps alive forever. The cookie's own `max-age` is this
- *  same number (`./routes`), so a browser drops it when the row does. */
 export const SESSION_DAYS = 30;
 
 const sha256 = (value: string): string =>
@@ -76,9 +59,6 @@ export function cookieValue(header: string | undefined, name: string): string | 
   return null;
 }
 
-/** Parsed by index rather than by expression: the header is attacker-controlled,
- *  and `^Bearer\s+(.+)$` backtracks quadratically over a run of spaces (CodeQL
- *  said so, correctly). This walk is linear whatever the header holds. */
 export function bearerValue(header: string | undefined): string | null {
   if (header === undefined) return null;
   const trimmed = header.trim();
@@ -174,10 +154,6 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     endWhere((entry) => entry.login === login);
   };
 
-  /** One connection's hold on one session — the shared lease machine
-   *  (`@odu/cordis/principal`'s {@link makeLease}), plus the row's registry so a
-   *  logout, a revocation, a role change or the sweep can end it. `request`
-   *  never returns the same lease twice, and `watch` fires exactly once. */
   const hold = (owner: { login: string; session?: string; token?: string }): Lease => {
     let entry: Held | null = null;
     const mine = makeLease(principalFor(owner.login), () => {
@@ -229,8 +205,6 @@ export function authServer(opts: AuthServerOptions): AuthServer {
         const row = liveSession(sha256(cookie));
         if (row !== null) return hold({ login: row.login, session: row.id });
       }
-      // The CLI and the MCP bridge carry a personal token on the upgrade; the
-      // provisioned header allowlist is what lets it arrive at all.
       const token = bearerValue(headers["authorization"]);
       if (token !== null) {
         const row = liveToken(sha256(token));
@@ -501,19 +475,7 @@ export const authRow = (config: GithubConfig) =>
       const rootToken = yield* RootToken;
       const broker: PrincipalBroker = yield* PrincipalBrokerTag;
 
-      // ACQUIRE, THEN ARRANGE THE RELEASE — one pair at a time, in this order,
-      // so a failure ANYWHERE below unwinds everything above it. That is what
-      // makes "a refused second claim installs nothing" true at the ROW and not
-      // only at the broker: the mount, the routes and the database all come
-      // after the claim, and the claim's own refusal throws with the database's
-      // release already registered.
-      //
-      // Finalizers run in REVERSE, so they run: stop the sweep, withdraw the
-      // routes, drop the mount, withdraw the resolver, close the database.
       const repo = openAuthRepo(join(stateDir, "auth", "auth.sqlite"));
-      // The server owns the last word on its database — it ends every lease
-      // still held before closing it — so the release names the server once it
-      // exists, and the bare database only if the server itself never did.
       let server: AuthServer | null = null;
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {

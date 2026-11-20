@@ -1,8 +1,4 @@
 Feature: The door — sign in, and what a role may do
-  # Every scenario declares
-  # its world by tag: @anonymous and @signed-in:<role> run against a daemon with
-  # sign-in configured (pointed at the stub), and an untagged scenario runs
-  # against today's loopback daemon, unchanged.
 
   @anonymous
   Scenario: An anonymous browser meets the sign-in page instead of the board
@@ -20,9 +16,6 @@ Feature: The door — sign in, and what a role may do
 
   @anonymous
   Scenario: A login outside the allow-list is refused with a reason
-    # The refusal IS a 403 document, so the browser logs that one navigation as
-    # a failed resource. The check stays and exactly that entry is filtered: a
-    # script error on the refusal page still fails.
     Given the stub says this account is not in the organisation
     When I start a sign-in
     Then the page refuses the sign-in naming the allow-list

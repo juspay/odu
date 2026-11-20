@@ -1,13 +1,3 @@
-/**
- * ## The state cookie, and why it is signed
- *
- * `state` is CSRF protection: the value the browser carries to GitHub must come
- * back unchanged, and it must be one this daemon minted. The nonce travels in
- * the query and the HMAC (keyed by the App's client secret — server-held, never
- * on a page) travels in an HttpOnly cookie; the callback requires both to agree.
- * A forged callback has neither the secret nor a browser's cookie.
- */
-
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -42,14 +32,6 @@ export interface AuthRoutesOptions {
   readonly now?: () => number;
 }
 
-/** `nonce.issuedAt.mac` — the nonce is the query value, and the MAC proves this
- *  daemon made it AND WHEN.
- *
- *  The timestamp is what makes a captured state/cookie pair stop working: the
- *  browser clears the cookie on success, but a REFUSAL page used to leave it in
- *  place, so a pair could be re-presented. Now it is good for
- *  {@link STATE_MINUTES} from the moment the sign-in started, whatever happened
- *  to the browser. */
 function signedState(secret: string, at: number): string {
   const nonce = randomBytes(24).toString("base64url");
   const mac = createHmac("sha256", secret).update(`${nonce}.${at}`).digest("base64url");
@@ -78,18 +60,6 @@ function escapeHtml(text: string): string {
     .replaceAll('"', "&quot;");
 }
 
-/**
- * `@odu/face/theme.css` is in the BUNDLE, and the whole point of the two pages
- * below is that they are read with no bundle: `curl /` on a gated daemon, and
- * a browser that GitHub sent back to a refusal. So the palette is spelled out
- * in hex here rather than taken from a token — the duplication is deliberate
- * and the values are the design's own (`--canvas`, `--ink`, `--brand`, …).
- *
- * BOTH HALVES, because `color-scheme` cannot re-value a literal: the dark
- * values are the defaults and a `prefers-color-scheme: light` block restates
- * them. A person whose desktop is light must not be handed a near-black page
- * by the one screen in this product that ships no stylesheet.
- */
 const DOOR_STYLE = `
       :root {
         color-scheme: dark light;
@@ -206,9 +176,6 @@ export function authRoutes(opts: AuthRoutesOptions): ClaimedRoutes {
   const request = opts.request ?? fetch;
   const now = opts.now ?? Date.now;
   const secure = config.publicOrigin.startsWith("https://");
-  /** The nonce is SPENT on every callback outcome — success, refusal, or a bad
-   *  state — so a captured `state`/cookie pair is good for one presentation and
-   *  only for {@link STATE_MINUTES}. */
   const spent = (response: HttpServerResponse.HttpServerResponse) =>
     withCookie(response, STATE_COOKIE, "", { secure, maxAge: "0 minutes" });
 

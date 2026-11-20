@@ -80,11 +80,6 @@ export function SignIn(): JSX.Element {
   );
 }
 
-/**
- * It draws the way to the PROFILE and
- * nothing else: the rows, People included, are the rail's own navigation, and
- * a second list of them down here was two things to keep in step.
- */
 export function SignedInHeader(props: {
   who: Who;
   atProfile: boolean;
@@ -379,8 +374,6 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
   );
 }
 
-/** The roles, least first — the order every select on this page offers them
- *  in, so a slip of the keyboard promotes nobody to owner. */
 const ROLES = ["member", "admin", "owner"] as const;
 type RoleName = (typeof ROLES)[number];
 

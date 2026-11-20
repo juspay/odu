@@ -1,11 +1,3 @@
-/**
- * The arrange half is a person's route wherever one exists: the sign-in is the
- * link on the page, a token is the profile's form, a grant is the people page —
- * and only the FIRST owner (the operator's bootstrap, which has no session to
- * draw a page for) goes through `odu surface auth user_grant` with the root
- * token.
- */
-
 import * as assert from "node:assert";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { signIn } from "../../../web-acceptance/support/authWorld.ts";
@@ -255,8 +247,6 @@ When("I change the new login's role to {string}", async function (this: OduWorld
 });
 
 Then("the header offers no People control", async function (this: OduWorld) {
-  // Asked once the header has drawn the person, so "absent" is an answer and
-  // not a page that has not finished arriving.
   await this.page.locator(".account-name").waitFor({ timeout: 30_000 });
   const controls = await this.page.getByRole("button", { name: "People", exact: true }).count();
   assert.strictEqual(controls, 0, "a non-owner was drawn the People control");

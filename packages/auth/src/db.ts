@@ -1,10 +1,3 @@
-/**
- * **What is stored, and what never is.** A session is stored by the SHA-256 of
- * its cookie value, and a token by the SHA-256 of its secret — so a copy of this
- * file is not a set of credentials. The cookie's own value is held only by the
- * browser that signed in.
- */
-
 import { Database } from "bun:sqlite";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -12,7 +5,6 @@ import type { Role } from "@odu/cordis/principal";
 import { normalizeLogin } from "./github";
 
 export interface SessionRow {
-  /** sha256 of the session's cookie value, hex. */
   id: string;
   login: string;
   created: number;
@@ -23,7 +15,6 @@ export interface SessionRow {
 
 export interface TokenRow {
   id: string;
-  /** sha256 of the token, hex. Never the token. */
   hash: string;
   login: string;
   name: string;
@@ -46,8 +37,6 @@ export interface GrantRow {
 }
 
 export interface AuthRepo {
-  /** A live session by its hash, or null. Expiry is the caller's question —
-   *  this answers the row, not whether it is still valid. */
   session(id: string): SessionRow | null;
   putSession(row: SessionRow): void;
   touchSession(id: string, at: number): void;
@@ -64,17 +53,12 @@ export interface AuthRepo {
   grant(login: string): GrantRow | null;
   setGrant(row: GrantRow): void;
   grants(): GrantRow[];
-  /** WHO HAS COME IN, durably: a login is recorded at its first sign-in and
-   *  touched whenever a session or a personal token of theirs is used — and,
-   *  unlike a session row, never deleted by sign-out or expiry. */
   touchPerson(login: string, at: number): void;
   people(): PersonRow[];
 
   close(): void;
 }
 
-/** Schema changes, in order. `PRAGMA user_version` is the schema's own number
- *  and the only place it lives. */
 const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE session (
