@@ -1,59 +1,11 @@
 /**
- * `odu web` — the singleton web service, and the two lifetimes it can have.
- *
- * **Serving is one function** ({@link serveWebService}); what differs is only
- * how the tenure is narrated and how it ends:
- *
- *   - **`odu web`** serves in the FOREGROUND. Ctrl-C stops it, the person can
- *     see it running, and finding the gate already held is reported rather than
- *     passed off as success — they asked to serve here, and here is taken.
- *   - **`odu web --background`** ensures a service that outlives the shell, the
- *     way it always did: adopt one, or spawn `web-daemon` and verify it answers.
- *   - **`web-daemon`** is what that spawns. Absent from the usage text because
- *     nobody should type it: it is quiet, it yields silently to a live holder,
- *     and it ends only through the control fragment's `drain`.
- *
- * The foreground being the DEFAULT is a deliberate reversal. Printing a URL and
- * exiting left a person with a server they had not watched start, could not
- * watch stop, and had no obvious way to end. Backgrounding is a real thing to
- * want; it is not the thing to assume.
- *
- * **A run outlives the server either way.** Ctrl-C reaches this process's
- * group; a coordinator is a detached group (or a transient unit) of its own, so
- * it never arrives there. Stopping the web service ends an OBSERVATION, which
- * is the same asymmetry `run_cancel` keeps.
- *
- * ## The singleton, exactly
- *
- * One per-user home (`~/.local/state/odu-web/`), one gate file in it, and one
- * fixed origin — and the home is derived FROM the origin, so moving the service
- * with `ODU_WEB_ORIGIN` moves its gate too (`@odu/service-client/socket`'s
- * `webAppNamespace`, which `./webDaemonLaunch` reads its home from).
- * Concurrent launchers converge through the framework's own pid gate: every one
- * of them writes a per-pid temp file and races a single atomic `link(2)`,
- * exactly one wins, and every loser reads the gate, proves the holder is alive,
- * and yields. Not a lock — a claim that a dead holder cannot keep.
- *
  * **The gate is claimed BEFORE the port is bound**, and the ordering is the one
  * thing this file must not get wrong. `daemonMain` claims the gate itself, but
  * it does so after the caller has done whatever else it needs — so a daemon
  * that bound 18440 first and then lost the gate race would have taken the port
  * from the winner. Claiming first means a loser never binds anything.
  *
- * **A fixed port occupied by something else is a REFUSAL, never a fallback.**
- * A service that relocated on `EADDRINUSE` would answer the concurrency
- * question by making itself unfindable: the browser tab, the CLI and the MCP
- * host all derive one address, and a second service on a second port is a
- * second truth nobody asked for.
- *
- * ## Upgrading a running one
- *
- * `odu web --upgrade` is the explicit path, in either lifetime. It reads the
- * running daemon's
- * identity off the framework's frozen control fragment (`core.hello` — the one
- * contract that never versions within a protocol epoch), and when the build or
- * the contract differs it drains it (`core.drain`), waits for the gate to
- * clear, and starts this build. Capture → drain → reattach, in that order:
+ * Capture → drain → reattach, in that order:
  * nothing is killed, the running service is asked, and the caller reattaches by
  * dialling the successor.
  */
@@ -169,16 +121,8 @@ import {
 
 
 
-/** The exit code a daemon tenure ends with. `@kolu/surface-daemon` computes
- *  this too, but only inside `daemonProcessMain`, which owns `process.exit` —
- *  and odu's binary owns its own exit edge for every command (see `main.ts`'s
- *  `exitAfterFlush`, which exists because a large answer must drain before the
- *  process ends). Two owners of one exit is one too many, so the mapping is
- *  spelled here instead. */
 function exitCodeOf(exit: DaemonExit): number {
   switch (exit.kind) {
-    // Yielding to a live instance is a SUCCESS: the caller wanted a service and
-    // there is one.
     case "already-running":
       return 0;
     case "shutdown":
@@ -188,45 +132,19 @@ function exitCodeOf(exit: DaemonExit): number {
   }
 }
 
+export interface Tenure {
+  log: Logger;
+  onHeld: (pid: number) => Promise<number> | number;
+  onServing: (origin: string, pid: number) => void;
+  stopOn?: readonly NodeJS.Signals[];
+}
+
 /**
- * THE DAEMON. Claims the gate, binds the listener, serves until told to stop.
- *
  * The order is: gate → service runtime → HTTP/WS listener → `daemonMain` (which
  * adds the control socket and owns the tenure). Everything started here is torn
  * down in the `finally`, because this function's return is the process's last
  * act and a live handle would keep it alive after its tenure ended — the
  * lingering-daemon class.
- */
-/**
- * HOW A TENURE PRESENTS ITSELF — the only thing the two lifetimes differ in.
- *
- * A backgrounded daemon narrates to a log nobody is watching and yields quietly
- * when it finds the gate held, because a launcher racing three of them wants
- * exactly one survivor and no noise. A foreground server narrates to a PERSON
- * who is standing there, and finding the gate held means the thing they asked
- * for — serve, here, in this terminal — did not happen and must be said.
- *
- * Everything else about serving is identical, which is why it is one function.
- */
-export interface Tenure {
-  /** Where this tenure narrates itself. A daemon writes structured JSON to a
-   *  stderr nobody reads until something goes wrong; a foreground server writes
-   *  to a person's terminal, where four lines of JSON before the URL are noise
-   *  standing between them and the thing they asked for. */
-  log: Logger;
-  /** Another process holds the gate. Answer with this command's exit code. */
-  onHeld: (pid: number) => Promise<number> | number;
-  /** Bound and serving, at the origin the OS actually gave us. */
-  onServing: (origin: string, pid: number) => void;
-  /** Signals that end this tenure. A daemon has none of its own — it is ended
-   *  through the control fragment's `drain` — and a foreground server has
-   *  Ctrl-C, which is the whole of its contract with the person running it. */
-  stopOn?: readonly NodeJS.Signals[];
-}
-
-/**
- * SERVE. One listener, one gate, one surface — and a `Tenure` deciding only how
- * it is narrated and how it ends.
  */
 export async function serveWebService(tenure: Tenure): Promise<number> {
   // BEFORE ANYTHING IS CLAIMED OR BOUND. A misbuilt package must not take the
@@ -241,18 +159,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
   const { host: bindHost, port } = serviceBind(origin);
   const log = tenure.log;
   const controller = new AbortController();
-  // ONE Origin allowlist, read once, applied at both doors — the websocket and
-  // `/mcp`. There is deliberately no Host allowlist: the service answers to
-  // whatever name it is reached by (an SSH forward, a tailnet name, a proxy),
-  // and the Origin check compares a browser's Origin against that same Host.
   const allowedOrigins = parseAllowedOrigins(process.env.ODU_WEB_ALLOWED_ORIGINS);
-  // The address a BUCKET is published at, when a proxy stands in front. Read
-  // here rather than in `@odu/service` because this is the one place that reads
-  // an environment, and refused HERE rather than concatenated there: a value
-  // with a path would build a substituter URL nobody asked for.
-  /** An environment variable's value, or `null` when it is unset or blank. A
-   *  blank `$ODU_ROOT_TOKEN=` is the same absence as no variable at all, and
-   *  reading it as a real token would make an empty string a credential. */
   const configured = (value: string | undefined): string | null => {
     const trimmed = value?.trim();
     return trimmed === undefined || trimmed === "" ? null : trimmed;
@@ -262,10 +169,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     process.stderr.write(`odu: ${published.message}\n`);
     return 1;
   }
-  // THE DOOR'S CONFIGURATION — read here because the host is the one place that
-  // reads an environment, and refused here when it is half set: a daemon whose
-  // sign-in silently switched off because one variable was misspelled would be
-  // a door that looks shut and is not.
   const github = readGithubConfig(process.env, {
     publicOrigin: published.origin,
     boundOrigin: origin,
@@ -274,17 +177,12 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     process.stderr.write(`${github.message}\n`);
     return 1;
   }
-  // THE TUNNEL ROW'S CONFIGURATION — read here for the same reason: this is the
-  // one place that reads an environment, and a half-set file path is refused at
-  // boot rather than as a Tunnel panel that never moves.
   const cloudflare = readCloudflareConfig(process.env);
   if (cloudflare.kind === "refused") {
     process.stderr.write(`${cloudflare.message}\n`);
     return 1;
   }
 
-  // THE CACHE ROW'S STORES — the operator's declarations and their credentials
-  // files, read here once and handed to the row, which builds and holds them.
   const cacheStores = readCacheStores(process.env);
   if (cacheStores.kind === "refused") {
     process.stderr.write(`${storeConfigMessage(cacheStores.refusal)}\n`);
@@ -311,10 +209,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
 
   // Ctrl-C, for a tenure that has one. Installed AFTER the gate is claimed and
   // removed in the `finally`, so a signal can never abort a process that is not
-  // yet serving and never outlive the tenure it belongs to. The handlers stop
-  // the SERVER; a coordinator it started is in its own process group (see
-  // `@odu/execution`'s spawn plan) and a Ctrl-C in this terminal never reaches
-  // it, which is the promise "your run survives this shell" made concrete.
+  // yet serving and never outlive the tenure it belongs to.
   const stopHandlers: (() => void)[] = [];
   for (const signal of tenure.stopOn ?? []) {
     const onSignal = (): void => controller.abort();
@@ -322,33 +217,12 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     stopHandlers.push(() => process.off(signal, onSignal));
   }
 
-  // AND THE FAULTS NOBODY CAUGHT. Beside the signal handlers because it is the
-  // same kind of thing — a process-level listener owned by this tenure and
-  // removed with it — but for the opposite event: not an operator asking the
-  // daemon to stop, a bug trying to stop it. Issue #160's readback failure
-  // reached `process.on("unhandledRejection")` and exited 1; with this
-  // installed it is a log line and a counter, and the service keeps serving.
-  // ONLY HERE: the CLI's other commands are short-lived processes that should
-  // still die on a fault they cannot handle.
   const unhandled = installUnhandledGuard({ log });
   stopHandlers.push(unhandled.remove);
 
-  // ── THE ROSTER ──────────────────────────────────────────────────────────
-  //
-  // EVERY ROW, NAMED ONCE, HERE — and this file is a root, which is what makes
-  // that legal: a root names every row, a row names only itself, and the host
-  // is the one package that composes them. Each row hands over ONE record it
-  // owns — its word on the wire, its plugin, what an agent is told and its own
-  // contract version — and the host lists them, naming none of their parts.
-  // A row that needs config is a row-owned factory taking the config the host
-  // read. The runs' record has `key: null`: its plugin builds the rooted bundle
-  // and OFFERS it, so its members keep the bare `surface/runs/...` tags.
   const ROWS: ReadonlyArray<Row> = [
     ciRowRecord,
     cacheRowRecord(cacheStores.stores),
-    // THE DOOR, when this daemon has one. A GitHub App configured means the row
-    // is mounted, and with none configured nothing asks who is calling — which
-    // is loopback mode, unchanged.
     ...(github.kind === "config" ? [authRowRecord(github.config)] : []),
     // THE TUNNEL, when a token file is configured. It reacts to the cache row's
     // published domains; the roster order is the mount order, so the cache (and
@@ -374,21 +248,9 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     return root.agent;
   };
 
-  // ── THE HOST ────────────────────────────────────────────────────────────
-  //
-  // One Cordis context for the tenure, and the rows mounted on it. The host
-  // PROVIDES the facts — the state root, the bound and public origins, the
-  // build, the logger, the store URI, the way to end, the composed bundle and
-  // the router mount — and each SIBLING row is a plugin that names what it
-  // needs. Nothing below this line reads an environment.
   const run = standing();
   const host = await run(openHost);
   const build = bakedBuild();
-  // THE ROUTE LAYERS, collected for this tenure and read once, at bind, so
-  // `layers` is this list and dies with the tenure. The LIST is here rather than
-  // in `@odu/cordis` for the same reason the roster is: the tag and the
-  // interface a row registers into are shared vocabulary, a mutable list is one
-  // daemon's.
   const layers: ClaimedRoutes[] = [];
   const routes: HttpRoutes = {
     add: (layer) => {
@@ -400,13 +262,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     },
     layers: () => layers,
   };
-  /** The `/mcp` adapter, once the rows are composed; `null` before that, and on
-   *  every path that never reached a listener. */
   let mcp: Awaited<ReturnType<typeof serveServiceMcpInProcess>> | null = null;
-  /** The host's own metrics fragment on the composed bundle, once there is a
-   *  bundle to mount it on. Dropped with the rows, for the same reason they
-   *  are: a fragment answering out of a runtime nobody drives is a verb that
-   *  reads a token file after the tenure that owned it ended. */
   let metricsMounted: { drop: () => Promise<void> } | null = null;
   let closed = false;
   const closeHostOnce = async (): Promise<void> => {
@@ -417,53 +273,20 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
 
   const scope = Scope.makeUnsafe();
   try {
-    // THE PRINCIPAL BROKER, before any row, built from the DOOR FACT: a row that
-    // knows how to sign somebody in registers its resolver on this in its own
-    // `apply`; with none registered, this daemon is either the local owner
-    // (loopback mode) or nobody at all (a door that is not answering) — the two
-    // arms `localBroker` states.
     const hasDoor = github.kind === "config";
     const principals = localBroker({ door: hasDoor });
-    // The per-request admission the MCP door's dispatch reads. One per tenure:
-    // the composition root makes it, and the adapter is built once over it. Its
-    // FALLBACK is the absent-resolver rule again, for a call outside any request.
     const admissions = admissionStore(hasDoor ? NOBODY_ADMISSION : LOCAL_ADMISSION);
-    // THE PURGE BROKER, the same shape asked of a different question: a
-    // collection announces the URLs it deleted, and whoever fronts those URLs
-    // forgets them. One per tenure, named by both rows and owned by neither —
-    // with no CDN row mounted nothing is registered and `announce` does
-    // nothing, which is how a cache collects on a daemon that has never heard
-    // of an edge.
     const purges = purgeBroker();
     // AND WHERE A RUN ASKS FOR ITS WRITE TOKEN (PLAN 4.1) — the same shape,
     // the other direction: the runs' row asks, the cache row answers, and the
-    // runs' row is mounted first. With no cache registered every question
-    // answers "no bucket here", which is a daemon whose runs simply do not
-    // push.
+    // runs' row is mounted first.
     const grants = grantsBroker();
-    // THE SCRAPE'S CONTRIBUTORS, the same shape for the same reason: many rows
-    // register, one route reads. The host renders `/metrics` and counts
-    // nothing itself — a host that read a row's database to publish its hit
-    // rate would be the reach `@odu/cordis` exists to prevent.
     const metrics = metricsBroker();
-    // THE HOST'S OWN ONE. The rule above is about ROWS, not about the host's
-    // process: these two counts are a property of this process and of no row,
-    // so the host contributes them itself rather than inventing a row to hold
-    // them. Withdrawn with the rest of `stopHandlers`; a scrape that lands
-    // after the listeners come off still reads — `counts()` closes over the
-    // tally, which outlives them.
     stopHandlers.push(
       metrics.add({ name: "host/unhandled", read: () => unhandledReading(unhandled) }),
     );
-    // THE OPERATOR'S CREDENTIAL AND THE STATE ROOT, derived ONCE. The tags
-    // below carry them to the rows; the host's own metrics fragment and route
-    // are not plugins and cannot read a tag, so they read these — not the
-    // environment a third and fourth time.
     const rootToken = configured(process.env.ODU_ROOT_TOKEN);
     const stateDir = stateRoot(process.env);
-    // THE SCRAPE CREDENTIAL. Under the per-user state root, beside the cache's
-    // database and the catalog, because it outlives this tenure and a token an
-    // operator minted must survive a restart.
     const metricsTokens = openMetricsTokens(stateDir);
     await run(provide(host, PrincipalBroker, () => principals));
     await run(provide(host, CachePurge, () => purges));
@@ -479,8 +302,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await run(provide(host, Shutdown, () => () => controller.abort()));
     await run(provide(host, Routes, () => routes));
     await run(provide(host, Metrics, () => metrics));
-    // EVERY ROW'S OWN VERSION, by name, for the identity cell — the roster's
-    // fields copied, and nothing about them understood here.
     await run(
       provide(host, RowContracts, () => ({
         ...Object.fromEntries(ROWS.map((row) => [row.name, row.contract])),
@@ -495,9 +316,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     // EVERY ROW IS A PLUGIN, and the runs' row OWNS ITS BUNDLE: its `apply`
     // builds the runtime and `offer`s it, the cache row is held PENDING on that
     // offer until it arrives, and mounting both + `settled` is the whole boot.
-    // The host neither constructs a row nor closes one — a bundle built here
-    // would be a runtime with no owner to tear it down, which is the bug this
-    // shape removes.
     for (const row of ROWS) await run(mountPlugin(host, row.plugin));
     // SETTLED, not merely mounted: a row provides services its siblings may
     // name, and mounting returns as soon as a fibre exists rather than once its
@@ -525,28 +343,19 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       return 1;
     }
 
-    // The runtime the runs' row offered, read once the rows have settled. A
-    // host that is not a plugin reads a service with `offered`.
+    // The runtime the runs' row offered, read once the rows have settled.
     const runtime = offered(host, Bundle);
     if (runtime === undefined) {
       process.stderr.write("odu: the ci row offered no runtime — refusing to serve\n");
       return 1;
     }
-    // THE HOST'S OWN FRAGMENT, on the bundle the runs' row offered: the verbs
-    // that mint the credential `/metrics` is read with. It is mounted HERE
-    // rather than by a row because the scrape is the host's — no row owns both
-    // the number of cached paths and the number of runs — and because the
-    // token file is the host's too. Dropped in the teardown below, before the
-    // host closes.
+    // THE HOST'S OWN FRAGMENT, on the bundle the runs' row offered. Dropped in
+    // the teardown below, before the host closes.
     metricsMounted = runtime.mount(
       METRICS_KEY,
       oduMetricsSurface,
       metricsFragment({ tokens: metricsTokens, rootToken }),
     );
-    // THE SERVED HANDLERS, WITH THE DOOR IN FRONT OF THEM — and only the
-    // SERVED ones: the control socket `daemonMain` opens is owner-only and
-    // already local, so it keeps the ungated record.
-    //
     // READ AT EVERY ACCEPT, not frozen at bind: `runtime.handlers` is a live
     // getter, and a row's mount replaces the record. `serving.ts` says the
     // generation is read at each accept for exactly this reason, so the gated
@@ -562,13 +371,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       return { group: runtime.group, handlers: gated.handlers };
     };
 
-    // THE `/mcp` DOOR — the composed bundle's, so it is the TRANSPORT's and is
-    // built here rather than by any one row: an adapter that served one row
-    // would have to be told what the others are. The adapter and its transport
-    // are one pair for the listener's life (an MCP `Server` binds exactly one
-    // transport, and re-making them per request would rebuild the expose walk
-    // and the resource pusher on every call). The DISPATCH behind it reads the
-    // served record per call, for the reason above.
     const transport = new RouteTransport();
     mcp = await serveServiceMcpInProcess({
       path: SERVICE_MCP_PATH,
@@ -583,10 +385,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
         ...Object.fromEntries(
           ROWS.filter((row) => row.key !== null).map((row) => [row.key as string, row.agent]),
         ),
-        // THE HOST'S FRAGMENT IS A SIBLING TO AN AGENT, because that is what it
-        // is on the wire: `metrics_token_mint` is reached exactly as
-        // `cache_token_mint` is. It is on every daemon — nothing configures it
-        // away — so unlike the door it is never conditionally absent.
         [METRICS_KEY]: METRICS_AGENT,
       },
     });
@@ -599,23 +397,13 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
           }),
           mcpGetRoute(SERVICE_MCP_PATH),
         ),
-        // THE DOOR FACT, the HOST'S OWN — whether this daemon has a door is a
-        // fact about its composition, and it changes with `auth`, not with the
-        // runs. The browser asks once before it draws anything.
         doorRoute(hasDoor),
       ),
       Layer.merge(
-        // AND WHICH ROWS ARE HERE: a control for a row that is not mounted opens
-        // a subscription nobody answers. The roster is fixed at boot — and the
-        // host's own metrics fragment is on it, because the roster is what the
-        // MCP bridge advertises a daemon's verbs from.
         rowsRoute([
           ...ROWS.map((row) => row.key).filter((key): key is string => key !== null),
           METRICS_KEY,
         ]),
-        // THE SCRAPE. A host route, authorised by the root token or a metrics
-        // token, reading whatever the rows have registered at the moment it is
-        // asked.
         metricsRoute({ sources: metrics, rootToken, tokens: metricsTokens }),
       ),
     );
@@ -627,8 +415,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     try {
       bound = await Effect.runPromise(
         serveSurfaceApp(
-          // The parts and their assembly live in `./serving`: this function owns
-          // the gate, the lifetime and the teardown around the listener.
           servingOptions({
             live: served,
             dist,
@@ -636,33 +422,14 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
             port,
             allowedOrigins,
             routes: composed,
-            // THE DOOR ITSELF. `cookie` and `authorization` are the two headers a
-            // connection is read under; the per-connection services provide the
-            // principal its lease admits (and close the socket when it ends); the
-            // middleware answers an anonymous `/mcp` with 401 and an anonymous
-            // browser with the server-rendered sign-in page.
             upgradeHeaders: UPGRADE_HEADERS,
             services: (connection) => connectionLayer(principals, connection),
-            // THE BUCKET NAMES RUN OUTSIDE THE DOOR: a visitor to a
-            // substituter's name sees the bucket's page, not the server's
-            // sign-in form — and nothing else of this daemon answers there.
             middleware: (app) =>
-              // THE BUCKET NAMES ARE THE CACHE ROW'S FACT, read through a
-              // THUNK: a row that re-applies must not leave this gate holding
-              // the service it replaced. The gate itself is composed here, and
-              // the host reaches no row's internals.
               bucketDomainGate(() => offered(host, BucketDomains))(
                 doorGate({
                   broker: principals,
                   mcpPath: SERVICE_MCP_PATH,
                   signInPage: () => signInPageHtml(),
-                  // THE PATHS THIS DAEMON'S ROUTES CLAIM, composed rather than
-                  // listed: the host's own (the door fact, the bundle's assets,
-                  // the worker, the manifest) plus every row's
-                  // claim, registered beside its routes. Read at bind, like the
-                  // layers. Everything else is the shell, and an anonymous
-                  // connection meets the sign-in page there — which is what
-                  // makes `curl /anything` prove the door.
                   reservedPaths: reservedPaths(routes.layers()),
                 })(app),
               ),
@@ -725,19 +492,6 @@ export async function webDaemonCommand(): Promise<number> {
 
 /**
  * `odu web` — SERVE, HERE, until Ctrl-C.
- *
- * The default is the foreground, and that is a deliberate reversal. A command
- * that printed a URL and exited left a person with a server they had not seen
- * start, could not see stop, and had no obvious way to end — the surprise being
- * that the shell prompt came back while something was still listening.
- * Backgrounding is a real thing to want, so it has a flag; it is not the thing
- * to assume.
- *
- * **A coordinator outlives this terminal either way.** Ctrl-C ends the SERVER.
- * Runs it started are detached process groups (or transient units), so the
- * signal never reaches them, and their evidence is in the catalog rather than
- * in this process. That asymmetry is the same one `run_cancel` keeps: ending an
- * observation is not ending the work.
  */
 export async function webCommand(opts: {
   upgrade: boolean;
@@ -745,15 +499,12 @@ export async function webCommand(opts: {
   background: boolean;
   /** WHAT THE BOARD THIS COMMAND HANDS OUT READS — declared by the root, which
    *  names the rows; a running daemon a major behind on any of them is refused
-   *  here with the upgrade sentence. The page itself needs no check of its own:
-   *  it is served by the daemon it would check, and a tab that outlives its
-   *  daemon is reloaded by the shell's `retired`. */
+   *  here with the upgrade sentence. */
   needs: RowNeeds;
 }): Promise<number> {
   return opts.background ? backgroundWeb(opts) : foregroundWeb(opts);
 }
 
-/** A logger that says nothing until it has something wrong to say. */
 function quietLogger(): Logger {
   const loud = stderrLogger();
   return {
@@ -765,10 +516,7 @@ function quietLogger(): Logger {
 }
 
 /**
- * FOREGROUND `odu web`: quiet about the spine, visible for a ROW's operational
- * facts. A person watching a terminal wants the URL and the way to stop it, not
- * "listener bound"; but a cache migration, a refused push and a NAR served are
- * exactly what they are watching for, and those arrive at `info`. The line
+ * The line
  * prefix is the contract: every cache row event is prefixed with its key.
  */
 export function foregroundLogger(sink: Logger = stderrLogger()): Logger {
@@ -783,15 +531,6 @@ export function foregroundLogger(sink: Logger = stderrLogger()): Logger {
   };
 }
 
-/**
- * Serve in this terminal.
- *
- * The singleton still holds: if another process owns the gate, this one cannot
- * serve, and it SAYS SO instead of returning as though it had. That is the
- * difference the flag exists for — `--background` asks for "make sure one is
- * running", and bare `odu web` asks for "run one here", which are different
- * requests with different answers when one is already up.
- */
 async function foregroundWeb(opts: {
   upgrade: boolean;
   json: boolean;
@@ -812,9 +551,6 @@ async function foregroundWeb(opts: {
     }
   }
   return serveWebService({
-    // QUIET about the spine, VISIBLE for a row's operational facts: a cache
-    // migration, a refusal and a served object are what the person watching is
-    // waiting for. Warnings and faults always come through.
     log: foregroundLogger(),
     stopOn: ["SIGINT", "SIGTERM"],
     onHeld: async (pid) => {
@@ -850,14 +586,6 @@ async function foregroundWeb(opts: {
   });
 }
 
-/**
- * `odu web --background` — ensure a service, print where it is, return.
- *
- * The whole command is `ensureService` plus wording. Everything about
- * converging on a singleton — adopt, spawn, wait for readiness, refuse — lives
- * in `./webLauncher`, because that is the part a test has to be able to drive
- * without a terminal.
- */
 async function backgroundWeb(opts: {
   upgrade: boolean;
   json: boolean;
@@ -903,36 +631,9 @@ function describe(outcome: Extract<EnsureOutcome, { ok: true }>): string {
 }
 
 
-/** Re-exported so a caller that wants the gate's current holder — or any of the
- *  launch facts that now live in `./webDaemonLaunch` — does not learn a second
- *  import path for something it already reaches `./web` for. */
-
-/**
- * LET GO OF WHOEVER'S DIRECTORY THIS WAS.
- *
- * A daemon inherits the working directory of the command that first needed it —
- * somebody's checkout, a fixture, a temp dir — and then OUTLIVES it. That is
- * the whole point of a singleton, and it makes the inherited cwd a liability:
- * when that directory is removed, the kernel cannot resolve a working directory
- * for anything the daemon forks, and EVERY spawn fails with `ENOENT` naming the
- * program rather than the directory. It is a spectacular error to read —
- * `posix_spawn '/…/gh'` for a `gh` that is right there, mode 755, executable
- * from any other process on the machine.
- *
- * Found through `odu ci protect`, which is the shortest path to it: eight
- * assertions failing with "the $ODU_GH_BIN seam was bypassed" because the
- * daemon had been started from a test fixture that the test then deleted.
- * Nothing about that is specific to tests — a person who runs `odu ci run` in a
- * worktree and then removes the worktree gets the same daemon.
- *
- * `/` because it is the one directory that is always there, and because a
- * daemon has no business holding a reference to any other.
- */
 function standOnSolidGround(): void {
   try {
     process.chdir("/");
   } catch {
-    // A cwd that cannot be changed is not a reason to refuse to serve; the
-    // spawns that would have failed will fail with their own message.
   }
 }

@@ -1,8 +1,3 @@
-/**
- * THE FOREGROUND POLICY. `odu web` is quiet about the spine, but a ROW's
- * operational facts are the reason a person is watching the terminal: a cache
- * migration, a refusal, a NAR served. Those all arrive with `odu cache: `.
- */
 import { describe, expect, it } from "bun:test";
 import type { Logger } from "effect";
 import { foregroundLogger } from "./web";

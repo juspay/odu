@@ -1,13 +1,3 @@
-/**
- * `GET /metrics`, AS A CLIENT MEETS IT.
- *
- * `HttpRouter.toWebHandler` gives the listener's own routing as a `fetch`-shaped
- * function, so what is asserted here is the status, the headers and the body a
- * Prometheus would see — including the one case that matters most and is
- * invisible to a handler-level test: the route is answered by the host, so a
- * scrape must never be able to reach it without a credential.
- */
-
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,13 +88,9 @@ describe("the scrape's door", () => {
   });
 
   it("is shut on a daemon with no root token, metrics token or not", async () => {
-    // Nothing can mint one either, so this is the whole surface: a daemon
-    // nobody configured a credential for publishes no numbers.
     const { ask, tokens, dispose } = world(null);
     try {
       expect((await ask("Bearer ")).status).toBe(401);
-      // A token minted before the root token was removed still works — it is a
-      // credential of its own, which is the point of having it.
       const minted = tokens.mint("pod");
       expect((await ask(`Bearer ${minted.token}`)).status).toBe(200);
     } finally {

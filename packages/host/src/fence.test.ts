@@ -1,66 +1,11 @@
-/**
- * THE FENCE — the claims no runtime can check, over this repo.
- *
- * `@olai/effect-cordis/fence` reads SOURCES and MODULE GRAPHS: which package
- * imported which, what a root's walk carries, where a row's name appears as
- * text, which module a second package can open holds live state, and whether the
- * rows the host supplied, the rows on disk and the rows the roots compose are one
- * set. It imports no plugin and evaluates no plugin, so a row that will not load
- * still gets every claim run against it.
- *
- * ## The declaration, in this repo's nouns
- *
- * - **Four roots**: `src/main.ts` (the CLI — Node), `packages/host/src/web.ts`
- *   (the daemon — Node), `packages/web-ui/src/main.tsx` (the browser's boot —
- *   it is where `connectSurfaces` is called) and `packages/web-ui/src/app.tsx`
- *   (the route table — browser). These are the files that may name more than one
- *   row.
- * - **Rows from manifests.** Every package says `"cordis": { "row": … }`; the
- *   fence resolves them itself, so a new package that forgets to say which row
- *   it is behind is a finding rather than a silent member of nothing.
- * - **No package is the registry, and none is needed.** The door's registry is
- *   "the one package in no row that names every row"; this repo's roster is
- *   `packages/host/src/web.ts`, which is a ROOT file, and the door treats "a
- *   consumer that mounts rows from a root file alone" as a state rather than a
- *   defect (`fence.ts` ~1266). Rows are fixed at boot and named in one root, so
- *   there is no second place a row could be added and forgotten. What still
- *   holds is the reason a row may not import `@odu/host`: a face that reached it
- *   to bootstrap would carry every row's server to reach the code that starts
- *   one — which is what `@odu/cordis` exists to avoid.
- * - **The collision table** names the files where a row's word appears outside
- *   its own packages and outside the roots, with the count each one carries.
- *   Growing it is a diff somebody agrees to.
- *
- * ## What it costs to be green
- *
- * Two shape changes, both made in round 2/3 rather than declared away: the run
- * views moved into `@odu/ci/face` (a row's face, in the row's package) so the
- * board shell holds no row contract outside a root, and the `/mcp` path is
- * PASSED IN to the host's route rather than imported by it. Those were the only
- * files the host-package rule was catching.
- *
- * ## The green report is PROVEN, not asserted
- *
- * `prove(declaration)` breaks a copy of this tree once per claim and reports
- * whether the claim that names the defect refused it — and whether it refused
- * ONLY that one. It is asserted below, because a green report is worth exactly
- * what its machinery is worth: a sweep whose pattern stopped matching, whose
- * corpus came back short, or whose resolver walked one file is every one of
- * them green, and `0 findings` cannot tell a fence that is holding from a fence
- * that is not running.
- */
-
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { fence, prove, rowsFromManifests } from "@olai/effect-cordis/fence";
 
-/** The workspace root: the directory whose `package.json` carries the
- *  `workspaces` globs. */
 const REPO = join(import.meta.dirname, "..", "..", "..");
 const source = (file: string): string => readFileSync(join(REPO, file), "utf-8");
 
-/** The rows on disk, from the manifests. */
 const FENCE_ROWS = rowsFromManifests(REPO);
 
 const declaration = {
@@ -76,135 +21,54 @@ const declaration = {
   // many times. A COUNT rather than a boolean, because "it is mentioned there"
   // and "it is mentioned there twenty-nine times" are different dependencies on
   // the same decision.
-  //
-  // Two kinds of entry, and both are the price of a row named after a common
-  // noun: the projections that must speak the sibling's key (they compose that
-  // row's client over one connection), and THE WORD ITSELF in code that has
-  // nothing to do with buckets (a runner's build cache, a `nix` cache flag, the
-  // acceptance suite's fixtures, a bucket's class names).
   collisions: {
     cache: {
-      // `serviceCli.ts` is NOT here any more: the argv projection used to
-      // hand-list the cache as its one sibling, and now derives every sibling
-      // from the wire's row records, so it spells no row's word at all.
-      // The bridge's one row word: what an UNANSWERED roster offers.
       "packages/cli/src/serviceMcp.ts": 2,
-      // The composed wire: the row's own facts, from which its surface, its
-      // key and the composed faces' need are all derived.
       "packages/cli/src/wire.ts": 2,
       "packages/execution/src/coordinator/spawn.ts": 1,
-      // The runner's object cache: the per-slug bare repo, and now the
-      // snapshot script's two reads of its path (the variable it assigns and
-      // the environment entry that carries it) — a git directory, not the
-      // cache row.
       "packages/execution/src/runner/workspace.ts": 24,
-      // `nix-cache-info` — Nix's protocol path, not odu's cache row. The probe
-      // URL a tunnel's name is confirmed with is the protocol's own spelling.
-      // The other three are the PURGE PORT: this row forgets the URLs a
-      // collection deleted, and `CachePurge` is the shared tag it registers
-      // on. It still never names the cache row's package or its verbs.
       "packages/cloudflare/src/server.ts": 4,
       "packages/cloudflare/src/api.ts": 1,
-      // The browser suite's Cloudflare stub answers the protocol probe.
       "packages/web-acceptance/support/cloudflareStub.ts": 1,
-      // `cache-control` on three responses — an HTTP header, not a bucket.
       "packages/host/src/principal.ts": 3,
-      // THE SAME HEADER AGAIN, on the scrape's two answers: `cache-control:
-      // no-store` keeps a proxy from serving a stale exposition. An HTTP
-      // header, not a bucket.
       "packages/host/src/metricsRoute.ts": 2,
-      // THE SAME HEADER, in the store layer: `PutOptions.cacheControl` and
-      // the `cache-control` an S3 put sends with the bytes (PLAN 2.8, where
-      // reads are served by the store itself and nothing of odu's is in the
-      // path to add one). An HTTP header on an object, not the cache row.
       "packages/objects/src/objectStore.ts": 1,
       "packages/objects/src/s3Store.ts": 3,
-      // The bucket-domain gate: the page rewrite's `/cache/` and its own
-      // 404 sentence. The path GRAMMAR moved to the row's `bucketOf` fact.
       "packages/host/src/bucketDomain.ts": 2,
-      // The same header on the shared door reader's one request — and TWO
-      // PORTS: the purge broker a CDN row registers on, and the GRANT broker
-      // the runs' row asks for a run's write token through (PLAN 4.1). Both
-      // are shared vocabulary, which is where a port belongs; `@odu/cordis`
-      // still names no row's package.
       "packages/cordis/src/services.ts": 20,
-      // THE RUNS' ROW, ASKING WHERE A RUN PUSHES (PLAN 4.1). `webPorts`
-      // resolves the cache a checkout's `flake.nix` already reads from — it
-      // is an HTTP client of a cache (`@odu/cache/push`, the one door that is
-      // not this row's server) plus the grant broker above, and it reaches no
-      // database, no verb and no face. The row's own plugin names the broker
-      // tag. `detail.tsx` is NOT here: the run page's bucket link is a prop
-      // the shell fills, so the face spells no row's route at all.
       "packages/ci/src/webPorts.ts": 6,
       "packages/ci/src/row.ts": 3,
-      // THE ENGINE, carrying the same fact to the lane: the coordinator reads
-      // the run's target off its argv and the runner pushes `result*` with
-      // the same client. The word is the `ODU_CACHE_*` task variables — named
-      // once, in the module that both writes and parses them — never the
-      // cache row.
       "packages/execution/src/coordinator/run.ts": 1,
-      // 4.2 grew that set from three variables to six: the pin name, and the
-      // run and the commit a push states as provenance. Every one is a
-      // COORDINATOR's decision carried to a lane, and the module that writes
-      // them is the module that parses them — which is what keeps the count in
-      // one file and not two.
       "packages/execution/src/runner/pushResults.ts": 6,
-      // The service's own sentence for a run that pushes nowhere.
       "packages/service/src/start.ts": 1,
-      // THE RUNS' OWN WORDS ABOUT WHERE A RUN PUSHES (PLAN 4.1): one line of
-      // `odu ci run`'s usage, and the paragraph an agent is taught at
-      // `initialize`. Prose, in the row that does the pushing — neither names
-      // the cache row's package, its verbs or its database.
       "packages/cli/src/ciCli.ts": 1,
       "packages/service-client/src/verbs.ts": 2,
       "packages/launch/src/webDaemonLaunch.ts": 1,
       "packages/web-acceptance/support/corpus.ts": 5,
       "packages/web-acceptance/support/world.ts": 5,
-      // THE SCREENSHOT HARNESS composes all three worlds the way `hooks.ts`
-      // does — a loopback daemon, a door daemon and a tunnel daemon — because
-      // the evidence it takes is every screen of every row.
       "packages/web-acceptance/board-shots.ts": 7,
     },
     ci: {
       "packages/web-acceptance/support/service.ts": 7,
     },
-    // THE DOOR'S WORD, and every one of these is a price of a row named after
-    // a common noun: the daemon's roster and its gate, the shared vocabulary
-    // that carries the `AuthDoor` fact and the broker tag, the composed wires a
-    // CLI and a bridge read, and the runs' own service cell — which publishes
-    // "does this daemon have a door" so a browser knows whether to sign in.
     auth: {
       "packages/cache/src/cache.ts": 2,
-      // The refusal a private bucket gets names the command that fixes it.
       "packages/cache/src/cli.ts": 2,
       "packages/ci/src/protect.ts": 2,
       "packages/cli/src/wire.ts": 2,
       "packages/service/src/service.ts": 1,
-      // The 401's sentence names the command a person runs to fix it.
       "packages/host/src/principal.ts": 1,
-      // The harness names the row's world: a scenario's tags say whether the
-      // browser meets a door, and the stub's environment is the door's.
       "packages/web-acceptance/support/authWorld.ts": 1,
       "packages/web-acceptance/support/hooks.ts": 3,
       "packages/web-acceptance/board-shots.ts": 1,
     },
-    // THE TUNNEL'S WORD, where it is not a row: the NIX protocol's own path
-    // `/nix-cache-info` is what a domain is probed for, and "cache" there
-    // belongs to Nix. The row's own instructions are prose on the wire.
     cloudflare: {
-      // The harness names the row's world and stubs the API it calls, the way
-      // the door's world names the auth stub.
       "packages/web-acceptance/support/cloudflareStub.ts": 2,
       "packages/web-acceptance/support/hooks.ts": 15,
       "packages/web-acceptance/board-shots.ts": 9,
-      // The composed wire: the row's own facts, from which every composed
-      // face (the argv face, the MCP bridge) reads the sibling.
       "packages/cli/src/wire.ts": 2,
     },
   },
-  // A MODULE THAT HOLDS LIVE STATE BEHIND A DOOR, and why: the spawn module's
-  // registry of runs it started — written only there, read only to report a
-  // child that died, and the one fact a launcher has no caller to carry.
   allowances: {
     "packages/execution/src/coordinator/spawn.ts":
       "`liveRuns` is the spawn module's own registry of the runs it started — " +
@@ -213,11 +77,6 @@ const declaration = {
   },
 } as const;
 
-/** The door READS AND PARSES the tree, and `prove` copies it once per claim, so
- *  these are the slowest tests in the tree by an order of magnitude — seconds
- *  alone, and over a minute when the rest of the suite competes for the machine.
- *  The bound is generous because it exists to turn a HANG into a failure, not to
- *  police a runner's speed. */
 const FENCE_TIMEOUT_MS = 240_000;
 
 describe("the fence over this repo", () => {
@@ -230,20 +89,9 @@ describe("the fence over this repo", () => {
   }, FENCE_TIMEOUT_MS);
 
   it("has no registry, and needs none", () => {
-    // The roster is in `packages/host/src/web.ts`, which is a ROOT file. The
-    // door treats "a consumer that mounts rows from a root file alone" as a
-    // STATE rather than a defect (`fence.ts` ~1266), and it is the truth here:
-    // this repo's rows are fixed at boot and named in one root, so there is no
-    // second place a row could be added and forgotten.
     expect(fence(declaration).reading.registry).toBeUndefined();
   });
 
-  // A GREEN REPORT IS ONLY EVIDENCE IF IT WOULD GO RED. `prove` is the door's
-  // own answer to that: it copies this tree, plants one defect per claim, and
-  // requires each one to be caught BY ITS OWN CLAIM and to spill into none of
-  // the others. Hand-written wrong declarations were what stood here before,
-  // and they proved less — three levers out of six, over one claim's edges,
-  // with nothing saying the other three were still turning.
   it("proves every claim, on a broken copy of this tree", () => {
     const proof = prove(declaration);
     expect(
@@ -263,14 +111,6 @@ describe("the fence over this repo", () => {
   }, FENCE_TIMEOUT_MS);
 });
 
-/**
- * THE THIRD ROW, and the shape that makes it a row rather than a folder.
- *
- * Declared by its manifest (so the walk above already found it), named by the
- * roots that may name rows, and imported by NOBODY else — `ci` and `cache` must
- * not be able to reach sign-in, which is the whole reason it is a separate
- * package rather than a module inside either.
- */
 describe("four rows, each reachable only from the roots", () => {
   const manifestOf = (member: string): { dependencies?: Record<string, string> } =>
     JSON.parse(source(`${member}/package.json`)) as {
@@ -282,16 +122,8 @@ describe("four rows, each reachable only from the roots", () => {
   });
 
   it("no package of the ci or cache row depends on auth", () => {
-    // EVERY member of those rows, read off the manifests — not the two
-    // directories somebody remembered. A row is a set of packages, and a
-    // dependency added to any one of them is the import the fence exists to
-    // refuse.
     const members = ["ci", "cache"]
       .flatMap((row) => FENCE_ROWS[row] ?? [])
-      // `packages/cli` projects EVERY row's argv face (it names
-      // `@odu/cache/cli` for the same reason), so it is a root-shaped member
-      // rather than one row's engine. The engines are what must not reach the
-      // door.
       .filter((member) => member !== "packages/cli");
     expect(members.length).toBeGreaterThan(2);
     for (const member of members) {
@@ -303,9 +135,6 @@ describe("four rows, each reachable only from the roots", () => {
   });
 
   it("no package of the tunnel row depends on the cache row", () => {
-    // THE TUNNEL REACTS TO A PUBLISHED FACT, not to the cache's database or
-    // verbs. A dependency added here would be the row reaching across, which is
-    // the shape `@odu/cordis`'s `BucketDomains` exists to avoid.
     for (const member of FENCE_ROWS.cloudflare ?? []) {
       expect(
         Object.keys(manifestOf(member).dependencies ?? {}),
@@ -315,40 +144,16 @@ describe("four rows, each reachable only from the roots", () => {
   });
 
   it("the roots are what name it", () => {
-    // The daemon mounts it, the browser opens its face, and the shell's boot
-    // dials its surface — each is a root, which is the only place a row may be
-    // named.
     expect(source("packages/host/src/web.ts")).toContain('"@odu/auth/server"');
     expect(source("packages/web-ui/src/main.tsx")).toContain('"@odu/auth/surface"');
     expect(source("packages/web-ui/src/app.tsx")).toContain('"@odu/auth/face"');
   });
 });
 
-/**
- * THE ONE CLAIM THE FRAMEWORK CANNOT MAKE, because it is about call sites rather
- * than about a package graph: **the word a row is mounted under, and the word
- * every face spells, are one constant.**
- *
- * The mount happens in the row's own `apply` (`bundle.mount(...)`), the roster
- * names it, and the faces build their view of the wire from it: the browser's
- * `connectSurfaces`, the stdio bridge and the cache's own client. A mismatch is
- * the quietest failure the bundle has — the page connects, the health fold is
- * green, and every call into that row answers "unknown member" — and a LITERAL
- * at each site is how the mismatch happens. So the claim is not "these strings
- * are equal" (the type system stopped needing that the day the constant
- * existed) but "these sites use the constant, and it is declared once, behind a
- * door all of them may open".
- *
- * `odu surface`'s projection is absent on purpose: it names NO row, deriving
- * every sibling from `@odu/cli/wire`'s records, which is one better than
- * spelling the constant (PLAN 2.10).
- */
 describe("the row's word", () => {
-  /** The contract, which is the browser-safe door every face can open. */
   const CONTRACT = source("packages/cache/src/surface.ts");
   const value = /export const CACHE_KEY = "([a-z0-9-]+)"/.exec(CONTRACT)?.[1];
 
-  /** Every place that has to know it. */
   const FACES = [
     "packages/host/src/web.ts",
     "packages/web-ui/src/main.tsx",
@@ -358,15 +163,11 @@ describe("the row's word", () => {
   ];
 
   it("reads the constant it thinks it is reading", () => {
-    // The non-vacuity floor: a pattern that stopped matching would make every
-    // assertion below true of `undefined`.
     expect(value).toBeDefined();
   });
 
   it("is declared once, in the contract both sides may open", () => {
     expect(CONTRACT).toContain(`export const CACHE_KEY = "${value as string}"`);
-    // Not beside the plugin: `./server` is a door four of the five faces cannot
-    // open, and a constant behind it is a literal they each retype.
     expect(source("packages/cache/src/server.ts")).not.toMatch(/export const CACHE_KEY/);
   });
 
@@ -376,17 +177,9 @@ describe("the row's word", () => {
 
   it("is the word every face spells", () => {
     for (const file of FACES) {
-      // The constant, or the row's own record that carries it (`CACHE_ROW`).
       expect(source(file), `${file} names neither CACHE_KEY nor CACHE_ROW`).toMatch(
         /\bCACHE_(KEY|ROW)\b/,
       );
-      // …and none of them spells the word itself as a SIBLING KEY.
-      //
-      // AN ARGV FLAG NAMED FOR THE ROW IS NOT ONE. `odu cache push --cache
-      // <substituter>` takes the cache's own URL, and `parseArgs` declares a
-      // flag as `cache: { type: … }` — a shape no sibling map ever has. The
-      // rule is about a face retyping the key it mounts the row at, and that
-      // is what stays forbidden.
       expect(source(file), `${file} spells the row's word`).not.toMatch(
         new RegExp(`\\b${value as string}:(?!\\s*\\{\\s*type:)`),
       );
@@ -394,8 +187,6 @@ describe("the row's word", () => {
   });
 
   it("is the key the row's own record serves it under, and the roster lists that record", () => {
-    // The record is the ROW's: the host names it whole and spells none of its
-    // parts, so the key is asserted where the row declares it.
     expect(source("packages/ci/src/row.ts")).toMatch(/\{\s*name:\s*CI_ROW,\s*key:\s*null,/);
     expect(source("packages/cache/src/surface.ts")).toMatch(
       /CACHE_ROW: RowFacts = \{\s*name:\s*CACHE_KEY,\s*key:\s*CACHE_KEY,/,

@@ -1,17 +1,3 @@
-/**
- * End-to-end: `GET /metrics` on a real daemon, with a real push behind it.
- *
- * What only a black-box run can catch is the wiring: that the cache row's
- * contributor is REGISTERED on the daemon the host serves (a unit test proves
- * the meter counts, not that anything handed it an event), that the route is
- * reserved so a door does not answer a scrape with a sign-in page, and that the
- * credential the route is read with can be minted, used and revoked through the
- * surface without restarting anything.
- *
- * One store path is pushed and its narinfo fetched exactly once, so the numbers
- * asserted are exact rather than "greater than zero".
- */
-
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
@@ -33,7 +19,6 @@ let storeRoot: string;
 let builderStore: string;
 const dirs: string[] = [];
 
-/** The store path this suite pushes, and the hash its narinfo is named for. */
 let pushed: string;
 const hashOf = (storePath: string): string =>
   storePath.slice(storePath.lastIndexOf("/") + 1).slice(0, 32);
@@ -53,13 +38,9 @@ function cli(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-/** One verb on a row, through `odu surface` — the face that administers. */
 const surface = (row: string, verb: string, input: unknown): Ran =>
   cli(["surface", row, verb, "--input", JSON.stringify(input), "--json"]);
 
-/** A deterministic file, added to the builder's chroot store. No derivation and
- *  no build: this suite is about the scrape, and `nix store add-file` is a real
- *  store path the cache has never seen for a fraction of the time. */
 function storeFile(name: string): string {
   const dir = scratchDir("odu-e2e-metrics-file-");
   dirs.push(dir);
@@ -74,17 +55,11 @@ function storeFile(name: string): string {
   return added.stdout.trim();
 }
 
-/** Scrape, as a Prometheus would. */
 const scrape = (authorization?: string): Promise<Response> =>
   fetch(`${world.origin}/metrics`, {
     headers: authorization === undefined ? {} : { authorization },
   });
 
-/**
- * ONE SAMPLE, by name and labels, whatever order the labels were rendered in.
- * Asserting on a whole line would pin the order a contributor happened to build
- * its label object in, which is not part of the format.
- */
 function sampleOf(
   exposition: string,
   name: string,
@@ -158,7 +133,6 @@ describe("the scrape", () => {
     });
     expect({ status: push.status, stderr: push.stderr }).toMatchObject({ status: 0 });
 
-    // EXACTLY ONE narinfo read, so the counter below is an exact number.
     const narinfo = await fetch(`${world.origin}/cache/main/${hashOf(pushed)}.narinfo`);
     expect(narinfo.status).toBe(200);
     expect(await narinfo.text()).toContain(`StorePath: ${pushed}`);
@@ -168,7 +142,6 @@ describe("the scrape", () => {
     expect(answer.headers.get("content-type")).toContain("version=0.0.4");
     const body = await answer.text();
 
-    // THE CACHE ROW'S COUNTERS, from events the daemon actually logged.
     expect(
       sampleOf(body, "odu_cache_requests_total", {
         bucket: "main",
@@ -181,20 +154,13 @@ describe("the scrape", () => {
       mode: "staged",
       outcome: "recorded",
     })).toBe(1);
-    // AND ITS GAUGES, read from SQLite at the scrape.
     expect(sampleOf(body, "odu_cache_paths", { bucket: "main" })).toBe(1);
     expect(sampleOf(body, "odu_cache_bytes", { bucket: "main" })).toBeGreaterThan(0);
     expect(sampleOf(body, "odu_cache_hits", { bucket: "main" })).toBe(1);
 
-    // BOTH ROWS ANSWERED. A contributor that threw would be a zero here, and
-    // the scrape would still have been served — which is why it is asserted.
     expect(sampleOf(body, "odu_metrics_contributor_up", { contributor: "cache" })).toBe(1);
     expect(sampleOf(body, "odu_metrics_contributor_up", { contributor: "ci" })).toBe(1);
-    // The runs' contributor is live even with an empty catalog.
     expect(sampleOf(body, "odu_runs_total", { outcome: "passed" })).toBe(0);
-    // AND THE HOST'S OWN GUARD, present at zero on a daemon that has caught
-    // nothing: the series exists before the first fault, so an alert on it can
-    // be written today rather than after the next #160.
     expect(sampleOf(body, "odu_unhandled_total", { kind: "rejection" })).toBe(0);
   }, 900_000);
 
@@ -202,8 +168,6 @@ describe("the scrape", () => {
     const anonymous = await scrape();
     expect(anonymous.status).toBe(401);
     expect(anonymous.headers.get("www-authenticate")).toContain("Bearer");
-    // NOT the sign-in page and not the board: the route is reserved, so the
-    // answer is a sentence a scraper can log.
     const text = await anonymous.text();
     expect(text).not.toContain("<html");
     expect(text).toContain("$ODU_ROOT_TOKEN");
@@ -227,7 +191,6 @@ describe("the scrape", () => {
     expect(opened.status).toBe(200);
     expect(await opened.text()).toContain("odu_cache_paths");
 
-    // The plaintext is answered once and never again.
     const listed = surface("metrics", "token_list", { rootToken: ROOT_TOKEN });
     expect(listed.status).toBe(0);
     expect(listed.stdout).not.toContain(answer.token);
@@ -240,7 +203,6 @@ describe("the scrape", () => {
     expect(revoked.status).toBe(0);
     expect((await scrape(`Bearer ${answer.token}`)).status).toBe(401);
 
-    // And minting needs the root token, like every other administrative verb.
     const refused = surface("metrics", "token_mint", { rootToken: "wrong", label: "x" });
     expect(refused.status).toBe(1);
     expect(refused.stderr).toContain("root token");

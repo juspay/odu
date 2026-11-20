@@ -1,11 +1,3 @@
-/**
- * THE SCRAPE CREDENTIAL — what the file keeps, and what it must never keep.
- *
- * The claim worth a test is not "mint then verify": it is that the plaintext
- * exists exactly once, that a revoked token stops working immediately, and that
- * a file somebody corrupted leaves the root token still able to open the route.
- */
-
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,7 +35,6 @@ describe("metrics tokens", () => {
 
     expect(store.revoke(facts.id)).toBe(true);
     expect(store.verify(token)).toBe(false);
-    // Still listed, so a revoked id reads as revoked rather than as a typo.
     expect(store.list().map((one) => [one.id, one.revoked])).toEqual([[facts.id, true]]);
     expect(store.revoke("no-such-id")).toBe(false);
   });
@@ -80,7 +71,6 @@ describe("metrics tokens", () => {
 
     expect(store.list()).toEqual([]);
     expect(store.verify("odum_anything")).toBe(false);
-    // And minting again writes a fresh file rather than throwing.
     expect(store.verify(store.mint("pod").token)).toBe(true);
   });
 });
@@ -90,8 +80,6 @@ describe("the root token", () => {
     expect(rootTokenMatches("s3cret", "s3cret")).toBe(true);
     expect(rootTokenMatches("s3cret", "s3cre")).toBe(false);
     expect(rootTokenMatches(null, "s3cret")).toBe(false);
-    // The empty presented token against an unconfigured root is the case a
-    // naive equality check gets wrong, and it is the whole door.
     expect(rootTokenMatches(null, "")).toBe(false);
     expect(rootTokenMatches("", "")).toBe(false);
   });

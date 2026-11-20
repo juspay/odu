@@ -1,26 +1,3 @@
-/**
- * THE WALL, enforced — from inside the package it is about.
- *
- * Same instrument the other members carry, and deliberately a SIBLING rather
- * than a shared helper: each package states its own closure from inside its own
- * directory, because that directory is the unit the boundary is about. A guard
- * imported from a neighbour would be a guard that only reaches as far as the
- * neighbour does — and, worse, a package's closure test would then NAME another
- * `@odu/*` package, which is the very edge it is policing.
- *
- * The claim here is a COMPOSITION ROOT's, which is the one thing that makes this
- * package different from a row: it may name every row (that is its job) and it
- * may name the daemon's own parts, but it must name NOTHING it does not use. A
- * manifest is a claim about a closure, and a root that declared `@odu/execution`
- * while importing none of it is a claim that its build was going to be bigger
- * than it is. That is a drifting-document failure, so it is asserted both ways:
- * every declared `@odu/*` package is imported somewhere under `src/`, and every
- * `@odu/*` package imported under `src/` is declared.
- *
- * The walk is a PARSE, not a line scan, and TYPE-ONLY EDGES COUNT — see
- * `@odu/cache`'s twin for both arguments.
- */
-
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -34,8 +11,7 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** The `@odu/*` packages this manifest declares — the rows the roster names and
- *  the vocabulary both sides speak. Pinned so a package arriving or leaving is
+/** Pinned so a package arriving or leaving is
  *  a diff somebody agrees to. */
 const EXPECTED_ODU_DEPENDENCIES = [
   "@odu/auth",
@@ -48,7 +24,6 @@ const EXPECTED_ODU_DEPENDENCIES = [
   "@odu/service-client",
 ];
 
-/** The `@kolu/*` sources hydrated from a Nix pin rather than installed. */
 const HYDRATED = new Set<string>([
   "@kolu/surface",
   "@kolu/surface-app",
@@ -57,7 +32,6 @@ const HYDRATED = new Set<string>([
   "@olai/effect-cordis",
 ]);
 
-/** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
 function tsFilesUnder(dir: string): string[] {
@@ -74,19 +48,12 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
-/** Every module specifier a consumer's compiler would have to resolve: static
- *  imports and re-exports (`import type` included), `import x = require("…")`,
- *  dynamic `import()`, and `import("…").T` in type position. */
 function specifiersIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
-    // TSX or TS by extension. TypeScript's parser resolves `<T>(x) => x` one way
-    // in a `.ts` and another in a `.tsx`, so a JSX file parsed as TS produces a
-    // tree with the imports still in it and the markup mangled — a policing
-    // test that keeps passing while seeing less than it thinks.
+    false,
     fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const out: string[] = [];
@@ -115,7 +82,6 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
-/** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@")
@@ -131,8 +97,6 @@ const sources = tsFilesUnder(join(packageRoot, "src"))
     return { rel, specifiers: specifiersIn(source, rel) };
   });
 
-/** Every `@odu/*` package these sources name, tests included: a test that
- *  imports a row still needs the row installed. */
 const named = new Set(
   sources
     .flatMap(({ specifiers }) => specifiers)
@@ -197,18 +161,12 @@ describe("@odu/host's import closure", () => {
   });
 
   it("mounts rows without importing a row's internals", () => {
-    // THE ROOT MAY NAME A ROW; it may not reach into one. A row's door is its
-    // `exports` map, so what this asserts is that every row import goes through
-    // a door rather than to a file behind it — the difference between composing
-    // a row and knowing how it is built.
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
       for (const spec of specifiers) {
         if (!spec.startsWith("@odu/") || spec === "@odu/cordis") continue;
         if (spec.startsWith("@odu/cordis/")) continue;
         const segments = spec.split("/").slice(2);
-        // A door is one segment (`@odu/ci/row`, `@odu/cache/server`); a file
-        // behind one is two or more (`@odu/ci/src/row`, `@odu/cache/dist/…`).
         if (segments.length > 1) offenders.push(`${rel}: ${spec}`);
       }
     }

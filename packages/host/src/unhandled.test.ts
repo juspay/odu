@@ -1,20 +1,3 @@
-/**
- * THE LAST CATCH, AS A FAULT MEETS IT.
- *
- * Two kinds of proof, because the claim has two halves. The in-process cases
- * drive the handlers directly and assert what is LOGGED and COUNTED — including
- * the cause chain, which is the field issue #160 would have been diagnosed from,
- * and a non-`Error` rejection, which is the value that makes a careless handler
- * throw inside itself.
- *
- * The other half cannot be shown in this process at all: "the daemon does not
- * exit" is a statement about a process, and a test that asserted it from inside
- * the same one would be asserting that it is still running — which it is, by
- * construction. So the survival case SPAWNS A REAL BUN PROCESS, gives it a real
- * unhandled rejection with a real cause, and then asks it for an HTTP response
- * afterwards. Nothing about the source text is read anywhere here.
- */
-
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,8 +11,6 @@ interface Line {
   readonly fields: Record<string, unknown>;
 }
 
-/** A logger that keeps what it was told. Not a mock framework: the assertions
- *  below are about the object a real logger would serialise. */
 function recorder(): { log: Logger; lines: Line[] } {
   const lines: Line[] = [];
   const at =
@@ -40,8 +21,6 @@ function recorder(): { log: Logger; lines: Line[] } {
   return { log: { debug: at("debug"), info: at("info"), warn: at("warn"), error: at("error") }, lines };
 }
 
-/** Fire the handlers the way the runtime does, without waiting for the runtime:
- *  the listeners are the unit, and `process.emit` is how they are reached. */
 function emit(event: "unhandledRejection" | "uncaughtException", value: unknown): void {
   (process as unknown as { emit(name: string, ...args: unknown[]): boolean }).emit(event, value);
 }
@@ -130,15 +109,6 @@ describe("installUnhandledGuard", () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-unhandled-child-"));
     scratches.push(dir);
     const script = join(dir, "child.ts");
-    // The child is the daemon in miniature: the guard installed, a listener
-    // bound, then BOTH faults for real — a rejection nobody awaits, and a
-    // `throw` out of a timer, which is the runtime's own `uncaughtException`
-    // dispatch rather than a `process.emit` standing in for it. It announces
-    // its port from INSIDE the guard's log call, once both have been counted,
-    // so the fetch below is necessarily a fetch that happened after both —
-    // the handshake carries the ordering, not a sleep. `/stop` stops the
-    // server gracefully; with nothing else holding the loop the child then
-    // ends on its own, which is what exit 0 is evidence of.
     writeFileSync(
       script,
       [
@@ -186,7 +156,6 @@ describe("installUnhandledGuard", () => {
       })();
       const port = await announced.promise;
 
-      // STILL SERVING, after both faults: the whole point of the guard.
       const answer = await fetch(`http://127.0.0.1:${port}/`);
       expect(answer.status).toBe(200);
       expect(await answer.text()).toBe("alive 1 1");

@@ -1,12 +1,4 @@
 /**
- * THE METRICS VERBS' HANDLERS — the host's own fragment, mounted on the composed
- * bundle beside the rows.
- *
- * The shape is `@odu/cordis/metricsSurface`'s (a row may not import the host, so
- * the surface lives in the vocabulary both sides share); the behaviour is here,
- * because the credential is the host's: it opens the host's route, and no row
- * issues it.
- *
  * **The authority rule is the cache row's, deliberately.** Administering a
  * daemon means the same thing whichever administrative verb you reach for: a
  * signed-in `admin` may, a signed-in `member` may not, and a caller with no
@@ -24,17 +16,12 @@ import { rootTokenMatches, type MetricsTokenStore } from "./metricsTokens";
 
 export type MetricsSurfaceDeps = ImplementSurfaceDeps<(typeof oduMetricsSurface)["spec"]>;
 
-/** A label nobody gave. Kept rather than refused: an unlabelled token is still
- *  listable and still revocable, which is what the id is for. */
 const UNLABELLED = "unlabelled";
 
 export function metricsFragment(options: {
   readonly tokens: MetricsTokenStore;
   readonly rootToken: string | null;
 }): MetricsSurfaceDeps {
-  /** One administrative call, with this fragment's authority rule applied
-   *  first. The work is synchronous — a JSON file, not a database — so there is
-   *  no promise to map, only a refusal to raise. */
   const admin = <A>(
     input: { rootToken: string },
     work: () => A | MetricsRefused,
