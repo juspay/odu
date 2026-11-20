@@ -46,15 +46,27 @@ function venueLabel(row: VenueRow): string {
   return row.slots > 1 ? `${row.host}#${row.slot + 1}/${row.slots}` : row.host;
 }
 
-function heldColumn(row: VenueRow, nowMs: number): string {
+type HeldCell =
+  | { kind: "held"; text: string }
+  | { kind: "error"; text: string }
+  | { kind: "none" };
+
+function heldCell(row: VenueRow, nowMs: number): HeldCell {
   if (row.state === "busy" && row.heldBy !== null) {
     const who = row.heldBy;
     const held = formatAgo(nowMs - who.sinceMs);
-    return who.run === null
-      ? `${who.holder} (${held})`
-      : `${who.holder} · ${who.run} (${held})`;
+    return {
+      kind: "held",
+      text:
+        who.run === null
+          ? `${who.holder} (${held})`
+          : `${who.holder} · ${who.run} (${held})`,
+    };
   }
-  return row.state === "down" ? (row.error ?? "unreachable") : "";
+  if (row.state === "down") {
+    return { kind: "error", text: row.error ?? "unreachable" };
+  }
+  return { kind: "none" };
 }
 
 export function renderVenues(rows: readonly VenueRow[], nowMs: number): string {
@@ -66,11 +78,11 @@ export function renderVenues(rows: readonly VenueRow[], nowMs: number): string {
     `${"HOST".padEnd(hostW)}  ${"PLATFORM".padEnd(platW)}  ${"STATE".padEnd(stateW)}  HELD BY`,
   ];
   for (const row of rows) {
-    const held = heldColumn(row, nowMs);
+    const cell = heldCell(row, nowMs);
     const head =
       `${venueLabel(row).padEnd(hostW)}  ${row.platform.padEnd(platW)}  ` +
       row.state.padEnd(stateW);
-    lines.push(held === "" ? head.trimEnd() : `${head}  ${held}`);
+    lines.push(cell.kind === "none" ? head.trimEnd() : `${head}  ${cell.text}`);
   }
   return `${lines.join("\n")}\n`;
 }

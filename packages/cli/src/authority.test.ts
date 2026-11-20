@@ -52,17 +52,22 @@ function exportedFile(member: string, sub: string): string | null {
   return join(dir, sub === "" ? literal : literal.replace(/\*/g, sub));
 }
 
-const SERVICE_ROOTS: readonly string[] = [
+const WALK_STOPS_AT: readonly string[] = [
   "internalCli.ts",
 ];
 
 const FACE_PACKAGES = ["packages/cli", "packages/cache", "packages/launch"] as const;
 
-const isFaceFile = (file: string): boolean =>
-  file === "src/main.ts" || FACE_PACKAGES.some((one) => file.startsWith(`${one}/`));
+type FileRole = "face" | "engine";
+
+const roleOf = (file: string): FileRole =>
+  file === "src/main.ts" ||
+  FACE_PACKAGES.some((one) => file.startsWith(`${one}/`))
+    ? "face"
+    : "engine";
 
 const PUBLIC_CLIENTS = reachedFromMain.filter(
-  (f) => !SERVICE_ROOTS.includes(f),
+  (f) => !WALK_STOPS_AT.includes(f),
 );
 
 const FORBIDDEN: readonly { prefix: string; authority: string }[] = [
@@ -123,14 +128,17 @@ function closureOf(entries: readonly string[]): Map<string, string[]> {
     const specifiers = specifiersIn(readFileSync(join(REPO, file), "utf-8"), file);
     seen.set(file, specifiers);
     for (const spec of specifiers) {
-      const local = localFile(spec, file);
+      const local = resolveToRepoFile(spec, file);
       if (local !== null) queue.push(local);
     }
   }
   return seen;
 }
 
-function localFile(specifier: string, from = "src/main.ts"): string | null {
+function resolveToRepoFile(
+  specifier: string,
+  from = "src/main.ts",
+): string | null {
   if (specifier.startsWith(".")) {
     const base = normalize(join(dirname(from), specifier));
     return firstOf([`${base}.ts`, `${base}.tsx`, `${base}/index.ts`]);
@@ -169,8 +177,8 @@ describe("the authority wall", () => {
   const crossPackageEntries = new Set(
     mainImports
       .filter((s) => s.startsWith("@odu/"))
-      .filter((s) => !SERVICE_ROOTS.some((root) => s === `@odu/cli/${root.slice(0, -3)}`))
-      .map((s) => localFile(s, "src/main.ts"))
+      .filter((s) => !WALK_STOPS_AT.some((root) => s === `@odu/cli/${root.slice(0, -3)}`))
+      .map((s) => resolveToRepoFile(s, "src/main.ts"))
       .filter((file): file is string => file !== null),
   );
   const closure = closureOf([...PUBLIC_CLIENTS, ...crossPackageEntries]);
@@ -185,8 +193,8 @@ describe("the authority wall", () => {
 
   it("keeps the exempt set exactly this one, and no more", () => {
     expect(
-      [...SERVICE_ROOTS].sort(),
-      "SERVICE_ROOTS changed. Every name here is a module the wall STOPS " +
+      [...WALK_STOPS_AT].sort(),
+      "WALK_STOPS_AT changed. Every name here is a module the wall STOPS " +
         "walking, so adding one removes it and everything it imports from the " +
         "policed set. That is occasionally right — `internalCli.ts` really is " +
         "the coordinator and its holder — and it is never something to do in " +
@@ -197,10 +205,10 @@ describe("the authority wall", () => {
   });
 
   it("names no service root that main.ts has stopped importing", () => {
-    for (const root of SERVICE_ROOTS) {
+    for (const root of WALK_STOPS_AT) {
       expect(
         reachedFromMain,
-        `SERVICE_ROOTS names ${root}, which src/main.ts no longer imports — ` +
+        `WALK_STOPS_AT names ${root}, which src/main.ts no longer imports — ` +
           "remove the exemption or restore the import.",
       ).toContain(root);
     }
@@ -230,7 +238,7 @@ describe("the authority wall", () => {
   it("lets no public client reach execution, the catalog, or a checkout dial", () => {
     const offenders: string[] = [];
     for (const [file, specifiers] of policed) {
-      if (!isFaceFile(file)) continue;
+      if (roleOf(file) !== "face") continue;
       for (const spec of specifiers) {
         const forbidden = FORBIDDEN.find((f) => spec.startsWith(f.prefix));
         if (forbidden === undefined) continue;

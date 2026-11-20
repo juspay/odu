@@ -26,7 +26,7 @@ import {
 import { readServiceCell } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { runHash } from "@odu/service-client/routes";
-import { verdictStateOf } from "./liveFromService";
+import { attemptRewound, nodeStateOf, verdictStateOf } from "./liveFromService";
 import { printVerdict } from "./render";
 import {
   call,
@@ -75,8 +75,14 @@ export interface RunOpts {
   branch?: string;
 }
 
+function hostsForwarding(
+  at: RunTarget,
+  shellHosts: string,
+): { hostsFile?: string } {
+  return at.world === "here" || shellHosts !== "" ? { hostsFile: shellHosts } : {};
+}
+
 export function startInputOf(at: RunTarget, opts: RunOpts) {
-  const shellHosts = hostsFileHere(opts.cwd);
   return {
     checkout: at.checkout,
     expectedSha: at.sha,
@@ -85,7 +91,7 @@ export function startInputOf(at: RunTarget, opts: RunOpts) {
     selectors: opts.selectors,
     platforms: opts.platforms,
     hostPins: opts.hostPins,
-    ...(at.mine || shellHosts !== "" ? { hostsFile: shellHosts } : {}),
+    ...hostsForwarding(at, hostsFileHere(opts.cwd)),
     ...(opts.root === undefined ? {} : { root: opts.root }),
     noDeps: opts.noDeps,
     noStrict: opts.noStrict,
@@ -632,7 +638,7 @@ export async function followLog(
     if (!read.ok) return reportFailure(read, opts.json);
     const page = read.value;
 
-    if (cursor !== undefined && cursor > 0 && page.offset < cursor) {
+    if (attemptRewound(page, cursor)) {
       if (!resynced) {
         process.stderr.write(
           `\nodu: this attempt was re-run and its log rewritten (${page.size} ` +
@@ -672,16 +678,7 @@ async function progressStream(
     for (const node of frame.nodes) {
       if (seen.get(node.id) === node.status) continue;
       seen.set(node.id, node.status);
-      const event = progressEvent(sha7, node.id, {
-        id: node.id,
-        name: node.id,
-        command: "",
-        needs: [],
-        status: node.status,
-        exitCode: node.exitCode,
-        startedAt: node.startedAt,
-        durationMs: node.durationMs,
-      });
+      const event = progressEvent(sha7, node.id, nodeStateOf(node));
       if (event !== null) process.stdout.write(`${JSON.stringify(event)}\n`);
     }
   });

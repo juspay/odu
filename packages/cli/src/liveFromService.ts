@@ -16,7 +16,14 @@ import type {
 } from "@odu/service-client/surface";
 import { logHasMore } from "@odu/service-client/surface";
 
-function nodeStateOf(node: NodesFrame["nodes"][number]): NodeState {
+export function attemptRewound(
+  page: { offset: number },
+  cursor: number | undefined,
+): boolean {
+  return cursor !== undefined && cursor > 0 && page.offset < cursor;
+}
+
+export function nodeStateOf(node: NodesFrame["nodes"][number]): NodeState {
   return {
     id: node.id,
     name: node.id,
@@ -86,7 +93,7 @@ async function* pages(
         waitMs: FOLLOW_MS,
       }),
     );
-    if (cursor !== undefined && cursor > 0 && page.offset < cursor) {
+    if (attemptRewound(page, cursor)) {
       cursor = 0;
       opened = false;
       continue;

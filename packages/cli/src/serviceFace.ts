@@ -25,7 +25,7 @@ import type {
 } from "@odu/service-client/surface";
 import { CI_NEEDS, isCommitPrefix, ServiceRefused } from "@odu/service-client/surface";
 import { Effect, type Stream } from "effect";
-import { connectToService, SERVICE_WIRE_GROUP } from "./wire";
+import { connectOrStartSingleton, SERVICE_WIRE_GROUP } from "./wire";
 
 export const WAIT_EXITS = {
   passed: 0,
@@ -69,7 +69,7 @@ async function dial(
   origin: string | undefined,
 ): Promise<ServiceConnection | number> {
   try {
-    return await connectToService(origin ?? serviceOrigin(), { needs: CI_NEEDS });
+    return await connectOrStartSingleton(origin ?? serviceOrigin(), { needs: CI_NEEDS });
   } catch (err) {
     process.stderr.write(`${errorMessage(err)}\n`);
     return WAIT_EXITS.ownerLost;
@@ -137,11 +137,11 @@ export function reportFailure(
     | { ok: false; refusal: ServiceRefused }
     | { ok: false; refusal: null; error: unknown },
   json: boolean,
-  refusalIs?: number,
+  refusalExitOverride?: number,
 ): number {
   if (outcome.refusal === null) return reportLost(outcome.error, json);
   const reported = reportRefusal(outcome.refusal, json);
-  return refusalIs ?? reported;
+  return refusalExitOverride ?? reported;
 }
 
 export function emitJson(value: unknown): void {
@@ -158,7 +158,7 @@ export interface Here {
 }
 
 export interface RunTarget extends Here {
-  mine: boolean;
+  world: "here" | "elsewhere";
   branch?: string;
 }
 
@@ -215,7 +215,7 @@ export function runTarget(
           "branch you mean and run again",
       );
     }
-    return { ...here(opts.cwd), mine: true };
+    return { ...here(opts.cwd), world: "here" };
   }
   if (opts.sha === undefined) {
     throw new Error(
@@ -235,7 +235,7 @@ export function runTarget(
   return {
     checkout: opts.checkout,
     sha: opts.sha,
-    mine: false,
+    world: "elsewhere",
     ...(opts.branch === undefined ? {} : { branch: opts.branch }),
   };
 }

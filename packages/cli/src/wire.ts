@@ -32,7 +32,7 @@ export const EVERY_ROW_NEEDS: RowNeeds = {
   ...Object.fromEntries(SIBLING_ROWS.map((row) => [row.name, ifMounted(row.contract)])),
 };
 
-export function connectToService(
+export function connectOrStartSingleton(
   origin: string | undefined,
   opts: { needs: RowNeeds; warned?: Set<string> },
 ): Promise<ServiceConnection> {

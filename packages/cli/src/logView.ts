@@ -43,14 +43,14 @@ export class LogView {
   private query = "";
   private height: number;
   private highWater = 0;
-  private writes = 0;
+  private contentVersion = 0;
   /** `Terminal.write` defers its callback, and a focus change disposes this
    *  view synchronously — so the continuation can land after disposal and
    *  touch a disposed buffer, which xterm reports by printing a stack trace to
    *  stderr. */
   private disposed = false;
   private counted:
-    | { query: string; writes: number; matches: number }
+    | { query: string; contentVersion: number; matches: number }
     | undefined;
 
   constructor(cols: number, height: number, query = "") {
@@ -75,7 +75,7 @@ export class LogView {
     // Touching the buffer after a dispose throws out of xterm and onto the
     // terminal.
     if (this.disposed) return;
-    this.writes += 1;
+    this.contentVersion += 1;
     this.clampAnchor();
   }
 
@@ -85,7 +85,7 @@ export class LogView {
     this.top = 0;
     this.cursor = -1;
     this.highWater = 0;
-    this.writes += 1;
+    this.contentVersion += 1;
   }
 
   private clampAnchor(): void {
@@ -100,7 +100,7 @@ export class LogView {
     this.height = next;
     this.term.resize(cols_, Math.max(this.height, 24));
     this.highWater = 0;
-    this.writes += 1;
+    this.contentVersion += 1;
     this.clampAnchor();
   }
 
@@ -199,13 +199,17 @@ export class LogView {
   private matchCount(): number {
     if (this.query === "") return 0;
     const memo = this.counted;
-    if (memo?.query === this.query && memo.writes === this.writes) {
+    if (memo?.query === this.query && memo.contentVersion === this.contentVersion) {
       return memo.matches;
     }
     const total = this.total;
     let n = 0;
     for (let i = 0; i < total; i++) if (this.hits(this.lineAt(i))) n++;
-    this.counted = { query: this.query, writes: this.writes, matches: n };
+    this.counted = {
+      query: this.query,
+      contentVersion: this.contentVersion,
+      matches: n,
+    };
     return n;
   }
 

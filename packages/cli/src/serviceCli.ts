@@ -17,7 +17,7 @@ import { ODU_VERSION } from "@odu/execution/common/version";
 import { serviceOrigin } from "@odu/service-client/endpoint";
 import { composedClients } from "@odu/cordis/compose";
 import {
-  connectToService,
+  connectOrStartSingleton,
   EVERY_ROW_NEEDS,
   SERVICE_SIBLINGS,
   SIBLING_ROWS,
@@ -37,7 +37,7 @@ const endpoint: EndpointSeam<typeof endpointFlags> = {
     Effect.succeed({
       where: values.origin,
       open: async (): Promise<SurfaceCliConnection> => {
-        const connection = await connectToService(values.origin, {
+        const connection = await connectOrStartSingleton(values.origin, {
           needs: EVERY_ROW_NEEDS,
         });
         return {
@@ -121,7 +121,7 @@ function oduSurfaceFace() {
  * say NOTHING. `disableErrorReporting` is the other half — without it the
  * runtime prints a second, differently-worded report of the same failure.
  */
-export function surfaceCliMain(argv: readonly string[]): Promise<number> {
+export function surfaceCliMain(argv: readonly string[]): Promise<never> {
   NodeRuntime.runMain(
     Command.runWith(oduSurfaceFace(), { version: ODU_VERSION })(argv).pipe(
       reportingRunEdge,
@@ -129,5 +129,5 @@ export function surfaceCliMain(argv: readonly string[]): Promise<number> {
     ),
     { disableErrorReporting: true },
   );
-  return new Promise<number>(() => {});
+  return new Promise<never>(() => {});
 }

@@ -122,6 +122,30 @@ function logStream(raw: string): LogStream {
   return found;
 }
 
+type ProgressFormat = "json";
+
+function progressFormat(raw: string): ProgressFormat {
+  if (raw !== "json") {
+    throw new Error(`odu: unknown --progress format "${raw}"`);
+  }
+  return raw;
+}
+
+function isNodeId(selector: string): boolean {
+  return selector.indexOf("@") > 0;
+}
+
+function deadlineMsFrom(values: {
+  "deadline-ms"?: string | undefined;
+  "timeout-ms"?: string | undefined;
+}): number | undefined {
+  const deadline = values["deadline-ms"];
+  if (deadline !== undefined) return positiveInt("--deadline-ms", deadline);
+  const timeout = values["timeout-ms"];
+  if (timeout !== undefined) return positiveInt("--timeout-ms", timeout);
+  return undefined;
+}
+
 const HISTORY_USAGE = `usage: odu ci history <list|show|import|prune> [args]
 
 list [--all] [--limit N] [-o json]   runs in the per-user catalog, newest first
@@ -167,7 +191,7 @@ async function historyCommand(
         },
       });
       return showViaService({
-        run: values.run ?? HERE_AND_NOW,
+        run: values.run ?? LATEST_IN_THIS_CHECKOUT,
         ...(values.after === undefined ? {} : { after: values.after }),
         ...(values.origin === undefined ? {} : { origin: values.origin }),
         json: values.output === "json",
@@ -221,7 +245,7 @@ async function historyCommand(
   }
 }
 
-const HERE_AND_NOW = "latest";
+const LATEST_IN_THIS_CHECKOUT = "latest";
 
 export async function ciCommand(
   sub: string | undefined,
@@ -252,9 +276,10 @@ export async function ciCommand(
           output: { type: "string", short: "o" },
         },
       });
-      if (values.progress !== undefined && values.progress !== "json") {
-        throw new Error(`odu: unknown --progress format "${values.progress}"`);
-      }
+      const progress =
+        values.progress === undefined
+          ? undefined
+          : progressFormat(values.progress);
       return runViaService({
         selectors: positionals,
         platforms: values.platform ?? [],
@@ -267,7 +292,7 @@ export async function ciCommand(
         supersede: values.supersede ?? false,
         linger: values.linger ?? false,
         noWait: values["no-wait"] ?? false,
-        ...(values.progress === "json" ? { progressJson: true } : {}),
+        ...(progress === undefined ? {} : { progressJson: true }),
         ...(values["request-id"] === undefined
           ? {}
           : { requestId: values["request-id"] }),
@@ -368,14 +393,9 @@ export async function ciCommand(
           "odu: wait takes no positional arguments (use --run / --after / --settle)",
         );
       }
-      const deadline =
-        values["deadline-ms"] !== undefined
-          ? positiveInt("--deadline-ms", values["deadline-ms"])
-          : values["timeout-ms"] !== undefined
-            ? positiveInt("--timeout-ms", values["timeout-ms"])
-            : undefined;
+      const deadline = deadlineMsFrom(values);
       return waitViaService({
-        run: values.run ?? HERE_AND_NOW,
+        run: values.run ?? LATEST_IN_THIS_CHECKOUT,
         ...(values.after === undefined ? {} : { after: values.after }),
         ...(deadline === undefined ? {} : { deadlineMs: deadline }),
         ...(values["expected-sha"] === undefined
@@ -404,7 +424,7 @@ export async function ciCommand(
         );
       }
       const target = positionals[0];
-      if (values["expect-attempt"] !== undefined && target.indexOf("@") <= 0) {
+      if (values["expect-attempt"] !== undefined && !isNodeId(target)) {
         throw new Error(
           `odu: --expect-attempt names one node's attempt, but "${target}" is ` +
             "a recipe or a lane, which can match several. Give the full node " +
@@ -419,7 +439,7 @@ export async function ciCommand(
               attempt: positiveInt("--expect-attempt", values["expect-attempt"]),
             };
       return retryViaService({
-        run: values.run ?? HERE_AND_NOW,
+        run: values.run ?? LATEST_IN_THIS_CHECKOUT,
         selector: positionals[0],
         ...(values["request-id"] === undefined
           ? {}
@@ -459,7 +479,7 @@ export async function ciCommand(
         );
       }
       return cancelViaService({
-        run: values.run ?? HERE_AND_NOW,
+        run: values.run ?? LATEST_IN_THIS_CHECKOUT,
         scope,
         ...(values["request-id"] === undefined
           ? {}

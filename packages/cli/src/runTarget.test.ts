@@ -29,7 +29,7 @@ function opts(over: Partial<RunOpts> = {}): RunOpts {
 describe("odu ci run --checkout", () => {
   it("sends the path and the commit exactly as typed", () => {
     const at = runTarget({ checkout: POD, sha: SHA, origin: ORIGIN }, NOWHERE);
-    expect(at).toEqual({ checkout: POD, sha: SHA, mine: false });
+    expect(at).toEqual({ checkout: POD, sha: SHA, world: "elsewhere" });
   });
 
   it("refuses without --sha, because the strict gate has nothing to compare", () => {
@@ -49,13 +49,13 @@ describe("odu ci run --checkout", () => {
       { checkout: POD, sha: SHA },
       { ODU_WEB_ORIGIN: ORIGIN },
     );
-    expect(at).toEqual({ checkout: POD, sha: SHA, mine: false });
+    expect(at).toEqual({ checkout: POD, sha: SHA, world: "elsewhere" });
   });
 
   it("accepts a loopback origin that was NAMED — the check is naming, not distance", () => {
     expect(
       runTarget({ checkout: POD, sha: SHA, origin: "http://127.0.0.1:18440" }, NOWHERE),
-    ).toEqual({ checkout: POD, sha: SHA, mine: false });
+    ).toEqual({ checkout: POD, sha: SHA, world: "elsewhere" });
   });
 
   it("does not take an EMPTY $ODU_WEB_ORIGIN as a naming", () => {
@@ -75,7 +75,7 @@ describe("odu ci run --checkout", () => {
       { checkout: POD, sha: SHA, branch: "master", origin: ORIGIN },
       NOWHERE,
     );
-    expect(at).toEqual({ checkout: POD, sha: SHA, branch: "master", mine: false });
+    expect(at).toEqual({ checkout: POD, sha: SHA, branch: "master", world: "elsewhere" });
     expect(
       startInputOf(at, opts({ checkout: POD, sha: SHA, branch: "master", origin: ORIGIN })).branch,
     ).toBe("master");
@@ -98,7 +98,7 @@ describe("odu ci run --checkout", () => {
 describe("what the start asks for", () => {
   const there = (): RunTarget =>
     runTarget({ checkout: POD, sha: SHA, origin: ORIGIN }, NOWHERE);
-  const hereAt = (): RunTarget => ({ checkout: "/code/app", sha: SHA, mine: true });
+  const hereAt = (): RunTarget => ({ checkout: "/code/app", sha: SHA, world: "here" });
 
   it("carries the named pair verbatim into run.start", () => {
     const input = startInputOf(there(), opts({ checkout: POD, sha: SHA, origin: ORIGIN }));

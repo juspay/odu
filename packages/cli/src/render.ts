@@ -157,11 +157,8 @@ export function stepFocus(
   const delta = key === "l" || key === "j" ? 1 : -1;
   const start = axis.indexOf(horizontal ? platform : namepath);
   if (start === -1) return undefined;
-  for (let stepCount = 1; stepCount < axis.length; stepCount++) {
-    const pos =
-      (((start + delta * stepCount) % axis.length) + axis.length) % axis.length;
-    const at = axis[pos];
-    if (at === undefined) continue;
+  const forward = [...axis.slice(start + 1), ...axis.slice(0, start)];
+  for (const at of delta === 1 ? forward : forward.reverse()) {
     const candidate = horizontal
       ? cells.get(fanId(namepath, at))
       : cells.get(fanId(at, platform));

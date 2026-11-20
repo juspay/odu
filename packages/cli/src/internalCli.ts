@@ -19,6 +19,34 @@ export function internalCommand(
   }
 }
 
+interface PushTarget {
+  substituter: string;
+  origin: string;
+  bucket: string;
+  tokenId: string;
+}
+
+function pushTargetFrom(values: {
+  push?: string | undefined;
+  "push-origin"?: string | undefined;
+  "push-bucket"?: string | undefined;
+  "push-token-id"?: string | undefined;
+}): PushTarget | undefined {
+  const substituter = values.push;
+  const origin = values["push-origin"];
+  const bucket = values["push-bucket"];
+  const tokenId = values["push-token-id"];
+  if (
+    substituter === undefined ||
+    origin === undefined ||
+    bucket === undefined ||
+    tokenId === undefined
+  ) {
+    return undefined;
+  }
+  return { substituter, origin, bucket, tokenId };
+}
+
 async function runCoordinator(rest: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,
@@ -52,6 +80,7 @@ async function runCoordinator(rest: string[]): Promise<number> {
   if (values.progress !== undefined && values.progress !== "json") {
     throw new Error(`odu: unknown --progress format "${values.progress}"`);
   }
+  const push = pushTargetFrom(values);
   return runCommand(
     {
       selectors: positionals,
@@ -76,19 +105,7 @@ async function runCoordinator(rest: string[]): Promise<number> {
         ? {}
         : { requestId: values["request-id"] }),
       ...(values.actor === undefined ? {} : { actor: values.actor }),
-      ...(values.push === undefined ||
-      values["push-origin"] === undefined ||
-      values["push-bucket"] === undefined ||
-      values["push-token-id"] === undefined
-        ? {}
-        : {
-            push: {
-              substituter: values.push,
-              origin: values["push-origin"],
-              bucket: values["push-bucket"],
-              tokenId: values["push-token-id"],
-            },
-          }),
+      ...(push === undefined ? {} : { push }),
       ...(values["push-skipped"] === undefined
         ? {}
         : { pushSkipped: values["push-skipped"] }),

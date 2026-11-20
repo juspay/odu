@@ -54,6 +54,16 @@ class JsonDisplay implements Display {
 
 const HEARTBEAT_MS = 60_000;
 
+function announcementFor(before: RunHeader, after: RunHeader): string | null {
+  if (runPhase(before) === runPhase(after)) return null;
+  const lanes = laneText(after);
+  if (lanes !== "") return `odu · lanes ${lanes}`;
+  const claiming = claimingText(after);
+  return claiming !== ""
+    ? `odu · claiming ${claiming}`
+    : "odu · no lanes — the run got no machine";
+}
+
 class PlainDisplay implements Display {
   private state: PipelineState | undefined;
   private timer: NodeJS.Timeout | undefined;
@@ -82,18 +92,8 @@ class PlainDisplay implements Display {
     const before = this.header;
     this.header = header;
     if (!this.started) return;
-    if (runPhase(before) === runPhase(header)) return;
-    const lanes = laneText(header);
-    if (lanes !== "") {
-      this.say(`odu · lanes ${lanes}`);
-      return;
-    }
-    const claiming = claimingText(header);
-    this.say(
-      claiming !== ""
-        ? `odu · claiming ${claiming}`
-        : "odu · no lanes — the run got no machine",
-    );
+    const line = announcementFor(before, header);
+    if (line !== null) this.say(line);
   }
 
   update(state: PipelineState): void {
@@ -138,13 +138,13 @@ class PlainDisplay implements Display {
 
 class LiveDisplay implements Display {
   private view: LiveView | undefined;
-  private pending: PipelineState | undefined;
+  private stateAwaitingView: PipelineState | undefined;
   private header: RunHeader = EMPTY_HEADER;
 
   constructor(private readonly opts: LiveOpts) {}
 
   start(state: PipelineState): void {
-    this.pending = state;
+    this.stateAwaitingView = state;
     void this.load().catch((err: unknown) => {
       process.stderr.write(
         `odu: live view unavailable (${errorMessage(err)}) — continuing without it\n`,
@@ -157,7 +157,7 @@ class LiveDisplay implements Display {
     if (this.stopped) return;
     const view = new Ctor(this.opts);
     this.view = view;
-    const pending = this.pending;
+    const pending = this.stateAwaitingView;
     if (pending !== undefined) view.start(pending, this.header);
   }
 
@@ -169,7 +169,7 @@ class LiveDisplay implements Display {
   }
 
   update(state: PipelineState): void {
-    if (this.pending !== undefined) this.pending = state;
+    if (this.stateAwaitingView !== undefined) this.stateAwaitingView = state;
     this.view?.update(state);
   }
 

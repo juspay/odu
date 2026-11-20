@@ -21,7 +21,7 @@ import { METRICS_KEY } from "@odu/cordis/metricsSurface";
 import { buildSurfaceFace } from "@kolu/surface/client";
 import { composedClients } from "@odu/cordis/compose";
 import {
-  connectToService,
+  connectOrStartSingleton,
   EVERY_ROW_NEEDS,
   SERVICE_SIBLINGS,
   SERVICE_WIRE_GROUP,
@@ -75,33 +75,35 @@ export async function serveServiceMcpOverStdio(opts: {
 
   const warned = new Set<string>();
 
+  const dialFresh = async () => {
+    const connection = await connectOrStartSingleton(origin, { needs: EVERY_ROW_NEEDS, warned });
+    opened.add(connection);
+    // `reroster` from inside this factory moves the roster while the dial
+    // that answers it is still being taken, and the framework refuses every
+    // request against the two generations it then straddles — so the
+    // question is fired and not awaited.
+    void askRoster();
+    return {
+      client: {
+        core: connection.client as unknown as SurfaceClientCallable,
+        clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
+      },
+      // The adapter builds its redial on this: a daemon that died or was
+      // upgraded tells this connection's transport, the adapter drops the
+      // slot, and the NEXT call dials a fresh one. Without it the slot stays
+      // "live" holding a dead socket, and every later call fails on it.
+      onClose: connection.onClose,
+      dispose: () => {
+        opened.delete(connection);
+        connection.dispose();
+      },
+    };
+  };
+
   served = await serveSurfaceAsMcp({
     core: { surface: oduServiceSurface, expose: ODU_SERVICE_EXPOSE },
     surfaces: surfacesOf(mountedRows(rows)),
-    client: async () => {
-      const connection = await connectToService(origin, { needs: EVERY_ROW_NEEDS, warned });
-      opened.add(connection);
-      // `reroster` from inside this factory moves the roster while the dial
-      // that answers it is still being taken, and the framework refuses every
-      // request against the two generations it then straddles — so the
-      // question is fired and not awaited.
-      void askRoster();
-      return {
-        client: {
-          core: connection.client as unknown as SurfaceClientCallable,
-          clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
-        },
-        // The adapter builds its redial on this: a daemon that died or was
-        // upgraded tells this connection's transport, the adapter drops the
-        // slot, and the NEXT call dials a fresh one. Without it the slot stays
-        // "live" holding a dead socket, and every later call fails on it.
-        onClose: connection.onClose,
-        dispose: () => {
-          opened.delete(connection);
-          connection.dispose();
-        },
-      };
-    },
+    client: dialFresh,
     serverInfo: { name: "odu", version: opts.version },
     instructions: () =>
       agentInstructions(

@@ -97,6 +97,12 @@ interface Binding {
   act: (v: LiveView, id: string) => void;
 }
 
+const QUIT = {
+  keys: ["q"],
+  hint: "q quit",
+  act: (v: LiveView) => v.quit(),
+} as const satisfies Binding;
+
 const BINDINGS: readonly Binding[] = [
   {
     keys: Object.keys(MOVES),
@@ -123,23 +129,20 @@ const BINDINGS: readonly Binding[] = [
   { keys: ["G", "end"], hint: null, act: (v) => v.withLog((l) => l.toBottom()) },
   { keys: ["pageup"], hint: "PgUp/PgDn scroll", act: (v) => v.page(-1) },
   { keys: ["pagedown"], hint: null, act: (v) => v.page(1) },
-  { keys: ["q"], hint: "q quit", act: (v) => v.quit() },
+  QUIT,
 ];
 
-const HINTS = BINDINGS.map((b) => b.hint).filter(
-  (h): h is string => h !== null,
-);
-
-const QUIT_HINT = BINDINGS.find((b) => b.keys.includes("q"))?.hint ?? "q quit";
+const HINTS = BINDINGS.filter((b) => b !== QUIT)
+  .map((b) => b.hint)
+  .filter((h): h is string => h !== null);
 
 function keyHints(room: number): string[] {
   const chosen: string[] = [];
   for (const hint of HINTS) {
-    if (hint === QUIT_HINT) continue;
-    if ([...chosen, hint, QUIT_HINT].join(" · ").length > room) break;
+    if ([...chosen, hint, QUIT.hint].join(" · ").length > room) break;
     chosen.push(hint);
   }
-  return [...chosen, QUIT_HINT];
+  return [...chosen, QUIT.hint];
 }
 
 const EVENT_ROWS = 2;
@@ -157,20 +160,48 @@ function inert<T extends { selectable: boolean }>(r: T): T {
 
 /** opentui draws a border title only when it fits ENTIRELY — an over-long one
  *  is dropped, not truncated. */
-function paneTitle(
-  id: string,
-  meta: string,
-  anchor: string,
-  width: number,
-): string {
+interface TitleParts {
+  id: string;
+  meta: string;
+  anchor: string;
+}
+
+const TITLE_SHEDDING: readonly ((parts: TitleParts) => string)[] = [
+  ({ id, meta, anchor }) => `${id}${meta === "" ? "" : ` — ${meta}`}  ${anchor}`,
+  ({ id, anchor }) => `${id}  ${anchor}`,
+];
+
+function paneTitle(parts: TitleParts, width: number): string {
   const room = Math.max(0, width - 6);
-  const full = `${id}${meta === "" ? "" : ` — ${meta}`}  ${anchor}`;
-  if (full.length <= room) return full;
-  const bare = `${id}  ${anchor}`;
-  if (bare.length <= room) return bare;
+  for (const render of TITLE_SHEDDING) {
+    const text = render(parts);
+    if (text.length <= room) return text;
+  }
+  const { id, anchor } = parts;
   const forId = room - anchor.length - 2;
   if (forId >= 4) return `…${id.slice(id.length - forId + 1)}  ${anchor}`;
   return id.slice(Math.max(0, id.length - room));
+}
+
+interface DrawnWindow {
+  readonly gutter: number;
+  readonly cellW: number;
+  recipeAt(row: number): string | undefined;
+  platformAt(offset: number): string | undefined;
+}
+
+function drawnWindow(
+  gutter: number,
+  cellW: number,
+  platforms: readonly string[],
+  drawn: readonly string[],
+): DrawnWindow {
+  return {
+    gutter,
+    cellW,
+    recipeAt: (row) => drawn[row],
+    platformAt: (offset) => platforms[Math.floor(offset / cellW)],
+  };
 }
 
 type Row = readonly TextChunk[];
@@ -197,11 +228,11 @@ export class LiveView {
   private header: RunHeader | undefined;
 
   private focusedId: string | undefined;
-  private focusLocked = false;
+  private focusPinnedByOperator = false;
 
   private log: LogView | undefined;
   private logSub: AbortController | undefined;
-  private events: Event[] = [];
+  private visibleTail: Event[] = [];
 
   private searching = false;
   private query = "";
@@ -218,10 +249,7 @@ export class LiveView {
     const box = this.matrixBox;
     const geom = this.matrixGeom;
     if (state === undefined || box === undefined || geom === undefined) return;
-    const row = y - box.y - 1;
-    if (row < 0 || row >= geom.shown) return;
-    const { recipes } = this.shapeOf(state.order);
-    const recipe = recipes[geom.from + row];
+    const recipe = geom.recipeAt(y - box.y - 1);
     if (recipe === undefined) return;
 
     const current =
@@ -230,14 +258,12 @@ export class LiveView {
         : undefined;
     const offset = x - box.x - geom.gutter;
     const platform =
-      offset < 0
-        ? current
-        : geom.platforms[Math.floor(offset / geom.cellW)] ?? current;
+      offset < 0 ? current : (geom.platformAt(offset) ?? current);
     if (platform === undefined) return;
 
     const target = cellAt(state, recipe, platform);
     if (target === undefined) return;
-    this.focusLocked = true;
+    this.focusPinnedByOperator = true;
     this.focus(target.id);
   }
 
@@ -252,7 +278,7 @@ export class LiveView {
   private torndown = false;
 
   private readonly stderrWrite = process.stderr.write.bind(process.stderr);
-  private retained: string[] = [];
+  private replayBuffer: string[] = [];
   private hooked = false;
 
   private headLine: TextRenderable | undefined;
@@ -274,15 +300,7 @@ export class LiveView {
   private grabOffset = 0;
   private statusLine: TextRenderable | undefined;
   private hintHits: { from: number; to: number; binding: Binding }[] = [];
-  private matrixGeom:
-    | {
-        gutter: number;
-        cellW: number;
-        platforms: string[];
-        from: number;
-        shown: number;
-      }
-    | undefined;
+  private matrixGeom: DrawnWindow | undefined;
   private matrixRows: TextRenderable[] = [];
   private eventRows: TextRenderable[] = [];
   private paneRows: TextRenderable[] = [];
@@ -415,11 +433,12 @@ export class LiveView {
       process.stdout.write(`${operatorLine(text)}\n`);
       return;
     }
-    this.events.push({ text, color, nodeId });
-    if (this.events.length > EVENT_ROWS) this.events.shift();
+    this.visibleTail.push({ text, color, nodeId });
+    if (this.visibleTail.length > EVENT_ROWS) this.visibleTail.shift();
     if (retain) {
-      if (this.retained.length < LiveView.RETAIN_MAX) this.retained.push(text);
-      else this.retained[LiveView.RETAIN_MAX - 1] = text;
+      if (this.replayBuffer.length < LiveView.RETAIN_MAX) {
+        this.replayBuffer.push(text);
+      } else this.replayBuffer[LiveView.RETAIN_MAX - 1] = text;
     }
     if (now) this.paint();
     else {
@@ -447,9 +466,9 @@ export class LiveView {
     this.renderer?.destroy();
     this.renderer = undefined;
     const clean = this.state !== undefined && summarize(this.state).clean;
-    if (!clean) for (const line of this.retained) this.stderrWrite(`${line}\n`);
-    this.retained = [];
-    this.events = [];
+    if (!clean) for (const line of this.replayBuffer) this.stderrWrite(`${line}\n`);
+    this.replayBuffer = [];
+    this.visibleTail = [];
   }
 
   /** The fabricated `write` MUST invoke the caller's callback — a writer
@@ -657,7 +676,7 @@ export class LiveView {
     if (r === undefined) return Number.MAX_SAFE_INTEGER;
     const body = r.terminalHeight - 2 - this.notices().length - 1;
     const forPane = wide ? 0 : LOG_FLOOR + 2;
-    return Math.max(1, body - forPane - this.events.length - 1);
+    return Math.max(1, body - forPane - this.visibleTail.length - 1);
   }
 
   private matrixWindowTop(
@@ -710,7 +729,7 @@ export class LiveView {
   }
 
   private seedFocus(state: PipelineState): void {
-    if (this.focusLocked) return;
+    if (this.focusPinnedByOperator) return;
     const id = defaultAttachId(state);
     if (id !== undefined) this.focus(id);
   }
@@ -814,14 +833,14 @@ export class LiveView {
     if (state === undefined) return;
     const next = stepFocus(state.order, this.focusedId, key);
     if (next === undefined) return;
-    this.focusLocked = true;
+    this.focusPinnedByOperator = true;
     this.focus(next);
   }
 
   focusNth(n: number): void {
     const next = this.state?.order[n - 1];
     if (next === undefined) return;
-    this.focusLocked = true;
+    this.focusPinnedByOperator = true;
     this.focus(next);
   }
 
@@ -938,13 +957,12 @@ export class LiveView {
     );
     const from = windowed ? this.matrixWindowTop(recipes.length, shown, focusIdx) : 0;
 
-    this.matrixGeom = {
-      gutter: nameW + 3,
+    this.matrixGeom = drawnWindow(
+      nameW + 3,
       cellW,
-      platforms: [...platforms],
-      from,
-      shown,
-    };
+      [...platforms],
+      recipes.slice(from, from + shown),
+    );
 
     const header: Row = [
       faint(`  ${"".padEnd(nameW)}  `),
@@ -1019,8 +1037,8 @@ export class LiveView {
   private paintEvents(): void {
     const box = this.eventsBox;
     if (box === undefined) return;
-    this.syncRows(box, this.eventRows, this.events.length, "ev", (row, i) => {
-      const ev = this.events[i];
+    this.syncRows(box, this.eventRows, this.visibleTail.length, "ev", (row, i) => {
+      const ev = this.visibleTail[i];
       setRow(row, [fg(ev?.color ?? DIM)(ev?.text ?? "")]);
     });
   }
@@ -1045,9 +1063,7 @@ export class LiveView {
             : node.status;
     const anchor = following ? "‹follow›" : "‹pinned›";
     box.title = paneTitle(
-      id ?? "",
-      meta,
-      anchor,
+      { id: id ?? "", meta, anchor },
       box.width > 0 ? box.width : (this.renderer?.terminalWidth ?? 80),
     );
 
@@ -1102,10 +1118,10 @@ export class LiveView {
     const box = this.eventsBox;
     const state = this.state;
     if (box === undefined || state === undefined) return;
-    const event = this.events[y - box.y];
+    const event = this.visibleTail[y - box.y];
     const id = event?.nodeId;
     if (id === undefined || state.nodes[id] === undefined) return;
-    this.focusLocked = true;
+    this.focusPinnedByOperator = true;
     this.focus(id);
   }
 

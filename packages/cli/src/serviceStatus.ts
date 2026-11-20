@@ -42,7 +42,8 @@ export type HereClient = Pick<OduServiceClient, "surface">;
 
 const NOTHING_TO_SHOW = new Set(["expired"]);
 
-function currentRun(newest: RunRow | undefined): RunRow | undefined {
+function currentRun(newestFirst: readonly RunRow[]): RunRow | undefined {
+  const newest = newestFirst[0];
   return newest === undefined || NOTHING_TO_SHOW.has(newest.state)
     ? undefined
     : newest;
@@ -57,7 +58,7 @@ async function resolveHere(
 ): Promise<number> {
   const found = await findRuns(client, { checkout, limit: 1 }, p);
   if (!found.ok) return found.exit;
-  const row = currentRun(found.value.rows[0]);
+  const row = currentRun(found.value.rows);
   return row === undefined ? none() : use(row);
 }
 
@@ -102,7 +103,7 @@ export async function statusWith(
       } else {
         process.stdout.write(renderStatus(frame, row));
       }
-      return statusExit(row);
+      return exitFor({ of: "row", row });
     },
     () => {
       if (p.json) emitJson({ run: null, nodes: [], posting: { owed: [] } });
@@ -112,7 +113,7 @@ export async function statusWith(
   );
 }
 
-function nodeJson(node: RunNode): {
+interface StatusJsonNode {
   id: string;
   status: string;
   attempt: number;
@@ -120,7 +121,9 @@ function nodeJson(node: RunNode): {
   duration_ms: number | null;
   host: string | null;
   log_key: string;
-} {
+}
+
+function nodeJson(node: RunNode): StatusJsonNode {
   return {
     id: node.id,
     status: node.status,
@@ -183,10 +186,18 @@ function envLines(env: RunEnv): string[] {
   return lines;
 }
 
-function statusExit(row: RunRow): number {
-  if (row.state === "owner_lost") return WAIT_EXITS.ownerLost;
-  if (!row.settled) return 0;
-  return row.passed ? 0 : 1;
+type ExitSubject =
+  | { of: "row"; row: RunRow }
+  | { of: "frame"; frame: NodesFrame };
+
+function exitFor(subject: ExitSubject): number {
+  if (subject.of === "row") {
+    if (subject.row.state === "owner_lost") return WAIT_EXITS.ownerLost;
+    if (!subject.row.settled) return 0;
+    return subject.row.passed ? 0 : 1;
+  }
+  if (subject.frame.state === "owner_lost") return WAIT_EXITS.ownerLost;
+  return exitCode(verdictStateOf(subject.frame, ""));
 }
 
 export async function attachViaService(opts: HereRunOpts): Promise<number> {
@@ -260,7 +271,7 @@ async function attachStream(
     );
     return 3;
   }
-  return frameExit(final);
+  return exitFor({ of: "frame", frame: final });
 }
 
 async function attachLive(
@@ -287,7 +298,7 @@ async function attachLive(
     },
     onQuit: () => {
       view.stop(latest === undefined ? undefined : pipelineStateOf(latest, row));
-      process.exit(latest === undefined ? 0 : frameExit(latest));
+      process.exit(latest === undefined ? 0 : exitFor({ of: "frame", frame: latest }));
     },
   });
 
@@ -304,10 +315,5 @@ async function attachLive(
     }
   }, { patience: p });
   view.stop(latest === undefined ? undefined : pipelineStateOf(latest, row));
-  return latest === undefined ? 3 : frameExit(latest);
-}
-
-function frameExit(frame: NodesFrame): number {
-  if (frame.state === "owner_lost") return WAIT_EXITS.ownerLost;
-  return exitCode(verdictStateOf(frame, ""));
+  return latest === undefined ? 3 : exitFor({ of: "frame", frame: latest });
 }

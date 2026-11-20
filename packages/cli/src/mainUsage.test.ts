@@ -28,7 +28,7 @@ const ROOT_CLIENTS = ["mcp"] as const;
 
 const HISTORY_SUBS = ["list", "show", "import", "prune"] as const;
 
-function optionsOfCases(text: string): Map<string, Set<string>> {
+function optionsByCaseLabel(text: string): Map<string, Set<string>> {
   const parsed = ts.createSourceFile(
     "dispatch.ts",
     text,
@@ -60,13 +60,20 @@ function optionsOfCases(text: string): Map<string, Set<string>> {
     return names;
   };
 
+  const fallingThrough: string[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isCaseClause(node) && ts.isStringLiteralLike(node.expression)) {
-      const names = new Set<string>();
-      for (const statement of node.statements) {
-        for (const name of optionNames(statement)) names.add(name);
+      const label = node.expression.text;
+      if (node.statements.length === 0) {
+        fallingThrough.push(label);
+      } else {
+        const names = new Set<string>();
+        for (const statement of node.statements) {
+          for (const name of optionNames(statement)) names.add(name);
+        }
+        for (const sharing of [...fallingThrough, label]) out.set(sharing, names);
+        fallingThrough.length = 0;
       }
-      out.set(node.expression.text, names);
     }
     ts.forEachChild(node, visit);
   };
@@ -74,8 +81,8 @@ function optionsOfCases(text: string): Map<string, Set<string>> {
   return out;
 }
 
-const cases = optionsOfCases(source);
-const ciCases = optionsOfCases(ciSource);
+const cases = optionsByCaseLabel(source);
+const ciCases = optionsByCaseLabel(ciSource);
 
 describe("odu's argv grammar", () => {
   it("found both dispatches at all", () => {
@@ -96,7 +103,6 @@ describe("odu's argv grammar", () => {
         missing.push(`${where} ${command} (no case found — was it renamed?)`);
         continue;
       }
-      if (options.size === 0) continue;
       if (!options.has("origin")) missing.push(`${where} ${command}`);
     }
     expect(
