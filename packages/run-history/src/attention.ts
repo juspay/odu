@@ -1,40 +1,3 @@
-/**
- * The attention query — ONE durable answer to "what do I need to know about
- * this run right now", consumed by the native CLI today and by a service face
- * later.
- *
- * It exists because the alternative is what the field review found: an agent
- * polling `status`, piping `logs` through a buffering shell, and waiting for
- * every lane to settle before it learns that the fast one went red four
- * minutes ago. Each of those is a different reader inventing its own idea of
- * "anything new?", and none of them survives a disconnect.
- *
- * The shape below is arranged around four rules, and they are the ones that
- * are easy to get subtly wrong:
- *
- *   - A CURSOR SUPPRESSES REPEATS, IT DOES NOT RESOLVE ANYTHING. `events` is
- *     what has happened since the caller's cursor; `unresolved_failures` is
- *     the state of the run and is computed from the WHOLE journal every time.
- *     An agent that acknowledged a failure and then asked again still sees the
- *     failure — because it is still failing. Conflating the two is how a red
- *     run gets reported green to whoever asked second.
- *   - THE CURSOR ADVANCES ONLY THROUGH INCLUDED EVENTS. If the budget trims
- *     the tail, the cursor stops where the trim did, and `has_more` says so.
- *     A cursor that ran ahead of what was delivered would silently drop
- *     exactly the events a reconnecting caller came back for.
- *   - A SETTLED RUN ALWAYS RETURNS ITS VERDICT. Not "if you subscribe in
- *     time" — the journal's `finalized` line is durable, so the answer is the
- *     same an hour later.
- *   - RUNNING, GONE, AND FINISHED ARE THREE STATES. A deadline says
- *     `still_running`. An owner that is provably dead with no terminal line
- *     says `owner_lost`. Neither is a pass and neither is a failure, and a
- *     caller that cannot tell them apart will retry the wrong one.
- *
- * Pure. Evidence arrives through {@link AttentionSources}, so this module is
- * testable against a hand-built journal and the store composes it with real
- * files in `./query`.
- */
-
 import type { NodeStatus } from "@odu/run-client/surface";
 import { pushTotals } from "@odu/run-client/surface";
 import { signalFromExit } from "./exit";
@@ -51,34 +14,19 @@ import type {
 } from "./schema";
 
 /** Total encoded size of one attention payload. The transport's own envelope
- *  (an MCP frame, an HTTP body) is outside this — the budget is about what the
- *  DOMAIN puts in front of a reader, so the same number applies whichever face
- *  is asking. */
+ *  (an MCP frame, an HTTP body) is outside this. */
 export const ATTENTION_BUDGET_BYTES = 16 * 1024;
 
-/** Per-failure excerpt ceiling. Four of them still fit inside the budget, and
- *  four simultaneous unrelated failures is already a run whose first problem
- *  is not the excerpt length. */
+/** Per-failure excerpt ceiling. */
 export const EXCERPT_BUDGET_BYTES = 4 * 1024;
 
-/** Default page size for `events`. The budget is the real bound; this stops a
- *  caller that has been away for an hour from building a megabyte of objects
- *  only to have them trimmed. */
+/** Default page size for `events`. The budget is the real bound. */
 export const DEFAULT_EVENT_LIMIT = 200;
 
-/** Re-exported so a reader of this payload can spell the same reading the
- *  `signal` field was built with — see `./exit` for why it lives there. */
 export { signalFromExit };
 
 /**
  * Where a run stands, as four states that a caller must handle differently.
- *
- * `owner_lost` is the one that earns its keep. Before it, a coordinator killed
- * mid-run was indistinguishable from a slow one: both had no terminal line and
- * a socket that answered nothing. An agent then either waited forever or read
- * the absence as a failure. Here it is a state with a name, and the recovery
- * for it (start a new run) is different from the recovery for `still_running`
- * (wait, or ask again with the cursor).
  */
 export type AttentionState =
   | "still_running"
@@ -97,7 +45,7 @@ export interface AttentionFailure {
   signal: string | null;
   placement: Placement;
   /** How to ask for this evidence again: the exact `--run/--attempt/NODE`
-   *  triple, so an agent echoes rather than reassembles. */
+   *  triple. */
   log_key: string;
   /** Did this attempt's log get its producer's last word? A `false` here with
    *  a non-empty excerpt is the honest "there was more and it is gone". */
@@ -106,10 +54,7 @@ export interface AttentionFailure {
   /** Why the log is short, when it is. */
   log_truncation_reason: string | null;
   excerpt: string;
-  /** Where the excerpt came from. Today there is exactly one source — the
-   *  attempt's own log — and the field exists so that stays VISIBLE: a
-   *  structured test reporter would add a value here, and until one does, no
-   *  face may imply it had one. `none` means the log was unreadable, which is
+  /** Where the excerpt came from. `none` means the log was unreadable, which is
    *  reported as itself and never as a passing or flaky node. */
   excerpt_source: "attempt_log" | "none";
   /** The excerpt is the tail of a longer log. */
@@ -143,13 +88,7 @@ export interface Attention {
   /** Settled with no red and no cancelled node. Never true for a run that is
    *  not settled — there is no such thing as "passing so far". */
   passed: boolean;
-  /** The run's own terminal word, or null while it has none.
-   *
-   *  Carried BESIDE `passed` rather than derived from it, because `passed:
-   *  false` covers two genuinely different endings: a run with a red node, and
-   *  one that was cancelled or torn down before every node finished. Reporting
-   *  the second as "failed" tells an operator to go looking for a test that
-   *  broke, which is a wrong instruction rather than a vague one. */
+  /** The run's own terminal word, or null while it has none. */
   outcome: "passed" | "failed" | "incomplete" | null;
   /** There is a red node whose evidence is ready to read. The bit a bounded
    *  wait returns on, before the slow lanes finish. */
@@ -174,14 +113,7 @@ export interface Attention {
   failures_omitted: number;
   /** Reporting-debt rows the budget could not carry. */
   debt_omitted: number;
-  /** This payload is LARGER than the budget it was asked for.
-   *
-   *  Reachable in exactly one way, and it is deliberate: a caller must always
-   *  be able to drain a journal, so one event is carried even when nothing
-   *  else fits. A single event can be arbitrarily large (a roster of a
-   *  thousand nodes is one event), so the alternative to exceeding the budget
-   *  is a cursor that can never advance — a caller stuck asking the same
-   *  question forever. Reported rather than hidden. */
+  /** This payload is LARGER than the budget it was asked for. */
   over_budget: boolean;
   /** Commit statuses this run owes GitHub. Debt, kept apart from the verdict:
    *  a run whose statuses did not land still passed or failed on its own. */
@@ -215,15 +147,11 @@ export interface Attention {
      *  LANDED. A node still pushing, or one whose push failed, adds nothing.
      */
     stored: number;
-    /** Store paths those same pushes found the bucket ALREADY serving. Kept
-     *  apart from `stored` all the way to the header: the sum of the two is
-     *  what the bucket serves because of this run, and reporting only the sum
-     *  claims every one of those paths crossed the network. */
+    /** Store paths those same pushes found the bucket ALREADY serving. */
     present: number;
     /** NAR bytes `stored` came to — what this run actually sent. */
     bytes: number;
-    /** The nodes whose push failed, in roster order. Empty when none did —
-     *  which is what "green means warmed" is allowed to mean. */
+    /** The nodes whose push failed, in roster order. Empty when none did. */
     failedOn: readonly string[];
   };
 }
@@ -268,12 +196,7 @@ export interface AttentionQuery {
   excerptBytes?: number;
 }
 
-/** The last whole-character suffix of `text` that fits in `maxBytes`.
- *
- *  A tail rather than a head because the end of a failing log is where the
- *  reason is. Trimming by BYTES with a character-safe boundary, because the
- *  budget is a byte budget and a log full of box-drawing characters would blow
- *  a character-counted one by a factor of three. */
+/** The last whole-character suffix of `text` that fits in `maxBytes`. */
 export function clampTailBytes(
   text: string,
   maxBytes: number,
@@ -282,8 +205,6 @@ export function clampTailBytes(
   if (encoder.encode(text).length <= maxBytes) {
     return { text, truncated: false };
   }
-  // Walk back from the end by code points until the encoding fits. Code points
-  // rather than UTF-16 units so a surrogate pair is never split.
   const chars = [...text];
   let bytes = 0;
   let take = 0;
@@ -296,11 +217,7 @@ export function clampTailBytes(
   return { text: chars.slice(chars.length - take).join(""), truncated: true };
 }
 
-/** One node's newest attempt, as the fold has it so far. EXPORTED because
- *  `foldJournal` is: a caller that folds a journal for its own projection (the
- *  service's per-run node view is the one in this tree) needs to be able to
- *  name what it got back, and a structural re-declaration on the other side
- *  would be a second spelling of the same record to keep true. */
+/** One node's newest attempt, as the fold has it so far. */
 export interface AttemptState {
   node: string;
   attempt: number;
@@ -309,53 +226,24 @@ export interface AttemptState {
   exitCode: number | null;
   durationMs: number | null;
   /** The journal's own clock for the `attempt_started` line — when this attempt
-   *  BEGAN. Taken from the entry rather than from a field on the event because
-   *  the entry is where the time already is, and a second timestamp inside the
-   *  payload would be a second thing that could disagree with it. Null for a
-   *  node the fold only ever saw a status for (a status without a start is a
-   *  torn journal, and inventing a start time for it would hide that). */
+   *  BEGAN. Null for a node the fold only ever saw a status for. */
   startedAt: number | null;
   logComplete: boolean;
   logBytes: number;
   logReason: string | null;
 }
 
-/** Fold the journal into the run's current shape. Exported for the tests that
- *  care about the fold itself rather than the payload around it. */
+/** Fold the journal into the run's current shape. */
 export function foldJournal(journal: readonly JournalEntry[]): {
   roster: string[];
   /** The newest attempt recorded per node. */
   latest: Map<string, AttemptState>;
   finalized: RunVerdict["outcome"] | null;
-  /**
-   * Work STARTED AGAIN after the run published a terminal outcome.
-   *
-   * A `--linger` coordinator keeps serving past settlement so a node can be
-   * retried, and a retry is not a new run: the same journal gains a fresh
-   * `attempt_started` after its own `finalized` line. Reading "has this run
-   * ever finalized" as "is this run settled" then reports a run that is
-   * actively executing as finished — and a wait keyed on settlement returns
-   * immediately, in the middle of the retry it was asked to watch.
-   *
-   * So settlement is a fact about the CURRENT execution, and this is the bit
-   * that distinguishes them.
-   */
+  /** Work STARTED AGAIN after the run published a terminal outcome. */
   resumed: boolean;
   debt: Map<string, { context: string; lastError: string; attempts: number }>;
   scope: RunScope | null;
-  /**
-   * WHERE the run's work is placed, folded out of the `lane` and `phase` lines.
-   *
-   * These two arms used to fall through to `default: break` — the journal wrote
-   * them and no reader read them. That absence is what made `odu ci status` dial
-   * the checkout's socket: the only thing that could answer "which lane is on
-   * which box" was the coordinator, so the one face that asked had to be
-   * allowed to talk to it, and a public command held a run authority of its own
-   * for want of a fold.
-   *
-   * Read from the catalog, the same answer survives the coordinator. A run that
-   * finished last week can still say which machines it landed on.
-   */
+  /** WHERE the run's work is placed, folded out of the `lane` and `phase` lines. */
   phase: "provisioning" | "lanes" | "no_lanes" | null;
   /** Per platform, last write wins — the coordinator republishes a lane's whole
    *  state on every change, so the newest line is the lane. */
@@ -371,9 +259,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
    *  carried one. Null for a run written before the field existed. */
   hostsSource: string | null;
   /** WHAT EACH NODE'S PUSH IS DOING (PLAN 4.1), last write wins. Per NODE
-   *  rather than per attempt: a re-run that pushes again replaces what the
-   *  previous one claimed, and a reader asking "what did this node warm"
-   *  means the attempt that stands. */
+   *  rather than per attempt. */
   push: Map<string, NodePush>;
 } {
   let roster: string[] = [];
@@ -411,19 +297,11 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         lanes.set(e.platform, {
           state: e.state,
           host: e.host,
-          // A `leased` lane has landed, so its pool is history — the machine is
-          // the answer. An older record carries no pool at all, and an empty
-          // one reads honestly as "not recorded" everywhere it is rendered.
           pool: e.pool === undefined ? [] : [...e.pool],
         });
-        // Kept from the newest line that HAS one, rather than overwritten by a
-        // later line that omits it: a mixed journal (old lines, then new) would
-        // otherwise lose the source it had just learned.
         if (e.hostsSource !== undefined) hostsSource = e.hostsSource;
         break;
       case "attempt_started": {
-        // A new attempt after a terminal line is work resuming — see
-        // `isResumptionEvent`, which is the rule the WRITER reads too.
         if (finalized !== null && isResumptionEvent(e)) resumed = true;
         const state: AttemptState = {
           node: e.node,
@@ -438,18 +316,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           logReason: null,
         };
         byAttempt.set(key(e.node, e.attempt), state);
-        // A newly started attempt supersedes the previous one for this node —
-        // which is what makes "unresolved" mean the LATEST attempt rather than
-        // any attempt that ever went red.
         latest.set(e.node, state);
-        // AND WHATEVER THE PREVIOUS ATTEMPT WARMED IS NO LONGER THIS NODE'S
-        // (PLAN 4.1). A rerun's push may find nothing new — every path it
-        // builds is already on the bucket — and the old counts would then
-        // stand for good over an attempt that pushed nothing. The retraction
-        // is THIS line rather than an event of its own: a new attempt is
-        // exactly the moment the claim stops being about the node a reader
-        // is looking at, and a rerun that does push writes a fresh `pushed`
-        // after it.
         push.delete(e.node);
         break;
       }
@@ -462,14 +329,11 @@ export function foldJournal(journal: readonly JournalEntry[]): {
           status: null,
           exitCode: null,
           durationMs: null,
-          // A status with no `attempt_started` before it is a torn journal, and
-          // the honest answer is that this attempt's start time is unknown.
           startedAt: null,
           logComplete: false,
           logBytes: 0,
           logReason: null,
         };
-        // Same for a node going back to pending/running — the same shared rule.
         if (finalized !== null && isResumptionEvent(e)) resumed = true;
         state.status = e.status;
         state.exitCode = e.exitCode;
@@ -501,14 +365,6 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         break;
       case "pushing": {
         push.set(e.node, { state: "pushing", bucket: e.bucket });
-        // THE RECIPE'S OWN DURATION, carried on the line that opens the push
-        // because nothing else carries it in time: the node stays `running`
-        // until the upload lands, so no `node_status` is journalled, and a
-        // page reading this fold would have no end for the recipe's bar —
-        // which is what left the `pushing` segment with no room to draw.
-        // NEVER over a duration a `node_status` already wrote: a `pushing`
-        // line is older evidence than the status that follows it, and the
-        // status is the one measured at the child's exit.
         if (e.durationMs !== undefined) {
           const state = latest.get(e.node);
           if (state !== undefined && state.durationMs === null) {
@@ -518,19 +374,6 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         break;
       }
       case "pushed": {
-        // THE LINE RECORDS A TOTAL AND A PART; A READER WANTS BOTH PARTS.
-        // `paths` is what the bucket serves as a result of this node — stored
-        // plus already-present — and `present` is the half of it the bucket
-        // already had. Subtracting is what turns the durable shape into the
-        // two numbers every surface renders.
-        //
-        // A LINE WITHOUT `present` FOLDS TO ALL-STORED, and that is the honest
-        // reading rather than a convenient one: releases before this field
-        // never recorded an already-present count, so the served total is the
-        // only thing they ever claimed, and attributing it to uploads is what
-        // those runs' headers already said. `Math.max` guards the one way the
-        // arithmetic can go negative — a line whose two numbers disagree —
-        // because a negative count on a header is worse than a zero.
         const present = e.present ?? 0;
         push.set(e.node, {
           state: "pushed",
@@ -552,8 +395,6 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         break;
       case "finalized":
         finalized = e.outcome;
-        // A run that resumed and then finalized AGAIN is settled once more —
-        // the flag describes the tail of the journal, not its history.
         resumed = false;
         break;
       default:
@@ -574,23 +415,6 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   };
 }
 
-/**
- * THE ROSTER'S ORDER, imposed on a set of node ids.
- *
- * `pushTotals` folds a `Map` whose order is the order the journal first
- * MENTIONED each node — the order pushes happened to be opened in, which is a
- * fact about scheduling and about nothing a reader cares about. Both the wire
- * and this payload promise `failedOn` in ROSTER order, because every face that
- * paints a run paints its nodes in the roster's order: a header that names the
- * failed pushes in a different one makes a reader scan the list twice to match
- * two spellings of the same three nodes.
- *
- * A node the roster does not list keeps its current position relative to the
- * other unlisted ones, AFTER everything the roster names: an empty roster (a
- * journal read before its first line, or a torn one) must not silently reorder
- * what it cannot speak for. `sort` is stable in every runtime odu runs on, and
- * this relies on it.
- */
 function inRosterOrder(
   nodes: readonly string[],
   roster: readonly string[],
@@ -619,10 +443,6 @@ export function attentionFor(
 
   const state = classify(sources, fold);
   const settled = state === "settled";
-  // The terminal word of the CURRENT execution. A run that resumed after
-  // finalizing has none — its previous outcome describes an execution that is
-  // over, and reporting it beside `state: still_running` would invite a reader
-  // to act on a verdict about work that is being redone right now.
   const verdictOutcome = fold.resumed
     ? null
     : (sources.verdict?.outcome ?? fold.finalized);
@@ -655,15 +475,8 @@ export function attentionFor(
     });
   }
 
-  // A failure is ACTIONABLE once its log has had its last word — that is the
-  // barrier the whole "return red before the slow lane finishes" promise rests
-  // on. Reporting a red node whose output is still arriving would hand an
-  // agent a half-written reason and invite it to act on the wrong line.
   const actionable = failures.some((f) => f.log_complete) || settled;
 
-  // The query's own `after` wins: a caller that names one on the call is
-  // saying "from here", and a stale cursor carried on the sources must not
-  // quietly override it.
   const afterSeq = (query.after ?? sources.after)?.seq ?? 0;
   const pending = sources.journal.filter((e) => e.seq > afterSeq);
   const debtRows = [...fold.debt.values()].map((d) => ({
@@ -706,13 +519,7 @@ export function attentionFor(
     actionable,
     unreadable_events: sources.unreadableEvents,
     endpoint: sources.endpoint,
-    // WHO STARTED IT (PLAN 4.4), straight off the manifest. Absent stays
-    // absent: a run recorded before the field has no actor, which is a
-    // different answer from "the machine's own owner".
     ...(manifest?.actor === undefined ? {} : { actor: manifest.actor }),
-    // WHERE THIS RUN PUSHED, and how much it landed (PLAN 4.1): the target
-    // off the manifest, the counts summed over the journal's own events. Both
-    // survive the coordinator, which is the point of recording them.
     ...(manifest?.push === undefined
       ? {}
       : {
@@ -742,8 +549,6 @@ export function attentionFor(
   ): Attention => ({
     ...identity,
     events: events.map((e) => ({ seq: e.seq, at: e.at, event: e.event })),
-    // Through INCLUDED events only. A cursor past what was delivered is a
-    // silent drop, and this is the one line that decides it.
     cursor: formatCursor({ runId: sources.runId, seq: events.at(-1)?.seq ?? afterSeq }),
     has_more: events.length < pending.length,
     remaining: pending.length - events.length,
@@ -755,22 +560,6 @@ export function attentionFor(
     over_budget: overBudget,
   });
 
-  /**
-   * Shed until it fits, in the order that costs a caller least.
-   *
-   * PROGRESS IS RESERVED FIRST, and that is the ordering decision that matters.
-   * Shedding events down to zero and then dropping failures leaves a payload
-   * whose cursor did not move — so the next call returns the same oversized
-   * answer, and a caller with sixty red nodes can never drain its backlog. One
-   * event is held back from every reduction below, so the cursor always
-   * advances and the loop always terminates.
-   *
-   * After that the order is by REPLAYABILITY: events beyond the first are
-   * re-served on the next call with the returned cursor, so they go first;
-   * excerpts shrink next (the reason survives, shorter); failure and debt rows
-   * go last and are COUNTED when they do, because a caller that is shown three
-   * of sixty failures must not read that as three.
-   */
   const fits = (a: Attention): boolean => encodedBytes(a) <= budget;
   const keep = pending.length > 0 ? 1 : 0;
   let events = pending.slice(0, limit);
@@ -800,9 +589,6 @@ export function attentionFor(
   while (debt.length > 0 && !fits(build(events, fails, debt, false))) {
     debt = debt.slice(0, debt.length - 1);
   }
-  // Built ONCE and measured, rather than built twice more to decide a boolean
-  // about itself: `over_budget` is a fact about the payload that is about to be
-  // returned, so the payload is the thing to ask.
   const fitted = build(events, fails, debt, false);
   return fits(fitted) ? fitted : build(events, fails, debt, true);
 }
@@ -811,17 +597,6 @@ function encodedBytes(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length;
 }
 
-/**
- * Where the run stands NOW.
- *
- * "Has it ever finalized" is not the question. A `--linger` run that settles,
- * takes a retry, and starts executing again has a `finalized` line in its
- * journal AND a node running right now; answering `settled` there ends a wait
- * in the middle of the very retry it was watching, and reports the previous
- * verdict as this execution's. `fold.resumed` is the journal's own answer to
- * "did work start again after that line", and it is what makes the state
- * describe the present tense.
- */
 function classify(
   sources: AttentionSources,
   fold: ReturnType<typeof foldJournal>,

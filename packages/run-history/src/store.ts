@@ -1,37 +1,3 @@
-/**
- * The durable store — every filesystem operation the run catalog performs, and
- * the only module in this package that touches a disk.
- *
- * The split with `./schema` is the usual portable/platform one: the shapes
- * travel (a browser face in PR 2 will decode the same manifest), the syscalls
- * do not. What is worth stating is the DIRECTION of authority inside this
- * file: the journal is the run's history, and everything else — the verdict,
- * the attempt sidecars, the manifest's mutable half — is a projection kept for
- * the reader's convenience. When a projection and the journal disagree, the
- * journal is right, and the reader that needs to be sure reads it.
- *
- * Three invariants the code below is arranged around:
- *
- *   - REGISTER BEFORE EXECUTE. `registerRun` publishes a manifest and claims
- *     the ownership epoch before the caller does anything observable. A run
- *     that dies in its first second is still a run somebody can address, which
- *     is the difference between "the coordinator crashed" and "nothing
- *     happened".
- *   - APPEND, NEVER REWRITE. The journal is opened `a` and every line is one
- *     `write(2)` of a complete JSON object; a torn tail is the last line only,
- *     and the reader drops it. Attempt logs are the same: one file per
- *     attempt, sealed when the attempt ends, and a retry gets the NEXT ordinal
- *     rather than the same file back.
- *   - EVERY WRITE IS FENCED, with two stated exemptions. `stillOwner` runs
- *     before each durable mutation, so a coordinator that has been superseded
- *     finds out at its next write and stops instead of racing a successor for
- *     the tail of one file. The exemptions are named where they live and both
- *     are deliberate: `appendAttemptLog` is the per-chunk hot path and is
- *     bounded by the seal around it, and `expireRun` is a janitor rather than
- *     a writer — it holds no epoch, so it guards on the owner being gone
- *     instead.
- */
-
 import {
   appendFileSync,
   chmodSync,
@@ -117,17 +83,14 @@ function readJson<A>(
   return Result.isSuccess(decoded) ? decoded.success : null;
 }
 
-/** A handle on one run's directory. Cheap: it is a path plus the catalog it
- *  came from, so a caller can hold one across a whole run without keeping a
- *  file descriptor open through a multi-hour pipeline. */
+/** A handle on one run's directory. */
 export interface RunHandle {
   readonly runId: string;
   readonly dir: string;
 }
 
 export interface CatalogOptions {
-  /** Override the catalog location. Tests always pass one; production reads
-   *  it from `ODU_STATE_DIR` via `./paths`. */
+  /** Override the catalog location. */
   root?: string;
   env?: StateEnv;
   platform?: NodeJS.Platform;
@@ -142,22 +105,11 @@ export function handleFor(runId: string, opts: CatalogOptions = {}): RunHandle {
   return { runId, dir: runDir(catalogPath(opts), runId) };
 }
 
-// ── registration ────────────────────────────────────────────────────────────
-
 export type RegisterResult =
   | { ok: true; handle: RunHandle; token: OwnershipToken; manifest: RunManifest }
   | { ok: false; refusal: ClaimRefusal };
 
-/**
- * Publish a run into the catalog and take write-ownership of it.
- *
- * The order is the contract: the directory and the ownership epoch come first,
- * the manifest second, the `registered` journal line third. A crash between
- * any two of those leaves a run that is addressable and owned but has not
- * claimed to have started — which is a state a reader can describe. The
- * opposite order would leave a manifest nobody owns, and the next process to
- * look would be entitled to write to it.
- */
+/** Publish a run into the catalog and take write-ownership of it. */
 export function registerRun(
   manifest: Omit<RunManifest, "version" | "registeredBy">,
   opts: CatalogOptions & { endpoint: string | null; now?: number } ,
@@ -191,39 +143,13 @@ export function readManifest(handle: RunHandle): RunManifest | null {
   return readJson(join(handle.dir, RUN_FILES.manifest), decodeManifest);
 }
 
-// ── the journal ─────────────────────────────────────────────────────────────
-
-/**
- * The next sequence number for a run — one past the highest line already on
- * disk. Read rather than remembered so a coordinator that takes over a run
- * mid-flight continues the numbering rather than restarting it.
- *
- * `highestSeq`, NOT the last DECODED entry, and the difference is a real bug
- * rather than a nicety. `readJournal` is deliberately forgiving and drops a
- * line it cannot decode — a record from a newer writer is the case it names
- * itself — but a dropped line still OCCUPIES its ordinal on disk. Numbering
- * from the decodable tail would hand that ordinal out a second time, and then
- * two lines share a sequence, their order after the sort is arbitrary, and a
- * caller resuming from that cursor silently skips one of them. A cursor is a
- * sequence number; it may only ever mean one line.
- */
+/** The next sequence number for a run — one past the highest line already on
+ *  disk. */
 function nextSeq(handle: RunHandle): number {
   return readJournal(handle).highestSeq + 1;
 }
 
-/**
- * A run's journal, held open by its owner.
- *
- * The ordinal lives IN MEMORY here, and that is the whole reason this type
- * exists rather than a free function. Deriving the next sequence from disk on
- * every append means reading and decoding the entire journal per line: the
- * hundredth event of a run re-reads ninety-nine, which is quadratic in the
- * length of a run and lands squarely on the coordinator's event loop — the one
- * that is also serving `.ci/odu.sock`. Holding the counter is safe precisely
- * because ownership is exclusive: one epoch, one writer, one counter. A
- * successor opens its own writer and re-derives the floor from disk, which is
- * the one moment the file is the authority.
- */
+/** A run's journal, held open by its owner. */
 export interface JournalWriter {
   append: (event: RunEvent, now?: number) => JournalEntry | null;
 }
@@ -244,13 +170,7 @@ export function openJournal(
   };
 }
 
-/**
- * Append one event, deriving its ordinal from disk.
- *
- * The one-shot form, for a caller that appends once and does not hold a
- * journal open — registration, and tests. A writer that appends repeatedly
- * wants {@link openJournal}; see its note on why.
- */
+/** Append one event, deriving its ordinal from disk. */
 export function appendEvent(
   handle: RunHandle,
   token: OwnershipToken,
@@ -263,11 +183,6 @@ export function appendEvent(
 /**
  * The append itself. Returns the entry written, or `null` when this writer no
  * longer owns the run (fenced) or the append failed.
- *
- * Best-effort by disposition — a failed history write must never fail a run,
- * which is the rule the checkout ledger already follows — but NOT silent about
- * the one case that matters: a `null` return means the caller has been fenced,
- * and the coordinator uses that to stop rather than to retry.
  */
 function appendAt(
   handle: RunHandle,
@@ -279,11 +194,8 @@ function appendAt(
   if (!stillOwner(token)) return null;
   const entry: JournalEntry = { seq, at: now, event };
   try {
-    // ONE `appendFileSync` of a complete line. `O_APPEND` makes a write under
-    // PIPE_BUF atomic against other appenders, and a crash mid-write can only
-    // truncate the final line — which `readJournal` drops. Two writes (payload
-    // then newline) would let a crash interleave a partial line with a
-    // successor's complete one, and no reader could tell them apart.
+    // `O_APPEND` makes a write under PIPE_BUF atomic against other appenders,
+    // and a crash mid-write can only truncate the final line.
     appendFileSync(
       join(handle.dir, RUN_FILES.events),
       `${JSON.stringify(entry)}\n`,
@@ -296,17 +208,15 @@ function appendAt(
 
 export interface JournalRead {
   entries: JournalEntry[];
-  /** Lines that did not parse — a torn tail, or a record from a newer writer.
-   *  Surfaced rather than swallowed: a face that shows history should be able
-   *  to say "and n events I could not read". */
+  /** Lines that did not parse — a torn tail, or a record from a newer
+   *  writer. */
   unreadable: number;
-  /** The highest ordinal ANY line claims, readable or not. The allocator reads
-   *  this rather than the decoded tail — see `nextSeq`. */
+  /** The highest ordinal ANY line claims, readable or not. */
   highestSeq: number;
 }
 
-/** Every journal line for a run, in order. Forgiving by design: an unparseable
- *  line is counted and skipped, never thrown. */
+/** Every journal line for a run, in order. An unparseable line is counted and
+ *  skipped, never thrown. */
 export function readJournal(handle: RunHandle): JournalRead {
   let text: string;
   try {
@@ -326,8 +236,6 @@ export function readJournal(handle: RunHandle): JournalRead {
       unreadable += 1;
       continue;
     }
-    // The ordinal is read BEFORE the event is decoded, so a line whose payload
-    // this build does not understand still reserves its number.
     const claimed = (parsed as { seq?: unknown }).seq;
     if (typeof claimed === "number" && Number.isSafeInteger(claimed)) {
       highestSeq = Math.max(highestSeq, claimed);
@@ -336,19 +244,11 @@ export function readJournal(handle: RunHandle): JournalRead {
     if (Result.isSuccess(decoded)) entries.push(decoded.success);
     else unreadable += 1;
   }
-  // Sorted by seq rather than trusted in file order: a takeover that
-  // re-derived `nextSeq` writes in order, but an imported record is assembled
-  // rather than appended, and a reader that assumes order would paginate a
-  // cursor past events it never delivered.
   entries.sort((a, b) => a.seq - b.seq);
   return { entries, unreadable, highestSeq };
 }
 
-// ── attempts ────────────────────────────────────────────────────────────────
-
-/** Every attempt ordinal recorded for a node, ascending. Read from the
- *  directory rather than the journal so evidence remains addressable even for
- *  a run whose journal was truncated. */
+/** Every attempt ordinal recorded for a node, ascending. */
 export function attemptsFor(handle: RunHandle, node: string): number[] {
   const dir = join(handle.dir, RUN_FILES.attempts, encodeNodeKey(node));
   let entries: string[];
@@ -366,8 +266,7 @@ export function attemptsFor(handle: RunHandle, node: string): number[] {
 }
 
 /** Every node this run has evidence for, decoded back to node ids. A key that
- *  does not decode is skipped — see `decodeNodeKey` on why null beats a
- *  guess. */
+ *  does not decode is skipped. */
 export function nodesWithEvidence(handle: RunHandle): string[] {
   let entries: string[];
   try {
@@ -381,12 +280,7 @@ export function nodesWithEvidence(handle: RunHandle): string[] {
     .sort();
 }
 
-/** Open (or re-open) an attempt's log for writing, and stamp its sidecar.
- *
- *  Creating the directory is what ALLOCATES the ordinal on disk; the journal's
- *  `attempt_started` line is what makes the allocation observable. Both, in
- *  that order, so a reader never sees an event pointing at evidence that is
- *  not there yet. */
+/** Open (or re-open) an attempt's log for writing, and stamp its sidecar. */
 export function startAttempt(
   handle: RunHandle,
   token: OwnershipToken,
@@ -424,25 +318,12 @@ export function startAttempt(
     join(dir, ATTEMPT_FILES.record),
     `${JSON.stringify(full, null, 2)}\n`,
   );
-  // Truncating create: an attempt directory is allocated once, but a
-  // coordinator that took over a run mid-attempt re-opens the same ordinal and
-  // must not append onto bytes it did not produce. BOTH streams, so a reader
-  // asking for a push log that never got a line reads an empty log rather
-  // than the previous coordinator's.
   writeAtomic(join(dir, ATTEMPT_FILES.log), "");
   writeAtomic(join(dir, ATTEMPT_FILES.pushLog), "");
   return true;
 }
 
-/**
- * REPLACE an attempt's log with `text`.
- *
- * For the one frame that is a re-sync rather than new output: a lane
- * re-sending a node's buffered tail. That is not a retry — the attempt is the
- * same attempt — so the bytes are replaced in place rather than rotated onto a
- * new ordinal, which would leave an empty ghost attempt behind and make
- * "attempt 2" mean nothing.
- */
+/** REPLACE an attempt's log with `text`. */
 export function writeAttemptLog(
   handle: RunHandle,
   node: string,
@@ -459,16 +340,10 @@ export function writeAttemptLog(
       text,
     );
   } catch {
-    // Best-effort, like every other evidence write — see `appendAttemptLog`.
   }
 }
 
-/** Append raw bytes to an attempt's log. Hot path — called per output chunk —
- *  so it does NOT re-check the fence on every call: the fence is checked when
- *  the attempt starts and when it is sealed, and a fenced writer appending to
- *  a log it will never seal is a bounded, recoverable mess (a log that ends
- *  without a terminal), whereas a `stat` per chunk is a syscall per line of
- *  every recipe's output. Stated rather than left as an oversight. */
+/** Append raw bytes to an attempt's log. */
 export function appendAttemptLog(
   handle: RunHandle,
   node: string,
@@ -483,23 +358,11 @@ export function appendAttemptLog(
   try {
     appendFileSync(path, text);
   } catch {
-    // Evidence is best-effort against the run: a full disk must not kill a
-    // coordinator mid-pipeline. The sidecar's byte count will disagree with
-    // the file, and `sealAttempt` records the log as incomplete because of it.
   }
 }
 
-/**
- * Close an attempt: record how it ended, stamp the log's completeness, and make
- * the evidence READ-ONLY.
- *
- * The chmod is the immutability the spec asks for, and it is worth being
- * precise about what it buys. It does not defend against a determined process
- * — the owner can chmod it back — but it turns "a retry overwrote the old log"
- * from a plausible bug into an operation that has to be spelled out on purpose.
- * The real guarantee is the addressing: a retry allocates attempt N+1 and
- * never names N again.
- */
+/** Close an attempt: record how it ended, stamp the log's completeness, and
+ *  make the evidence read-only. */
 export function sealAttempt(
   handle: RunHandle,
   token: OwnershipToken,
@@ -514,28 +377,20 @@ export function sealAttempt(
   const dir = attemptDir(handle.dir, encodeNodeKey(node), attempt);
   const existing = readJson(join(dir, ATTEMPT_FILES.record), decodeAttempt);
   if (existing === null) return false;
-  // `logBytes` counts the RECIPE's log: it is the number every existing
-  // reader has taken as "how much output this attempt produced", and the
-  // push's bytes are a fact about the cache, not about the recipe.
   const logPath = join(dir, ATTEMPT_FILES.log);
   let bytes = 0;
   try {
     bytes = statSync(logPath).size;
   } catch {
-    // No log file at all — an attempt that produced nothing before it died.
   }
   writeAtomic(
     join(dir, ATTEMPT_FILES.record),
     `${JSON.stringify({ ...existing, ...outcome, logBytes: bytes }, null, 2)}\n`,
   );
-  // BOTH streams go read-only: a sealed attempt's evidence is sealed, and a
-  // push log left writable would be the one file a retry could overwrite.
   for (const path of [logPath, join(dir, ATTEMPT_FILES.pushLog)]) {
     try {
       chmodSync(path, 0o444);
     } catch {
-      // A filesystem that will not take the mode (or a log that never existed)
-      // costs the belt, not the braces: the ordinal is still never reused.
     }
   }
   return true;
@@ -578,48 +433,20 @@ export interface LogSlice {
   offset: number;
   /**
    * How many BYTES this slice consumed — which is not `text`'s byte length.
-   *
-   * The decode is non-fatal (see below), so a range whose boundary lands
-   * inside a multibyte character yields U+FFFD where one or two real bytes
-   * were: measuring the decoded string would then report MORE bytes than were
-   * read, and a caller resuming from that number would skip real log content.
-   * The offset to continue from is `offset + bytesRead`, and it is a fact
-   * about the read rather than one a consumer can recover from the text.
+   * Continue from `offset + bytesRead`.
    */
   bytesRead: number;
   /** Total size of the log at read time. */
   size: number;
   /** Did this slice reach the end of the file? Distinct from `logComplete` on
-   *  the attempt record: this is "you have read everything that is there",
-   *  that is "everything there is, is there". A reader needs both — the pair
-   *  is what lets a face say "complete" honestly. */
+   *  the attempt record. */
   eof: boolean;
 }
 
 /**
- * Read a byte range of a file, race-free.
- *
- * ONE DESCRIPTOR. `statSync(path)` followed by `readFileSync(path)` asks the
- * filesystem about a NAME twice, and a name is not a file: between the two
- * calls the writer is still writing (that is what a coordinator, a lane and a
- * recipe all do), so the size the read is planned from is not the size of what
- * it reads. Opening once and `fstat`ing the handle makes both facts about the
- * same inode at the same instant.
- *
- * BYTE OFFSETS, not lines, because the caller that matters is resuming: "give
- * me from where I stopped" has a cheap exact answer in bytes and an expensive
- * approximate one in lines. A negative `offset` counts back from the end,
- * which is how a face asks for a tail without first stat-ing the file.
- *
- * UTF-8 is decoded NON-fatally on purpose: a slice boundary can land inside a
- * multibyte character, and refusing to render a log because a range cut a
- * character in half would be a worse answer than a replacement character at
- * the seam. That is exactly why {@link LogSlice.bytesRead} exists — the
- * decoded string's byte length is NOT what was read, so a caller resuming from
- * it would skip content.
- *
- * The primitive, not the policy: what to do about a file that is not there is
- * the caller's (`null`), and so is what the file MEANS.
+ * Read a byte range of a file. A negative `offset` counts back from the end.
+ * UTF-8 is decoded non-fatally, so {@link LogSlice.bytesRead} rather than the
+ * decoded string's length is what was read. `null` when the file is not there.
  */
 export function readFileSlice(
   path: string,
@@ -657,9 +484,7 @@ export function readFileSlice(
   }
 }
 
-/** One attempt's log, by address. Path resolution over {@link readFileSlice} —
- *  the technique is the primitive's, and which file it is is this function's
- *  entire contribution. */
+/** One attempt's log, by address. */
 export function readAttemptLog(
   handle: RunHandle,
   node: string,
@@ -675,8 +500,6 @@ export function readAttemptLog(
     range,
   );
 }
-
-// ── verdict and expiry ──────────────────────────────────────────────────────
 
 export function writeVerdict(
   handle: RunHandle,
@@ -700,28 +523,9 @@ export function readExpiry(handle: RunHandle): Expiry | null {
 }
 
 /**
- * Replace a run's evidence with a tombstone. The manifest and verdict stay —
- * they are small and they are what makes an expired run still answerable — and
- * the logs and journal go.
- *
- * REFUSES A RUN THAT IS STILL BEING WRITTEN, and takes no ownership token to
- * do it. Retention is a janitor, not a writer, so it cannot hold the fence —
- * but deleting the journal out from under a live coordinator would be the
- * worst outcome available here: that coordinator's own fence still passes (the
- * epoch has not moved), so it would keep appending and leave a journal that
- * restarts mid-history.
- *
- * The guard is a FRESH HEARTBEAT, deliberately not the full
- * `ownershipProvablyLost` test that a successor uses. A successor must not
- * displace a live writer, so it also asks whether the recorded pid is alive; a
- * janitor asking the same question would refuse forever, because a finished
- * coordinator's `owner.json` keeps naming a pid that the OS is free to hand to
- * somebody else. "Somebody stamped this within the grace" is the question that
- * actually means *being written*, and it answers itself correctly for a run
- * that ended a month ago.
- *
- * Returns whether it did anything, so a caller can say why a run is still on
- * disk.
+ * Replace a run's evidence with a tombstone: the manifest and verdict stay,
+ * the logs and journal go. Refuses a run that is still being written. Returns
+ * whether it did anything.
  */
 export function expireRun(handle: RunHandle, now: number = Date.now()): boolean {
   if (beingWritten(currentOwner(handle.dir), now)) return false;
@@ -736,8 +540,6 @@ export function expireRun(handle: RunHandle, now: number = Date.now()): boolean 
     try {
       rmSync(join(handle.dir, name), { recursive: true, force: true });
     } catch {
-      // A file we cannot remove is a file that stays: expiry is a courtesy to
-      // the disk, never a correctness requirement.
     }
   }
   writeAtomic(
@@ -747,61 +549,23 @@ export function expireRun(handle: RunHandle, now: number = Date.now()): boolean 
   return true;
 }
 
-// ── discovery ───────────────────────────────────────────────────────────────
-
 /** One row of the catalog listing: enough to choose a run without opening it. */
 export interface CatalogRow {
   runId: string;
   manifest: RunManifest | null;
   verdict: RunVerdict | null;
   expiry: Expiry | null;
-  /**
-   * Whether anything is writing this run, from the OWNER RECORD rather than
-   * from the manifest.
-   *
-   * The manifest's `registeredBy` is stamped once, at registration, and no
-   * write path ever updates it — so a coordinator that is killed before it
-   * finalizes leaves an endpoint there forever, and a listing that trusted it
-   * would report that run as "running" for the rest of the catalog's life.
-   * That is precisely the "a killed coordinator is indistinguishable from a
-   * slow one" failure this package exists to remove, and it was removed for
-   * `odu ci wait --run` (which folds the owner record) while surviving here.
-   *
-   * `owner.json` is the live copy: `heartbeat` refreshes it and
-   * `releaseOwnership` clears the endpoint. So the listing asks it, and gets
-   * the same three-state answer the attention query gives.
-   */
+  /** Whether anything is writing this run, read from `owner.json`. */
   liveness: "owned" | "owner_lost" | "no_owner";
-  /**
-   * Work has restarted since this run published `verdict`.
-   *
-   * `verdict.json` is a PROJECTION of the journal, and it is refreshed only at
-   * `finalize`. A `--linger` run that settles, takes a rerun, and is mid-retry
-   * therefore still has last generation's verdict on disk while its journal has
-   * already moved on — so a listing that read the verdict alone showed an
-   * actively re-running run as "passed". That is the same "a stale field
-   * misreports a run" failure this catalog exists to remove, reappearing at one
-   * of its own read paths.
-   *
-   * The journal is the authority, so this asks it: is there a resumption event
-   * after the last `finalized` line? See `isResumptionEvent`, the rule the
-   * attention fold and the coordinator's writer both use.
-   */
+  /** Work has restarted since this run published `verdict`. */
   resumed: boolean;
-  /** Where a live owner serves, when one does. Null for every other state, so
-   *  a reader cannot mistake a stale address for a reachable one. */
+  /** Where a live owner serves, when one does. Null for every other state. */
   endpoint: string | null;
 }
 
 /**
- * Every run id in the catalog, newest first — and NOTHING ELSE.
- *
- * `listRuns` below opens four files and a journal per run to build a row, and
- * a caller that only wants the ids paid for all of it: the service's poller
- * walked the whole catalog four times a second and used `runId` alone, which
- * at seven hundred runs kept its event loop busy full-time (juspay/odu#113).
- * This reads the directory and no file inside it, so its cost is the listing
- * and the sort, whatever the runs hold.
+ * Every run id in the catalog, newest first — and NOTHING ELSE. It reads the
+ * directory and no file inside it (juspay/odu#113).
  */
 export function listRunIds(
   opts: CatalogOptions & { limit?: number } = {},
@@ -816,23 +580,14 @@ export function listRunIds(
   return opts.limit === undefined ? ids : ids.slice(0, opts.limit);
 }
 
-/**
- * Every run in the catalog, newest first.
- *
- * The ordering comes from the run id, which encodes its start instant — so the
- * common listing is a string sort and not a manifest read per directory. The
- * manifests ARE read (a row without one is barely a row), but the order does
- * not depend on them, which is what keeps a corrupted manifest from
- * scrambling the list.
- */
+/** Every run in the catalog, newest first, ordered by the run id, which
+ *  encodes its start instant. */
 export function listRuns(
   opts: CatalogOptions & { limit?: number; repoRoot?: string; now?: number } = {},
 ): CatalogRow[] {
   const now = opts.now ?? Date.now();
   const catalog = catalogPath(opts);
   const rows: CatalogRow[] = [];
-  // Not `opts` itself: this listing's `limit` counts rows that survive the
-  // `repoRoot` filter, and handing it down would cut the ids before filtering.
   for (const runId of listRunIds({ root: catalog })) {
     const handle: RunHandle = { runId, dir: runDir(catalog, runId) };
     const manifest = readManifest(handle);
@@ -849,9 +604,6 @@ export function listRuns(
       expiry: readExpiry(handle),
       liveness:
         owner === null ? "no_owner" : alive ? "owned" : "owner_lost",
-      // Only asked when there is a verdict that could be stale. A run with no
-      // verdict has nothing for a resumption to contradict, and this listing
-      // deliberately avoids reading a journal it does not need.
       resumed: verdict !== null && resumedSinceFinal(handle),
       endpoint: alive ? owner.endpoint : null,
     });
@@ -861,9 +613,7 @@ export function listRuns(
 }
 
 /** Resolve a run-id PREFIX against the catalog. Exactly one match resolves;
- *  several are an ambiguity the caller reports rather than a first-match
- *  guess, because addressing the wrong run is how a retry lands on the wrong
- *  commit. */
+ *  several are an ambiguity. */
 export function resolveRunIdPrefix(
   prefix: string,
   opts: CatalogOptions = {},
@@ -884,9 +634,7 @@ export function resolveRunIdPrefix(
 }
 
 /** The run id a `<sha7>#<seq>` ref names, scoped to a checkout when one is
- *  given. Newest wins if a checkout somehow published the ref twice — the
- *  ordinal is reserved exclusively, so that is a torn-catalog case, not a
- *  routine one. */
+ *  given. Newest wins if a checkout somehow published the ref twice. */
 export function resolveRunRef(
   ref: { sha7: string; seq: number },
   opts: CatalogOptions & { repoRoot?: string } = {},
@@ -910,8 +658,7 @@ export function latestRun(
   return rows[0]?.runId ?? null;
 }
 
-/** Run ids whose start instant is older than `before`, for retention. Derived
- *  from the id, so pruning does not have to read a manifest per run. */
+/** Run ids whose start instant is older than `before`, for retention. */
 export function runsStartedBefore(
   before: number,
   opts: CatalogOptions = {},
@@ -930,14 +677,7 @@ export function runsStartedBefore(
   });
 }
 
-/**
- * Has work restarted since the run's last terminal line?
- *
- * The journal is the authority on this; `verdict.json` cannot answer it,
- * because it is written at `finalize` and never invalidated by the resumption
- * that follows. Reads only the event kinds, so it stays cheap enough for a
- * listing: no attempt records, no logs, no excerpts.
- */
+/** Has work restarted since the run's last terminal line? */
 export function resumedSinceFinal(handle: RunHandle): boolean {
   let seenFinal = false;
   let resumed = false;

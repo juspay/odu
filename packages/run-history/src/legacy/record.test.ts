@@ -16,7 +16,6 @@ import {
 const decodesAsRecord = (value: unknown): boolean =>
   Result.isSuccess(Schema.decodeUnknownResult(RunRecordSchema)(value));
 
-/** A PipelineState with `order`-respecting nodes built from terse tuples. */
 function stateOf(
   rows: Array<[id: string, status: PipelineState["nodes"][string]["status"], exit: number | null, dur: number | null]>,
 ): PipelineState {
@@ -54,7 +53,6 @@ describe("buildRunRecord", () => {
     });
     expect(record.outcome).toBe("passed");
     expect(record.version).toBe(RUN_RECORD_VERSION);
-    // The record validates against its own schema (the ledger reader's gate).
     expect(decodesAsRecord(record)).toBe(true);
   });
 
@@ -137,10 +135,6 @@ describe("buildRunRecord", () => {
   });
 
   it("writes only platform+host per lane, whatever shape the caller passed", () => {
-    // The coordinator feeds this `leasedLanes(header)`, whose elements are
-    // `LeasedLane` and therefore also carry `state: "leased"`. Structural typing
-    // lets that through the parameter, so a spread would write an undeclared key
-    // into every durable `.ci/<sha7>/runs/<seq>.json` lane entry.
     const record = buildRunRecord({
       ...base,
       lanes: leasedLanes({

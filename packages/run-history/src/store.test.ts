@@ -1,29 +1,3 @@
-/**
- * The durable store — what survives the coordinator that wrote it.
- *
- * The properties pinned here are the ones a reader has to be able to trust
- * months later, from a different build than the one that did the writing:
- *
- *   - REGISTER BEFORE EXECUTE: a manifest and an ownership epoch exist before
- *     anything observable happens, so "the coordinator crashed" is a state a
- *     face can describe rather than a directory nobody can name.
- *   - DENSE SEQUENCE: journal `seq` starts at 1 and never gaps, because a
- *     cursor IS a seq — a hole is indistinguishable from a delivery a caller
- *     missed.
- *   - FORGIVING READS: a torn tail or a record from a newer writer is COUNTED
- *     and skipped, never thrown. A history reader that crashes on history is
- *     worse than one that says "and 2 events I could not read".
- *   - IMMUTABLE EVIDENCE: an attempt's bytes are written once. A retry
- *     allocates the next ordinal and never names the old one again.
- *   - EVERY WRITE IS FENCED: a superseded writer's next append returns null and
- *     puts nothing on disk, rather than racing a successor for a file tail.
- *
- * Easy to get wrong, and so tested from the failure side: the fenced append and
- * the unreadable line get as much weight as the happy path. Every test passes
- * an explicit catalog `root` — a suite that wrote into the developer's real
- * `~/.local/state/odu` is a suite nobody can run twice.
- */
-
 import {
   appendFileSync,
   existsSync,
@@ -77,7 +51,6 @@ afterEach(() => {
   }
 });
 
-/** A catalog root of our own. Never the real one. */
 function tmpCatalog(): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-store-"));
   dirs.push(dir);
@@ -88,8 +61,6 @@ const T0 = 1_700_000_000_000;
 const SHA = "26d2c2dabcdef0123456789012345678901234ab";
 const NODE = "ci::e2e@x86_64-linux";
 
-/** The half of a manifest a caller supplies — the store stamps `version` and
- *  `owner` itself, which is why `registerRun` takes exactly this shape. */
 type ManifestInput = Omit<RunManifest, "version" | "registeredBy">;
 
 function manifest(over: Partial<ManifestInput> = {}): ManifestInput {
@@ -115,8 +86,6 @@ function manifest(over: Partial<ManifestInput> = {}): ManifestInput {
   };
 }
 
-/** Register, or fail the test loudly — most tests need a run to exist, not to
- *  re-litigate that registration works. */
 function register(root: string, over: Partial<ManifestInput> = {}) {
   const result = registerRun(manifest(over), {
     root,
@@ -127,10 +96,6 @@ function register(root: string, over: Partial<ManifestInput> = {}) {
   return result;
 }
 
-/** Take the run over from a machine that is not this one — the honest way to
- *  fence a writer in a test, since the incumbent's pid is OUR pid and is very
- *  much alive. A stale heartbeat plus a different host is the documented
- *  cross-host takeover. */
 function fence(handle: RunHandle): void {
   const takeover = claimOwnership({
     runId: handle.runId,
@@ -156,8 +121,6 @@ describe("registerRun", () => {
     expect(result.manifest.registeredBy.endpoint).toBe("/run/odu.sock");
     expect(result.manifest.registeredBy.claimedAt).toBe(T0);
 
-    // Round-trip: what a later, differently-built reader gets back is what was
-    // written — including the mutable owner half.
     expect(readManifest(result.handle)).toEqual(result.manifest);
 
     const journal = readJournal(result.handle);
@@ -165,8 +128,6 @@ describe("registerRun", () => {
     expect(journal.entries).toHaveLength(1);
     expect(journal.entries[0]?.seq).toBe(1);
     expect(journal.entries[0]?.at).toBe(T0);
-    // The scope travels on the first line, so a reader knows what a later
-    // verdict actually covers without opening the manifest.
     expect(journal.entries[0]?.event).toEqual({
       kind: "registered",
       scope: input.scope,
@@ -180,13 +141,12 @@ describe("registerRun", () => {
     const second = registerRun(manifest(), {
       root,
       endpoint: "/run/odu-2.sock",
-      now: T0 + 1_000, // well inside the grace: the incumbent is alive
+      now: T0 + 1_000,
     });
 
     expect(second.ok).toBe(false);
     if (second.ok) throw new Error("a live run was registered over");
     expect(second.refusal.kind).toBe("held");
-    // And the first owner's manifest is untouched — no half-registration.
     expect(readManifest(first.handle)?.registeredBy.epoch).toBe(1);
   });
 });
@@ -226,9 +186,6 @@ describe("the journal", () => {
   });
 
   it("returns null from a FENCED append, and writes nothing", () => {
-    // The whole point of the fence: a coordinator that has been superseded
-    // finds out at its next write. Two writers appending to one journal is the
-    // unrecoverable case, so the refusal must cost nothing on disk.
     const root = tmpCatalog();
     const { handle, token } = register(root);
     const before = readJournal(handle).entries;
@@ -241,18 +198,13 @@ describe("the journal", () => {
   });
 
   it("skips a torn tail and a foreign record, and COUNTS them", () => {
-    // Two different kinds of unreadable, both of which a real catalog produces:
-    // a SIGKILL mid-append leaves a truncated final line, and a newer odu
-    // writes an event arm this reader has never heard of. Neither may blind the
-    // read — a face that shows history should be able to say "and 2 events I
-    // could not read".
     const root = tmpCatalog();
     const { handle, token } = register(root);
     appendEvent(handle, token, { kind: "phase", phase: "lanes" }, T0 + 1);
 
     const events = join(handle.dir, RUN_FILES.events);
     appendFileSync(events, `${JSON.stringify({ seq: 3, at: T0 + 2, event: { kind: "from_the_future" } })}\n`);
-    appendFileSync(events, `{"seq":4,"at":${T0 + 3},"event":{"kind":"pha`); // no newline: torn
+    appendFileSync(events, `{"seq":4,"at":${T0 + 3},"event":{"kind":"pha`);
 
     const journal = readJournal(handle);
     expect(journal.unreadable).toBe(2);
@@ -283,8 +235,6 @@ describe("attempt evidence", () => {
         startedAt: T0 + 10,
       }),
     ).toBe(true);
-    // A multibyte character on purpose: `logBytes` is BYTES, and a length in
-    // characters would be a lie a resuming reader would seek by.
     appendAttemptLog(handle, NODE, 1, "compiling…\n");
     appendAttemptLog(handle, NODE, 1, "boom\n");
     const text = "compiling…\nboom\n";
@@ -313,9 +263,6 @@ describe("attempt evidence", () => {
     expect(slice?.size).toBe(Buffer.byteLength(text));
     expect(slice?.eof).toBe(true);
 
-    // Sealed evidence is read-only. Not a defence against a determined process
-    // — the owner can chmod it back — but it turns "a retry overwrote the log"
-    // from a plausible bug into something somebody had to spell out.
     const logPath = join(
       attemptDir(handle.dir, encodeNodeKey(NODE), 1),
       ATTEMPT_FILES.log,
@@ -324,10 +271,6 @@ describe("attempt evidence", () => {
   });
 
   it("leaves a sealed attempt untouched when the node is retried", () => {
-    // IMMUTABILITY, which here is really about ADDRESSING: attempt 2 is a new
-    // ordinal with its own directory, so nothing about it can reach attempt 1's
-    // bytes. A store that reused the ordinal would silently destroy the
-    // evidence of the failure that caused the retry.
     const root = tmpCatalog();
     const { handle, token } = register(root);
 
@@ -348,7 +291,7 @@ describe("attempt evidence", () => {
     expect(readAttemptLog(handle, NODE, 1)?.text).toBe("first go\n");
     expect(readAttemptRecord(handle, NODE, 1)?.exitCode).toBe(2);
     expect(readAttemptLog(handle, NODE, 2)?.text).toBe("second go\n");
-    expect(readAttemptRecord(handle, NODE, 2)?.status).toBeNull(); // still running
+    expect(readAttemptRecord(handle, NODE, 2)?.status).toBeNull();
     expect(attemptsFor(handle, NODE)).toEqual([1, 2]);
   });
 
@@ -372,16 +315,11 @@ describe("attempt evidence", () => {
         logTruncationReason: null,
       }),
     ).toBe(false);
-    // No ordinal was allocated, and attempt 1 is still open rather than sealed
-    // by a writer that no longer speaks for the run.
     expect(attemptsFor(handle, NODE)).toEqual([1]);
     expect(readAttemptRecord(handle, NODE, 1)?.status).toBeNull();
   });
 
   it("names every node it holds evidence for, decoded back to node ids", () => {
-    // The directory name is an escaped spelling (`::` and `@` are hostile as
-    // path segments); the caller only ever speaks node ids, so the round trip
-    // has to survive a real one.
     const root = tmpCatalog();
     const { handle, token } = register(root);
     const other = "ci::unit@aarch64-darwin";
@@ -409,8 +347,6 @@ describe("attempt evidence", () => {
 describe("readAttemptLog byte ranges", () => {
   const placement = { platform: "x86_64-linux", host: "builder-1" };
 
-  /** A run whose one attempt log is exactly "0123456789" — ten ASCII bytes, so
-   *  every offset in a range assertion is also its character index. */
   function withLog(root: string) {
     const { handle, token } = register(root);
     startAttempt(handle, token, { node: NODE, attempt: 1, placement, startedAt: T0 });
@@ -425,7 +361,7 @@ describe("readAttemptLog byte ranges", () => {
     expect(middle?.text).toBe("234");
     expect(middle?.offset).toBe(2);
     expect(middle?.size).toBe(10);
-    expect(middle?.eof).toBe(false); // there are bytes past this slice
+    expect(middle?.eof).toBe(false);
 
     const rest = readAttemptLog(handle, NODE, 1, { offset: 5 });
     expect(rest?.text).toBe("56789");
@@ -440,8 +376,6 @@ describe("readAttemptLog byte ranges", () => {
     expect(tail?.offset).toBe(6);
     expect(tail?.eof).toBe(true);
 
-    // A tail longer than the file is the whole file, not an error: a face that
-    // asks for the last 4 KiB of a 10-byte log wants the 10 bytes.
     const all = readAttemptLog(handle, NODE, 1, { offset: -4096 });
     expect(all?.text).toBe("0123456789");
     expect(all?.offset).toBe(0);
@@ -456,9 +390,6 @@ describe("readAttemptLog byte ranges", () => {
   });
 
   it("returns null for an attempt that does not exist", () => {
-    // Distinct from an empty log: "there is no such evidence" and "the evidence
-    // is empty" are different answers, and a face must not print the second for
-    // the first.
     const handle = withLog(tmpCatalog());
     expect(readAttemptLog(handle, NODE, 99)).toBeNull();
     expect(readAttemptLog(handle, "ci::never-ran@x86_64-linux", 1)).toBeNull();
@@ -467,7 +398,6 @@ describe("readAttemptLog byte ranges", () => {
 });
 
 describe("discovery", () => {
-  /** Three runs in one catalog: ids sort by start instant, so `c` is newest. */
   function threeRuns(root: string) {
     register(root, { runId: "0000000a-0001", sha: `aaaaaaa${SHA.slice(7)}`, seq: 1 });
     register(root, {
@@ -487,16 +417,11 @@ describe("discovery", () => {
       "0000000b-0001",
       "0000000a-0001",
     ]);
-    // The endpoint is projected onto the row so a lister can tell a live run
-    // from a finished one without opening it.
     expect(listRuns({ root })[0]?.endpoint).toBe("/run/odu.sock");
     expect(listRuns({ root })[0]?.liveness).toBe("owned");
   });
 
   it("lists run ids newest first without opening a single file", () => {
-    // The poller's discovery (juspay/odu#113). A run directory with NO files in
-    // it is still listed — the proof that this reads the directory and nothing
-    // inside it — and an entry that is not a run id is not.
     const root = tmpCatalog();
     threeRuns(root);
     mkdirSync(join(root, "0000000f-0001"));
@@ -513,24 +438,14 @@ describe("discovery", () => {
   });
 
   it("reports a coordinator that died without finalizing as owner_lost, not running", () => {
-    // The listing's own three-state answer, and the reason it cannot be
-    // `endpoint !== null`. The manifest's `registeredBy.endpoint` is stamped
-    // once at registration and no write path clears it, so a run whose
-    // coordinator was killed keeps that address forever — and a lister that
-    // trusted it would report the run as executing for the life of the
-    // catalog, in the one view an operator scans to find what is still going.
     const root = tmpCatalog();
     const registered = register(root, { runId: "0000000d-0001" });
-    // Move ownership to a machine that is not this one and let its heartbeat
-    // go stale — the honest way to have a dead owner in a test, since our own
-    // pid is very much alive (see `fence`).
     fence(registered.handle);
 
     const rows = listRuns({ root, now: T0 + OWNERSHIP_GRACE_MS * 4 });
     const row = rows.find((r) => r.runId === "0000000d-0001");
     expect(row?.verdict).toBeNull();
     expect(row?.liveness).toBe("owner_lost");
-    // And no address is offered for a socket nobody is serving.
     expect(row?.endpoint).toBeNull();
   });
 
@@ -544,11 +459,6 @@ describe("discovery", () => {
   });
 
   it("expires every kind of evidence, including the ones added after it was written", () => {
-    // The partition, not a list at the call site. `receipts/` and
-    // `coordinator.log` were both added to a run directory after `expireRun`
-    // named its two deletions inline, and both then survived expiry forever —
-    // the coordinator log being the record of a run that died before its
-    // per-node logs said anything, which is the case this release exists for.
     const root = tmpCatalog();
     const { handle, token } = register(root, { runId: "0000000e-0001" });
     appendEvent(handle, token, { kind: "roster", order: [NODE] });
@@ -570,7 +480,6 @@ describe("discovery", () => {
         false,
       );
     }
-    // And what makes an expired run still answerable stays.
     expect(existsSync(join(handle.dir, RUN_FILES.manifest))).toBe(true);
     expect(readExpiry(handle)).not.toBeNull();
   });
@@ -580,8 +489,6 @@ describe("discovery", () => {
   });
 
   it("resolves a run-id prefix to one, none, or an ambiguity", () => {
-    // Never a first-match guess: addressing the wrong run is how a retry lands
-    // on the wrong commit.
     const root = tmpCatalog();
     threeRuns(root);
     expect(resolveRunIdPrefix("0000000b", { root })).toEqual({
@@ -603,8 +510,6 @@ describe("discovery", () => {
     const root = tmpCatalog();
     threeRuns(root);
     expect(resolveRunRef({ sha7: "bbbbbbb", seq: 2 }, { root })).toBe("0000000b-0001");
-    // The sha must match as a prefix AND the ordinal must match: a right sha
-    // with the wrong ordinal is a different run, not a near miss.
     expect(resolveRunRef({ sha7: "bbbbbbb", seq: 9 }, { root })).toBeNull();
     expect(resolveRunRef({ sha7: "fffffff", seq: 2 }, { root })).toBeNull();
   });
@@ -651,15 +556,12 @@ describe("expireRun", () => {
 
     expireRun(handle, T0 + 90_000);
 
-    // The bulk is gone…
     expect(existsSync(join(handle.dir, RUN_FILES.events))).toBe(false);
     expect(existsSync(join(handle.dir, RUN_FILES.attempts))).toBe(false);
     expect(readJournal(handle)).toEqual({ entries: [], unreadable: 0, highestSeq: 0 });
     expect(attemptsFor(handle, NODE)).toEqual([]);
     expect(readAttemptLog(handle, NODE, 1)).toBeNull();
 
-    // …and the small, answerable half stays. An agent holding a months-old run
-    // id gets "expired, and it failed" rather than "no such run".
     expect(readManifest(handle)?.runId).toBe(handle.runId);
     expect(readVerdict(handle)?.outcome).toBe("failed");
     expect(readExpiry(handle)).toEqual({
@@ -668,7 +570,6 @@ describe("expireRun", () => {
       expiredAt: T0 + 90_000,
       outcome: "failed",
     });
-    // And the run is still listed — expiry is a tombstone, not a deletion.
     expect(listRuns({ root }).map((r) => r.runId)).toEqual([handle.runId]);
   });
 

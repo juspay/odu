@@ -1,30 +1,3 @@
-/**
- * Receipts — the property that a mutation asked for twice is performed once.
- *
- * The failure this file exists for is not a race. It is an agent whose reply
- * was lost asking again, and getting a SECOND run for one request. So the
- * claim, not the result, is what has to be exclusive, and the interesting
- * assertions are all about the second caller:
- *
- *   - EXACTLY ONE CLAIMANT. `claimReceipt` returns `claimed` once and never
- *     again for that id; the loser is told `in_flight` or `replay`, which are
- *     different instructions and must not be confused.
- *   - A FILE IT CANNOT READ IS NOT FREE. A torn receipt reports `in_flight`
- *     with nothing to reconcile against — the one case where "I don't know"
- *     has to beat "go ahead", because going ahead is the duplicate run.
- *   - THE FIRST ANSWER WINS. `completeReceipt` on an already-completed receipt
- *     leaves the first result in place, so a reconciler racing the original
- *     caller cannot rewrite what was already told to somebody.
- *   - A REQUEST ID BECOMES A FILENAME. `isRequestId` is therefore a gate and
- *     not a nicety: a caller that can name a file can name any file.
- *
- * Easy to get wrong because every one of these is invisible on the happy path
- * — a suite that only claims once and completes once passes with the exclusion
- * removed. Every test writes into a catalog root of its own; a suite that
- * touched the developer's real `~/.local/state/odu` is a suite nobody can run
- * twice.
- */
-
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,8 +25,6 @@ const PLANNED = "0000000b-0002";
 
 type ManifestInput = Omit<RunManifest, "version" | "registeredBy">;
 
-/** A registered run of our own, in a catalog of our own. Receipts live beside
- *  a run's journal, so a receipt needs a run before it needs anything else. */
 function aRun(): RunHandle {
   const root = mkdtempSync(join(tmpdir(), "odu-receipts-"));
   dirs.push(root);
@@ -76,7 +47,6 @@ function aRun(): RunHandle {
   return result.handle;
 }
 
-/** The claim every test starts from, so a test states only what it varies. */
 function claim(
   handle: RunHandle,
   over: Partial<Parameters<typeof claimReceipt>[1]> = {},
@@ -91,9 +61,6 @@ function claim(
   });
 }
 
-/** Where a receipt file actually lands, for the tests that have to corrupt
- *  one. Spelled here rather than exported: a test that had to import the path
- *  builder would be testing the builder. */
 function receiptFile(handle: RunHandle, requestId: string): string {
   return join(handle.dir, "receipts", `${requestId}.json`);
 }
@@ -109,9 +76,6 @@ describe("claiming a request id", () => {
     expect(first?.receipt.result).toBeNull();
     expect(first?.receipt.version).toBe(RUN_RECORD_FORMAT);
 
-    // The same request arriving again while the first has not finished. NOT
-    // `claimed` — a second `claimed` is a second run for one request — and not
-    // `replay` either, because there is no answer to replay yet.
     const second = claim(handle);
     expect(second?.kind).toBe("in_flight");
     expect(second?.receipt.plannedRunId).toBe(PLANNED);
@@ -126,27 +90,19 @@ describe("claiming a request id", () => {
     expect(again?.kind).toBe("replay");
     expect(again?.receipt.state).toBe("completed");
     expect(again?.receipt.completedAt).toBe(T0 + 5);
-    // Verbatim: two asks must not get two different descriptions of one action.
     expect(again?.receipt.result).toEqual({ mode: "relaunched", run: PLANNED });
   });
 
   it("refuses the same id carrying different input", () => {
-    // Two requests wearing one id is a caller bug, and answering it with
-    // either outcome would be worse than saying so.
     const handle = aRun();
     claim(handle);
 
     const other = claim(handle, { digest: digestOf([RUN_ID, "e2e"]) });
     expect(other?.kind).toBe("conflict");
-    // The refusal carries what is ON DISK, so a caller can see what the id was
-    // spent on rather than being shown its own rejected request back.
     expect(other?.receipt.digest).toBe(digestOf([RUN_ID, "unit"]));
   });
 
   it("treats a receipt it cannot read as taken, never as free", () => {
-    // A torn write, or a record from a build that knew a field this one does
-    // not. Reading it as free would do the work twice — the single failure the
-    // whole mechanism exists to prevent — so "I don't know" beats "go ahead".
     const handle = aRun();
     mkdirSync(join(handle.dir, "receipts"), { recursive: true });
     writeFileSync(receiptFile(handle, "req-1"), '{"version":1,"requestId":"req-1"');
@@ -155,8 +111,6 @@ describe("claiming a request id", () => {
 
     const outcome = claim(handle);
     expect(outcome?.kind).toBe("in_flight");
-    // And with an empty planned id: there is nothing to reconcile against, so
-    // the caller must refuse rather than go looking for a run that has no name.
     expect(outcome?.receipt.plannedRunId).toBe("");
   });
 
@@ -171,8 +125,6 @@ describe("claiming a request id", () => {
 
 describe("completing a receipt", () => {
   it("keeps the FIRST result when it is completed twice", () => {
-    // A reconciler and the original caller can both arrive at a receipt that is
-    // accepted-but-not-completed. History has one version.
     const handle = aRun();
     claim(handle);
 
@@ -198,8 +150,6 @@ describe("isRequestId", () => {
     expect(isRequestId("..")).toBe(false);
     expect(isRequestId("a/b")).toBe(false);
     expect(isRequestId("../escape")).toBe(false);
-    // Leading `-` is refused too: an id is also a token that lands in argv,
-    // and one that starts like a flag is a caller's problem to spell better.
     expect(isRequestId("-leading-dash")).toBe(false);
     expect(isRequestId("x".repeat(129))).toBe(false);
   });
@@ -218,18 +168,11 @@ describe("digestOf", () => {
     expect(digestOf([RUN_ID, "unit", "", 0])).not.toBe(
       digestOf([RUN_ID, "e2e", "", 0]),
     );
-    // Order is part of the input, not an accident of it: the same parts in a
-    // different order are a different request.
     expect(digestOf(["a", "b"])).not.toBe(digestOf(["b", "a"]));
-    // Types are canonicalised, so a caller that spells an ordinal as a number
-    // and one that spells it as a string agree.
     expect(digestOf(["a", 1, true])).toBe(digestOf(["a", "1", "true"]));
   });
 
   it("gives an absent part and an empty one one spelling", () => {
-    // The retry policy spells "no expected attempt" as `""` and `0` rather than
-    // omitting the parts, so an empty list and a list of empties must not be
-    // two different requests.
     expect(digestOf([])).toBe(digestOf([""]));
     expect(digestOf([])).toBe(digestOf([...[]]));
   });

@@ -1,18 +1,3 @@
-/**
- * Importing the old world without rewriting it, and without overclaiming what
- * the old bytes can support.
- *
- * Three properties, and each of them is a promise a face repeats to a user. The
- * import is READ-ONLY over the checkout — `.ci/` keeps working exactly as it
- * did, so a byte of it moving here would be a regression nobody notices until
- * the old reader disagrees with the new one. It is IDEMPOTENT — the run id is
- * derived from the source identity, so running the command twice must not
- * double a checkout's history. And it is HONEST about the evidence: the old
- * layout kept one log per (commit, node) and overwrote it on rerun, so an
- * imported attempt is marked incomplete with a reason that names the layout,
- * rather than being presented as the same kind of evidence a native run makes.
- */
-
 import {
   closeSync,
   type Dirent,
@@ -86,8 +71,6 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
-/** A checkout with the LEGACY layout: `.ci/<sha7>/runs/<seq>.json` beside
- *  `.ci/<sha7>/<platform>/<node>.log`. */
 function legacyCheckout(records: RunRecord[], logs: Record<string, string> = { [NODE]: LOG }): string {
   const repoRoot = tmp("odu-import-checkout-");
   for (const r of records) {
@@ -104,8 +87,6 @@ function legacyCheckout(records: RunRecord[], logs: Record<string, string> = { [
   return repoRoot;
 }
 
-/** Every file under `.ci`, with its bytes, size and mtime — the fingerprint an
- *  import must not change. */
 function fingerprint(repoRoot: string): Record<string, string> {
   const out: Record<string, string> = {};
   const walk = (dir: string): void => {
@@ -121,11 +102,6 @@ function fingerprint(repoRoot: string): Record<string, string> {
         walk(path);
         continue;
       }
-      // ONE descriptor: the size and mtime are asked of the OPEN FILE, not of
-      // the name a moment before reading it. A stat-then-read pair is two
-      // questions about a path, and a fingerprint whose parts came from two
-      // instants cannot witness "nothing changed" — which is the only thing
-      // this helper exists to say.
       const fd = openSync(path, "r");
       try {
         const stat = fstatSync(fd);
@@ -162,7 +138,6 @@ describe("importCheckout", () => {
     expect(manifest?.importedFrom).toBe(
       join(repoRoot, ".ci", SHA7, "runs", "2.json"),
     );
-    // The run sorts into the catalog at the moment it actually happened.
     expect(manifest?.createdAt).toBe(1_700_000_000_000);
   });
 
@@ -179,15 +154,13 @@ describe("importCheckout", () => {
     expect(attempt?.status).toBe("failed");
     expect(attempt?.exitCode).toBe(1);
     expect(attempt?.logBytes).toBe(Buffer.byteLength(LOG));
-    // The honest half: the old layout never recorded completeness, so this is
-    // never presented as a log that got its producer's last word.
     expect(attempt?.logComplete).toBe(false);
     expect(attempt?.logTruncationReason).toContain(".ci");
     expect(attempt?.logTruncationReason).toContain("overwrote it on rerun");
   });
 
   it("leaves an attempt with no surviving log addressable and empty", () => {
-    const repoRoot = legacyCheckout([record()], {}); // record written, log never kept
+    const repoRoot = legacyCheckout([record()], {});
     const root = tmp("odu-import-catalog-");
     importCheckout({ root, repoRoot });
 
@@ -206,17 +179,10 @@ describe("the reconstructed journal", () => {
     const entries = readJournal(
       handleFor(importedRunId(record({ outcome: "failed" })), { root }),
     ).entries;
-    // NOTE: asserted as "carries", not "ends with". The reconstruction pushes
-    // `finalized` before the per-node `log_finalized` lines it allocates while
-    // copying evidence, so the terminal line is a `log_finalized` — see the
-    // ordering note reported alongside these tests.
     const finalized = entries.filter((e) => e.event.kind === "finalized");
     expect(finalized).toHaveLength(1);
     expect(finalized[0]?.event).toEqual({ kind: "finalized", outcome: "failed" });
-    // Stamped with the run's own clock, not the import's.
     expect(finalized[0]?.at).toBe(1_700_000_060_000);
-    // Dense, 1-based sequences — a cursor is a seq, so a gap would be a hole a
-    // caller could not tell from a delivery it missed.
     expect(entries.map((e) => e.seq)).toEqual(
       entries.map((_, i) => i + 1),
     );
@@ -237,7 +203,6 @@ describe("the reconstructed journal", () => {
     expect(failed.settled).toBe(true);
     expect(failed.passed).toBe(false);
     expect(failed.unresolved_failures.map((f) => f.node)).toEqual([NODE]);
-    // Nothing is serving an imported run, and nothing ever will.
     expect(failed.endpoint).toBeNull();
 
     const passed = readAttention(handleFor(importedRunId(green), { root }));
@@ -274,7 +239,6 @@ describe("an imported run is not retryable", () => {
 describe("importedRunId", () => {
   it("is stable for the same record — which is what makes the import idempotent", () => {
     expect(importedRunId(record())).toBe(importedRunId(record()));
-    // Only the source identity feeds it: two readings of the same run agree.
     expect(importedRunId(record({ pipeline: "other" }))).toBe(importedRunId(record()));
   });
 
@@ -315,7 +279,7 @@ describe("the checkout it read", () => {
     expect(Object.keys(before).length).toBeGreaterThan(0);
 
     importCheckout({ root, repoRoot });
-    importCheckout({ root, repoRoot }); // and the second pass touches nothing either
+    importCheckout({ root, repoRoot });
 
     expect(fingerprint(repoRoot)).toEqual(before);
   });

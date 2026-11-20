@@ -1,36 +1,3 @@
-/**
- * Importing the old world — reading a checkout's `.ci/` history into the
- * catalog, on purpose and by name.
- *
- * Before this package, odu's durable history was checkout-scoped: a run record
- * at `.ci/<sha7>/runs/<seq>.json` and per-node logs at
- * `.ci/<sha7>/<platform>/<node>.log`. Those files are still readable, still
- * read by `odu runs`, and are NOT rewritten by anything here — the old layout
- * keeps working exactly as it did, which is the compatibility half of this
- * release.
- *
- * What is offered instead is an EXPLICIT import: `odu ci history import` walks a
- * checkout's `.ci/` and mints a catalog entry per old record, so a
- * long-running checkout's history follows its owner into the per-user catalog
- * rather than being stranded. Explicit because two properties of the old
- * format make an automatic migration dishonest:
- *
- *   - AN OLD RECORD HAS NO ATTEMPTS. `.ci` keeps one log per (commit, node) and
- *     a rerun overwrote it, so an imported run has exactly attempt 1 and its
- *     log is whatever survived. Presenting that as the same kind of evidence a
- *     native run produces would be a claim the bytes cannot support, so an
- *     imported attempt is marked `logComplete: false` with a reason that says
- *     which layout it came from.
- *   - AN OLD RECORD HAS NO JOURNAL. The events below are RECONSTRUCTED from the
- *     record's terminal node list — they are what must have happened, not what
- *     was observed. `importedFrom` on the manifest is how a reader tells the
- *     two apart, and every face that shows an imported run should say so.
- *
- * Nothing here deletes anything. An import that runs twice is a no-op for runs
- * already imported (the run id is derived from the source identity, so the
- * second pass finds the directory already there).
- */
-
 import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { logPathFor } from "@odu/run-client/nodeId";
@@ -59,21 +26,12 @@ import {
  * The run id an imported record gets.
  *
  * DERIVED from the source identity rather than minted, and that is what makes
- * the import idempotent: the same `.ci` record always lands on the same run id,
- * so a second import finds the directory and skips it instead of producing a
- * duplicate history that grows every time somebody runs the command.
- *
- * The time half is the run's own `startedAt`, so an imported run sorts into the
- * catalog at the moment it actually happened — which is the whole point of
- * importing it rather than appending it.
+ * the import idempotent: the same `.ci` record always lands on the same run id.
  */
 export function importedRunId(
   record: Pick<RunRecord, "repo" | "sha" | "seq" | "startedAt">,
 ): string {
   const ts = Math.floor(record.startedAt).toString(36).padStart(8, "0");
-  // A stable tail from the record's own identity: same commit + same ordinal =
-  // same id, different ones never collide. Hashed to base36 so the id keeps the
-  // shape `isRunId` accepts.
   let hash = 0x811c9dc5;
   for (const ch of `${record.repo ?? ""}|${record.sha}|${record.seq}`) {
     hash ^= ch.charCodeAt(0);
@@ -120,15 +78,6 @@ export function importCheckout(opts: ImportOptions): ImportReport {
   return report;
 }
 
-/**
- * Write one legacy record into the catalog.
- *
- * No ownership epoch is claimed: an imported run is finished by definition, so
- * there is nothing to fence and claiming would leave a corpse owner behind.
- * The manifest's `owner` records the import itself — epoch 1, no endpoint, a
- * heartbeat at the import instant — which is what a reader needs to see that
- * nothing is serving this run and nothing ever will.
- */
 function importOne(
   handle: RunHandle,
   record: RunRecord,
@@ -152,9 +101,6 @@ function importOne(
       mode: record.dirty ? "live" : "strict",
       expectedSha: record.sha,
       dirty: record.dirty,
-      // Never: the old layout kept no snapshot inputs, so a retry of an
-      // imported run has nothing to replay. Refusing is the honest answer and
-      // this field is where it is decided.
       retryable: false,
     },
     build: { oduVersion: "imported", self: null, runnerFlake: null },
@@ -175,10 +121,6 @@ function importOne(
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
 
-  // The reconstructed journal. Every line is stamped with the record's own
-  // clock rather than the import's, so a face that renders event times shows
-  // when the run happened; the events themselves are marked as reconstructed by
-  // the manifest's `importedFrom`, not by a per-event flag nobody would read.
   const entries: JournalEntry[] = [];
   let seq = 0;
   const push = (at: number, event: JournalEntry["event"]): void => {
@@ -231,9 +173,6 @@ function importOne(
     });
   }
 
-  // Copy the evidence and stamp each attempt, THEN write the journal — so a
-  // reader that finds a `log_finalized` line always finds the bytes it
-  // describes. (The loop below appends those lines as it copies.)
   for (const node of record.nodes) {
     const source = join(opts.repoRoot, logPathFor(sha7, node.id));
     const dir = attemptDir(handle.dir, encodeNodeKey(node.id), 1);
@@ -287,10 +226,6 @@ function importOne(
       },
     });
   }
-  // The terminal LAST, after every `log_finalized` the copy loop appended.
-  // `foldJournal` is order-insensitive, but a cursor reader is not: events
-  // delivered after a `finalized` line would be a run still talking about
-  // itself past its own ending.
   push(record.finishedAt, { kind: "finalized", outcome: record.outcome });
   entries.sort((a, b) => a.seq - b.seq);
   writeAtomic(

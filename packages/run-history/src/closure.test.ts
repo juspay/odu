@@ -1,33 +1,3 @@
-/**
- * The WALL, enforced — what this package is allowed to import.
- *
- * Same instrument as `@odu/run-client`'s `closure.test.ts`, and deliberately a
- * SIBLING rather than a shared helper: each package must be able to state its
- * own closure from inside its own directory, because that is the unit a
- * consumer copies. A guard imported from a neighbour would be a guard that
- * travels only as far as the neighbour does — and the failure it catches is
- * exactly the failure of a directory that did not travel with everything it
- * needs.
- *
- * Two ways to break a consumer that `tsc` cannot see from inside this repo,
- * where odu's own node_modules resolves everything:
- *
- *   - an import that reaches back into odu's `src/` compiles here and is a
- *     `TS2307` downstream, because only this directory was copied;
- *   - an import of a package this manifest does not declare compiles here (the
- *     root node_modules has it) and is a missing module downstream.
- *
- * The walk is a PARSE, not a line scan — see the run-client twin for why a
- * regex over lines is a guard that passes because of today's formatting.
- * TYPE-ONLY EDGES COUNT: this package ships raw TypeScript, so a consumer's
- * `tsc` resolves an `import type` exactly as it resolves a value import.
- *
- * The one claim that is this package's own: the arrow to `@odu/run-client`
- * runs ONE WAY. run-history reads the vocabulary a live run speaks; run-client
- * knows nothing about durable history, and the day it does, this file is where
- * the cycle shows up.
- */
-
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -41,19 +11,10 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** What a consumer must satisfy, pinned as a literal set. Growing it is a
- *  decision every downstream pays for, so it is written down rather than
- *  derived from whatever the manifest happens to say today. */
 const EXPECTED_DEPENDENCIES = ["@odu/run-client", "effect"];
 
-/** The `@kolu/*` sources a consumer must hydrate alongside this package.
- *  EMPTY, and that is a property worth pinning: this package touches no
- *  surface framework at all — it is files and schemas — so a consumer that
- *  wants history alone hydrates nothing. The first `@kolu/*` import here would
- *  be a new directory every downstream has to copy. */
 const HYDRATED = new Set<string>([]);
 
-/** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
 function tsFilesUnder(dir: string): string[] {
@@ -70,9 +31,6 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
-/** Every module specifier a consumer's compiler would have to resolve: static
- *  imports and re-exports (`import type` included), `import x = require("…")`,
- *  dynamic `import()`, and `import("…").T` in type position. */
 function specifiersIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
@@ -107,7 +65,6 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
-/** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@")
@@ -126,8 +83,6 @@ const sources = tsFilesUnder(join(packageRoot, "src"))
 describe("@odu/run-history's import closure", () => {
   it("has sources to police", () => {
     expect(sources.length).toBeGreaterThan(0);
-    // A parser that silently returned nothing would make every assertion
-    // below vacuously true.
     expect(sources.flatMap((s) => s.specifiers).length).toBeGreaterThan(0);
   });
 
@@ -170,10 +125,6 @@ describe("@odu/run-history's import closure", () => {
   });
 
   it("keeps the run-client arrow pointing one way", () => {
-    // The claim this package makes that its neighbour cannot: history depends
-    // on the live vocabulary, never the reverse. Asserted from BOTH sides —
-    // that we import it, and that it does not import us — so a cycle
-    // introduced from either direction lands here.
     const usesRunClient = sources.some(({ specifiers }) =>
       specifiers.some((s) => packageOf(s) === "@odu/run-client"),
     );

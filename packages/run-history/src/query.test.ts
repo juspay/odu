@@ -1,20 +1,3 @@
-/**
- * The seam between what a caller TYPED and the run it meant — and the bounded
- * wait that decides when there is something worth reporting.
- *
- * Both halves fail quietly when they are wrong. A prefix that resolves to the
- * first match addresses somebody else's commit, and the caller finds out after
- * acting on it. A cursor kept across a finalized retry is a token for the
- * parent run, and resuming it against the child truthfully reports "nothing
- * new" about a run that has done everything — so a wrong-run cursor must be a
- * REFUSAL carrying a resync route, never a silent restart. And the wait must
- * come back `still_running` at its deadline rather than inventing a verdict:
- * "not yet" and "it passed" are different answers to the same question.
- *
- * These run against the real store on a temp catalog — the resolution rules are
- * about files on disk, and a stubbed store would not be testing them.
- */
-
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,7 +36,6 @@ afterEach(() => {
   }
 });
 
-/** A catalog of this test's own — never the developer's real one. */
 function catalog(): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-query-"));
   dirs.push(dir);
@@ -93,8 +75,6 @@ function register(
   return { handle: result.handle, token: result.token, runId };
 }
 
-/** Drive one node to red, with its log written and sealed — the shape a
- *  bounded wait is meant to return on. */
 function failOneNode(run: Registered, text: string): void {
   appendEvent(run.handle, run.token, { kind: "roster", order: [NODE] });
   appendEvent(run.handle, run.token, {
@@ -160,9 +140,6 @@ describe("resolveRun", () => {
   });
 
   it("REFUSES an ambiguous prefix, naming how many it matched", () => {
-    // Two runs started in the same millisecond share the id's time half, so a
-    // prefix of it names both. Picking the first would address the wrong
-    // commit's evidence, silently.
     const root = catalog();
     const at = 1_700_000_000_000;
     const a = register(root, { runId: mintRunId(at, () => 0.11) });
@@ -196,8 +173,6 @@ describe("resolveRun", () => {
   it("refuses junk with the three forms it accepts — a message, never a throw", () => {
     const root = catalog();
     for (const token of ["", "  ", "not a run!", "??", "/etc/passwd"]) {
-      // Reaching the assertion at all is half the point: an unparseable token
-      // comes back as a refusal, it does not throw past the caller.
       expect(resolveRun(token, { root }).ok).toBe(false);
     }
     const answer = resolveRun("not-a-run!", { root });
@@ -229,8 +204,6 @@ describe("resolveCursor", () => {
   });
 
   it("REFUSES a cursor belonging to another run, with a resync for THIS one", () => {
-    // The finalized-retry trap: the caller kept the parent's cursor. Resuming it
-    // here would report "nothing new" about a run that has done everything.
     const root = catalog();
     const parent = register(root, { runId: mintRunId(1_700_000_000_000) });
     const child = register(root, { runId: mintRunId(1_700_000_100_000) });
@@ -285,7 +258,6 @@ describe("readAttention over a real run", () => {
     expect(failure?.excerpt_source).toBe("attempt_log");
     expect(failure?.excerpt).toContain("BOOM");
     expect(failure?.log_key).toBe(`--run ${run.runId} --attempt 1 ${NODE}`);
-    // The `registered` line the store wrote at registration is event 1.
     expect(answer.events[0]?.event.kind).toBe("registered");
     expect(answer.cursor).toBe(
       formatCursor({ runId: run.runId, seq: answer.events.length }),
@@ -320,9 +292,6 @@ describe("readAttention over a real run", () => {
 });
 
 describe("waitForLogGrowth", () => {
-  /** An attempt that has STARTED and is still writing — the state a follower
-   *  actually waits on. The record has to exist before it can be sealed, which
-   *  is what makes "complete" and "the writer died" distinguishable at all. */
   function startNode(run: Registered, text = ""): number {
     appendEvent(run.handle, run.token, {
       kind: "attempt_started",
@@ -358,9 +327,6 @@ describe("waitForLogGrowth", () => {
   });
 
   it("says `shrank` when the log was rewritten under the caller's cursor", async () => {
-    // `writeAttemptLog` is a re-sync, not a retry: the same attempt's bytes are
-    // replaced in place. A follower holding an offset past the new end is
-    // holding an address that no longer means what it did.
     const root = catalog();
     const run = register(root);
     startNode(run, "0123456789");
@@ -396,9 +362,6 @@ describe("waitForLogGrowth", () => {
   });
 
   it("says `run_terminal` for the log of a writer that was KILLED", async () => {
-    // The case an inferred answer gets wrong. The attempt was sealed
-    // `logComplete: false` — nobody will ever say its last word — but the run
-    // has a verdict, which proves just as firmly that no byte is coming.
     const root = catalog();
     const run = register(root);
     const from = startNode(run, "cut off mid-");
@@ -486,7 +449,6 @@ describe("waitForAttention", () => {
       deadlineMs: 200,
       pollMs: 10,
     });
-    // The deadline is a FACT, not an error, and it is neither half of a verdict.
     expect(Date.now() - started).toBeGreaterThanOrEqual(150);
     expect(answer.state).toBe("still_running");
     expect(answer.settled).toBe(false);
@@ -504,10 +466,8 @@ describe("waitForAttention", () => {
       pollMs: 10,
       settle: true,
     });
-    // It waited out the whole deadline despite having red to report…
     expect(Date.now() - started).toBeGreaterThanOrEqual(150);
     expect(answer.actionable).toBe(true);
-    // …and still answered "not finished", not "failed".
     expect(answer.state).toBe("still_running");
     expect(answer.settled).toBe(false);
     expect(answer.passed).toBe(false);

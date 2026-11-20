@@ -1,22 +1,3 @@
-/**
- * The ownership fence — and the one property everything else here is in
- * service of: A LIVE OWNER IS NEVER DISPLACED.
- *
- * That property is easy to get wrong because every cheap signal of death is
- * also a signal of a healthy restart. A quiet heartbeat is what a coordinator
- * doing a cold `nix copy` looks like; a missing socket is what a coordinator
- * between two `serve` calls looks like. Code that accepts either one alone
- * hands a second writer the same journal, and a fabricated `finalized` line
- * cannot be un-said. So the tests below spend most of their weight on the
- * REFUSALS — a stale heartbeat with a live pid on the same host must not be
- * enough — and on the fence itself: a superseded token answers false to
- * `stillOwner` and writes nothing thereafter.
- *
- * Every test injects `now`, `pid`, `host` and `isAlive`. Nothing here may
- * depend on the wall clock or on the machine's real hostname: a fence test
- * that passes because a random pid happened to be dead is not a test.
- */
-
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,7 +20,6 @@ afterEach(() => {
   }
 });
 
-/** A run directory nobody has ever claimed. */
 function tmpRun(): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-owner-"));
   dirs.push(dir);
@@ -49,11 +29,9 @@ function tmpRun(): string {
 }
 
 const RUN_ID = "0000000a-0001";
-/** A fixed instant, so "stale" and "fresh" are arithmetic rather than luck. */
 const T0 = 1_700_000_000_000;
 const STALE = T0 + OWNERSHIP_GRACE_MS + 1;
 
-/** The incumbent every test starts from: pid 4242 on `box-a`, claimed at T0. */
 function claimFirst(dir: string, endpoint: string | null = "/run/odu.sock") {
   const claim = claimOwnership({
     runId: RUN_ID,
@@ -68,8 +46,6 @@ function claimFirst(dir: string, endpoint: string | null = "/run/odu.sock") {
   return claim;
 }
 
-/** Read `owner.json` as it sits on disk — the published record, deliberately
- *  NOT through `currentOwner`, so a test can catch the two disagreeing. */
 function publishedOwner(dir: string): unknown {
   return JSON.parse(readFileSync(join(dir, RUN_FILES.owner), "utf-8"));
 }
@@ -88,7 +64,6 @@ describe("claimOwnership on an unowned run", () => {
       heartbeatAt: T0,
       endpoint: "/run/odu.sock",
     });
-    // Published where a reader looks, and matching the claim file's authority.
     expect(publishedOwner(dir)).toEqual(claim.owner);
     expect(currentOwner(dir)).toEqual(claim.owner);
   });
@@ -106,26 +81,20 @@ describe("a live owner is never displaced", () => {
       now: T0 + 1_000,
       pid: 5555,
       host: "box-b",
-      isAlive: () => false, // irrelevant: the heartbeat has not even gone stale
+      isAlive: () => false,
     });
 
     expect(second.ok).toBe(false);
     if (second.ok) throw new Error("a live owner was displaced");
     expect(second.refusal.kind).toBe("held");
-    // The refusal has to be actionable by a human: WHICH process, on WHICH box.
     expect(second.refusal.reason).toContain("4242");
     expect(second.refusal.reason).toContain("box-a");
     if (second.refusal.kind !== "held") throw new Error("expected a held refusal");
     expect(second.refusal.owner.epoch).toBe(1);
-    // Nothing moved.
     expect(currentOwner(dir)?.epoch).toBe(1);
   });
 
   it("REFUSES on a stale heartbeat alone when the incumbent's pid is still alive here", () => {
-    // The central test of this file. A heartbeat older than the grace is
-    // EVIDENCE of death, never a verdict: a coordinator wedged on a cold `nix
-    // copy` has stopped beating and is very much still writing. On the same
-    // host we can ask the kernel, and the kernel's answer beats the clock's.
     const dir = tmpRun();
     claimFirst(dir);
 
@@ -135,7 +104,7 @@ describe("a live owner is never displaced", () => {
       endpoint: null,
       now: STALE,
       pid: 5555,
-      host: "box-a", // same host — the only case where the pid check is honest
+      host: "box-a",
       isAlive: () => true,
     });
 
@@ -144,7 +113,6 @@ describe("a live owner is never displaced", () => {
     expect(successor.refusal.kind).toBe("held");
     expect(successor.refusal.reason).toContain("still running on this host");
     expect(successor.refusal.reason).toContain("stale heartbeat");
-    // And the refusal is total: no epoch was burned on the way to it.
     expect(currentOwner(dir)?.epoch).toBe(1);
     expect(currentOwner(dir)?.pid).toBe(4242);
   });
@@ -160,7 +128,7 @@ describe("a live owner is never displaced", () => {
       now: STALE,
       pid: 5555,
       host: "box-a",
-      isAlive: () => false, // both halves of the proof are now in hand
+      isAlive: () => false,
     });
 
     expect(successor.ok).toBe(true);
@@ -169,18 +137,11 @@ describe("a live owner is never displaced", () => {
     expect(successor.owner.pid).toBe(5555);
     expect(successor.owner.endpoint).toBe("/run/odu-2.sock");
     expect(publishedOwner(dir)).toEqual(successor.owner);
-    // The takeover is what fences the previous writer.
     expect(stillOwner(first.token)).toBe(false);
     expect(stillOwner(successor.token)).toBe(true);
   });
 
   it("hands over on a DIFFERENT host on the stale heartbeat alone", () => {
-    // The stated limit, tested rather than left implicit: `isAlive` can only
-    // answer about processes on THIS machine, so a cross-host takeover has
-    // nothing but the grace to wait out. Note `isAlive: () => true` — it is
-    // deliberately not consulted here, because a pid number from another box
-    // means nothing locally, and pretending otherwise would be worse than the
-    // documented wait.
     const dir = tmpRun();
     claimFirst(dir);
 
@@ -189,7 +150,7 @@ describe("a live owner is never displaced", () => {
       dir,
       endpoint: null,
       now: STALE,
-      pid: 4242, // the same NUMBER, which is exactly the trap a pid file falls into
+      pid: 4242,
       host: "box-b",
       isAlive: () => true,
     });
@@ -218,13 +179,10 @@ describe("stillOwner — the fence every durable write asks", () => {
     });
     expect(second.ok).toBe(true);
 
-    // The old token is not "probably stale" — it is definitively not the owner,
-    // and it finds out at its next question rather than at some notification.
     expect(stillOwner(first.token)).toBe(false);
   });
 
   it("is false for a token pointing at a run nobody has claimed", () => {
-    // Fail-closed: a writer that cannot confirm ownership must not write.
     expect(stillOwner({ runId: RUN_ID, dir: tmpRun(), epoch: 1 })).toBe(false);
   });
 });
@@ -237,15 +195,12 @@ describe("heartbeat", () => {
     expect(heartbeat(first.token, T0 + 20_000)).toBe(true);
     const owner = currentOwner(dir);
     expect(owner?.heartbeatAt).toBe(T0 + 20_000);
-    expect(owner?.claimedAt).toBe(T0); // the claim instant is history, not liveness
+    expect(owner?.claimedAt).toBe(T0);
     expect(owner?.epoch).toBe(1);
     expect(owner?.endpoint).toBe("/run/odu.sock");
   });
 
   it("returns false once fenced, and does NOT resurrect the old epoch", () => {
-    // The failure this rules out: a fenced coordinator whose heartbeat timer
-    // fires once more and writes `owner.json` back to its own epoch. The
-    // successor would then be fenced by its predecessor's corpse.
     const dir = tmpRun();
     const first = claimFirst(dir);
     const second = claimOwnership({
@@ -264,7 +219,7 @@ describe("heartbeat", () => {
     const owner = currentOwner(dir);
     expect(owner?.epoch).toBe(2);
     expect(owner?.pid).toBe(5555);
-    expect(owner?.heartbeatAt).toBe(STALE); // untouched by the fenced beat
+    expect(owner?.heartbeatAt).toBe(STALE);
     expect(stillOwner(second.token)).toBe(true);
   });
 });
@@ -277,13 +232,10 @@ describe("releaseOwnership", () => {
     releaseOwnership(first.token, T0 + 30_000);
 
     const owner = currentOwner(dir);
-    expect(owner?.endpoint).toBeNull(); // the live surface is gone…
-    expect(owner?.epoch).toBe(1); // …the record is not
+    expect(owner?.endpoint).toBeNull();
+    expect(owner?.epoch).toBe(1);
     expect(stillOwner(first.token)).toBe(true);
 
-    // And a fresh caller arriving right after the release is still refused: a
-    // clean exit is not an invitation, it is a fresh heartbeat. Anything that
-    // wants this run has to prove a takeover like everybody else.
     const other = claimOwnership({
       runId: RUN_ID,
       dir,
@@ -314,7 +266,6 @@ describe("releaseOwnership", () => {
 
     releaseOwnership(first.token, STALE + 1_000);
 
-    // A stale writer must not be able to close the successor's live surface.
     expect(currentOwner(dir)?.endpoint).toBe("/run/odu-2.sock");
     expect(currentOwner(dir)?.epoch).toBe(2);
   });
@@ -322,11 +273,6 @@ describe("releaseOwnership", () => {
 
 describe("currentOwner reads the claim files, not just owner.json", () => {
   it("reports the highest epoch even when owner.json is behind a claim", () => {
-    // The crash this models: a successor wins `owner.2.claim` with
-    // O_CREAT|O_EXCL and is killed before it can publish `owner.json`. A reader
-    // that trusted the published file alone would report epoch 1 — and the next
-    // claimant would then take epoch 2 a SECOND time, believing it had won a
-    // race it had already lost.
     const dir = tmpRun();
     claimFirst(dir);
     const orphan: Owner = {
@@ -342,17 +288,16 @@ describe("currentOwner reads the claim files, not just owner.json", () => {
       `${JSON.stringify(orphan, null, 2)}\n`,
     );
 
-    expect(publishedOwner(dir)).toMatchObject({ epoch: 1 }); // still behind
-    expect(currentOwner(dir)).toEqual(orphan); // the claim IS the ownership
+    expect(publishedOwner(dir)).toMatchObject({ epoch: 1 });
+    expect(currentOwner(dir)).toEqual(orphan);
 
-    // So the next takeover goes to 3, never re-issuing 2.
     const successor = claimOwnership({
       runId: RUN_ID,
       dir,
       endpoint: null,
       now: STALE,
       pid: 8888,
-      host: "box-d", // a different host from the orphan: the heartbeat alone
+      host: "box-d",
       isAlive: () => true,
     });
     expect(successor.ok).toBe(true);

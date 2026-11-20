@@ -1,48 +1,12 @@
-/**
- * The durable shapes — what a run catalog entry IS, on disk, forever.
- *
- * Three records and one journal:
- *
- *   - {@link RunManifestSchema} — the run's identity, the snapshot it ran, the
- *     build that ran it, and who owns writing to it. Written once, atomically,
- *     BEFORE the run executes, so a coordinator that dies in its first second
- *     still leaves an addressable run rather than a directory nobody can name.
- *   - {@link RunEventSchema} — one line of the ordered journal. The journal is
- *     the run's history; every other durable fact here is a projection of it.
- *   - {@link AttemptRecordSchema} — one attempt's evidence sidecar: where it
- *     ran, how it ended, and whether its log is complete.
- *   - {@link RunVerdictSchema} — the terminal outcome, published at finalize.
- *
- * These bytes are read by a face built from a DIFFERENT commit than the one
- * that wrote them (an agent's `odu` is whatever `nix run` gave it that
- * morning), so every record carries `version` and every reader is expected to
- * skip what it cannot parse rather than crash. That is the same forgiveness
- * rule `@odu/run-client`'s wire schemas state, applied to files instead of a
- * socket — and it is why fields are ADDED as `optionalKey` and never
- * repurposed.
- *
- * Pure schema: no filesystem, no clock. `./store` owns the I/O.
- */
-
 import { Schema } from "effect";
 import { NodeStatusSchema } from "@odu/run-client/surface";
 
-/** The record format every file in a run directory carries. Bumped only when a
- *  field changes SHAPE — a new optional field is not a bump, because an older
- *  reader still parses the record it is added to. */
+/** The record format every file in a run directory carries. */
 export const RUN_RECORD_FORMAT = 1;
 
 const Version = Schema.Literal(RUN_RECORD_FORMAT);
 
-// ── what the run was asked to do ────────────────────────────────────────────
-
-/** The selection a run was started with — the answer to "what does a green
- *  verdict here actually cover".
- *
- *  It is durable because a finalized retry has to reproduce it: replaying a
- *  run from `--platform x86_64-linux e2e` must replay THAT, not today's idea
- *  of the pipeline. It is also what stops a passing selection from being read
- *  as a passing pipeline — a face that shows a verdict shows this beside it. */
+/** The selection a run was started with. */
 export const RunScopeSchema = Schema.Struct({
   /** The `recipe[@platform]` selectors, verbatim. Empty means the whole
    *  `[metadata("ci")]` DAG. */
@@ -51,41 +15,30 @@ export const RunScopeSchema = Schema.Struct({
   platforms: Schema.Array(Schema.String),
   /** `--root NAMEPATH`, when the caller named one. */
   root: Schema.optionalKey(Schema.String),
-  /** `--no-deps`: the selectors ran alone, with no dependency expansion. A
-   *  green run under this flag says even less about the pipeline, so it is
-   *  part of the scope rather than a run detail. */
+  /** `--no-deps`: the selectors ran alone, with no dependency expansion. */
   noDeps: Schema.Boolean,
 });
 export type RunScope = typeof RunScopeSchema.Type;
 
 /** The snapshot a run executed. `strict` pins HEAD in a detached worktree;
  *  `live` runs the working tree as it stands (`--no-snapshot`/`--no-strict`).
- *  `expectedSha` is the commit the run claims to be about either way — a
- *  finalized retry refuses rather than substituting today's HEAD. */
+ *  `expectedSha` is the commit the run claims to be about either way. */
 export const RunSnapshotSchema = Schema.Struct({
   contentSha: Schema.optionalKey(Schema.String),
   overlay: Schema.optionalKey(Schema.Struct({ count: Schema.Int, paths: Schema.Array(Schema.String) })),
   mode: Schema.Literals(["strict", "live"]),
   expectedSha: Schema.String,
-  /** The working tree carried uncommitted changes (only reachable in `live`).
-   *  A verdict about a dirty tree is not a verdict about a commit, and a
-   *  replay of one cannot be reconstructed from the sha alone — which is
-   *  exactly what `retryable` below records. */
+  /** The working tree carried uncommitted changes (only reachable in `live`). */
   dirty: Schema.Boolean,
   /** Can this snapshot be reproduced from recorded inputs alone? False for a
-   *  dirty live-tree run: its inputs were never committed, so a finalized
-   *  retry has nothing to replay and must refuse instead of quietly running
-   *  something else. Stored rather than derived so the rule lives with the
-   *  record it governs. */
+   *  dirty live-tree run. */
   retryable: Schema.Boolean,
 });
 export type RunSnapshot = typeof RunSnapshotSchema.Type;
 
-/** Which build produced this run — the provenance a reader needs to explain a
- *  record it does not recognise, and the executable a recovery has to re-launch.
- *  `self` is the `odu` binary path (`ODU_SELF`), `runnerFlake` the flake-ref the
- *  lane runner was resolved from. Both nullable: a source run (`bun src/…`)
- *  has no wrapper to name. */
+/** Which build produced this run. `self` is the `odu` binary path
+ *  (`ODU_SELF`), `runnerFlake` the flake-ref the lane runner was resolved
+ *  from. Both nullable. */
 export const RunBuildSchema = Schema.Struct({
   oduVersion: Schema.String,
   self: Schema.NullOr(Schema.String),
@@ -93,189 +46,86 @@ export const RunBuildSchema = Schema.Struct({
 });
 export type RunBuild = typeof RunBuildSchema.Type;
 
-// ── ownership ───────────────────────────────────────────────────────────────
-
-/**
- * Who may write to this run, and how a successor proves the previous writer is
- * gone.
- *
- * `epoch` is the FENCE, and it is the whole reason this is a record rather than
- * a pid file. A pid file answers "is something with that number alive", which
- * is not the question: the number is reused, the process may be alive on
- * another host, and a socket that vanished may be a coordinator mid-restart.
- * So a writer stamps the epoch it claimed and re-checks it before every append;
- * a successor that takes over increments it, and the moment it does, the
- * previous writer's next append finds an epoch it does not hold and stops.
- * Disappearance alone never grants ownership — {@link OwnerSchema} records what
- * a claimant must outlive, and the store decides.
- */
+/** Who may write to this run. */
 export const OwnerSchema = Schema.Struct({
   /** Monotonic; the holder of the highest epoch is the writer. */
   epoch: Schema.Int.check(Schema.isGreaterThan(0)),
-  /** The owning process, on `host`. A pid alone means nothing across hosts,
-   *  so the pair travels together. */
+  /** The owning process, on `host`. */
   pid: Schema.Int,
   host: Schema.String,
   /** `Date.now()` when this epoch was claimed. */
   claimedAt: Schema.Number,
-  /** Last liveness stamp. A stale heartbeat is EVIDENCE, never a verdict: the
-   *  store also requires the pid to be gone on this host before it hands the
-   *  epoch on. */
+  /** Last liveness stamp. */
   heartbeatAt: Schema.Number,
-  /** Where this owner serves its live surface (the checkout's `.ci/odu.sock`),
-   *  so a face can find the live run behind a catalog entry. Null once the
-   *  owner has finished and closed it. */
+  /** Where this owner serves its live surface (the checkout's `.ci/odu.sock`).
+   *  Null once the owner has finished and closed it. */
   endpoint: Schema.NullOr(Schema.String),
 });
 export type Owner = typeof OwnerSchema.Type;
 
-// ── the manifest ────────────────────────────────────────────────────────────
-
 export const RunManifestSchema = Schema.Struct({
   version: Version,
   runId: Schema.String,
-  /** `owner/repo` for a GitHub origin, `null` for a local-only checkout — the
-   *  axis a multi-repo face fans in on. */
+  /** `owner/repo` for a GitHub origin, `null` for a local-only checkout. */
   repo: Schema.NullOr(Schema.String),
   /** Full 40-hex commit; `sha7` is derived at read sites, never stored twice. */
   sha: Schema.String,
   /** The checkout-scoped ordinal this run published as `<sha7>#<seq>`, or null
-   *  when none could be reserved. Kept so the catalog can answer the ref every
-   *  existing face already prints. */
+   *  when none could be reserved. */
   seq: Schema.NullOr(Schema.Int),
   pipeline: Schema.String,
   /**
-   * The branch the run was started on.
-   *
-   * Stamped at registration and never updated, because it is a fact about the
-   * run rather than about the checkout: a reader that asked the checkout would
-   * get whatever branch is checked out TODAY, which for a board of last week's
-   * runs is a different answer to the one it looks like. The checkout may also
-   * be gone by then, and a run's branch is not.
-   *
-   * ABSENT rather than nullable, and absent covers both "this record predates
-   * the field" and "HEAD was detached" — two things a reader does the same
-   * thing about (show the commit instead) and neither of which is a branch.
+   * The branch the run was started on. ABSENT when the record predates the
+   * field or HEAD was detached.
    */
   branch: Schema.optionalKey(Schema.String),
-  /** Absolute path of the checkout this run was started from. The catalog is
-   *  per-user, not per-checkout (that is the point — PR 2 discovers runs
-   *  without scanning arbitrary directories), so the checkout is a FIELD.
-   *  It may no longer exist by the time a reader gets here. */
+  /** Absolute path of the checkout this run was started from. It may no longer
+   *  exist by the time a reader gets here. */
   repoRoot: Schema.String,
   createdAt: Schema.Number,
   scope: RunScopeSchema,
   /**
-   * The EXPLICIT placement constraint this run was launched under — the
-   * `PLATFORM=ADDR` pins the caller passed, verbatim.
+   * The `PLATFORM=ADDR` placement pins the caller passed, verbatim.
    *
-   * **The constraint, never the selection.** A pin is what the CALLER asked
-   * for; `Placement.host` on an attempt is the machine a lease happened to
-   * hand out, which for a multi-host pool is an accident of who was free. A
-   * replay that reproduced the second would freeze an incidental box and call
-   * it the user's intent; one that reproduces neither runs wherever today's
-   * ambient hosts file points, which is how a run pinned to one machine comes
-   * back on a different one after somebody edited a config. So the pins travel
-   * with the run, and a finalized retry replays them.
-   *
-   * Three readings, and the third is why this is `optionalKey` rather than a
-   * defaulted array:
-   *
-   *   - `["x86_64-linux=boxA"]` — pinned. Replay it.
-   *   - `[]` — explicitly unpinned. Replay unpinned.
-   *   - ABSENT — this record was written before odu recorded placement, so
-   *     there is no evidence either way. A finalized retry REFUSES rather than
-   *     guessing: an empty array would be indistinguishable from "the user
-   *     asked for no pins", and silently reading a missing fact as permission
-   *     to place anywhere is exactly the widening this field exists to stop.
-   *
-   * The record format is not bumped for this. `optionalKey` leaves a v1 record
-   * written by an older build decodable, which is what makes the third reading
-   * expressible at all — a required field would make those records unreadable
-   * and turn a retry refusal into a catalog that cannot be opened.
+   *   - `["x86_64-linux=boxA"]` — pinned.
+   *   - `[]` — explicitly unpinned.
+   *   - ABSENT — written before odu recorded placement; a finalized retry
+   *     REFUSES.
    */
   hostPins: Schema.optionalKey(Schema.Array(Schema.String)),
   /**
-   * The INVENTORY this run resolved its placement against — the caller's
-   * `$ODU_HOSTS`, as the coordinator saw it.
-   *
-   * Pins say WHICH box; this says which fleet the pin was a name in. They are
-   * not the same fact and recording only the first was not enough: a run
-   * started with inventory A can be retried by a service holding inventory B,
-   * and then an unpinned platform resolves to different machines, or a pinned
-   * one is refused because B does not configure that platform at all. Nothing
-   * about that is visible in the replay's own answer.
-   *
-   * The same three readings as {@link RunManifest.hostPins}, for the same
-   * reason:
+   * The caller's `$ODU_HOSTS`, as the coordinator saw it.
    *
    *   - a PATH — resolve against that file.
    *   - `""` — the caller's shell had none, so the chain starts at
-   *     `~/.config`. A real answer, and different from not knowing.
-   *   - ABSENT — written before odu recorded inventory. A finalized retry
-   *     REFUSES, because guessing here places somebody's work on a fleet they
-   *     never named.
+   *     `~/.config`.
+   *   - ABSENT — written before odu recorded inventory; a finalized retry
+   *     REFUSES.
    */
   hostsFile: Schema.optionalKey(Schema.String),
   snapshot: RunSnapshotSchema,
   build: RunBuildSchema,
-  /**
-   * Who registered this run — PROVENANCE, stamped once and never updated.
-   *
-   * Named `registeredBy` rather than `owner` because it is not the owner: the
-   * live ownership record is `owner.json`, which `heartbeat` refreshes and
-   * `releaseOwnership` clears. Two copies of one fact with no sync path is how
-   * a killed coordinator came to be listed as "running" forever; the fix was
-   * to stop reading this one as liveness, and the rename is what stops the
-   * next reader trying. Its `endpoint` records where the run WAS served, which
-   * is a fact about registration and stays true.
-   */
+  /** Who registered this run. */
   registeredBy: OwnerSchema,
   /**
-   * WHO STARTED THIS RUN — the principal the connection carried, stamped once
-   * at registration (PLAN 4.4).
-   *
-   * A signed-in person's `login`, or the reserved `"@local"` for a loopback
-   * connection (a login cannot contain `@`, so the two never collide),
-   * which is the machine's own owner and has no login to give. The service
-   * reads it from `CurrentPrincipal`, never from the caller's input: a field
-   * a caller could type would be a claim rather than a fact.
-   *
-   * `optionalKey`, which is the third reading and the reason this is not
-   * nullable: ABSENT means the record was written before odu recorded an
-   * actor, and a face shows nothing rather than attributing somebody's run to
-   * a machine. It is PROVENANCE and not authority — revoking a token stops
-   * the next call, not the run this one launched.
+   * WHO STARTED THIS RUN: a signed-in person's `login`, or the reserved
+   * `"@local"` for a loopback connection. ABSENT when the record predates the
+   * field.
    */
   actor: Schema.optionalKey(Schema.String),
-  /** The run this one was derived from, for a finalized retry — so a face can
-   *  say "this is a replay of that" instead of showing two unrelated runs of
-   *  one commit. Null for a run started from a command line. */
+  /** The run this one was derived from, for a finalized retry. Null for a run
+   *  started from a command line. */
   parentRunId: Schema.NullOr(Schema.String),
   /** The caller's idempotency key for the launch that created this run, when
-   *  one was supplied. A repeat of the same id returns THIS run rather than
-   *  starting a second one. */
+   *  one was supplied. A repeat of the same id returns THIS run. */
   requestId: Schema.NullOr(Schema.String),
-  /** Where this run's evidence was imported from, when it did not originate in
-   *  the catalog — the legacy `.ci/<sha7>/runs/<seq>.json` path an import read.
-   *  Present only on imported records, so a reader never mistakes a
-   *  reconstructed history for a first-hand one. */
+  /** Where this run's evidence was imported from; present only on imported
+   *  records. */
   importedFrom: Schema.optionalKey(Schema.String),
   /**
-   * WHERE THIS RUN PUSHED WHAT IT BUILT, and what it said about doing so
-   * (PLAN 4.1).
-   *
-   * `target` is null for a run that pushed nothing, and `note` then says why —
-   * no flake, no odu cache in its `nixConfig`, or one this daemon does not
-   * serve. With a target, `note` carries the `trusted-public-keys` warning when
-   * there is one and is null otherwise.
-   *
-   * `tokenId` is the handle the token is REVOKED by at finalize. The token
-   * itself is never here, never in the journal and never in a log: the manifest
-   * is a durable record of a run, and a credential in one would outlive every
-   * bound this design puts on it.
-   *
-   * `optionalKey`, so every record written before this stays decodable.
+   * WHERE THIS RUN PUSHED WHAT IT BUILT. `target` is null for a run that
+   * pushed nothing. `tokenId` is the handle the token is revoked by at
+   * finalize.
    */
   push: Schema.optionalKey(
     Schema.Struct({
@@ -286,12 +136,7 @@ export const RunManifestSchema = Schema.Struct({
           tokenId: Schema.String,
         }),
       ),
-      /** WHY NOTHING IS PUSHED — no flake, an eval that failed, a substituter
-       *  this daemon does not serve, two it does. Null when a target stands.
-       *  Separate from the warning below because they are opposite facts: one
-       *  is the absence of the feature, the other is the feature working with
-       *  a caveat, and one field holding both made every reader guess which
-       *  it had from a second value. */
+      /** WHY NOTHING IS PUSHED. Null when a target stands. */
       skipped: Schema.NullOr(Schema.String),
       /** WHAT IS WRONG WHILE SOMETHING IS PUSHED: the bucket's key is missing
        *  from the repository's `trusted-public-keys`, so what this run warms
@@ -302,31 +147,18 @@ export const RunManifestSchema = Schema.Struct({
 });
 export type RunManifest = typeof RunManifestSchema.Type;
 
-// ── the journal ─────────────────────────────────────────────────────────────
-
-/** Where the run is in its lifecycle, mirroring `@odu/run-client`'s `RunPhase`
- *  minus the `unstarted` value a REGISTERED run cannot be in. */
+/** Where the run is in its lifecycle. */
 const PhaseSchema = Schema.Literals(["provisioning", "lanes", "no_lanes"]);
 
 /** Where a node's work happened: which platform lane, and which machine (null
- *  while a lane is still claiming one). Every failure the attention query
- *  reports carries it, because "it failed" and "it failed on that box" are
- *  different amounts of help. */
+ *  while a lane is still claiming one). */
 export const PlacementSchema = Schema.Struct({
   platform: Schema.String,
   host: Schema.NullOr(Schema.String),
 });
 export type Placement = typeof PlacementSchema.Type;
 
-/**
- * One journal line's payload. `kind` is the discriminant (matching this repo's
- * existing wire unions, which use `kind` rather than `_tag`).
- *
- * FROZEN, in the same one-way sense the log-frame union is: a reader older than
- * the writer meets an arm it does not know. The journal reader therefore SKIPS
- * an unparseable line and counts it, rather than failing the read — an
- * unreadable event is a gap a face can report, and a crash is not.
- */
+/** One journal line's payload. `kind` is the discriminant. */
 export const RunEventSchema = Schema.Union([
   /** The run exists and is about to execute. Always sequence 1. */
   Schema.Struct({
@@ -334,28 +166,13 @@ export const RunEventSchema = Schema.Union([
     scope: RunScopeSchema,
   }),
   Schema.Struct({ kind: Schema.Literal("phase"), phase: PhaseSchema }),
-  /** The run's node roster, in scheduling order.
-   *
-   *  Emitted at registration and again whenever the set CHANGES — installing a
-   *  sharded recipe's children is the real case. It is what lets a reader
-   *  answer "is this run settled" from the journal alone: without a roster,
-   *  the journal says which nodes reached a status and nothing about which
-   *  ones were expected to, so a run that died before its slowest lane started
-   *  would look identical to one that finished. */
+  /** The run's node roster, in scheduling order. */
   Schema.Struct({
     kind: Schema.Literal("roster"),
     order: Schema.Array(Schema.String),
   }),
   /** A platform lane changed state. `claiming` is waiting for a venue and has
-   *  no host yet; `leased` has one.
-   *
-   *  `pool` and `hostsSource` are what `odu ci status` prints during a provision —
-   *  "which boxes is this waiting on, and which file said so" — and they are
-   *  here because that question outlives the coordinator that could once be
-   *  asked it. Both `optionalKey`: the journal reader SKIPS a line it cannot
-   *  parse and counts it (see the union header), so making either required
-   *  would not fail loudly, it would silently erase every lane of every run
-   *  written before this field existed. */
+   *  no host yet; `leased` has one. */
   Schema.Struct({
     kind: Schema.Literal("lane"),
     platform: Schema.String,
@@ -363,13 +180,10 @@ export const RunEventSchema = Schema.Union([
     host: Schema.NullOr(Schema.String),
     /** The candidate machines this lane may land on, while it is `claiming`. */
     pool: Schema.optionalKey(Schema.Array(Schema.String)),
-    /** The hosts file the pool was declared in, so a placement surprise can be
-     *  traced to the file that caused it. */
+    /** The hosts file the pool was declared in. */
     hostsSource: Schema.optionalKey(Schema.NullOr(Schema.String)),
   }),
-  /** A node started its Nth attempt. The event that ALLOCATES the ordinal, so
-   *  the journal is the authority on how many attempts exist — not a directory
-   *  listing that a half-written retry could inflate. */
+  /** A node started its Nth attempt. */
   Schema.Struct({
     kind: Schema.Literal("attempt_started"),
     node: Schema.String,
@@ -387,10 +201,8 @@ export const RunEventSchema = Schema.Union([
     durationMs: Schema.NullOr(Schema.Number),
     placement: PlacementSchema,
   }),
-  /** This attempt's log has had its last word. `complete` is the promise the
-   *  whole diagnostics contract turns on: false means the producer was lost
-   *  and `reason` says how, so a reader is never handed a truncated log
-   *  wearing a completion frame. */
+  /** This attempt's log has had its last word. `complete` false means the
+   *  producer was lost and `reason` says how. */
   Schema.Struct({
     kind: Schema.Literal("log_finalized"),
     node: Schema.String,
@@ -399,18 +211,14 @@ export const RunEventSchema = Schema.Union([
     complete: Schema.Boolean,
     reason: Schema.NullOr(Schema.String),
   }),
-  /** A GitHub commit status this run owes but could not confirm. Reporting
-   *  debt, kept DISTINCT from the test outcome — a run whose statuses did not
-   *  land still passed or failed on its own merits. */
+  /** A GitHub commit status this run owes but could not confirm. */
   Schema.Struct({
     kind: Schema.Literal("posting_debt"),
     context: Schema.String,
     lastError: Schema.String,
     attempts: Schema.Int,
   }),
-  /** A retry was accepted against this run. The durable receipt: a repeat of
-   *  `requestId` with identical input replays this line instead of mutating
-   *  anything a second time. */
+  /** A retry was accepted against this run. */
   Schema.Struct({
     kind: Schema.Literal("retry_accepted"),
     requestId: Schema.String,
@@ -419,108 +227,42 @@ export const RunEventSchema = Schema.Union([
     effectiveRunId: Schema.String,
     /** The dependency-minimal nodes the caller asked to re-run. */
     roots: Schema.Array(Schema.String),
-    /** Dependants the reset will also clear. Named because a caller that reads
-     *  "reran unit" and finds `e2e` pending has to know which happened. */
+    /** Dependants the reset will also clear. */
     resetDependants: Schema.Array(Schema.String),
     /** Hash of the request's meaningful input, so a repeat of the same id with
      *  DIFFERENT input is refused rather than answered with this receipt. */
     inputDigest: Schema.String,
   }),
-  /**
-   * What became of an accepted retry — the OTHER half of the protocol.
-   *
-   * `retry_accepted` is written before the reset is performed, which is the
-   * ordering that keeps a lost reply from hiding a mutation. The cost of that
-   * ordering is that acceptance alone proves only INTENT: between the two
-   * lines the coordinator can die, and the lane can refuse. So the intent stays
-   * pending until this line resolves it, and a reconciler that finds only the
-   * acceptance reports UNKNOWN rather than success.
-   *
-   * Both outcomes are recorded. A refusal is an answer — replaying it is how a
-   * repeat learns its retry was declined instead of being told nothing is known.
-   */
+  /** What became of an accepted retry. */
   Schema.Struct({
     kind: Schema.Literal("retry_applied"),
     requestId: Schema.String,
-    /** WHICH root this resolves. One request can name several roots and they
-     *  are dispatched one at a time, so a resolution that named only the
-     *  request would be overwritten by the next root's — and a retry where one
-     *  root was reset and another declined would read as wholly one or the
-     *  other. Per-node, so partial application is representable. */
+    /** WHICH root this resolves. */
     node: Schema.String,
     /** Did the lane actually take the reset? */
     applied: Schema.Boolean,
   }),
-  /**
-   * A NODE BEGAN PUSHING (PLAN 4.1) — the moment its recipe exited 0 and the
-   * lane started sending the closure.
-   *
-   * Journalled rather than kept in the coordinator's memory, because the run
-   * page reads a FOLD OF THIS JOURNAL, live run included: a flag that never
-   * reached a line here would never reach a reader. It is what makes the push
-   * step say `pushing` for the minute an upload takes instead of appearing,
-   * finished, out of nothing.
-   *
-   * Superseded by the `pushed` or `push_failed` line that follows it; a
-   * `pushing` left as a node's last push line means the lane died mid-upload,
-   * which is exactly what a reader should be shown.
-   */
+  /** A NODE BEGAN PUSHING: its recipe exited 0 and the lane started sending
+   *  the closure. */
   Schema.Struct({
     kind: Schema.Literal("pushing"),
     node: Schema.String,
     bucket: Schema.String,
-    /** THE RECIPE'S OWN DURATION, as it was known the instant the push began.
-     *
-     *  Here, on the line that OPENS the push, because this is the last line
-     *  the journal gets until the upload ends: the node stays `running` while
-     *  it sends, so the coordinator writes no `node_status` (it journals a
-     *  status CHANGE, and nothing changed), and a page folding this journal
-     *  would have no end for the recipe's bar for the whole minute an upload
-     *  takes. That is not a cosmetic gap — a recipe with no duration reads as
-     *  "still running", its bar fills the track, and the push step is left
-     *  with no room to draw at all.
-     *
-     *  It is a FACT at exit 0 and not an estimate: the lane measures it when
-     *  the child exits, before handing the closure over, and the `node_status`
-     *  that eventually lands carries the same number. The fold therefore
-     *  applies this only where it has none — a status line is the later and
-     *  better-measured evidence, and this one must never overwrite it.
-     *
-     *  `optionalKey`, so a line written before this field still decodes. */
+    /** THE RECIPE'S OWN DURATION, as it was known the instant the push
+     *  began. */
     durationMs: Schema.optionalKey(Schema.Int),
   }),
   /**
-   * A NODE'S OUTPUTS LANDED IN THE CACHE (PLAN 4.1) — the durable half of
-   * "green means warmed".
-   *
-   * Written when a recipe exits 0 and its `result*` closure was pushed, so a
-   * reader of a finished run can say what that run put in the bucket without
-   * the bucket having to be asked. `paths` counts what the bucket SERVES as a
-   * result (stored plus already-present), which is the same list the push
-   * client verifies; `bytes` is the UNCOMPRESSED NAR size of what was
-   * uploaded, which is what a closure states and what `nix path-info -S`
-   * answers — not what zstd made of it on the way.
-   *
-   * `present` SPLITS that served total without moving it. Readers want the
-   * two apart — what this run sent versus what the bucket already had — and
-   * the obvious shape would have been to replace `paths` with `stored`. It is
-   * not done, because this is the DURABLE record: lines written by every
-   * release before this one are still on disk and still read, and a renamed
-   * field would make all of them decode as a run that pushed nothing. So
-   * `paths` keeps its meaning exactly, `present` is `optionalKey`, and the
-   * fold subtracts. A line without `present` folds to "all of it went up",
-   * which is not a guess: those runs recorded no already-present count
-   * because the client's split was never carried, and the served total is the
-   * only number they ever stated.
+   * A NODE'S OUTPUTS LANDED IN THE CACHE. `paths` counts what the bucket
+   * SERVES as a result (stored plus already-present); `bytes` is the
+   * UNCOMPRESSED NAR size of what was uploaded.
    */
   Schema.Struct({
     kind: Schema.Literal("pushed"),
     node: Schema.String,
     bucket: Schema.String,
     paths: Schema.Int,
-    /** Of `paths`, how many the bucket ALREADY served before this node — so
-     *  `paths - present` is what this node uploaded. `optionalKey`, so a line
-     *  written before this field still decodes. */
+    /** Of `paths`, how many the bucket ALREADY served before this node. */
     present: Schema.optionalKey(Schema.Int),
     bytes: Schema.Int,
     /** HOW LONG THE PUSH TOOK, on its own. A node's `durationMs` is the
@@ -529,15 +271,8 @@ export const RunEventSchema = Schema.Union([
      *  `optionalKey`, so a line written before this field still decodes. */
     durationMs: Schema.optionalKey(Schema.Int),
   }),
-  /**
-   * A NODE'S PUSH FAILED — the recipe passed and its outputs did not reach the
-   * bucket, which makes the node red (the rule 4.1 set).
-   *
-   * Its own line rather than silence, because the node's red status alone
-   * cannot say WHICH half failed: a reader of a finished run would see a red
-   * recipe where the recipe in fact passed. The push step reads red from this
-   * and the recipe step stays green, which is what happened.
-   */
+  /** A NODE'S PUSH FAILED: the recipe passed and its outputs did not reach
+   *  the bucket, which makes the node red. */
   Schema.Struct({
     kind: Schema.Literal("push_failed"),
     node: Schema.String,
@@ -546,8 +281,7 @@ export const RunEventSchema = Schema.Union([
     message: Schema.String,
     durationMs: Schema.optionalKey(Schema.Int),
   }),
-  /** The run reached a terminal outcome. Sequence-wise the last line any
-   *  writer appends. */
+  /** The run reached a terminal outcome. */
   Schema.Struct({
     kind: Schema.Literal("finalized"),
     outcome: Schema.Literals(["passed", "failed", "incomplete"]),
@@ -555,26 +289,7 @@ export const RunEventSchema = Schema.Union([
 ]);
 export type RunEvent = typeof RunEventSchema.Type;
 
-/**
- * Does this event mean WORK IS HAPPENING?
- *
- * The one rule the journal's writer and its readers must agree on, so it is
- * written once. After a `finalized` line, an event that satisfies this is the
- * run RESUMING — a new execution generation — and the two sides draw opposite
- * halves of the same conclusion from it: the reader stops calling the run
- * settled, and the writer knows it now owes a SECOND `finalized` when this
- * generation ends.
- *
- * They were not always the same rule, and the asymmetry was a bug in both
- * directions at once. The reader treated a resumed run as unsettled forever
- * because the writer emitted `finalized` once per run and never again; a
- * caller waiting on a retry could therefore never observe it finish. Neither
- * half is wrong on its own — which is why the rule cannot live in either.
- *
- * `pending`/`running` and not merely `attempt_started`, because a lane
- * publishes `pending` before it starts an attempt: keying on the attempt alone
- * leaves a window in which resumed work still reads as settled.
- */
+/** Does this event mean WORK IS HAPPENING? */
 export function isResumptionEvent(event: RunEvent): boolean {
   if (event.kind === "attempt_started") return true;
   if (event.kind === "node_status")
@@ -583,8 +298,7 @@ export function isResumptionEvent(event: RunEvent): boolean {
 }
 
 /** A journal line: the payload plus its ordinal and wall clock. `seq` is dense
- *  and 1-based within a run — a cursor is a `seq`, so a gap would be a hole a
- *  caller could not tell from a delivery it missed. */
+ *  and 1-based within a run. */
 export const JournalEntrySchema = Schema.Struct({
   seq: Schema.Int.check(Schema.isGreaterThan(0)),
   at: Schema.Number,
@@ -592,22 +306,8 @@ export const JournalEntrySchema = Schema.Struct({
 });
 export type JournalEntry = typeof JournalEntrySchema.Type;
 
-/**
- * WHAT ONE NODE'S PUSH IS DOING, folded out of the three `push*` lines above.
- *
- * A union rather than a record with nullable counts, because the three states
- * answer different questions and only one of them has counts to give: a reader
- * holding `{ state: "pushing" }` cannot accidentally render `0 stored` as a
- * fact about the bucket.
- *
- * THE COUNTS ARE SPLIT HERE, not on the line: the journal records the served
- * total and an optional already-present count, and the fold turns that pair
- * into the two numbers every reader actually wants.
- *
- * `bucket` and `message` are here but NOT on the node wire: the bucket is a
- * property of the run (one target, on the header) and the message is already
- * in the node's push log, which is the place to read it.
- */
+/** WHAT ONE NODE'S PUSH IS DOING, folded out of the three `push*` lines
+ *  above. */
 export type NodePush =
   | { state: "pushing"; bucket: string }
   | {
@@ -622,11 +322,7 @@ export type NodePush =
     }
   | { state: "failed"; bucket: string; message: string; durationMs: number };
 
-// ── attempts ────────────────────────────────────────────────────────────────
-
-/** One attempt's sidecar. Written when the attempt starts (so an interrupted
- *  attempt is still addressable) and completed as it ends; NEVER rewritten
- *  once `endedAt` is set — a retry allocates the next ordinal instead. */
+/** One attempt's sidecar. */
 export const AttemptRecordSchema = Schema.Struct({
   version: Version,
   node: Schema.String,
@@ -638,9 +334,8 @@ export const AttemptRecordSchema = Schema.Struct({
   exitCode: Schema.NullOr(Schema.Int),
   /** The signal the shell reported this attempt died of, when it did. DERIVED
    *  from the exit status by the POSIX shell's `128 + N` convention and stored
-   *  only when the status is a failure — so it is a reading of what the shell
-   *  said, not a fact the runner reported. `null` whenever that reading does
-   *  not apply. A consumer that needs certainty reads `exitCode`. */
+   *  only when the status is a failure. `null` whenever that reading does not
+   *  apply. */
   signal: Schema.NullOr(Schema.String),
   /** Bytes written to this attempt's log. */
   logBytes: Schema.Int,
@@ -651,14 +346,11 @@ export const AttemptRecordSchema = Schema.Struct({
 });
 export type AttemptRecord = typeof AttemptRecordSchema.Type;
 
-// ── the verdict ─────────────────────────────────────────────────────────────
-
 export const RunVerdictSchema = Schema.Struct({
   version: Version,
   runId: Schema.String,
-  /** `passed` only when the run COMPLETED with no red and no cancelled node —
-   *  the same three-state rule the checkout ledger already uses, so a reader
-   *  that knows one knows the other. */
+  /** `passed` only when the run COMPLETED with no red and no cancelled
+   *  node. */
   outcome: Schema.Literals(["passed", "failed", "incomplete"]),
   startedAt: Schema.Number,
   finishedAt: Schema.Number,
@@ -676,10 +368,7 @@ export const RunVerdictSchema = Schema.Struct({
 });
 export type RunVerdict = typeof RunVerdictSchema.Type;
 
-/** A run whose evidence has aged out. A TOMBSTONE, not a deletion: the
- *  directory keeps this file so an addressed read answers "expired on <date>"
- *  instead of "no such run", which are different things to an agent holding a
- *  months-old run id. */
+/** A run whose evidence has aged out. A TOMBSTONE, not a deletion. */
 export const ExpirySchema = Schema.Struct({
   version: Version,
   runId: Schema.String,

@@ -1,17 +1,3 @@
-/**
- * The four rules the attention payload is arranged around, each falsifiable on
- * its own — plus the three small folds a caller's answer is assembled from.
- *
- * Every rule here is one where the WRONG behaviour is quiet. A cursor that
- * resolved failures reports a red run green to whoever asked second. A cursor
- * that ran past what was delivered drops exactly the events a reconnecting
- * caller came back for. A `passed` that can be true before a run settles turns
- * "nothing has failed yet" into "it passed". A budget that sheds excerpts
- * before events throws away the reason the caller was woken up and keeps the
- * replayable half. None of them throws, and none of them shows up in a type —
- * so they are pinned here, against a hand-built journal and a stub log reader.
- */
-
 import { describe, expect, it } from "bun:test";
 import {
   ATTENTION_BUDGET_BYTES,
@@ -27,7 +13,6 @@ import type { JournalEntry, Placement, RunManifest, RunVerdict } from "./schema"
 const RUN = "lz4k9x0m-7t2ab019";
 const LINUX: Placement = { platform: "x86_64-linux", host: "builder-1" };
 
-/** A journal with dense 1-based sequences, the way the store appends one. */
 function journal(...events: JournalEntry["event"][]): JournalEntry[] {
   return events.map((event, i) => ({ seq: i + 1, at: 1_000 + i, event }));
 }
@@ -47,7 +32,6 @@ function sources(over: Partial<AttentionSources> = {}): AttentionSources {
   };
 }
 
-/** A node that started, went red, and had its log sealed. */
 function redNode(node: string, opts: { exitCode?: number; sealed?: boolean } = {}): JournalEntry["event"][] {
   const events: JournalEntry["event"][] = [
     { kind: "attempt_started", node, attempt: 1, placement: LINUX },
@@ -106,12 +90,10 @@ describe("a cursor suppresses repeats but resolves nothing", () => {
     expect(first.events).toHaveLength(entries.length);
     expect(first.unresolved_failures).toHaveLength(1);
 
-    // Same run, asked again from the cursor the first answer handed back.
     const again = attentionFor(src, { after: { runId: RUN, seq: entries.length } });
     expect(again.events).toEqual([]);
     expect(again.has_more).toBe(false);
     expect(again.remaining).toBe(0);
-    // The failure is state, not news: it is still failing.
     expect(again.unresolved_failures).toHaveLength(1);
     expect(again.unresolved_failures[0]?.node).toBe("ci::unit@x86_64-linux");
     expect(again.unresolved_failures[0]?.excerpt).toBe("boom");
@@ -152,7 +134,6 @@ describe("the cursor advances only through included events", () => {
     expect(rest.has_more).toBe(false);
     expect(rest.remaining).toBe(0);
     expect(rest.cursor).toBe(formatCursor({ runId: RUN, seq: 9 }));
-    // Every sequence exactly once, across the two pages.
     expect([...page.events, ...rest.events].map((e) => e.seq)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9,
     ]);
@@ -259,8 +240,6 @@ describe("running, gone, and finished are three states", () => {
       }),
     );
     expect(answer.state).toBe("expired");
-    // Expired is not settled, so it is not a pass — a caller that wants the
-    // outcome of an aged-out run reads the tombstone, not this bit.
     expect(answer.settled).toBe(false);
     expect(answer.passed).toBe(false);
   });
@@ -375,8 +354,6 @@ describe("actionable — red is returned once the log barrier completes", () => 
     );
     expect(answer.unresolved_failures[0]?.log_complete).toBe(true);
     expect(answer.actionable).toBe(true);
-    // …and it is still not settled: actionable is an invitation to look, not a
-    // verdict.
     expect(answer.settled).toBe(false);
     expect(answer.passed).toBe(false);
   });
@@ -396,7 +373,6 @@ describe("actionable — red is returned once the log barrier completes", () => 
 describe("the byte budget", () => {
   const NODE = "ci::e2e@x86_64-linux";
 
-  /** A run with `count` journal lines and one red node holding `excerpt`. */
   function bigRun(count: number, excerpt: string): AttentionSources {
     return sources({
       journal: journal(
@@ -422,7 +398,6 @@ describe("the byte budget", () => {
   it("sheds events before excerpts — the reason survives, the replayable half goes", () => {
     const excerpt = "the failing line\n".repeat(30);
     const src = bigRun(300, excerpt);
-    // A budget that fits the failure with no events at all, plus a little slack.
     const withoutEvents = bytesOf(
       attentionFor(src, { after: { runId: RUN, seq: 1_000 }, budgetBytes: 1_000_000 }),
     );
@@ -448,8 +423,6 @@ describe("the byte budget", () => {
     expect(answer.has_more).toBe(true);
     expect(answer.remaining).toBe(src.journal.length - answer.events.length);
 
-    // Asking again from that cursor delivers the shed tail, starting exactly
-    // one past what arrived.
     const rest = attentionFor(src, {
       after: { runId: RUN, seq: lastDelivered },
       budgetBytes: 1_000_000,
@@ -460,10 +433,6 @@ describe("the byte budget", () => {
   });
 
   it("sheds events down to ONE, never to none, and then shrinks the excerpt", () => {
-    // One event is RESERVED from every reduction, and that reservation is the
-    // difference between a payload that can be drained and one that cannot: a
-    // page whose cursor did not move returns the same oversized answer next
-    // time, forever.
     const src = bigRun(0, "x".repeat(20_000));
     const withEmpty = bytesOf(
       attentionFor(
@@ -477,16 +446,12 @@ describe("the byte budget", () => {
     });
     expect(answer.events).toHaveLength(1);
     expect(bytesOf(answer)).toBeLessThanOrEqual(withEmpty + 2_000);
-    // The failure is still reported, and says its evidence was cut.
     expect(answer.unresolved_failures).toHaveLength(1);
     expect(answer.unresolved_failures[0]?.excerpt_truncated).toBe(true);
     expect(answer.unresolved_failures[0]?.excerpt.length).toBeLessThan(20_000);
   });
 
   it("keeps a run with many failures inside the budget, and says how many it dropped", () => {
-    // The reported shape: sixty red nodes produced a 21,776-byte answer against
-    // a 16 KiB budget, with zero events, `has_more: true` and an unchanged
-    // cursor — an answer that was both too big and impossible to page past.
     const nodes = Array.from({ length: 60 }, (_, i) => `ci::n${i}@x86_64-linux`);
     const src = sources({
       journal: journal(
@@ -498,8 +463,6 @@ describe("the byte budget", () => {
     const answer = attentionFor(src, { budgetBytes: ATTENTION_BUDGET_BYTES });
 
     expect(bytesOf(answer)).toBeLessThanOrEqual(ATTENTION_BUDGET_BYTES);
-    // A prefix, and it SAYS it is a prefix — a caller shown three of sixty
-    // must not read that as three.
     expect(answer.unresolved_failures_total).toBe(60);
     expect(answer.failures_omitted).toBe(
       60 - answer.unresolved_failures.length,
@@ -508,8 +471,6 @@ describe("the byte budget", () => {
   });
 
   it("advances the cursor even when nothing else fits, so a backlog can drain", () => {
-    // The drain property, stated as a loop: page until `has_more` goes false.
-    // Under the old rule this never terminated.
     const nodes = Array.from({ length: 40 }, (_, i) => `ci::n${i}@x86_64-linux`);
     const src = sources({
       journal: journal(
@@ -531,7 +492,6 @@ describe("the byte budget", () => {
       if (!page.has_more) break;
       const next = parseCursor(page.cursor);
       expect(next).not.toBeNull();
-      // Strictly forward, every round — the guarantee that makes this finite.
       expect(next!.seq).toBeGreaterThan(cursor?.seq ?? 0);
       cursor = next;
       rounds += 1;
@@ -539,14 +499,6 @@ describe("the byte budget", () => {
         500,
       );
     }
-    // A GENEROUS deadline, and the reason is that this test is honestly
-    // expensive rather than slow by accident: it re-folds a 40-node journal
-    // once per page until the backlog drains, which is the whole point — the
-    // property is that the loop TERMINATES, and a cheaper fixture would not
-    // exercise it. Bun's 5-second default is comfortable on an idle machine and
-    // was exceeded on a loaded one, which would have made this the suite's
-    // first flake on a busy CI runner: a red build about the machine rather
-    // than the code, on the one test whose failure should mean something.
   }, 60_000);
 
   it("clamps each excerpt to the per-failure ceiling before the payload budget", () => {
@@ -569,13 +521,11 @@ describe("clampTailBytes", () => {
   });
 
   it("never splits a multibyte character", () => {
-    // Three 4-byte emoji, with room for one and a half.
     const emoji = clampTailBytes("🙂🙂🙂", 6);
     expect(emoji.text).toBe("🙂");
     expect(emoji.truncated).toBe(true);
     expect(new TextEncoder().encode(emoji.text).length).toBeLessThanOrEqual(6);
 
-    // Three 3-byte CJK characters, with room for one and a third.
     const cjk = clampTailBytes("日本語", 4);
     expect(cjk.text).toBe("語");
     expect(cjk.truncated).toBe(true);
@@ -660,8 +610,6 @@ describe("the run's push answer", () => {
   const BUILD = "ci::build@x86_64-linux";
   const E2E = "ci::e2e@aarch64-darwin";
 
-  /** A run that pushes somewhere — the answer's `push` is absent without one,
-   *  because a manifest written before the field says nothing either way. */
   const manifest: RunManifest = {
     version: 1,
     runId: RUN,
@@ -704,12 +652,6 @@ describe("the run's push answer", () => {
   });
 
   it("names the failed pushes in ROSTER order, not the order they failed in", () => {
-    // The fold is a Map, so its order is the order the journal first mentioned
-    // each node — here, the reverse of the roster, which is what a slow lane
-    // finishing first produces. Both the wire and this payload promise roster
-    // order, and a reader painting a run paints its nodes in that one: a
-    // header listing the same three nodes in another order is a list the
-    // reader has to match up by hand.
     const answer = attentionFor(
       sources({
         manifest,
@@ -724,9 +666,6 @@ describe("the run's push answer", () => {
   });
 
   it("puts a node the roster never listed after the ones it did", () => {
-    // A roster that does not name a node is a torn or partial journal, not a
-    // licence to drop the node or to hoist it: it keeps the order it had,
-    // behind everything the roster can speak for.
     const answer = attentionFor(
       sources({
         manifest,
