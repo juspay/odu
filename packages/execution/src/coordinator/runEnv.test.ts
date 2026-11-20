@@ -1,11 +1,3 @@
-/**
- * The venue claim as a VALUE — `claimVenues` lifted out of `orchestrate`'s
- * 1000-line scope (lens review, lowy F1 / hickey F4). Its outputs used to be
- * three mutated bindings behind an `Error | null` return; they are now the
- * return value, which is also what makes this reachable without an ssh host:
- * `leaseLanes`'s injected `claim` is the only thing standing in for one.
- */
-
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,8 +33,6 @@ const base = (repoRoot: string) => ({
   noWait: true,
   runLabel: "abc1234#1",
   onLine: (): void => {},
-  // Never reached: an injected `claim` is what stands in for the ssh dial that
-  // would have needed a resolved runner derivation.
   resolveDrvPath: (): never => {
     throw new Error("resolveDrvPath must not be called with an injected claim");
   },
@@ -103,8 +93,6 @@ describe("claimVenues", () => {
   });
 
   it("holds the observable waiting rows for exactly the claim, on both exits", async () => {
-    // One scope, one `finally`: `odu ci hosts` sees the run waiting while it
-    // waits, and never after — including when the claim fails.
     const repoRoot = repo();
     let duringClaim: string[] = [];
     await claimVenues({
@@ -135,15 +123,7 @@ describe("claimVenues", () => {
   });
 
   it("keeps a successful claim when the bookkeeping write fails", async () => {
-    // The clear-out runs in a `finally`, and a throw there REPLACES the value
-    // the `try` produced. So an unwritable lease file would have discarded a
-    // claim that actually succeeded, rejected out of a function documented not
-    // to throw, and stranded the lease: `orchestrate` never reaches the merge
-    // into `acquiredLeases`, so nothing left alive can release it. A stale row
-    // in an inventory file is the smaller problem, and the one that loses.
     const repoRoot = repo();
-    // `.ci` as a FILE, so every mkdir/write beneath it raises ENOTDIR — the
-    // real disk failures (ENOSPC, EACCES, a raced rename) take the same path.
     writeFileSync(join(repoRoot, ".ci"), "not a directory");
 
     const released: string[] = [];
@@ -158,7 +138,6 @@ describe("claimVenues", () => {
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     expect(outcome.lanes).toEqual({ "x86_64-linux": "ci-1" });
-    // The caller gets the lease and therefore the ability to release it.
     expect(outcome.leases.map((l) => l.host)).toEqual(["ci-1"]);
     expect(released).toEqual([]);
   });

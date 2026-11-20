@@ -1,32 +1,3 @@
-/**
- * Which independence a coordinator actually gets, and the sentence that says so.
- *
- * `survivableSpawnPlan` decides between two very different promises — "your run
- * is in a cgroup of its own" and "your run dies when this unit restarts" — from
- * three environment variables and a platform. That decision is easy to get
- * wrong in the direction that is invisible: reaching for `systemd-run` where
- * there is no user manager fails at spawn time on someone else's machine, and
- * NOT reaching for it inside a unit silently hands back a run that a `systemctl
- * restart` will kill while the receipt claims it survives.
- *
- * So the function is pure — every input is an argument — and this file states
- * WORLDS rather than mutating the process's own environment. What is pinned:
- *
- *   - the mechanism for each world, including every "empty string means unset"
- *     boundary, since a shell exporting an empty `INVOCATION_ID` is a real
- *     spelling of "not under a unit";
- *   - the argv `systemd-run` actually gets, as a token array whose tail is the
- *     odu argv unchanged;
- *   - the HONEST LIMIT sentence — the one case where odu cannot escape the
- *     cgroup and says so. That sentence is the whole value of the branch: an
- *     operator is entitled to know before the run does.
- *
- * `systemd-run` itself is NOT executed here, and cannot be: the Nix build
- * sandbox and the CI container have neither a user manager nor a session bus.
- * The module header says as much. This suite pins the DECISION; the detached
- * branch's real syscalls are exercised by `packages/execution/src/coordinator/spawnSurvival.test.ts`.
- */
-
 import { describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import { survivableSpawnDriver } from "@kolu/surface-daemon-supervisor";
@@ -45,17 +16,6 @@ import {
 const UNIT = "odu-run-0000000a-0001";
 const ODU_ARGV = ["odu", "run", "e2e"];
 
-/**
- * The argv that WOULD be executed, without executing it.
- *
- * odu no longer assembles this: the `systemd-run` incantation is
- * `@kolu/surface-daemon-supervisor`'s `survivableSpawnDriver`, and what odu
- * supplies is `coordinatorSpawnConfig`. So the assertions below run the real
- * driver over odu's real config with the fork replaced by a capture — which
- * makes them a test of the COMPOSITION odu actually ships rather than of a
- * private copy of the mechanism. A capture that never fires is a test that
- * asserted nothing, so `launched` throws rather than returning empty.
- */
 function launched(
   env: SpawnEnv,
   oduArgv: readonly string[] = ODU_ARGV,
@@ -78,25 +38,15 @@ function launched(
   return seen;
 }
 
-/**
- * A machine that HAS a user manager, so these tests state the variable half of
- * the decision without also asserting a socket exists on whatever host they run
- * on. `userManagerReachable` gets its own tests below, where the probe is the
- * subject rather than the setting.
- */
 const HAS_BUS = (env: SpawnEnv): boolean =>
   userManagerReachable(env, () => true);
 
-/** A world, named. `platform` defaults to linux because every interesting
- *  branch is a linux branch. */
 function plan(env: SpawnEnv, platform: NodeJS.Platform = "linux") {
   return survivableSpawnPlan(env, platform, UNIT, HAS_BUS);
 }
 
 describe("the spawn plan off linux", () => {
   it("is detached on darwin, and says systemd is not there", () => {
-    // Even with every systemd marker set — an env inherited across an ssh hop,
-    // say. The platform decides first: there is no user manager to ask.
     const p = plan(
       { INVOCATION_ID: "abc", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/bus" },
       "darwin",
@@ -104,7 +54,6 @@ describe("the spawn plan off linux", () => {
     expect(p.mechanism).toBe("detached");
     expect(p.reason).toContain("no systemd");
     expect(p.reason).toContain("darwin");
-    // A detached plan runs the odu argv itself, unwrapped.
     const { command, args } = launched(
       { INVOCATION_ID: "abc", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/bus" },
       ODU_ARGV,
@@ -140,19 +89,11 @@ describe("the spawn plan on linux", () => {
       INVOCATION_ID: "9d7a",
       DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
     });
-    // The odu argv is the TAIL, unmodified: the wrapper prepends, it never
-    // rewrites what it was asked to run.
     expect(command).toBe("systemd-run");
     expect(args[0]).toBe("--user");
     expect(args.slice(-ODU_ARGV.length)).toEqual(ODU_ARGV);
-    // Scoped to the run, so two coordinators never collide on a unit name and
-    // `systemctl --user status` names the run an operator is asking about. The
-    // driver appends a per-spawn suffix, because a dead unit can linger loaded
-    // and refuse a name that is reused.
     expect(args).toContain("--unit");
     expect(args.some((a) => a.startsWith(UNIT))).toBe(true);
-    // Reap the unit's own bookkeeping, so a machine that runs a hundred CI runs
-    // does not accumulate a hundred failed unit stubs.
     expect(args).toContain("--collect");
   });
 
@@ -162,9 +103,6 @@ describe("the spawn plan on linux", () => {
   });
 
   it("admits the honest limit when a unit has no reachable user manager", () => {
-    // The case odu cannot fix, so it names it. This sentence is what a launcher
-    // reports as the run's lifetime, and "your run dies with this unit" is a
-    // different promise from "your run survives it".
     const p = plan({ INVOCATION_ID: "9d7a" });
     expect(p.mechanism).toBe("detached");
     expect(p.reason).toContain("no user session bus is reachable");
@@ -180,9 +118,6 @@ describe("the spawn plan on linux", () => {
     });
     expect(p.mechanism).toBe("detached");
     expect(p.reason).toContain("ODU_NO_SYSTEMD_RUN");
-    // And the driver is TOLD, not left to re-derive: every systemd marker here
-    // is set, so a second decision inside the driver would take the other
-    // branch. One decision, forced across.
     const { command, args } = launched({
       ODU_NO_SYSTEMD_RUN: "1",
       INVOCATION_ID: "9d7a",
@@ -195,8 +130,6 @@ describe("the spawn plan on linux", () => {
 
 describe("empty strings", () => {
   it("read as unset at every variable the decision turns on", () => {
-    // A shell that exports a variable it never assigned sets it to "". Reading
-    // that as "present" would flip all three decisions the wrong way.
     expect(
       plan({ INVOCATION_ID: "", DBUS_SESSION_BUS_ADDRESS: "unix:path=/x" })
         .reason,
@@ -228,24 +161,13 @@ describe("oduSelfArgv", () => {
   });
 
   it("REFUSES when the wrapper baked nothing — a misbuilt package, not a mode", () => {
-    // This used to fall back to `[process.execPath, process.argv[1]]`, which
-    // re-execed the entry through whatever interpreter was running. It read as
-    // a courtesy to a dev checkout and it was a hole in the runtime contract:
-    // Nix is odu's only supported runtime, and the fallback let an unpackaged
-    // odu spawn coordinators carrying NONE of the wrapper's baked locators —
-    // so the child reached for `nix`, `git` and `gh` on an ambient PATH and
-    // failed several layers from the cause. The throw names the cause.
     expect(() => oduSelfArgv({})).toThrow(/ODU_SELF is unset/);
-    // An empty ODU_SELF is unset here too — a wrapper is a thing somebody edits.
     expect(() => oduSelfArgv({ ODU_SELF: "" })).toThrow(/misbuilt package/);
   });
 });
 
 describe("coordinatorSpawnSpec", () => {
   it("detaches into its own process group and pipes the child's early output", () => {
-    // `detached` is what makes a signal addressed to the launcher's group miss
-    // the coordinator; the pipes are how a caller reports a startup failure it
-    // otherwise could only describe as "it did not come up".
     const spec = coordinatorSpawnSpec("/checkouts/odu");
     expect(spec.cwd).toBe("/checkouts/odu");
     expect(spec.detached).toBe(true);
@@ -254,11 +176,6 @@ describe("coordinatorSpawnSpec", () => {
 });
 
 describe("the bus is a SOCKET, not a variable", () => {
-  // The bug this exists for: a GitHub Actions runner sets INVOCATION_ID and
-  // XDG_RUNTIME_DIR and has no user manager at all. Reading those names as
-  // evidence chose `systemd-run --user`, which failed at submission — and every
-  // run started through the web service was reported as a run that could not
-  // start. Nothing was wrong with any of those runs.
   it("refuses a named bus whose socket is not there", () => {
     const looked: string[] = [];
     const reachable = userManagerReachable(
@@ -305,12 +222,6 @@ describe("the bus is a SOCKET, not a variable", () => {
 });
 
 describe("what a spawned process EXITING means", () => {
-  // The distinction a false refusal turns on. `systemd-run --user` is a
-  // SUBMITTER: it asks the user manager to start a transient unit and exits as
-  // soon as the job is accepted, normally while the service is still starting.
-  // A readiness wait that treated that exit as the coordinator's would give up
-  // on a run that is coming up perfectly well, report a failure, and leave the
-  // run executing with nobody watching it.
   it("is death for a detached spawn — that process IS the coordinator", () => {
     const plan = survivableSpawnPlan({}, "linux", "odu-run-x");
     expect(plan.mechanism).toBe("detached");
@@ -327,18 +238,12 @@ describe("what a spawned process EXITING means", () => {
     );
     expect(plan.mechanism).toBe("systemd-run");
     expect(plan.exitIsDeath).toBe(false);
-    // Zero says the job was accepted and nothing about the service…
     expect(plan.describeExit(0)).toContain("accepted the unit");
-    // …non-zero says the manager refused it, which IS a failure.
     expect(plan.describeExit(1)).toContain("refused");
   });
 });
 
 describe("a transient unit is told where odu keeps its things", () => {
-  // A transient unit starts from the user manager's environment, not from the
-  // launcher's. Everything that tells odu where to look is simply ABSENT
-  // unless it is named — and a coordinator that starts with no hosts file and
-  // no state root is not a coordinator that started.
   it("forwards the variables odu itself reads", () => {
     const { args } = launched(
       {
@@ -362,17 +267,12 @@ describe("a transient unit is told where odu keeps its things", () => {
     expect(args).toContain(
       "SURFACE_AGENT_FLAKE_REF=/nix/store/abc-odu-agent-flake-source",
     );
-    // The runtime dir decides where a socket may live, so it travels too.
     expect(args).toContain("XDG_RUNTIME_DIR=/run/user/1000");
-    // Every `--setenv` precedes the payload.
     expect(args.lastIndexOf("--setenv")).toBeLessThan(args.indexOf("odu"));
     expect(args.slice(-2)).toEqual(["odu", "run"]);
   });
 
   it("names only what it means to, and skips what is unset", () => {
-    // An allowlist, not the whole environment: forwarding a launcher's entire
-    // environment into a service is how an orchestrator's ambient identity
-    // variables end up inside every recipe the run executes.
     const { args } = launched(
       {
         INVOCATION_ID: "abc",
@@ -385,16 +285,11 @@ describe("a transient unit is told where odu keeps its things", () => {
     );
 
     expect(args.join(" ")).not.toContain("CLAUDE_CODE_CHILD_SESSION");
-    // An empty value is unset, not an empty assignment.
     expect(args.join(" ")).not.toContain("ODU_HOSTS=");
   });
 });
 
 describe("the working directory a daemon does not need", () => {
-  // A run is a function of its CHECKOUT, so a coordinator must start there.
-  // kolu's driver takes no `cwd` — a surface daemon has no such tie — so the
-  // detached branch gets one at odu's spawn seam and the systemd branch gets
-  // `--same-dir` inserted into the argv the driver assembled.
   it("inserts --same-dir directly after the --user the driver leads with", () => {
     expect(
       withSameDir("systemd-run", ["--user", "--collect", "--unit", "u", "odu"]),
@@ -402,10 +297,6 @@ describe("the working directory a daemon does not need", () => {
   });
 
   it("REFUSES an argv whose shape it does not recognise", () => {
-    // The failure this guard exists for is silent and distant: a coordinator
-    // started in the user manager's directory cannot find the justfile it was
-    // asked to run, and the error names a missing recipe rather than a missing
-    // flag. If a future driver stops leading with `--user`, fail HERE.
     expect(() => withSameDir("systemd-run", ["--collect", "--user"])).toThrow(
       /no longer being set/,
     );

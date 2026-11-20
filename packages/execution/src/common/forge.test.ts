@@ -1,19 +1,3 @@
-/**
- * THE FORGE CONTRACT — one suite, two implementations.
- *
- * A port is only a port if its implementations are interchangeable, and the
- * only way to state that is to run the same assertions against more than one.
- * `ghForge` is driven through a fake `$ODU_GH_BIN` (the e2e suites' own seam, so
- * what this suite exercises is the argv a real `gh` would receive), and the
- * in-memory fake is the shape a suite or a later installation-token
- * implementation fills in.
- *
- * What is deliberately NOT here: credential decisions, refusal wording, and
- * policy. `no_credential` belongs to the caller that knows how to recover from
- * it (`@odu/cli`'s protect), not to the forge that merely reports what `gh`
- * said.
- */
-
 import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -53,7 +37,6 @@ afterEach(() => {
   else process.env.ODU_GH_BIN = GH_WAS;
 });
 
-/** Install a stand-in `gh` that answers every operation this contract names. */
 function fakeGh(): void {
   const dir = mkdtempSync(join(tmpdir(), "odu-forge-gh-"));
   trash.push(dir);
@@ -85,8 +68,6 @@ esac
   process.env.ODU_GH_BIN = bin;
 }
 
-/** A Forge held in memory — the second implementation the contract is stated
- *  against, and the shape a suite substitutes without a subprocess. */
 function memoryForge(): Forge {
   const statuses = new Map<string, RemoteStatus>([[STATUS_ROW.context, STATUS_ROW]]);
   return {
@@ -114,7 +95,6 @@ function memoryForge(): Forge {
   };
 }
 
-/** Run the whole contract against one implementation. */
 function contract(label: string, make: () => Forge): void {
   describe(`Forge contract: ${label}`, () => {
     it("posts a status and says it worked", async () => {

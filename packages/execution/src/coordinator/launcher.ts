@@ -1,23 +1,3 @@
-/**
- * `RunLauncher` — the port a face asks for a NEW run through, and the packaged
- * implementation the composition root binds it to.
- *
- * A port rather than a function call because two things must not know each
- * other. The retry policy (`./recovery`) decides that a finalized run needs a
- * fresh run from its recorded inputs; how a coordinator process comes to exist
- * is a different question with a different answer per environment, and the CLI
- * that types `odu ci rerun` has no business holding either. So the policy takes a
- * launcher, the root supplies one, and a test supplies a stub that records the
- * request instead of starting anything.
- *
- * THE REQUEST IS IMMUTABLE AND CARRIES ITS OWN IDENTITY. `runId` is minted by
- * the CALLER, before the spawn, and handed to the child — which is what makes
- * a lost reply recoverable. Without it, a launcher that spawned and then lost
- * its answer has no way to ask "did that run happen?" except by looking for
- * something it cannot name; with it, the question is a directory lookup. The
- * same field is what lets the child link itself to the run it replays.
- */
-
 import { dirname, join } from "node:path";
 import {
   closeSync,
@@ -43,169 +23,51 @@ import {
   waitForReadiness,
 } from "./spawn";
 
-/**
- * THE TARGET AND THE CREDENTIAL a run pushes with (PLAN 4.1).
- *
- * Structurally the shape `@odu/service` names; spelled here for the reason the
- * module header gives — neither package may import the other, and the root
- * that binds the port is where they meet.
- */
 export interface LaunchPush {
-  /** The URL the repository substitutes from, as its `flake.nix` names it. */
   readonly substituter: string;
-  /** `Odu-Origin`: where the push is aimed. The DAEMON resolved it from its
-   *  own bucket — nothing read it back off a server the repository named. */
   readonly origin: string;
-  /** The bucket that substituter serves, as this daemon advertises it. */
   readonly bucket: string;
-  /** How the token is revoked. Recorded on the manifest; the token is not. */
   readonly tokenId: string;
-  /** The write token. Never on an argv, never in a log — see
-   *  {@link LaunchRequest.push}. */
   readonly token: string;
 }
 
-/** How long a push note may be on an argv and in a manifest. Every byte of it
- *  comes from a repository's own `nix` output, so it is bounded where it is
- *  built (`@odu/cache/push`) AND where it is handed on. */
 export const PUSH_NOTE_MAX = 512;
 
-/** What a face asks for. Every field is decided before anything is started, so
- *  the request can be recorded, replayed, or refused without a process
- *  existing. */
 export interface LaunchRequest {
   readonly checkout: string;
-  /** Which catalog the launched run publishes into. Absent means the ambient
-   *  one; a test (or a caller with its own root) passes its own, and the
-   *  coordinator's log has to land in the SAME catalog as the run it narrates. */
   readonly catalog?: CatalogOptions;
-  /** The id the new run will publish under — minted by the caller. */
   readonly runId: string;
-  /** The run this one replays, when it is a recovery. */
   readonly parentRunId: string | null;
-  /** The caller's idempotency key, when it supplied one. */
   readonly requestId: string | null;
-  /** What to run: the recorded scope of the run being replayed, or a fresh
-   *  selection. */
   readonly scope: RunScope;
-  /** The commit this run is about. A launcher never substitutes today's HEAD:
-   *  a checkout that has moved on is a REFUSAL, made by the child's own strict
-   *  gate, not a quiet different run. */
   readonly expectedSha: string;
-  /** Strict-mode flags, carried through so a replay reproduces the run it is
-   *  replaying rather than today's defaults. */
   readonly noStrict: boolean;
   readonly noSnapshot: boolean;
   readonly noPost: boolean;
   readonly hostPins: readonly string[];
-  /**
-   * The value `$ODU_HOSTS` must have in the coordinator — the CALLER's, not
-   * this process's.
-   *
-   * A launcher runs inside a per-user singleton service, so `process.env` here
-   * belongs to whichever shell started the daemon, possibly days ago. The
-   * coordinator resolves its host inventory by reading an environment
-   * (`./hosts`), so inheriting ours silently substitutes that shell's
-   * inventory for the caller's.
-   *
-   * `null` means the caller expressed nothing — an agent, a browser — and the
-   * service's own configuration stands. A caller WITH a shell says so
-   * exactly: a path, or `""` for "my shell has no `$ODU_HOSTS`", which
-   * `loadHosts` already reads as unset.
-   */
   readonly hostsFile: string | null;
-  /**
-   * WHO ASKED FOR THIS RUN (PLAN 4.4) — a login, `"local"` for a loopback
-   * connection, or `null` when the launcher has no principal to name.
-   *
-   * Stamped on the manifest by the child, which is where every other durable
-   * fact about a run is written. `null` rather than a default string: a
-   * launcher that was never told is a record with no actor, and that absence
-   * is exactly what distinguishes it from a run somebody did start locally.
-   */
   readonly actor: string | null;
-  /** Take the checkout from a run that is already in progress there, rather
-   *  than being refused by it. The coordinator owns what that MEANS (cancel the
-   *  incumbent, confirm it is gone, then claim the lock — see `./run`), and it
-   *  has to, because only the process about to hold the lock can do the
-   *  cancel-then-confirm without a window. A launcher that dropped this flag
-   *  would send a caller's explicit "replace it" into the ordinary
-   *  busy-checkout refusal. */
   readonly supersede: boolean;
-  /** Park at settle rather than tearing down. Carried because it is the
-   *  CALLER's shape of run, not the launcher's policy. */
   readonly linger: boolean;
-  /**
-   * WHERE THIS RUN PUSHES WHAT IT BUILDS, and the credential for it (PLAN
-   * 4.1). `null` for a run that pushes nothing, which is every run whose
-   * checkout reads from no odu cache this daemon serves.
-   *
-   * The TOKEN is the one field of a launch that never reaches an argv. It is
-   * written to a private file beside the run's own log
-   * ({@link pushTokenPath}), the coordinator reads it once and unlinks it, and
-   * from there it travels to the lane inside the `run.configure` payload. A
-   * `ps` on the machine, the coordinator's log, the journal and `run_read` are
-   * all places it is deliberately absent from.
-   */
   readonly push: LaunchPush | null;
-  /** Why this run pushes nothing, for its `_ci-setup` log. Null when it
-   *  does push. */
   readonly pushSkipped: string | null;
-  /** What is wrong while it does: the bucket's key is missing from the
-   *  repository's `trusted-public-keys`. Null when there is nothing to say. */
   readonly pushKeyWarning: string | null;
-  /** The clone was MOVED to the commit this run is about — one sentence for
-   *  the same setup log. Null when nothing was moved, which is every run
-   *  started from a checkout its caller is standing in. */
   readonly checkoutMoved: string | null;
 }
 
 export interface LaunchReceipt {
   ok: boolean;
-  /** The run id the request named — the same one whether this call started it
-   *  or found it already started. */
   runId: string;
-  /** Where the new coordinator serves. */
   endpoint: string;
   pid?: number;
-  /** How independent the coordinator actually is, and why. Reported rather
-   *  than assumed: "your run survives this shell" and "your run dies with this
-   *  unit" are different promises and an operator is entitled to know which
-   *  one it got. */
   lifetime?: string;
   error?: string;
 }
 
 export type RunLauncher = (request: LaunchRequest) => Promise<LaunchReceipt>;
 
-/**
- * The verb a launched coordinator is invoked with — INTERNAL, and that is the
- * point.
- *
- * This used to be `run`, the public command, and once `odu ci run` became a thin
- * client of the service the two could not both be that name: `run.start` calls
- * this launcher, the launcher would invoke `odu ci run`, and `odu ci run` would call
- * `run.start`. Unbounded recursion, arrived at by a rename rather than by a
- * loop anybody wrote.
- *
- * So the coordinator has a verb of its own. It is absent from the usage text —
- * the same convention `web-daemon` and `lease-hold` already keep — because
- * nobody should type it: it takes exactly the argv {@link launchArgv} emits,
- * including the four identity flags (`--run-id`, `--expected-sha`,
- * `--parent-run`, `--request-id`) that let a caller mint a run identity the
- * catalog will accept. Those belong to a LAUNCHER, and leaving them on a public
- * verb was always the recursion trap written down in advance.
- */
 export const COORDINATOR_VERB = "run-coordinator";
 
-/**
- * The argv a launch request becomes.
- *
- * Pure, exported, and tested: this is the "structured data/argv, never a
- * string to eval" rule made concrete. A face that wants to show a person what
- * a recovery would run prints this array; nothing anywhere builds a shell
- * command out of a user's selectors.
- */
 export function launchArgv(request: LaunchRequest): string[] {
   const args = [COORDINATOR_VERB, ...request.scope.selectors];
   for (const p of request.scope.platforms) args.push("--platform", p);
@@ -217,8 +79,6 @@ export function launchArgv(request: LaunchRequest): string[] {
   if (request.noPost) args.push("--no-post");
   if (request.supersede) args.push("--supersede");
   if (request.linger) args.push("--linger");
-  // The identity the caller minted, so the child publishes under the id the
-  // receipt already names.
   args.push("--run-id", request.runId);
   args.push("--expected-sha", request.expectedSha);
   if (request.parentRunId !== null) {
@@ -227,67 +87,37 @@ export function launchArgv(request: LaunchRequest): string[] {
   if (request.requestId !== null) {
     args.push("--request-id", request.requestId);
   }
-  // WHO STARTED IT (PLAN 4.4). A login or `@local`; absent when the launcher
-  // had no principal to name, which the child records as no actor at all.
   if (request.actor !== null) {
     args.push("--actor", request.actor);
   }
-  // WHERE THIS RUN PUSHES (PLAN 4.1), and the one line its setup log owes —
-  // but NOT the token, which is the whole reason there is a `--push-token-id`
-  // and no `--push-token`: an argv is public on the machine that runs it.
   if (request.push !== null) {
     args.push("--push", request.push.substituter);
     args.push("--push-origin", request.push.origin);
     args.push("--push-bucket", request.push.bucket);
     args.push("--push-token-id", request.push.tokenId);
   }
-  // TRUNCATED, BOTH. A skip reason is built from a repository's own `nix`
-  // output; an argv has a per-argument ceiling (`MAX_ARG_STRLEN`), and a
-  // launch that failed because somebody wrote a long error message would look
-  // like a bug in odu.
   if (request.pushSkipped !== null) {
     args.push("--push-skipped", request.pushSkipped.slice(0, PUSH_NOTE_MAX));
   }
   if (request.pushKeyWarning !== null) {
     args.push("--push-key-warning", request.pushKeyWarning.slice(0, PUSH_NOTE_MAX));
   }
-  // THE SAME CEILING, for the same reason: this one carries a path somebody
-  // else chose.
   if (request.checkoutMoved !== null) {
     args.push("--checkout-moved", request.checkoutMoved.slice(0, PUSH_NOTE_MAX));
   }
   return args;
 }
 
-/** The transient unit name a systemd-run launch uses. Scoped to the run so two
- *  coordinators never collide, and recognisable so `systemctl --user status`
- *  names the run an operator is asking about. */
 export function unitNameFor(runId: string): string {
   return `odu-run-${runId}`;
 }
 
-/** The lifetime sentence a receipt carries, from the plan that was used. */
 function lifetimeOf(plan: SpawnPlan): string {
   return plan.mechanism === "systemd-run"
     ? `the coordinator runs as its own transient user service — ${plan.reason}`
     : `the coordinator is a detached process group — ${plan.reason}`;
 }
 
-/**
- * MAY A FAILED LAUNCH BE TRIED AGAIN?
- *
- * Only one shape says yes, and getting it wrong doubles a run — so the decision
- * is a pure function rather than a condition inline. `systemd-run` is a
- * SUBMITTER: a non-zero exit from it means the user manager declined to create
- * the unit, which is the only failure that proves nothing was started.
- *
- *   - a ZERO exit means the job was accepted and says nothing about the
- *     service, so a second launch might be a second coordinator;
- *   - a DETACHED spawn's exit is the coordinator's own death, and re-launching
- *     over that would paper over a real refusal (a dirty tree, a bad justfile);
- *   - no exit at all means the readiness ceiling was reached with something
- *     possibly still coming up.
- */
 export function mayRelaunchDetached(
   plan: SpawnPlan,
   exitCode: number | null,
@@ -295,32 +125,12 @@ export function mayRelaunchDetached(
   return plan.mechanism === "systemd-run" && exitCode !== null && exitCode !== 0;
 }
 
-/**
- * HAS THE RUN THIS REQUEST ASKED FOR COME INTO EXISTENCE?
- *
- * The manifest, addressed by the id the caller minted before the spawn — which
- * is the only fact about the launch that no other run can satisfy.
- *
- * A socket cannot answer this, and believing it could was a bug with no error
- * in it. `.ci/odu.sock` belongs to a CHECKOUT: when a start supersedes the run
- * already there, the incumbent's socket answers immediately, so a launcher
- * waiting on the path returned `ok: true` for a replacement that had not
- * reached its strict gate — and `run.start` then wrote an accepted receipt for
- * a run that never registered. The same mistake in the other direction refused
- * a run that started, finished and closed its socket faster than the poll.
- *
- * The manifest is written before the venue claim and before the socket is
- * served (`./history`'s "called BEFORE the run executes"), so this is also the
- * EARLIER signal, not a slower one bought for correctness.
- */
 function runIsRegistered(request: LaunchRequest): boolean {
   return (
     readManifest(handleFor(request.runId, request.catalog ?? {})) !== null
   );
 }
 
-/** What one launch attempt came to. `managerRefused` is the one outcome a
- *  SECOND attempt is allowed to follow — see {@link mayRelaunchDetached}. */
 interface Attempt {
   receipt: LaunchReceipt;
   managerRefused: boolean;
@@ -333,27 +143,11 @@ async function attemptLaunch(
   lifetime: (plan: SpawnPlan) => string,
 ): Promise<Attempt> {
   const argv = [...oduSelfArgv(env), ...launchArgv(request)];
-  // The coordinator's own narration goes into its catalog directory, beside
-  // the evidence it is about to produce. The run id is pre-minted, so the
-  // path exists to be named before the process does — and a launcher that
-  // exits (as this one does, the moment the run registers) must not leave the
-  // child writing into a pipe nobody is reading. See `spawnCoordinator`.
-  // THE RUN'S WRITE TOKEN, left where only the owner can read it (PLAN 4.1).
-  //
-  // Written BEFORE the spawn, because the coordinator reads it as its first
-  // act. `mode` ALONE was not enough: it applies only when the file is
-  // created, and a plain write follows a symlink — so a pre-existing
-  // `push.token` (any mode) or a link pointing out of the directory would
-  // have silently defeated both halves of the intent. Unlink first, then
-  // create with `wx` and `O_NOFOLLOW`: the open fails rather than writing a
-  // credential somewhere nobody chose.
   if (request.push !== null) {
     const tokenPath = pushTokenPath(request.runId, request.catalog ?? {});
     mkdirSync(dirname(tokenPath), { recursive: true });
     rmSync(tokenPath, { force: true });
     // `O_NOFOLLOW` has no string spelling in `fs`'s flag grammar, so the
-    // numeric flags are built directly: this must FAIL on a symlink rather
-    // than write a credential through one.
     const handle = openSync(
       tokenPath,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
@@ -372,20 +166,10 @@ async function attemptLaunch(
     coordinatorLogPath(request.runId, request.catalog ?? {}),
     env,
   );
-  // Remembered rather than awaited on the failure path: under `systemd-run`
-  // the readiness wait can end on its own ceiling while the submitter is
-  // still around, and `await`ing an exit that has not happened would hang the
-  // very call that is trying to report a failure. Registered BEFORE the wait,
-  // so by the time the wait has resolved this has too.
   let exitCode: number | null = null;
   void spawned.onExit.then((code) => {
     exitCode = code;
   });
-  // Readiness, not "did the process we forked exit". Under `systemd-run`
-  // the process we forked is a SUBMITTER that exits while the service is
-  // still starting, so reading its exit as the coordinator's would refuse a
-  // run that is coming up — and leave it running with nobody watching.
-  // `waitForReadiness` asks the PLAN which of those it just started.
   const up = await waitForReadiness(
     spawned.plan,
     () => Promise.resolve(runIsRegistered(request)),
@@ -420,38 +204,6 @@ async function attemptLaunch(
   };
 }
 
-/**
- * The packaged launcher: start `odu ci run` for this request and return once the
- * run it asked for is IN THE CATALOG.
- *
- * Waiting for that is what makes the receipt worth anything. A launcher that
- * returned as soon as `spawn` succeeded would hand back a run id that may
- * belong to a process which died on the strict gate a millisecond later, and
- * the caller would then wait thirty seconds on a run that never existed. It
- * waits on the RUN and not on the checkout's socket, for the reason
- * {@link runIsRegistered} gives.
- *
- * **A user manager that refuses the unit is not a failed run.** The plan probes
- * for a session bus before it chooses `systemd-run`, but a socket that exists is
- * not yet a manager that will accept a job — a container, a locked-down runner,
- * a user with `linger` off. When the submitter comes back non-zero, NOTHING was
- * started, so the launch is made again the way it would have been made on a host
- * with no systemd at all. The receipt says which one it got: `lifetime` is the
- * field where "your run survives this shell" and "your run dies with this unit"
- * are different sentences, and a fallback that stayed quiet would print the
- * first while meaning the second.
- */
-/**
- * The environment a coordinator is started in: this process's, with the ONE
- * variable that decides where the run's work lands replaced by the caller's.
- *
- * Pure and exported because the interesting case is invisible in a passing
- * test: `""` and `null` both look like "nothing" at a call site and mean
- * opposite things. `""` is a caller's shell reporting that it has no
- * `$ODU_HOSTS` — assigned, so the child's chain starts where that shell's
- * does. `null` is a caller with no shell at all, and the service's own
- * configuration stands.
- */
 export function coordinatorEnv(
   request: LaunchRequest,
   base: NodeJS.ProcessEnv,
@@ -464,12 +216,6 @@ export function coordinatorEnv(
 export function packagedLauncher(): RunLauncher {
   return async (request) => {
     const receipt = await launchOnce(request);
-    // THE WRITER CLEANS UP. `attemptLaunch` wrote `runs/<id>/push.token` for a
-    // coordinator that never started, so nothing will ever read it or unlink
-    // it and a plaintext credential would sit in the catalog until retention.
-    // Done HERE rather than asked of the service beside its `revoke`: the
-    // service does not own that file, and a two-step protocol split across
-    // two layers is one every caller can half-remember.
     if (!receipt.ok && request.push !== null) {
       dropPushToken(request.runId, request.catalog ?? {});
     }
@@ -477,14 +223,11 @@ export function packagedLauncher(): RunLauncher {
   };
 }
 
-/** One launch, with a user manager's refusal retried directly. */
 async function launchOnce(request: LaunchRequest): Promise<LaunchReceipt> {
   const endpoint = runSocketPath(request.checkout);
   const base = coordinatorEnv(request, process.env);
   const first = await attemptLaunch(request, endpoint, base, lifetimeOf);
   if (!first.managerRefused) return first.receipt;
-  // The opt-out the plan already honours, set for this one retry — so the
-  // fallback re-uses the decision rather than adding a second way to spell it.
   const refusal = first.receipt.error ?? "the user manager refused the unit";
   const second = await attemptLaunch(
     request,
@@ -502,41 +245,17 @@ async function launchOnce(request: LaunchRequest): Promise<LaunchReceipt> {
   };
 }
 
-/** Where a checkout's coordinator lock lives, beside its socket. Named here
- *  because the launcher's refusals cite it. */
 export function checkoutLockPath(checkout: string): string {
   return join(checkout, ".ci", "odu.run.lock");
 }
 
-/** Where a launched coordinator writes its own account of the run —
- *  `runs/<runId>/coordinator.log` in the catalog. Addressed by RUN, so it is
- *  still findable when the checkout is not, and durable, so a startup failure
- *  survives the launcher that observed it. */
 export function coordinatorLogPath(
   runId: string,
-  /** WHICH catalog. Omitted means the ambient one, which is right in
-   *  production and wrong under an injected root — a relaunch would write the
-   *  child's log into the developer's real catalog while the run itself lived
-   *  in a temp one, where retention could never see it. The same options every
-   *  other reader of this catalog already threads. */
   catalog: CatalogOptions = {},
 ): string {
-  // The NAME comes from the package that owns the layout, so retention's
-  // evidence partition can see this file. Spelling it here is how it came to
-  // survive expiry forever.
   return join(handleFor(runId, catalog).dir, RUN_FILES.coordinatorLog);
 }
 
-/**
- * Where a launch leaves the run's write token for the coordinator it is about
- * to start (PLAN 4.1) — `runs/<runId>/push.token`, mode 0600.
- *
- * The handoff is a file because the two alternatives are both public on the
- * machine: an argv is visible to `ps`, and a transient unit's environment to
- * `systemctl show`. The coordinator reads it once and unlinks it, so a live run
- * does not have one; a leftover means a coordinator that died before it got
- * there, and the token it holds expires on its own.
- */
 export function pushTokenPath(
   runId: string,
   catalog: CatalogOptions = {},
@@ -544,16 +263,6 @@ export function pushTokenPath(
   return join(handleFor(runId, catalog).dir, RUN_FILES.pushToken);
 }
 
-/**
- * Read the run's write token and remove the file — the COORDINATOR's half of
- * the handoff {@link pushTokenPath} describes, spelled beside it so the two
- * ends of one protocol cannot drift.
- *
- * `null` when there is no file: a run launched without a push target, a
- * coordinator somebody started by hand, or a second read — there is no second
- * read, because the first unlinked it. The caller then pushes nothing, which is
- * the same answer a checkout naming no cache gets.
- */
 export function takePushToken(
   runId: string | undefined,
   catalog: CatalogOptions = {},
@@ -569,15 +278,6 @@ export function takePushToken(
   }
 }
 
-/**
- * Remove a run's token file without reading it — what a caller does when the
- * launch it wrote the file for never produced a coordinator.
- *
- * The token is revoked on that path too, so this is not what makes it
- * harmless; it is what stops a plaintext credential sitting in the catalog
- * until retention takes it, which is a long time to leave one lying around
- * for no reason.
- */
 export function dropPushToken(runId: string, catalog: CatalogOptions = {}): void {
   rmSync(pushTokenPath(runId, catalog), { force: true });
 }

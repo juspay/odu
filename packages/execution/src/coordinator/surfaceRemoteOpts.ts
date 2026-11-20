@@ -14,15 +14,6 @@ import { type LaneClient, laneClientOver } from "../common/laneSurface";
 /** Wait for the session to hold a client, then build odu's TYPED lane face over
  *  the same wire.
  *
- *  `sshConnector` hands back the structural `AgentClient` (= `SurfaceFace`):
- *  the dial is surface-generic, so per-member precision cannot live in the
- *  connector (kolu PLAN D2). It also hands back the link's own tag-keyed
- *  `dispatch` precisely so a consumer can build a second, precise face over it
- *  — which is what `laneClientOver` is. Re-deriving the face from odu's OWN
- *  surface value means the tags can only agree with what the runner serves;
- *  casting the connector's erased face would have been a second projection free
- *  to drift.
- *
  *  A missing dispatch is a framework bug, not a degraded mode, so it throws.
  *  Reading it right after `pin()` is honest here because odu's lanes and lease
  *  holds are ONE-SHOT: the first link death after attach is terminal, so there

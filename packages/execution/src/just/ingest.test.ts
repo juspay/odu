@@ -16,9 +16,6 @@ import {
 const hasJust =
   spawnSync("just", ["--version"], { encoding: "utf-8" }).status === 0;
 
-/** A `just --dump` recipe node in module `ci` (namepath `ci::<name>`), shaped
- *  like real `just --dump --dump-format json` output. Shared by the synthetic
- *  fixtures below. */
 function ciRecipe(
   name: string,
   deps: string[],
@@ -33,9 +30,6 @@ function ciRecipe(
   };
 }
 
-/** A synthetic `just --dump --dump-format json` tree shaped like kolu's:
- *  an empty-bodied `[metadata("ci")]` root in module `ci`, an `install`
- *  funnel, and coordinator-side recipes that must never schedule. */
 function dump(): unknown {
   return {
     recipes: {
@@ -78,7 +72,6 @@ describe("pipelineFromDump", () => {
       "ci::smoke",
       "ci::unit",
     ]);
-    // pool-ensure lives in the module but is not reachable from the root
     expect(spec.tasks.find((t) => t.id === "ci::pool-ensure")).toBeUndefined();
   });
 
@@ -129,17 +122,12 @@ describe("pipelineFromDump", () => {
       pipelineFromDump(named).tasks.find((task) => task.id === "ci::e2e")?.pin,
     ).toEqual(["main"]);
 
-    // A BARE MARKER IS THE REPOSITORY'S DEFAULT BRANCH, carried as `null`:
-    // ingest is read wherever `just` ran and has no business resolving it —
-    // the coordinator asks the checkout's own git.
     const bare = dump() as any;
     bare.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin"] }];
     expect(
       pipelineFromDump(bare).tasks.find((task) => task.id === "ci::e2e")?.pin,
     ).toEqual([null]);
 
-    // REPEATING THE ATTRIBUTE NAMES MORE REFS, in declaration order — the way
-    // `just`'s own `[group(…)]` repeats.
     const several = dump() as any;
     several.modules.ci.recipes.e2e.attributes = [
       { metadata: ["odu:pin=release-1.x"] },
@@ -150,8 +138,6 @@ describe("pipelineFromDump", () => {
         ?.pin,
     ).toEqual(["release-1.x", null]);
 
-    // WHETHER this run is on any of them is nobody's business here — ingest
-    // reads what the recipe said and the coordinator decides.
     expect(
       pipelineFromDump(dump()).tasks.find((task) => task.id === "ci::e2e")?.pin,
     ).toBeUndefined();
@@ -162,8 +148,6 @@ describe("pipelineFromDump", () => {
     empty.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin="] }];
     expect(() => pipelineFromDump(empty)).toThrow(/odu:pin=<ref>/);
 
-    // A REPEAT IS A TYPO, NOT A SECOND INTENT: one pin per ref, and the
-    // second declaration could only ever re-state the first.
     const twice = dump() as any;
     twice.modules.ci.recipes.e2e.attributes = [
       { metadata: ["odu:pin=main"] },
@@ -171,7 +155,6 @@ describe("pipelineFromDump", () => {
     ];
     expect(() => pipelineFromDump(twice)).toThrow(/one pin per ref/);
 
-    // Bare twice is the same repeat, said the other way.
     const bareTwice = dump() as any;
     bareTwice.modules.ci.recipes.e2e.attributes = [
       { metadata: ["odu:pin"] },
@@ -181,9 +164,6 @@ describe("pipelineFromDump", () => {
   });
 
   it("refuses the list and the glob somebody reaches for instead", () => {
-    // THE TWO WRONG SHAPES. Accepted as text, `a,b` and `re*` would be refs
-    // no run is ever on: the pin would never be made and nothing would say
-    // so. The refusal names the shape that works.
     const list = dump() as any;
     list.modules.ci.recipes.e2e.attributes = [{ metadata: ["odu:pin=a,b"] }];
     expect(() => pipelineFromDump(list)).toThrow(/one ref per attribute; repeat it/);
@@ -202,8 +182,6 @@ describe("pipelineFromDump", () => {
   });
 
   it("resolves a dependency on a child module's recipe, at any depth", () => {
-    // `ci::default: unit counters::check` — the CI module names the child's
-    // *path* and nothing else; the child owns its own recipe and deps.
     const spec = pipelineFromDump({
       recipes: {},
       modules: {
@@ -219,7 +197,6 @@ describe("pipelineFromDump", () => {
           modules: {
             counters: {
               recipes: {
-                // The child's own dep is bare — resolved in the child, not in ci.
                 check: {
                   name: "check",
                   namepath: "ci::counters::check",
@@ -260,11 +237,9 @@ describe("pipelineFromDump", () => {
       "ci::counters::fixture",
       "ci::unit",
     ]);
-    // Nodes are named and invoked by namepath, as everywhere else.
     const check = spec.tasks.find((t) => t.id === "ci::counters::check");
     expect(check?.command).toBe("just --no-deps ci::counters::check");
     expect(check?.needs).toEqual(["ci::counters::fixture"]);
-    // A bare selector still finds the child's recipe by leaf name.
     expect(
       laneTasks(spec, "x86_64-linux", [{ recipe: "check" }], true).map(
         (t) => t.id,
@@ -341,12 +316,6 @@ describe("selectors", () => {
   });
 });
 
-/** A *synthetic* dump exercising the pure filtering logic — both a `[linux]`
- *  and a `[macos]` recipe present at once, which real `just --dump` never emits
- *  from a single coordinator (see the "real just --dump" suite for the actual
- *  contract). `deployer` (no OS attribute) depends on the linux-only recipe so
- *  the cascade is observable; `everywhere` is `[parallel]` to prove a non-OS
- *  attribute imposes no platform restriction. */
 function osDump(): unknown {
   const tagged = (name: string, attr: string): unknown =>
     ciRecipe(name, [], { attributes: [attr] });
@@ -404,10 +373,8 @@ describe("recipeRunsOn", () => {
     expect(recipeRunsOn(["netbsd"], "x86_64-netbsd")).toBe(true);
     expect(recipeRunsOn(["dragonfly"], "x86_64-dragonfly")).toBe(true);
     expect(recipeRunsOn(["android"], "aarch64-android")).toBe(true);
-    // each restricts to its own OS, not "runs everywhere"
     expect(recipeRunsOn(["freebsd"], "x86_64-linux")).toBe(false);
     expect(recipeRunsOn(["android"], "aarch64-darwin")).toBe(false);
-    // [unix] excludes windows but includes the BSDs and android
     expect(recipeRunsOn(["unix"], "x86_64-freebsd")).toBe(true);
     expect(recipeRunsOn(["unix"], "x86_64-windows")).toBe(false);
   });
@@ -447,7 +414,6 @@ describe("platform filtering", () => {
   });
 
   it("cascades: a dependent of a pruned recipe is pruned on that platform too", () => {
-    // deployer needs linuxOnly; on darwin linuxOnly is gone, so deployer is too.
     const darwin = laneTasks(spec, "aarch64-darwin", [], false).map((t) => t.id);
     expect(darwin).not.toContain("ci::deployer");
     const linux = laneTasks(spec, "x86_64-linux", [], false).map((t) => t.id);
@@ -482,14 +448,8 @@ describe("mermaidGraph", () => {
 });
 
 /**
- * The real-`just` dump path. The synthetic `osDump()` above feeds both a
- * `[linux]` and a `[macos]` recipe through `pipelineFromDump`, but a single
- * coordinator's `just --dump --dump-format json` *never* yields that input:
  * `just` resolves OS attributes before emitting JSON, so a recipe whose OS
- * doesn't match the coordinator is absent from the dump entirely. These tests
- * pin the resulting contract — OS attributes reliably *prune* same-OS recipes
- * off foreign lanes, but cannot *introduce* a foreign-OS recipe — so a future
- * change can't silently regress (or over-promise) it.
+ * doesn't match the coordinator is absent from the dump entirely.
  */
 describe.skipIf(!hasJust)("loadJustPipeline (real just --dump)", () => {
   const coordinatorOs = osPlatform === "darwin" ? "macos" : "linux";
@@ -526,7 +486,6 @@ describe.skipIf(!hasJust)("loadJustPipeline (real just --dump)", () => {
       ].join("\n"),
     );
     const spec = loadJustPipeline(dir);
-    // The coordinator-OS recipe is in the dump, tagged with its OS.
     expect(spec.tasks.find((t) => t.id === "same-os")?.os).toEqual([
       coordinatorOs,
     ]);
@@ -541,8 +500,6 @@ describe.skipIf(!hasJust)("loadJustPipeline (real just --dump)", () => {
   });
 
   it("expands a real child-module dependency into its namepath node", () => {
-    // What `just` resolves natively (`mod sub` + `root: sub::check`), pinned
-    // against real `just --dump` output rather than a hand-shaped tree.
     const dir = justfileDir(
       [
         "mod sub 'sub/mod.just'",
@@ -567,7 +524,6 @@ describe.skipIf(!hasJust)("loadJustPipeline (real just --dump)", () => {
     expect(spec.tasks.find((t) => t.id === "sub::check")?.needs).toEqual([
       "sub::helper",
     ]);
-    // And the command odu runs is one `just` accepts.
     expect(
       spawnSync("just", ["--no-deps", "sub::check"], { cwd: dir }).status,
     ).toBe(0);
@@ -589,8 +545,6 @@ describe.skipIf(!hasJust)("loadJustPipeline (real just --dump)", () => {
       ].join("\n"),
     );
     const spec = loadJustPipeline(dir);
-    // The foreign-OS recipe is absent from the coordinator's dump entirely, so
-    // it never schedules on *any* lane, including its own target OS.
     expect(spec.tasks.find((t) => t.id === "foreign-os")).toBeUndefined();
     const foreign = laneTasks(spec, foreignOsPlatform, [], false).map(
       (t) => t.id,

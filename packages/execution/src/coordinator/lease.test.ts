@@ -136,12 +136,6 @@ describe("acquireFromPool", () => {
   });
 
   it("REFUSES a mixed pool at the lease entry, naming the hosts file (juspay/odu#54, #66)", async () => {
-    // This test used to assert the opposite — that the scan picked localhost
-    // once the remotes came back busy. That IS the #54 defect: localhost is
-    // lease-exempt, so it read as always-free and starved every busy remote.
-    // The rule is judged once at this entry, over the one pool this call
-    // leases, and the localhost-beside-remotes branch is gone from the scan
-    // rather than special-cased.
     const claim = jest.fn(
       async (): Promise<ClaimResult> => ({ kind: "busy", heldBy: null }),
     );
@@ -158,16 +152,10 @@ describe("acquireFromPool", () => {
     ).rejects.toThrow(
       /\/home\/me\/\.config\/odu\/hosts\.json: host pool for "x86_64-linux" must not mix localhost with remote hosts/,
     );
-    // Refused before any claim: no remote is dialed to learn the pool is illegal.
     expect(claim).not.toHaveBeenCalled();
   });
 
   it("never judges a platform this run does not lease (juspay/odu#66)", async () => {
-    // The regression the whole issue is about, at the seam that now owns the
-    // rule: an illegal x86_64-linux pool sits in the same (machine-global)
-    // hosts file, but this call leases aarch64-darwin. `acquireFromPool` is
-    // handed exactly one pool, so the linux pool cannot possibly refuse this
-    // run — by construction, not by convention.
     const r = await acquireFromPool({
       platform: "aarch64-darwin",
       pool: ["rasam"],
@@ -418,13 +406,6 @@ describe("settleLeaseHandoff", () => {
 
 describe("leaseLanes", () => {
   it("REFUSES a mixed pool on a LATER platform even while an earlier one is busy", async () => {
-    // The reason legality is judged at the entry rather than in the poll loop.
-    // `platforms` is sorted alphabetically and the loop breaks on the first
-    // blocked platform, so a per-scan assert for `x86_64-linux` was never
-    // reached while `aarch64-darwin` stayed busy: with the default
-    // `noWait: false` the operator waited forever instead of being told the
-    // config is illegal. Judged at the entry the refusal is deterministic —
-    // it does not depend on alphabetical order or on who happens to be busy.
     const claim = jest.fn(
       async (): Promise<ClaimResult> => ({ kind: "busy", heldBy: null }),
     );
@@ -452,9 +433,6 @@ describe("leaseLanes", () => {
   });
 
   it("never judges a platform this run does not lease (juspay/odu#66)", async () => {
-    // The mixed x86_64-linux pool is in the same machine-global hosts file,
-    // but this run claims only darwin — `platforms` IS the run's lease set, so
-    // the illegal pool is none of its business and must not refuse it.
     const claim = jest.fn(async (host: string): Promise<ClaimResult> => held(host));
     const r = await leaseLanes({
       pools: {
@@ -685,9 +663,6 @@ describe("leaseLanes", () => {
 });
 
 describe("isMixedPool — the shape the lease seam refuses", () => {
-  // Exported so `odu ci hosts` can WARN about an illegal pool without refusing
-  // over it: the inventory view never leases, and refusing there would be
-  // juspay/odu#66 again — a run stopped over a platform it never touches.
   it("is true only when localhost sits beside a remote", () => {
     expect(isMixedPool(["ci-1", "localhost"])).toBe(true);
     expect(isMixedPool(["localhost", "nix@ci-2.example"])).toBe(true);
@@ -699,32 +674,10 @@ describe("isMixedPool — the shape the lease seam refuses", () => {
   });
 });
 
-/**
- * Waiting in line must KEEP THE PROCESS ALIVE.
- *
- * `odu ci run --progress=json` exited 0 in the middle of a wait: with a platform
- * busy, the multi-platform loop releases the holds it already took — and those
- * ssh/runner children were the only ref'd handles keeping the event loop fed —
- * then sleeps until the next poll. Built on an unref'd timer, that sleep is
- * invisible to the loop: Bun sees nothing left to do and exits cleanly, so the
- * run reports success without ever running. Interactive progress hid it, since
- * the live view keeps stdin ref'd on the process's behalf.
- *
- * Every other test here injects `opts.sleep`, which routes around the defect
- * completely. To see it at all the poll has to be the REAL one, in a process
- * with nothing else holding the loop open — hence a child.
- */
 describe("the wait poll holds the process open", () => {
   const leaseModule = join(import.meta.dir, "lease.ts");
   const POLL_MS = 250;
 
-  /**
-   * Run `body` as a standalone Bun process and report what it managed to say.
-   * The child is shaped like `src/main.ts` — the work hangs off a promise
-   * chain, never a top-level await, because a pending top-level await is by
-   * itself a reason for Bun to stay alive and would mask exactly the defect
-   * under test.
-   */
   function runAlone(body: string): {
     status: number | null;
     stdout: string;
@@ -752,9 +705,6 @@ describe("the wait poll holds the process open", () => {
     }
   }
 
-  /** Busy on the first look at `busyHost`, free on every later one. The fake
-   *  leases hold no handles, so once the loop releases them the timer is all
-   *  that stands between this process and a silent exit. */
   const claimSource = (busyHost: string) => `
     let looks = 0;
     const claim = async (host) => {
@@ -793,11 +743,8 @@ describe("the wait poll holds the process open", () => {
       })`)}
     `);
 
-    // Not "it exited non-zero" — the defect's whole shape is a clean exit 0
-    // with the work undone, which is why the run looked like a success.
     expect(`${r.stdout}${r.stderr}`).toContain("WAITED-THEN-ACQUIRED");
     expect(r.status).toBe(0);
-    // And it really waited, rather than being fixed by a sleep that no-ops.
     expect(r.elapsedMs).toBeGreaterThanOrEqual(POLL_MS);
   }, 30_000);
 

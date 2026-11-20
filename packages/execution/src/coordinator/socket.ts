@@ -1,30 +1,7 @@
 /**
- * THIS checkout's end of the run rendezvous — the two halves only odu has:
- * SERVING the fan-in surface on `.ci/odu.sock` while `odu ci run` is live, and
- * REFUSING in odu's own words when a face finds no run there.
- *
- * Reaching a live run is `@odu/run-client/dial`'s, in this repo and out of it;
- * {@link dialRunOrExit} only adds the exit a one-shot command wants.
- *
- * That exit is a FACE's decision, and it is the half of this file that must
- * never travel. A later extract reading the filename as "the socket" would take
- * {@link dialRunOrExit} and {@link noRunInProgressMessage} across with the
- * serving side; then a library would be deciding that a dashboard's process
- * should die because a run settled. Absence is a state — the package answers
- * `null` and every caller says what that means for it.
- *
- * Transport is `@kolu/surface`'s `serveOverUnixSocket` — same base64-newline
- * framing as every other odu transport, and unlike justci's `.ci/pc.sock`, what
- * is served is the same typed surface every other face speaks. odu keeps the
- * checkout-scoped path (one run per checkout, like justci) rather than the
- * library's per-user runtime-dir convention, and translates the library's
- * structured outcomes into odu-flavored verdicts: `already-served` IS the
- * one-run-per-checkout lock, and a dial failure IS "no run in progress".
- *
  * `serveOverUnixSocket` assumes Node's async-connect-error contract, which Bun
  * does not always honor — importing `asyncConnectError` (for its side effect)
- * restores it. `@odu/run-client/dial` installs the same shim for itself, so
- * between the two every unix-socket dial and serve in this repo is covered.
+ * restores it.
  */
 
 import { chmodSync, mkdirSync } from "node:fs";
@@ -42,15 +19,6 @@ import {
 } from "@odu/run-client/dial";
 import { RUN_LOCK_PATH } from "./checkoutLock";
 
-/** The two per-checkout coordinator paths, derived TOGETHER from the checkout
- *  root — never one from the other. `ensureCheckoutFree` SIGTERMs whoever holds
- *  the run lock, so a lock path inferred from a relative socket path is a kill
- *  aimed at whatever checkout the process happens to be cwd'd into (that is how
- *  odu's own suite once killed the run executing it). Taking a root makes the
- *  pair unambiguous at every call site.
- *
- *  The socket half is `@odu/run-client`'s own path algebra, so the place a
- *  coordinator BINDS and the place a foreign client DIALS are one formula. */
 export function checkoutPaths(repoRoot: string): {
   socketPath: string;
   lockPath: string;
@@ -61,22 +29,6 @@ export function checkoutPaths(repoRoot: string): {
   };
 }
 
-/** odu's plug for the transport's listener-lifetime seam, which juspay/kolu#2101
- *  N3 made REQUIRED precisely so no caller can serve a socket nobody is watching
- *  the health of. The two tiers are not the same event:
- *
- *   - `warn`/`error` — a post-listen listener fault. The socket IS `attach` /
- *     `status` / every agent read, so a coordinator whose listener died while
- *     the lanes run on is exactly the comatose-and-silent shape #2101 was made
- *     of. Straight to the operator feed.
- *   - `info`/`debug` — bound, closed, and a peer dying mid-frame. Routine by
- *     construction: every `odu ci status` dial ends in a peer close, so routing
- *     these to the feed would bury the tier above in noise from healthy runs.
- *
- *  The division of voice matches kaval's wrapper: the transport narrates the
- *  LISTENER, {@link serveSocket} below owns the BIND-TIME verdicts (they are
- *  `outcome` values, and the odu-flavored advice for each is not the
- *  transport's vocabulary). */
 export function socketLogger(onLine: (line: string) => void): Logger {
   const quiet = (): void => {};
   const loud = (obj: Record<string, unknown>, msg: string): void => {
@@ -86,18 +38,6 @@ export function socketLogger(onLine: (line: string) => void): Logger {
   return { debug: quiet, info: quiet, warn: loud, error: loud };
 }
 
-/** Serve the fan-in surface on the unix socket; refuses when another run is
- *  live in this checkout (one run per checkout — justci's `.ci/pc.sock` rule).
- *  The library reclaims a provably-stale socket left by a crashed coordinator
- *  and refuses to serve from a world-readable directory, so `.ci` is
- *  tightened to owner-only first (it holds nothing but this run's logs).
- *
- *  The served value is the `{ group, handlers }` pair `implementSurface` hands
- *  back, and it is TYPED — a tag carries its own route, so there is nothing to
- *  re-prefix at the mount site.
- *
- *  `log` is required for the same reason the transport requires it — see
- *  {@link socketLogger}. Both call sites pass a path, so it takes one too. */
 export async function serveSocket(
   served: {
     group: RpcGroup.RpcGroup<Rpc.Any>;
@@ -143,41 +83,14 @@ export async function serveSocket(
   }
 }
 
-/** The shared no-run refusal string — CLI wait/rerun and `dialRunOrExit` all
- *  cite the same wording so agents match one phrase. */
 export function noRunInProgressMessage(path: string): string {
   return `odu: no run in progress in this checkout (no live socket at ${path})\n`;
 }
 
-/** The sibling refusal, for the other way a face can end up with nothing to
- *  say: it WAS attached, and the feed went away before the thing it was
- *  waiting for arrived.
- *
- *  A dropped link is not a finished run, and telling the two apart is not the
- *  reader's job — it is the FACE's, because only the face knows what it was
- *  waiting FOR. `attach` waits for the pipeline to settle, `logs -f` for one
- *  node's log to end; each breaks out of its own loop on its own terminal
- *  frame, so falling out of the loop any other way means the feed died. What
- *  every one of them must NOT do is what they all used to: run off the end of
- *  the loop into the success path and report a partial observation as a
- *  verdict — `attach` exiting 0 on a run still running, `logs -f` returning
- *  success on a log that stops mid-line. (The settle wait had the same defect
- *  and answers it differently, by re-dialing: it is the one face whose whole
- *  job is to outlive a transient drop.)
- *
- *  `awaited` names what never came, in the face's own words — and names it
- *  without repeating "the run", which this sentence has already said: the
- *  stutter ("…the connection to the run before the run settled") landed in the
- *  operator-facing line of a face that had just lost their terminal. */
 export function feedDroppedMessage(awaited: string): string {
   return `odu: lost the connection to the run before ${awaited} — it may still be going (check \`odu ci status\`)\n`;
 }
 
-/** {@link dialRun}, for a face that has nothing to say without a run: exits
- *  with the justci-parity message instead of handing back `null`.
- *
- *  Dying is a one-shot command's decision, never a library's — which is the
- *  whole reason this wrapper is here and not in the package. */
 export async function dialRunOrExit(
   path: string = SOCKET_PATH,
 ): Promise<DialedRun> {

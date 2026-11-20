@@ -1,11 +1,3 @@
-/**
- * The one behaviour `subscribe` promises that its callers cannot re-derive:
- * what an INTERRUPTION looks like from the Promise side.
- *
- * `effectEdges.test.ts` next door governs WHERE effects may be run; this pins
- * what the edge does with the two ends a subscription can have.
- */
-
 import { describe, expect, it } from "bun:test";
 import { Cause, Effect, Stream } from "effect";
 import {
@@ -25,12 +17,6 @@ async function drain<T>(stream: Stream.Stream<T, unknown>): Promise<T[]> {
 
 describe("subscribe", () => {
   it("ends the iteration when the stream is interrupted from below", async () => {
-    // What a surface client does when its peer closes the socket while the
-    // subscription's dial is in flight. `Cause.squash` renders an interrupt-only
-    // cause as a bare `Error` reading "All fibers interrupted without error" —
-    // no `_tag`, no `cause`, nothing a consumer can branch on but the prose. So
-    // it used to escape every classifier odu has and surface as an uncaught,
-    // including out of `wait_for_settle`. An interruption is an END.
     const stream = Stream.concat(
       Stream.make(1, 2),
       Stream.failCause(Cause.interrupt(1 as never)) as Stream.Stream<number>,
@@ -50,11 +36,6 @@ describe("subscribe", () => {
 
 describe("firstFrame", () => {
   it("reads an interruption the same way `subscribe` does", async () => {
-    // The rule is the MODULE's, not one member's. A one-shot read is where this
-    // interruption actually happens (a peer closing while the dial is in
-    // flight), and leaving it unclassified handed `firstSnapshot` /
-    // `headerSnapshot` the shapeless `All fibers interrupted without error`
-    // instead of the odu-worded protocol failure they raise for exactly this.
     const interrupted = Stream.failCause(
       Cause.interrupt(1 as never),
     ) as Stream.Stream<number>;
@@ -70,9 +51,6 @@ describe("firstFrame", () => {
   });
 
   it("rejects with a NAMED no-answer when the head misses its deadline", async () => {
-    // Three outcomes, three shapes: a frame, `undefined` for a stream that
-    // ended empty, and this for a producer that is there and silent. The last
-    // is the hung `odu ci attach` of juspay/odu#113, which had no way to say so.
     const silent = Stream.fromEffect(Effect.never) as Stream.Stream<number>;
     const outcome = await firstFrame(silent, { deadlineMs: 20 }).then(
       () => "answered",
@@ -91,9 +69,6 @@ describe("firstFrame", () => {
 describe("errorMessage", () => {
   it("renders an Error's message, or its name when the message is empty", () => {
     expect(errorMessage(new Error("boom"))).toBe("boom");
-    // An empty message must not print a blank line — the same class of
-    // non-answer the function exists to eliminate. `String(new Error(""))` is
-    // the name, which is at least a noun.
     expect(errorMessage(new Error(""))).toBe("Error");
   });
   it("renders a bare string", () => {
@@ -101,16 +76,9 @@ describe("errorMessage", () => {
   });
   it("renders an object's string message, else the value itself", () => {
     expect(errorMessage({ message: "nested cause" })).toBe("nested cause");
-    // `String({...})` would be "[object Object]" — a sentence that names
-    // nothing. Show what actually failed instead.
     expect(errorMessage({ code: "E_DIED" })).toBe('{"code":"E_DIED"}');
-    // A large object caps: a Cause/Exit dropping into this arm would otherwise
-    // print whole structure on one line, burying the command's actual answer.
     expect(errorMessage({ x: "A".repeat(600) })).toHaveLength(513);
     expect(errorMessage(null)).toBe("null");
-    // Cyclic values and BigInts make `JSON.stringify` throw; the render path
-    // must not. It degrades to `String(err)` — "[object Object]" for the
-    // cyclic case, which names nothing but breaks nothing either.
     const cyclic: { self?: unknown } = {};
     cyclic.self = cyclic;
     expect(() => errorMessage(cyclic)).not.toThrow();

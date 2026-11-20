@@ -1,25 +1,3 @@
-/**
- * What the socket owes an observer WHILE a venue claim is outstanding
- * (juspay/odu#84, grok debate F4).
- *
- * The claim is the only thing in `orchestrate` that both takes minutes and dials
- * ssh, so the window it opens — a live socket, live signal handlers, a live
- * `lane.cancel`, and no lanes — could not be reached from a test at all. This
- * drives the real `runCommand` against a throwaway repo with the claim INJECTED
- * and held open, which is the only way to ask the question that matters:
- *
- *   an operator drops the only platform mid-claim; does `wait_for_settle` say
- *   the run is over while the coordinator still holds the box?
- *
- * It did. `cancelPlatform` terminalized the lane's nodes at once, and every
- * out-of-process reader (`odu ci wait`, the MCP `wait_for_settle`) judges settle by
- * the `nodes` cell — not by the coordinator's private `checkSettled`. So a
- * single-platform run answered "settled, cancelled" while `claimVenues` was
- * still copying a closure, still holding the checkout's one-run lock, and still
- * owed a lease; an agent taking that at face value got "a run is already in
- * progress" from its next `run()`.
- */
-
 import { spawn, spawnSync } from "node:child_process";
 import {
   mkdirSync,
@@ -57,9 +35,6 @@ afterEach(() => {
   }
 });
 
-/** A throwaway git checkout with a one-recipe CI DAG and a hosts file naming a
- *  REMOTE host — remote so the platform lands in `platformsToClaim` and the run
- *  actually enters the claim. Nothing ever dials it: the claim is injected. */
 function fixture(): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-claim-"));
   const git = (...args: string[]): void => {
@@ -79,9 +54,6 @@ function fixture(): string {
   git("config", "user.name", "test");
   git("add", "-A");
   git("commit", "-qm", "fixture");
-  // A remote lane refuses without an origin to fetch from. Deliberately not a
-  // github.com URL: `parseGithubRemote` then yields null, so no forge coordinate
-  // is resolved and no status-posting path is reachable at all.
   git("remote", "add", "origin", "file:///nonexistent/origin.git");
 
   const prevCwd = process.cwd();
@@ -89,8 +61,6 @@ function fixture(): string {
   const prevSource = process.env.SURFACE_AGENT_FLAKE_REF;
   process.chdir(dir);
   process.env.ODU_HOSTS = join(dir, "hosts.json");
-  // Never resolved — `requireBakedRunnerSource` only has to not throw, because
-  // the injected claim is what would have used it.
   process.env.SURFACE_AGENT_FLAKE_REF = "path:/nonexistent";
   open.push({
     dir,
@@ -112,7 +82,6 @@ function sha7Of(dir: string): string {
   }).stdout.trim();
 }
 
-/** Poll the checkout socket until the coordinator answers. */
 async function dialUntilServing(
   socketPath: string,
   timeoutMs = 20_000,
@@ -133,10 +102,6 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
     const runModule = join(import.meta.dir, "run.ts");
     const childDir = mkdtempSync(join(tmpdir(), "odu-early-cancel-"));
     const childFile = join(childDir, "early-cancel.ts");
-    // A separate process is essential: production shutdown ends in
-    // process.exit(130), and replacing that exit would let the already-cancelled
-    // coordinator resume into a second terminal owner. Hold its injected venue
-    // claim forever so cancel lands in the exact pre-claim-completion window.
     writeFileSync(
       childFile,
       [
@@ -188,7 +153,6 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
       expect(code).toBe(130);
       expect(stderr).not.toContain("ReferenceError");
       expect(stderr).not.toContain("before initialization");
-      // Shutdown reached the durable-artifact step which used to throw.
       const timings = readFileSync(
         join(dir, ".ci", sha7Of(dir), "timings.jsonl"),
         "utf-8",
@@ -205,8 +169,6 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
     const dir = fixture();
     const socketPath = join(dir, ".ci", "odu.sock");
 
-    // The claim, held open until this test releases it — the ssh dial a real
-    // run would be inside for minutes.
     let releaseClaim: (outcome: ClaimOutcome) => void = () => {};
     const claimHeld = new Promise<ClaimOutcome>((resolve) => {
       releaseClaim = resolve;
@@ -233,11 +195,8 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
         },
       },
     );
-    // The run never returns on its own here (it parks or awaits settle); a
-    // rejection must still surface rather than becoming an unhandled one.
     const runOutcome = run.catch((err: unknown) => err);
 
-    // The socket comes up BEFORE the claim — the whole point of #84.
     await Promise.race([
       waitFor(() => claimEntered, 20_000),
       runOutcome.then(result => { throw new Error(`run ended before claim: ${String(result)}`); }),
@@ -245,20 +204,12 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
     const dialed = await dialUntilServing(socketPath);
 
     try {
-      // Drop the only platform, the way `odu ci cancel @plat` / MCP `lane_cancel`
-      // does — over the socket, from outside, while the claim is still held.
       const ack = await runUnary(
         dialed.client.surface.lane.cancel({ platform: PLATFORM }),
       );
       expect(ack.ok).toBe(true);
 
-      // THE ASSERTION. The run is not over: the coordinator still holds the
-      // checkout lock and is still inside the claim. A verdict here must time
-      // out, not report a settled/cancelled run.
       const verdict = await waitForSettle({
-        // The reader both faces ship (`agentReaderForSocket`), not a link this
-        // test happened to be holding — the wait is only honest over a reader
-        // that can re-dial, so a harness must not hand it another shape.
         client: agentReaderForSocket(socketPath),
         timeoutMs: 750,
         failFast: false,
@@ -267,15 +218,11 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
       expect(verdict.settled).toBe(false);
       expect(verdict.timed_out).toBe(true);
     } finally {
-      // Let the claim fail so the run terminalizes and stops on its own.
       releaseClaim({
         ok: false,
         error: new Error("odu: test released the claim"),
       });
       await dialed.close();
-      // Cleared on the happy path: an armed 10s timer holds the loop open long
-      // after the assertions pass, which is the whole run's wall time for a
-      // backstop that exists only for the case where the run never returns.
       let backstop: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         runOutcome,
@@ -288,11 +235,6 @@ describe.if(hasJust)("a cancel that lands mid-claim", () => {
   }, 60_000);
 });
 
-/**
- * The second question the same harness can ask: a node whose fate the
- * COORDINATOR decides — no lane ever attached — still has a log, and a reader is
- * owed the same two facts about it as about any other node.
- */
 describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
   it("ends its fan-in log and owns its file, so `logs -f` returns and no stale bytes survive", async () => {
     const dir = fixture();
@@ -301,8 +243,6 @@ describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
       const r = spawnSync("git", args, { cwd: dir, encoding: "utf-8" });
       if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
     };
-    // `.ci/` is where the run writes; ignoring it keeps the tree CLEAN, which a
-    // remote-pool run requires (a dirty tree refuses before it ever claims).
     writeFileSync(join(dir, ".gitignore"), ".ci/\n");
     git("add", "-A");
     git("commit", "-qm", "ignore .ci");
@@ -310,9 +250,6 @@ describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
       cwd: dir,
       encoding: "utf-8",
     }).stdout.trim();
-    // A PREVIOUS run of this same commit left its output here. The path is
-    // addressed by commit, not by run, so this run must replace it — including
-    // for a node that never emits a byte, which is exactly this one.
     const logFile = join(dir, ".ci", sha7, PLATFORM, "unit.log");
     mkdirSync(join(dir, ".ci", sha7, PLATFORM), { recursive: true });
     writeFileSync(logFile, "STALE OUTPUT FROM THE PREVIOUS RUN\n");
@@ -350,8 +287,6 @@ describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
     ]);
     const dialed = await dialUntilServing(socketPath);
     try {
-      // Attached BEFORE the node is terminalized, the way `odu ci logs -f` is:
-      // this is the reader whose loop only ends on a terminal frame.
       const kinds: string[] = [];
       const sub = subscribe(
         dialed.client.surface.nodeLog.get({ id: `unit@${PLATFORM}` }),
@@ -363,30 +298,19 @@ describe.if(hasJust)("a node the coordinator itself terminalizes", () => {
             if (frame.kind === "end") break;
           }
         } catch {
-          // The socket closes when the run exits; a reader still parked on it
-          // then sees the transport go, which is NOT the terminal under test.
         }
       })();
-      // The subscription is live once its opening snapshot lands — assert
-      // against a reader that was already attached, not one that raced.
       await waitFor(() => kinds.length > 0, 20_000);
 
-      // The claim fails: no machine, no lane, and every node on the platform
-      // goes terminal by the coordinator's own decision.
       releaseClaim({
         ok: false,
         error: new Error("odu: test released the claim"),
       });
 
-      // THE ASSERTION. The node reached a terminal status, so its log reached
-      // its terminal too — on the fan-in socket, not only on a lane's. Without
-      // it `odu ci logs -f unit@<plat>` against this run never returns.
       await waitFor(() => kinds.includes("end"), 20_000);
       void sub.return?.();
       await runOutcome;
 
-      // …and the run owns the file, so a reader who opens it is not handed the
-      // previous run's output under this run's red verdict.
       expect(readFileSync(logFile, "utf-8")).not.toContain("STALE OUTPUT");
     } finally {
       await dialed.close();

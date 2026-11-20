@@ -1,22 +1,3 @@
-/**
- * Writable per-SHA workspaces — the "load-bearing gap" the Atlas note named:
- * kolu's CI recipes (`nix`, `e2e`, `smoke`) are write-heavy, so a lane can't
- * run them from the read-only runner closure the way mini-ci's typecheck
- * pipeline does.
- *
- * Shape (per design review): a per-slug *object cache* (bare repo, fetched
- * incrementally under a flock so concurrent runs on a shared host — rasam
- * has no lease — don't race), and a *fresh per-run worktree* keyed by
- * sha + pid so a re-run of the same SHA never collides with a previous
- * run's directory. The worktree lands under the system tmpdir: the host's
- * tmpfiles reaper eventually collects what a crashed run leaves behind
- * (justci's /tmp debris had the same lifecycle); a clean run removes its
- * own worktree on dispose.
- *
- * Strict lanes fetch a pushed SHA. Working-tree lanes import a snapshot bundle
- * after fetching its origin prerequisites, then verify the materialized commit.
- */
-
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
@@ -36,11 +17,9 @@ export interface WorkspaceRequest {
 export interface WorkspaceResult {
   ok: boolean;
   workspace: string | null;
-  /** Best-effort cleanup of this run's worktree (a clean run calls it). */
   cleanup: () => void;
 }
 
-/** Last path segment of the origin, sans `.git` — the cache key. */
 export function slugFor(origin: string): string {
   const tail =
     origin
@@ -100,8 +79,6 @@ export function narrateSnapshot(
   }
 }
 
-/** One child's streams as lines, and its exit code — the one place they are
- *  drained, so every spawn in this file reports the same way. */
 function watch(
   child: ChildProcess,
   label: string,
@@ -136,9 +113,6 @@ function run(
   return watch(child, cmd, onOutput);
 }
 
-/** Prepare a fresh writable checkout of `origin` at `sha`. Idempotent: every
- *  call yields a new worktree, so `rerun(_ci-setup)` and same-SHA retries
- *  never trip over a previous run's directory. */
 export async function prepareWorkspace(
   req: WorkspaceRequest,
   onOutput: (line: string) => void,
@@ -148,9 +122,7 @@ export async function prepareWorkspace(
   const commit = req.snapshot?.commit ?? req.sha;
   // A fresh, unique worktree name per invocation — pid alone collides when the
   // same runner process prepares the same SHA twice (a `rerun(_ci-setup)` or a
-  // same-SHA retry), and `git worktree add` refuses an existing directory. The
-  // random suffix makes every call yield a brand-new path, honoring the
-  // idempotence this function advertises.
+  // same-SHA retry), and `git worktree add` refuses an existing directory.
   const workdir = join(
     process.env.ODU_WORK_DIR ?? join(tmpdir(), "odu"),
     slug,
@@ -188,11 +160,6 @@ export async function prepareWorkspace(
       ![snap.commit, ...snap.requires].every((id) => /^[0-9a-f]{40}$/.test(id))
     )
       return fail("invalid snapshot commit");
-    // One flock covers prerequisite fetch, verify and import. THE SCRIPT IS
-    // CONSTANT; the cache, origin, commit, bundle and prerequisites are read
-    // as quoted `"$…"` parameters from the environment, so an origin or a
-    // path can never become shell syntax — and the argument array `sh -c`
-    // receives is the same four constants for every run.
     const script = `set -eu
 cache=$ODU_SNAPSHOT_CACHE; origin=$ODU_SNAPSHOT_ORIGIN; commit=$ODU_SNAPSHOT_COMMIT; bundle=$ODU_SNAPSHOT_BUNDLE
 if ! git -C "$cache" rev-parse --git-dir >/dev/null 2>&1; then git init --bare "$cache"; fi
@@ -215,8 +182,6 @@ else
   fi
 fi
 `;
-    // The prerequisites are validated 40-character hex SHAs above, so the
-    // space-separated list the loop splits is a list of SHAs and nothing else.
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       ODU_SNAPSHOT_CACHE: cache,
@@ -225,10 +190,6 @@ fi
       ODU_SNAPSHOT_BUNDLE: snap.bundlePath ?? "",
       ODU_SNAPSHOT_REQUIRES: snap.requires.join(" "),
     };
-    // THE COMMAND IS A LITERAL AT EACH SPAWN, and only the argument array of
-    // a real shell is the script (constant). `flock` is not a shell, so its
-    // arguments — the lock path included — are data it hands to `sh`; the
-    // fallback spells `sh` directly.
     code = await watch(
       spawn("flock", [join(cache, "odu-fetch.lock"), "sh", "-c", script], {
         env,
@@ -248,7 +209,6 @@ fi
       try {
         rmSync(snap.bundlePath, { force: true });
       } catch {
-        /* disposed or already consumed */
       }
     }
     if (code !== 0) return fail(`snapshot import exited ${code}`);
@@ -296,7 +256,6 @@ fi
       try {
         rmSync(workdir, { recursive: true, force: true });
       } catch {
-        // best-effort; the tmpdir reaper owns the long tail
       }
     },
   };

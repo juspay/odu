@@ -16,11 +16,6 @@ import {
   statusFor,
 } from "./statuses";
 
-/**
- * The Forge a statuses suite needs: the two status operations, and nothing
- * else. The other three refuse rather than answering a plausible empty result,
- * so a suite that reached one by accident says so.
- */
 function forgeOf(parts: {
   send?: (payload: StatusPayload) => Promise<ForgeResult>;
   list?: () => Promise<readonly RemoteStatus[]>;
@@ -39,9 +34,6 @@ function forgeOf(parts: {
   };
 }
 
-/** A poster whose Forge is built from the status fakes under test. The suite
- *  says which status operation it is faking; the poster still receives a
- *  Forge, which is the only seam it knows. */
 function makePoster(
   opts: Omit<StatusPosterOptions, "forge"> & {
     send?: (payload: StatusPayload) => Promise<ForgeResult>;
@@ -99,7 +91,6 @@ describe("statusFor", () => {
     });
   });
 
-  // An absent required context is what correctly blocks the merge.
   it("posts nothing for skipped and pending", () => {
     expect(statusFor(id, "skipped", null, "abc1234")).toBeNull();
     expect(statusFor(id, "pending", null, "abc1234")).toBeNull();
@@ -162,8 +153,6 @@ describe("postingEqual", () => {
   });
 });
 
-// ── StatusPoster reliability (juspay/odu#61) ────────────────────────────────
-
 function payload(
   over: Partial<StatusPayload> & Pick<StatusPayload, "context">,
 ): StatusPayload {
@@ -201,7 +190,6 @@ describe("StatusPoster — honest dedup + retry", () => {
     });
     const p = payload({ context: "ci::unit@x86_64-linux" });
     poster.post(p);
-    // Drain: initial + retries until success.
     for (let i = 0; i < 10 && poster.health().owed.length > 0; i++) {
       await poster.settle();
       await new Promise((r) => setTimeout(r, 5));
@@ -232,7 +220,7 @@ describe("StatusPoster — honest dedup + retry", () => {
       onLine: () => {},
       send: sendGh,
       debounceMs: 0,
-      backoffBaseMs: 60_000, // don't reschedule during the test window
+      backoffBaseMs: 60_000,
       backoffCapMs: 60_000,
     });
     poster.post(payload({ context: "ci::unit@x86_64-linux" }));
@@ -242,8 +230,6 @@ describe("StatusPoster — honest dedup + retry", () => {
     expect(poster.health().owed[0]?.lastError).toMatch(/API down/);
     expect(poster.pendingContexts()).toEqual([]); // desired is success, not pending
     const unposted = await poster.finalize();
-    // `attempts` is persisted now (it used to be dropped and fabricated as 0 by
-    // whichever reader needed it), so the durable row carries the real count.
     expect(unposted).toEqual([
       { context: "ci::unit@x86_64-linux", lastError: "API down", attempts: 3 },
     ]);
@@ -454,14 +440,6 @@ describe("StatusPoster — honest dedup + retry", () => {
     expect(sendGh).not.toHaveBeenCalled();
   });
 
-  // The stuck-pending bug: a re-run of an already-green sha left five contexts
-  // showing "Running" on GitHub while the run itself passed and `unposted`
-  // reported nothing owed — so the merge stayed blocked with no sign anything
-  // was wrong. Seed loads the previous run's terminal statuses as `confirmed`;
-  // a node fast enough to finish inside its own debounce then re-posts a
-  // byte-identical success (same duration on a warm cache), which matched
-  // `confirmed` and returned early — leaving the un-sent `pending` armed as
-  // desired. The debounce then fired and put GitHub *back* to "Running".
   it("drops a stale pending when the terminal status GitHub has is re-posted", async () => {
     jest.useFakeTimers();
     const sent: StatusPayload[] = [];
@@ -482,7 +460,6 @@ describe("StatusPoster — honest dedup + retry", () => {
         sent.push(p);
         return { ok: true };
       },
-      // The previous run on this same sha left the context green.
       list: async () => [
         { context: ctx, state: "success", description: done.description },
       ],
@@ -492,7 +469,6 @@ describe("StatusPoster — honest dedup + retry", () => {
     poster.post(
       payload({ context: ctx, state: "pending", description: "Running: x" }),
     );
-    // Warm cache: the recipe finishes before its own pending has been sent.
     poster.post(done);
 
     await advanceTimersByTimeAsync(50);
@@ -505,13 +481,6 @@ describe("StatusPoster — honest dedup + retry", () => {
     expect(poster.health().owed).toEqual([]);
   });
 
-  // The same stuck check, one beat later: here the pending is already on the
-  // wire when the success arrives. `confirmed` still names what GitHub had
-  // *before* that send — the seeded success — so the incoming success looked
-  // redundant and was dropped, and the pending it was racing then landed and
-  // stayed. Observed live: `_ci-setup@aarch64-darwin` and
-  // `ci::typecheck@aarch64-darwin` finished in 1-4s and sat on "Running" while
-  // the 18s node beside them reported fine.
   it("does not dedup against confirmed while a send is on the wire", async () => {
     const sent: StatusPayload[] = [];
     const ctx = "ci::typecheck@aarch64-darwin";
@@ -540,8 +509,6 @@ describe("StatusPoster — honest dedup + retry", () => {
         }
         return { ok: true };
       },
-      // The previous run on this sha left the context green with this exact
-      // description — a cached recipe reproduces its duration.
       list: async () => [
         { context: ctx, state: "success", description: done.description },
       ],
@@ -597,9 +564,6 @@ describe("StatusPoster — honest dedup + retry", () => {
   });
 
   it("keeps a successful send that landed as the poster closed", async () => {
-    // The mirror-image false alarm: `finalize` flipped to closed while the send
-    // was in flight, so an ok result was discarded and the run reported a
-    // status as owed (attempts: 0) that GitHub had in fact received.
     let release = (): void => {};
     const gate = new Promise<void>((r) => {
       release = r;

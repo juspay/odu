@@ -1,12 +1,3 @@
-/**
- * Checkout-local venue lease record (`.ci/odu-lease.json`).
- *
- * Agent-held leases (odu ci lease / MCP lease) persist across discrete tool
- * calls via a detached holder process. The record maps platform → holder
- * identity so `odu ci run` can consume a held host without re-claiming, and so
- * wait-in-line state is observable (not stderr-only).
- */
-
 import {
   existsSync,
   mkdirSync,
@@ -27,9 +18,7 @@ export interface PlatformLeaseRecord {
   holderPid: number;
   since: number;
   state: LeaseRecordState;
-  /** When waiting: who holds the box (if known). */
   waitingBehind: HolderInfo | null;
-  /** Optional run label the holder advertised. */
   run: string | null;
 }
 
@@ -39,7 +28,6 @@ export function leaseRecordPath(repoRoot: string): string {
   return join(repoRoot, LEASE_RECORD_PATH);
 }
 
-/** True if `pid` still exists (signal 0). */
 export function pidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -75,10 +63,6 @@ export function writeLeaseRecord(
   renameSync(tmp, path);
 }
 
-/**
- * Drop entries whose holderPid is dead. Returns the cleaned record and
- * whether anything changed.
- */
 export function reconcileLeaseRecord(repoRoot: string): {
   record: LeaseRecordFile;
   changed: boolean;
@@ -108,7 +92,6 @@ export function removeLeaseRecordFile(repoRoot: string): void {
   try {
     unlinkSync(path);
   } catch {
-    /* absent */
   }
 }
 
@@ -136,7 +119,6 @@ export function removePlatformLease(
   }
 }
 
-/** Live held host for a platform, or null if none / stale / waiting. */
 export function heldHostForPlatform(
   repoRoot: string,
   platform: string,
@@ -148,7 +130,6 @@ export function heldHostForPlatform(
   return e.host;
 }
 
-/** Platforms currently held by a live agent holder (state held). */
 export function liveHeldPlatforms(
   repoRoot: string,
 ): Record<string, string> {

@@ -1,46 +1,16 @@
-/**
- * Platform → host-pool resolution. Keys are Nix system tuples; values are
- * pools of anything ssh can dial (or `localhost`, which short-circuits the
- * nix-copy transport). A plain string in hosts.json is a pool of one — fully
- * back-compatible. Missing platforms silently drop from the fanout — the
- * operator opts in per platform, exactly the justci hosts.json semantics. But
- * a config that names *no* platform at all is not "run everything here": that
- * is the juspay/odu#46 fork-bomb, so `fanoutPools` refuses it loudly rather
- * than synthesizing a localhost lane (running locally stays available only as
- * an explicit `--host PLAT=localhost` or `"PLAT": "localhost"` decision).
- *
- * Lookup order (`$ODU_HOSTS → ~/.config/odu/hosts.json →
- * ~/.config/justci/hosts.json`): the first file that exists wins. The justci
- * path is the compat fallback for machines still carrying a justci hosts file.
- * `--host PLAT=ADDR` upserts a single-host pool on top (and adds the platform
- * when absent — that is how a one-shot pin forces a specific box).
- *
- * Picking *which* free machine from a multi-host pool is the lease layer's job
- * (`lease.ts`); this module only resolves the declared inventory per platform.
- */
-
 import { existsSync, readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** One independently leasable execution slot on a host. `slot` is zero-based
- *  and becomes part of the remote flock path; `slots` is retained for display
- *  so `odu ci hosts` can show the declared capacity without re-grouping config. */
 export interface HostSlot {
   host: string;
   slot: number;
   slots: number;
 }
 
-/** One platform's declared execution capacity. A legacy string contributes
- *  one slot. `{ "host": "ci-1", "slots": 4 }` contributes four slots, ordered
- *  breadth-first across physical hosts so a burst spreads before it stacks. */
 export type HostPool = readonly (string | HostSlot)[];
 
-/** Normalize programmatic/test pools that still use the pre-capacity string
- *  shape. Files are normalized eagerly, but accepting strings here keeps the
- *  public coordinator seam source-compatible. */
 export function asHostSlot(entry: string | HostSlot): HostSlot {
   return typeof entry === "string"
     ? { host: entry, slot: 0, slots: 1 }
@@ -49,29 +19,14 @@ export function asHostSlot(entry: string | HostSlot): HostSlot {
 
 export interface HostsConfig {
   hosts: Record<string, HostPool>;
-  /** Which file won — named in run output so the operator can tell; `null`
-   *  when no candidate file existed (typed absence, not a sentinel string, so
-   *  consumers branch on it instead of matching display text). */
   source: string | null;
 }
 
-/** A resolution-chain slot: the label the operator sees and the path we probe
- *  (null for `$ODU_HOSTS` when it is unset — the slot still shows in the
- *  refusal so the chain reads in full). One source of truth for both the
- *  lookup in `loadHosts` and the named chain in the no-config refusal. */
 interface HostsCandidate {
   label: string;
   path: string | null;
 }
 
-/**
- * @param override the CALLER's `$ODU_HOSTS`, when the caller is not this
- *   process. Three readings, the same three the wire carries: a path uses that
- *   file; `""` means the caller's shell had none, so the chain starts at
- *   `~/.config`; `undefined` means nobody said, so this process's own
- *   environment answers. A per-user singleton runs work on behalf of callers
- *   whose environment is not its own, and that is exactly when it matters.
- */
 function hostsCandidates(override?: string): HostsCandidate[] {
   const oduHosts = override ?? process.env.ODU_HOSTS;
   return [
@@ -119,7 +74,6 @@ function parseHostCapacity(
   );
 }
 
-/** Parse one platform's value: a host entry, or a non-empty array of entries. */
 function parsePool(
   path: string,
   platform: string,
@@ -139,7 +93,6 @@ function parsePool(
   );
   const maxSlots = Math.max(...capacities.map((entry) => entry.slots));
   const pool: HostSlot[] = [];
-  // Breadth-first by slot index: ci-1/0, ci-2/0, ci-1/1, ci-2/1.
   for (let slot = 0; slot < maxSlots; slot += 1) {
     for (const entry of capacities) {
       if (slot < entry.slots) {
@@ -173,24 +126,10 @@ export function loadHosts(override?: string): HostsConfig {
   return { hosts: {}, source: null };
 }
 
-/** The loud refusal `fanoutPools` raises when a run resolves to *zero* pools —
- *  no hosts file anywhere, no `--host` pin, no `--platform` slice. A missing
- *  config is indistinguishable in outcome from an explicit `"…": "localhost"`,
- *  but only one is a decision someone made (juspay/odu#46): defaulting the
- *  no-config case to a localhost lane fork-bombed a production workstation, so
- *  we name the full resolution chain we checked and how to opt into localhost
- *  on purpose, and refuse. The message text — the chain, the `--host` syntax —
- *  lives beside `loadHosts`, the module that owns the chain. Takes the loaded
- *  `config` (not a fresh filesystem probe) so the diagnosis matches what
- *  resolution actually did — e.g. names the file that won but configured
- *  nothing, rather than mislabeling a shadowed lower-precedence file.
- *  Module-private: `fanoutPools` is the seam callers reach it through. */
 function noHostsConfiguredError(config: HostsConfig): Error {
   const chain = hostsCandidates()
     .map((c) => `       ${c.label}`)
     .join("\n");
-  // `loadHosts` sets `source` to the file it read, or null when none existed —
-  // so we can say precisely why the fanout came up empty.
   const why =
     config.source === null
       ? "None of these exist."
@@ -212,11 +151,6 @@ function noHostsConfiguredError(config: HostsConfig): Error {
   );
 }
 
-/** Apply `--host PLAT=ADDR` pins and `--platform` slices to the config.
- *  Pins replace the pool with a single-host pool (the pin is a forced pick).
- *  Returns declared inventory — unjudged, and not post-lease lanes: locality
- *  is the lease seam's to enforce (`leaseLanes` / `acquireFromPool` entry),
- *  over exactly the pools a run claims. */
 export function resolvePools(
   config: HostsConfig,
   hostPins: readonly string[],
@@ -249,21 +183,11 @@ export function resolvePools(
   return sliced;
 }
 
-/** The pools a run fans out over, WITH the file they were declared in — one
- *  value, so provenance can't be dropped on the way to the lease layer (the
- *  lease refusals name the hosts file, and a `source` re-attached by hand at
- *  each consumer is a `source` some future consumer forgets). */
 export interface ResolvedPools {
   hosts: Record<string, HostPool>;
   source: string | null;
 }
 
-/** The fanout pools for a run: `resolvePools` plus the no-config fail-fast.
- *  Zero resolved pools means the run named no host anywhere — the juspay/odu#46
- *  case — so we refuse loudly instead of defaulting to a localhost lane. This
- *  is the single seam `run` decides the inventory through; keeping the refusal
- *  here (not inline in `run`) keeps the decision pure and testable. Post-lease
- *  platform→host maps stay named `lanes` (`leaseLanes`). */
 export function fanoutPools(
   config: HostsConfig,
   hostPins: readonly string[],
@@ -276,15 +200,10 @@ export function fanoutPools(
   return { hosts, source: config.source };
 }
 
-/** Short label for a dial target: strip `user@` and any DNS domain suffix so
- *  the operator-facing pick/status lines stay compact (`nix@ci-3.foo` → `ci-3`).
- *  IPv4/IPv6 literals are left intact — first-dot splitting would collapse
- *  distinct pool targets (`10.0.0.1` and `10.0.0.2` both → `10`). */
 export function shortHost(addr: string): string {
   const afterAt = addr.includes("@")
     ? addr.slice(addr.indexOf("@") + 1)
     : addr;
-  // Bracketed IPv6 (ssh style): keep the full host part.
   if (afterAt.startsWith("[")) return afterAt;
   if (isIP(afterAt) !== 0) return afterAt;
   const dot = afterAt.indexOf(".");

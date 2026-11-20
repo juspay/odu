@@ -1,30 +1,9 @@
 /**
- * Lane resurrection: what a run does when a remote lane's link dies under it.
- *
- * A CI run that has spent four minutes on a builder should not be thrown away
- * because a laptop changed wifi networks. Holding the link open through it is
- * not available: the session's watchdog force-cycles a silent ssh arm at ~25s,
- * ssh's dead-peer policy ends it at ~30s, and the link's own pinger is a
- * 60–65s backstop beneath both. kolu bakes all three (`@kolu/surface/keepAlive`;
- * no link factory takes a timing parameter), so that deadline is not odu's to
- * move. The runner is ephemeral by design — it dies with the pipe, and that death is what
- * frees the venue flock and reaps the recipe process trees. So survival is the
- * coordinator's job, after the fact: claim another venue and start a new lane
- * over the nodes the dead one had not finished.
- *
- * These drive the REAL `runCommand` against a throwaway repo with both ssh-
- * shaped collaborators injected (`claimVenues` and `startLane`), because every
- * rule worth pinning here is a rule about how those two interact: which tasks
- * the second lane is configured with, what happens to the first lane's `ok`
- * node and its log, how many times the run will try, and which of the two
- * signals for one ssh drop (the lane's `onDead`, the lease's `lost`) gets to
- * act on it.
- *
- * A note on the failure mode of getting this wrong: `shutdown` ends in
- * `process.exit`. A regression that routes a resurrectable lease loss back to
- * the whole-run teardown does not fail an assertion here — it takes the test
- * runner down with it, which is loud in a different way and equally
- * unmistakable.
+ * Holding the lane's link open through an ssh drop is not available: the
+ * session's watchdog force-cycles a silent ssh arm at ~25s, ssh's dead-peer
+ * policy ends it at ~30s, and the link's own pinger is a 60–65s backstop
+ * beneath both. kolu bakes all three (`@kolu/surface/keepAlive`; no link
+ * factory takes a timing parameter).
  */
 
 import { spawnSync } from "node:child_process";
@@ -51,8 +30,6 @@ import { type RunArgs, runCommand } from "./run";
 const hasJust =
   spawnSync("just", ["--version"], { encoding: "utf-8" }).status === 0;
 
-/** The budget these runs are judged against — the default, since the fixture
- *  does not set `ODU_MAX_LANE_RESURRECTIONS`. */
 const MAX_RESURRECTIONS = maxLaneResurrections();
 
 const PLATFORM =
@@ -86,16 +63,6 @@ afterEach(() => {
   }
 });
 
-/**
- * A throwaway checkout whose CI DAG is a diamond stub: `alpha`, then `beta`
- * and `gamma` which both need it. That shape is the point — the retry has to
- * carry `beta` and `gamma` while dropping the `alpha` edge, and a DAG without
- * a satisfied dependency could not tell a correct filter from no filter.
- *
- * The pool names a REMOTE host so the platform enters the venue claim at all
- * (a localhost lane is deliberately out of scope for resurrection). Nothing
- * ever dials it: both `claimVenues` and `startLane` are injected.
- */
 function fixture(): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-resurrect-"));
   const git = (...args: string[]): void => {
@@ -120,8 +87,6 @@ function fixture(): string {
     ].join("\n"),
   );
   writeFileSync(join(dir, "hosts.json"), JSON.stringify({ [PLATFORM]: HOST_A }));
-  // The run writes under `.ci/`; ignoring it keeps the tree clean, which a
-  // remote-pool run in live-tree mode requires.
   writeFileSync(join(dir, ".gitignore"), ".ci/\n");
   git("init", "-q");
   git("config", "user.email", "test@example.com");
@@ -131,9 +96,6 @@ function fixture(): string {
   git("remote", "add", "origin", "file:///nonexistent/origin.git");
 
   const prevCwd = process.cwd();
-  // Never dialled: the coordinator refuses a wrapper that baked no agent source
-  // (a MISBUILT PACKAGE), so the suite has to supply one — but nothing ever
-  // resolves from it, because the lane that would is injected.
   const env: Record<string, string> = {
     ODU_HOSTS: join(dir, "hosts.json"),
     ODU_STATE_DIR: join(dir, ".ci", "state"),
@@ -164,7 +126,6 @@ function sha7Of(dir: string): string {
   }).stdout.trim();
 }
 
-/** One lane-local state frame, the shape a runner publishes. */
 function laneState(statuses: Record<string, NodeStatus>): PipelineState {
   const ids = Object.keys(statuses);
   return {
@@ -190,8 +151,6 @@ function laneState(statuses: Record<string, NodeStatus>): PipelineState {
   };
 }
 
-/** A lane the test drives by hand: its options are the configuration under
- *  test, and its callbacks are the wire a real runner would talk over. */
 interface FakeLane {
   opts: LaneOptions;
   closed: boolean;
@@ -199,7 +158,6 @@ interface FakeLane {
 
 interface FakeLease extends LeaseHandle {
   released: boolean;
-  /** Fire the lease's `lost` — the ssh drop seen from the venue hold. */
   die: () => void;
 }
 
@@ -220,7 +178,6 @@ function fakeLease(host: string): FakeLease {
   return lease;
 }
 
-/** The injected pair, plus everything the assertions read off them. */
 function harness(opts: { hold?: () => Promise<void> } = {}) {
   const lanes: FakeLane[] = [];
   const leases: FakeLease[] = [];
@@ -231,12 +188,6 @@ function harness(opts: { hold?: () => Promise<void> } = {}) {
     if (lanes.length > 0) expect(laneOpts.snapshot?.commit).toBe(lanes[0]!.opts.snapshot?.commit);
     expect(laneOpts.snapshot?.commit).toMatch(/^[0-9a-f]{40}$/);
     lanes.push(entry);
-    // What a REAL lane does the moment it attaches: `nodeLog.get({ id })` opens
-    // with a `snapshot` frame for every node it owns, on BOTH of its streams,
-    // and a fresh runner's buffers are empty. Without it a fake hides what the
-    // coordinator does with a snapshot — `resetLocal`, a truncating write —
-    // which is exactly where a notice written into a retried node's log used
-    // to go to die.
     for (const id of ["_ci-setup", ...laneOpts.tasks.map((t) => t.id)]) {
       laneOpts.onLogFrame(id, { kind: "snapshot", text: "" }, "recipe");
       laneOpts.onLogFrame(id, { kind: "snapshot", text: "" }, "push");
@@ -254,7 +205,6 @@ function harness(opts: { hold?: () => Promise<void> } = {}) {
   };
 
   const claimVenues = async (): Promise<ClaimOutcome> => {
-    // Alternate hosts so a resurrected lane is visibly on a different box.
     const host = claimHosts.length % 2 === 0 ? HOST_A : HOST_B;
     claimHosts.push(host);
     if (claimHosts.length > 1 && opts.hold !== undefined) await opts.hold();
@@ -266,7 +216,6 @@ function harness(opts: { hold?: () => Promise<void> } = {}) {
   return { lanes, leases, claimHosts, deps: { startLane, claimVenues } };
 }
 
-/** Poll the checkout socket until the coordinator answers. */
 async function dialUntilServing(
   socketPath: string,
   timeoutMs = 20_000,
@@ -280,7 +229,6 @@ async function dialUntilServing(
   }
 }
 
-/** Follow the fan-in `nodes` cell the way every out-of-process reader does. */
 async function watchNodes(socketPath: string): Promise<{
   statusOf: (namepath: string) => NodeStatus | undefined;
   close: () => Promise<void>;
@@ -295,7 +243,6 @@ async function watchNodes(socketPath: string): Promise<{
         latest = state;
       }
     } catch {
-      // The socket closes when the run exits; that is not a failure here.
     }
   })();
   return {
@@ -304,16 +251,8 @@ async function watchNodes(socketPath: string): Promise<{
   };
 }
 
-/** A node's terminal verdict is withheld until its log ends, so an `end` frame
- *  in these tests is not decoration: without it a node reported `ok` never
- *  reaches `ok` on the fan-in. */
 const laneFrame = (frame: NodeLogFrame): NodeLogFrame => frame;
 
-/** Wait for a condition, and fail with the RUN's own error if the run ends
- *  first. A coordinator that refused at startup (a misbuilt binary, an
- *  unparseable justfile) would otherwise surface as an anonymous poll timeout
- *  twenty seconds later, with the actual message swallowed by the promise
- *  nobody looked at. */
 async function waitForLive(
   outcome: Promise<unknown>,
   pred: () => boolean,
@@ -327,10 +266,6 @@ async function waitForLive(
   ]);
 }
 
-/** Wait for the run to end — but only for a bounded while. A run whose lanes
- *  are hand-driven never settles once an assertion has stopped driving them,
- *  and a `finally` that waited forever would replace the assertion's message
- *  with a bare suite timeout. */
 async function settleOrGiveUp(outcome: Promise<unknown>): Promise<void> {
   let backstop: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
@@ -342,20 +277,6 @@ async function settleOrGiveUp(outcome: Promise<unknown>): Promise<void> {
   if (backstop !== undefined) clearTimeout(backstop);
 }
 
-/**
- * Read a file the RUN writes, once it exists.
- *
- * Every assertion in this file drives the run through an in-process seam and
- * then reads a `.ci` artifact — but the status a test awaited and the bytes it
- * then reads travel on different paths, so the await does not imply the file.
- * On a fast machine it always does; on a slow, contended one (the macOS runner,
- * three separate times, three different assertions) it sometimes does not, and
- * the failure is an ENOENT that looks nothing like the property under test.
- *
- * Waiting weakens no assertion here: the content checks that follow still have
- * to hold, and a file that never appears fails on the deadline with its own
- * path named.
- */
 async function readWhenWritten(path: string): Promise<string> {
   await waitFor(() => existsSync(path), 20_000);
   return readFileSync(path, "utf-8");
@@ -381,8 +302,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
         "gamma",
       ]);
 
-      // alpha finishes and its log is complete; beta is mid-recipe; gamma has
-      // not started.
       first.opts.onNodes(
         laneState({
           "_ci-setup": "ok",
@@ -404,43 +323,21 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
       expect(nodes.statusOf("beta")).toBe("running");
 
-      // THE EVENT: the ssh link dies with beta still running.
       first.opts.onDead("ssh pipe died");
 
-      // A second venue is claimed, on the other box, and the dead lane's own
-      // lease is handed back rather than held through the retry.
       await waitFor(() => lanes.length === 2, 20_000);
       expect(claimHosts).toEqual([HOST_A, HOST_B]);
       expect(leases[0]!.released).toBe(true);
       expect(first.closed).toBe(true);
 
-      // THE ASSERTION. Only the unfinished work, and `needs` filtered to it —
-      // the runner's `configure` validates the DAG it is handed and rejects a
-      // dependency it was never given, so an unfiltered `needs: ["alpha"]`
-      // would be refused outright.
       const second = lanes[1]!;
       expect(second.opts.host).toBe(HOST_B);
       expect(second.opts.tasks.map((t) => t.id)).toEqual(["beta", "gamma"]);
       expect(second.opts.tasks.map((t) => [...t.needs])).toEqual([[], []]);
 
-      // The finished node keeps its verdict AND its output; the interrupted one
-      // goes back to pending with the interruption written into its log.
-      //
-      // WAITED FOR, not sampled. `lanes[1]` existing is an in-process fact,
-      // while `nodes` is a real socket subscriber whose frames arrive a tick
-      // or two behind — so sampling here is a coin flip weighted by how busy
-      // the coordinator's event loop happens to be, and it lands tails often
-      // enough to be seen on an unmodified tree. Waiting does not weaken the
-      // assertion: a `beta` that was wrongly left `running` (or a re-run
-      // `alpha`) never reaches these values, so the wait fails rather than
-      // passing late.
       await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
       await waitFor(() => nodes.statusOf("beta") === "pending", 20_000);
       const sha7 = sha7Of(dir);
-      // Sync, because two assertions below poll it inside a `waitFor`. A log
-      // the run has not written YET reads as empty rather than throwing, which
-      // is what makes it safe to poll: an ENOENT from inside a predicate is an
-      // exception, not a `false`, so it ends the wait instead of continuing it.
       const logOf = (node: string): string => {
         const path = join(dir, ".ci", sha7, PLATFORM, `${node}.log`);
         return existsSync(path) ? readFileSync(path, "utf-8") : "";
@@ -448,10 +345,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       expect(
         await readWhenWritten(join(dir, ".ci", sha7, PLATFORM, "alpha.log")),
       ).toContain("ALPHA OUTPUT");
-      // The interruption is narrated where it SURVIVES. A node's log is
-      // addressed by commit and the successor lane opens it with a `snapshot`
-      // that resets the file, so `_ci-setup` — coordinator-owned, never reset
-      // by a lane — is the one place this platform's venue story is told.
       await waitFor(
         () => logOf("_ci-setup").includes("reclaiming a venue"),
         20_000,
@@ -462,7 +355,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       );
       expect(logOf("beta")).toBe("");
 
-      // The retry lane finishes the run.
       second.opts.onNodes(
         laneState({ "_ci-setup": "ok", beta: "ok", gamma: "ok" }),
       );
@@ -481,11 +373,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
   }, 60_000);
 
   it("does not re-run a node whose ok verdict was still in flight", async () => {
-    // A node's terminal status is withheld until its log ends, so a node that
-    // FINISHED with its tail still on the wire reads `running` on the fan-in.
-    // The retry set is read off those statuses — so unless the held verdicts
-    // are published first, the one node that actually passed is exactly the one
-    // a resurrection would run again, throwing its output away in the process.
     const dir = fixture();
     const socketPath = join(dir, ".ci", "odu.sock");
     const { lanes, deps } = harness();
@@ -510,8 +397,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
         laneFrame({ kind: "append", text: "ALPHA OUTPUT\n" }),
         "recipe",
       );
-      // `ok` reported, log NOT ended: the verdict gate holds it, so the fan-in
-      // still says `running` — which is exactly the trap.
       first.opts.onNodes(
         laneState({
           "_ci-setup": "ok",
@@ -525,16 +410,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       first.opts.onDead("ssh pipe died");
       await waitForLive(outcome, () => lanes.length === 2);
 
-      // WAIT for it, do not sample it. `lanes.length === 2` is an in-process
-      // fact; `nodes` is a real socket subscriber, so the published verdict
-      // arrives a tick or two behind it and how far behind depends on how busy
-      // the coordinator's event loop is. Sampling here passed while the
-      // coordinator did little else per transition and became a coin flip once
-      // it also wrote a durable record.
-      //
-      // This does not weaken the assertion: if the resurrection had wrongly
-      // re-run `alpha`, its status would go back to pending/running and stay
-      // there, so the wait fails instead of passing late.
       await waitFor(() => nodes.statusOf("alpha") === "ok", 20_000);
       expect(lanes[1]!.opts.tasks.map((t) => t.id)).toEqual(["beta", "gamma"]);
       expect(
@@ -563,7 +438,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
     const nodes = await watchNodes(socketPath);
 
     try {
-      // Three lanes in total: the original plus MAX_RESURRECTIONS retries.
       for (let attempt = 0; attempt <= MAX_RESURRECTIONS; attempt += 1) {
         await waitForLive(outcome, () => lanes.length === attempt + 1);
         const lane = lanes[attempt]!;
@@ -579,18 +453,11 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
         lane.opts.onDead(`link died #${attempt + 1}`);
       }
 
-      // No fourth lane: the run stops asking for boxes and says so.
       const code = await outcome;
       expect(code).not.toBe(0);
       expect(lanes.length).toBe(MAX_RESURRECTIONS + 1);
 
       const sha7 = sha7Of(dir);
-      // The timings file is written as the run tears its lanes down, and the
-      // exit code we just awaited is published from a different path — so a
-      // bare read here is a race that only loses on a slow, contended machine
-      // (it lost on macOS CI, never locally). Wait for the artifact rather than
-      // assuming the exit implies it, which is the same discipline the rest of
-      // this file's assertions already use.
       const timings = (await readWhenWritten(join(dir, ".ci", sha7, "timings.jsonl")))
         .trim()
         .split("\n")
@@ -638,17 +505,10 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       );
       await waitFor(() => nodes.statusOf("alpha") === "running", 20_000);
 
-      // THE EVENT: the venue hold's ssh session dies. This used to shut the
-      // whole run down with exit 1 — `process.exit` from inside the
-      // coordinator. It must instead go and claim another box: the flock is
-      // already free on the builder, so there is nothing to fail closed about.
       leases[0]!.die();
       await waitFor(() => lanes.length === 2, 20_000);
       expect(claimHosts).toEqual([HOST_A, HOST_B]);
 
-      // ONE ssh drop is often BOTH signals. The lane's own death for the
-      // episode already resurrected is a no-op — not a second retry, and not a
-      // second box.
       first.opts.onDead("ssh pipe died");
       await new Promise((r) => setTimeout(r, 150));
       expect(lanes.length).toBe(2);
@@ -694,16 +554,12 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       );
       await waitFor(() => nodes.statusOf("alpha") === "running", 20_000);
       lanes[0]!.opts.onDead("ssh pipe died");
-      // The retry claim is now queueing for a box, exactly as the startup claim
-      // can be — and an operator drops the lane.
       await waitFor(() => leases.length === 0 || leases[0]!.released, 20_000);
       const ack = await runUnary(
         dialed.client.surface.lane.cancel({ platform: PLATFORM }),
       );
       expect(ack.ok).toBe(true);
 
-      // The claim returns a box nobody will use now. It must go straight back,
-      // and the cancel the claim deferred must land.
       releaseHold();
       const code = await outcome;
       expect(code).not.toBe(0);
@@ -712,12 +568,6 @@ describe.if(hasJust)("a remote primary lane that dies mid-run", () => {
       expect(leases[1]!.released).toBe(true);
 
       const sha7 = sha7Of(dir);
-      // The timings file is written as the run tears its lanes down, and the
-      // exit code we just awaited is published from a different path — so a
-      // bare read here is a race that only loses on a slow, contended machine
-      // (it lost on macOS CI, never locally). Wait for the artifact rather than
-      // assuming the exit implies it, which is the same discipline the rest of
-      // this file's assertions already use.
       const timings = (await readWhenWritten(join(dir, ".ci", sha7, "timings.jsonl")))
         .trim()
         .split("\n")

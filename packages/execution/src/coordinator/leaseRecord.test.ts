@@ -18,7 +18,6 @@ describe("leaseRecord", () => {
       try {
         rmSync(r, { recursive: true, force: true });
       } catch {
-        /* ignore */
       }
     }
   });

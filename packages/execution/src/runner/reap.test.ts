@@ -1,17 +1,7 @@
-/**
- * Falsifiability for the group reaper — real child process groups, real
- * signals. The reaper is the one owner of "how does a recipe tree die", so
- * these pin the whole contract: TERM first, bounded grace, KILL survivors,
- * both async (`reap`) and on the synchronous process-exit sweep
- * (`reapAllSync`).
- */
-
 import { type ChildProcess, spawn } from "node:child_process";
 import { describe, expect, it } from "bun:test";
 import { createGroupReaper } from "./reap";
 
-/** A TERM-ignoring group member: the shell shrugs off SIGTERM and respawns
- *  its sleep children, so only SIGKILL ends it. */
 const STUBBORN = "trap '' TERM; while :; do sleep 0.05; done";
 
 const spawnGroup = (script: string): ChildProcess =>
@@ -44,7 +34,6 @@ describe("group reaper", () => {
     const pid = child.pid as number;
     reaper.track(pid);
     reaper.reap(pid);
-    // Dies on the SIGTERM itself — the far-away SIGKILL never has to fire.
     await until(() => !alive(pid));
   });
 
@@ -54,8 +43,6 @@ describe("group reaper", () => {
     const pid = child.pid as number;
     reaper.track(pid);
     reaper.reap(pid);
-    // Still alive right after: SIGTERM alone did not kill it (that survival
-    // is exactly the production leak this module exists to close).
     expect(alive(pid)).toBe(true);
     await until(() => !alive(pid));
   });
@@ -77,8 +64,6 @@ describe("group reaper", () => {
       reaper.track(child.pid as number);
     }
     reaper.reapAllSync();
-    // SIGKILL was delivered synchronously; the pids may linger a beat as
-    // zombies until the event loop reaps them, then they are gone for good.
     await until(() => !alive(stubborn.pid as number));
     await until(() => !alive(meek.pid as number));
   });

@@ -1,6 +1,4 @@
 /**
- * `just` → PipelineSpec: the translator that replaces justci's DAG ingestion.
- *
  * `just --dump --dump-format json` (just ≥ 1.57) emits the whole justfile
  * tree; odu discovers the unique recipe tagged `[metadata("ci")]`, expands
  * its reachable dependency subgraph, and turns every reachable recipe into a
@@ -117,12 +115,7 @@ function metadataValues(recipe: DumpRecipe): string[] {
 }
 
 /** Every declaration of one `odu:` marker on a recipe, in the order the dump
- *  lists them: the text after `=`, or `null` for a bare marker.
- *  PRESENCE only — how many declarations are legal, and what their
- *  text may say, stays with the caller, because the markers disagree about
- *  both: a recipe has ONE shard count, and may pin on several refs. Folding
- *  either rule in here would make each marker a case in one function, so the
- *  day one grows a richer value the other has to be re-read to change it. */
+ *  lists them: the text after `=`, or `null` for a bare marker. */
 function markerDeclarations(
   recipe: DumpRecipe,
   marker: string,
@@ -138,9 +131,6 @@ function markerDeclarations(
 function shardCount(recipe: DumpRecipe): number | undefined {
   const declared = markerDeclarations(recipe, "odu:shard");
   if (declared.length === 0) return undefined;
-  // ONE shard count per recipe. A second declaration is two answers to "how
-  // many ways does this split", and honouring either silently would run a
-  // fan-out neither author asked for.
   if (declared.length > 1) {
     throw new Error(
       `odu: recipe "${recipe.namepath}" declares odu:shard more than once`,
@@ -158,24 +148,12 @@ function shardCount(recipe: DumpRecipe): number | undefined {
 
 /**
  * The git REFS this recipe's pushed closure is pinned under, in the order the
- * dump lists them (`just` sorts a recipe's attributes, and the decision is a
- * membership test, so the order carries no meaning) — `[metadata("odu:pin=main")]`,
- * and `null` for a bare
+ * dump lists them — `[metadata("odu:pin=main")]`, and `null` for a bare
  * `[metadata("odu:pin")]`, which names the repository's DEFAULT branch
  * without spelling it.
  *
- * Refs rather than a boolean because a pin is only wanted on the branches the
- * repository treats as trunks: pinning every feature branch's closure would
- * hold a bucket's whole history open, and the recipe is the only place that
- * knows which refs its output is worth keeping for. WHICH ref this run is on,
- * and what the default branch IS, are the coordinator's to answer
- * (`coordinator/run.ts`) — the dump is read on whatever machine ran `just`.
- *
  * REPEATING THE ATTRIBUTE NAMES MORE REFS, the way `just`'s own multi-valued
- * attributes work (`[group("a")] [group("b")]`). So the two shapes an author
- * reaches for instead — `odu:pin=a,b` and a glob — are refused by name rather
- * than accepted as a ref nobody will ever be on, which pins nothing and says
- * nothing. A ref declared twice is a typo, not a second intent.
+ * attributes work (`[group("a")] [group("b")]`).
  */
 function pinRefs(recipe: DumpRecipe): (string | null)[] | undefined {
   const declared = markerDeclarations(recipe, "odu:pin");
@@ -301,21 +279,10 @@ export function workdirOf(
   return relative === "" || relative === "." ? null : relative;
 }
 
-/**
- * DID `just` RUN THIS RECIPE OUTSIDE THE WORKSPACE? — asked of the module
- * that owns `just`'s cwd rules, rather than re-derived by reading its answer.
- *
- * {@link workdirOf} says so by answering an ABSOLUTE path, because that is
- * what the recipe's directory literally is; a consumer that tested
- * `isAbsolute` itself would be a second place holding that encoding, on the
- * fastest-revving external contract in this design.
- */
 export function runsOutsideWorkspace(workdir: string | undefined): boolean {
   return workdir !== undefined && posix.isAbsolute(workdir);
 }
 
-/** `./a/b/` → `a/b`, trimmed by LOOP rather than by `/\/+$/`: the input is a
- *  repository's own string and a backtracking trim over it is quadratic. */
 function withoutEdgeSlashes(path: string): string {
   let from = 0;
   if (path.startsWith("./")) from = 2;
@@ -334,11 +301,6 @@ export function recipeRunsOn(os: readonly string[], platform: string): boolean {
   return os.some((attr) => OS_ATTR_MATCHERS[attr]?.(osSegment) ?? false);
 }
 
-/** The task ids that schedule on `platform`: each task whose own OS attributes
- *  allow it *and* whose every dependency also schedules here — so a recipe
- *  pinned to one OS takes its dependents off the other platforms with it,
- *  never leaving a lane a node whose dependency was pruned (a cascade to a
- *  fixpoint; pipelines are tiny). */
 function enabledOnPlatform(
   tasks: readonly TaskSpec[],
   byId: ReadonlyMap<string, TaskSpec>,
@@ -367,7 +329,6 @@ export interface IngestOptions {
   root?: string;
 }
 
-/** Build the pipeline from a parsed `just --dump --dump-format json` tree. */
 export function pipelineFromDump(
   dump: unknown,
   opts: IngestOptions = {},
@@ -397,8 +358,6 @@ export function pipelineFromDump(
     root = tagged[0] as FlatRecipe;
   }
 
-  // Reachable subgraph from the root's dependency edges only — recipes that
-  // merely live in the same module (pool-ensure, pool-status) never schedule.
   const reachable = new Map<string, FlatRecipe>();
   const queue: FlatRecipe[] = [root];
   while (queue.length > 0) {
@@ -421,8 +380,6 @@ export function pipelineFromDump(
     }
   }
 
-  // An empty-bodied root (kolu's `ci::default`) is a pure fan-out marker, not
-  // a node — justci posted no status for it. A root with a body is a task.
   const includeRoot = root.recipe.body.length > 0;
   if (includeRoot) reachable.set(root.recipe.namepath, root);
 
@@ -430,8 +387,6 @@ export function pipelineFromDump(
     ({ recipe, module }) => {
       const shards = shardCount(recipe);
       const pin = pinRefs(recipe);
-      // THE ROOT'S OWN `source`, whose directory is the workspace root every
-      // module's directory is expressed against.
       const workdir = workdirOf(module, recipe, (dump as DumpModule).source);
       return {
         id: recipe.namepath,
@@ -447,14 +402,9 @@ export function pipelineFromDump(
       };
     },
   );
-  // Deterministic order: dependencies first (stable topo by repeated passes),
-  // alphabetical within a rank — so dashboards and dumps are reproducible.
   tasks.sort((a, b) => a.id.localeCompare(b.id));
   const ranked = topoOrder(tasks);
 
-  // Phase one deliberately shards terminal checks: a dependent must not start
-  // after only one shard succeeds. Keeping this refusal beside ingestion makes
-  // the limitation explicit until the runner wire grows an aggregate barrier.
   for (const task of ranked) {
     if (task.shards === undefined) continue;
     const dependent = ranked.find((candidate) =>
@@ -511,8 +461,6 @@ export function loadJustPipeline(
   return pipelineFromDump(JSON.parse(result.stdout), opts);
 }
 
-// ── selectors ──────────────────────────────────────────────────────────────
-
 export interface Selector {
   recipe: string;
   platform?: string;
@@ -562,8 +510,6 @@ export function laneTasks(
   const byId = new Map(spec.tasks.map((t) => [t.id, t]));
   const enabled = enabledOnPlatform(spec.tasks, byId, platform);
 
-  // When there are no selectors every enabled task is wanted; otherwise walk
-  // the dependency closure of the matching selectors.
   let wanted: Set<string> | null = null;
   if (relevant.length > 0) {
     wanted = new Set<string>();

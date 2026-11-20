@@ -1,108 +1,20 @@
 /**
- * odu's ONE edge between Effect's world and the Promise world its coordinator
- * and CLI are written in — for BOTH member shapes a surface exposes.
- *
- * A unary verb is an `Effect` now, not a `Promise`: there is no other spelling,
- * and `await`ing one silently yields the Effect object instead of dispatching
- * the call (see `runUnary`). A streaming verb is a lazy `Stream`. Neither can
- * be consumed by an `async` function without something running it, and that
- * something lives here, once, so no caller re-derives the rules — nor
- * accidentally invents a second boundary.
- *
- * The file is named for what it IS (the Effect edge) rather than for the first
- * shape it carried, because `packages/execution/src/common/effectEdges.test.ts` enumerates it as
- * odu's only sanctioned `Effect.run*` site and a misnamed edge is how a second
- * one gets added without anyone noticing.
- *
- * Every streaming member used to be `await client.surface.X.get(input, {signal})
- * → AsyncIterable<T>`; under Effect it is `client.surface.X.get(input) →
- * Stream<T>`, returned SYNCHRONOUSLY and LAZY, with no `AbortSignal` anywhere
- * (kolu PLAN D10/#18: cancellation is fiber interruption). Two consequences this
- * module owns so no caller re-derives them:
- *
- *   - **Subscribing is pulling.** A `Stream` value registers nothing; the first
- *     `next()` is what starts the producer. A caller that must be subscribed
- *     BEFORE it causes the event it waits on has to issue that first pull
- *     itself — `runTool`'s coordinator-startup poll and `waitTool`'s settle
- *     watcher both do, and their comments say so.
- *   - **Unsubscribing is `return()`.** Closing the iterator interrupts the fiber
- *     running the stream, which IS the teardown. So the `AbortSignal` a caller
- *     still legitimately owns (a Ctrl+C, an MCP request cancellation, the live
- *     view's focus switch) is wired to `return()` here rather than threaded into
- *     a call option that no longer exists.
- *
- * `return()` is deliberately NOT awaited: a producer parked upstream settles its
- * close late, and awaiting it would stall the next subscription (or a `for
- * await`'s own `break`). The close is fire-and-forget and its rejection is
- * swallowed — closing an already-failed stream can reject, and that rejection is
- * about the teardown, never about the data the caller already read.
- *
- * This is a LEAF, not a receptacle: a bounded algorithm over one call shape,
- * hiding no volatility. `@kolu/surface`'s own `runStreamScoped` is the shared
- * answer but is only reachable through its Solid barrel, which a Node process
- * should not import; kolu's own CLIs carry the same ~25 lines for the same
- * reason, and its W2 reports ask three times for a `./run-stream` subpath.
+ * The edge between Effect and the Promise world: `await`ing an `Effect` yields
+ * the object instead of dispatching the call, a `Stream` is lazy (the first
+ * `next()` starts the producer), and closing the iterator interrupts the fiber,
+ * which is the teardown.
  */
 
 import { Cause, Effect, Option, Stream } from "effect";
 
-/**
- * Dispatch a UNARY member call and hand back a Promise.
- *
- * `client.surface.<ns>.<verb>(input)` returns an `Effect` — a *description* of
- * the call, not the call. An `Effect` is not a thenable, so
- *
- *     const ack = await client.surface.run.configure(input);   // ← WRONG
- *
- * compiles, resolves `ack` to the Effect object itself, and **never dispatches
- * anything**. It reads exactly like the line that used to be right, which is
- * why kolu banned the shape repo-side after it bit five times in one wave —
- * including one that had quietly disabled the drain a daemon acceptance test
- * existed to prove. `packages/execution/src/common/effectEdges.test.ts` bans it here too.
- *
- * So: an odu caller that genuinely lives in Promise-land runs the call through
- * this function, and nowhere else. `Effect.runPromise` rejects with the
- * SQUASHED failure, i.e. the declared tagged-error instance with its `_tag` and
- * data intact, so a `catch` site can still narrow on it exactly as before.
- *
- * A caller that is ALREADY Effect-shaped — every `BespokeTool.handler`, every
- * surface handler — must NOT use this. It composes the Effect instead, and
- * inherits interruption (an MCP request cancelled mid-call tears the call down
- * through its own finalizers) which this edge, being a Promise, cannot offer.
- */
+/** Dispatch a UNARY member call as a Promise. Rejects with the SQUASHED
+ *  failure — the tagged-error instance with its `_tag` and data intact. */
 export async function runUnary<T>(
   call: Effect.Effect<T, unknown>,
 ): Promise<T> {
   return Effect.runPromise(call);
 }
 
-/**
- * AN INTERRUPTION IS AN END — this module's rule about the one failure shape
- * that crosses the Effect/Promise boundary illegibly, applied at the ONE place
- * the `Cause` is still readable.
- *
- * A `Stream` whose fiber is interrupted rejects out of `Effect.runPromise` with
- * what `Cause.squash` makes of an interrupt-only cause: a bare `Error` reading
- * `All fibers interrupted without error`, carrying no `_tag`, no `cause`, and
- * nothing else to branch on. Every consumer of this module therefore had one
- * failure it could only recognise by matching that prose, which this repo
- * refuses to do — so none of them recognised it, and the shapeless error
- * escaped as an uncaught. It is REACHABLE: a surface client whose peer closes
- * the socket while the subscription's dial is in flight ends this way rather
- * than with the tagged `SurfaceStdioTransportClosed` (measured against a
- * coordinator exiting under `wait_for_settle`).
- *
- * The `Cause` is legible HERE, one layer above where the squash happens, and
- * nowhere above it. So classify here, once — and for every reading member, not
- * whichever one was fixed first: the reader that ends this way is a property of
- * the TRANSPORT, and both members ride the same transports.
- *
- * (`runUnary` deliberately does not use this. A unary call must settle with a
- * value or a rejection, and there is no honest value for "the call was
- * interrupted" — a caller that swallowed one would proceed as though it had an
- * answer. The rejection stays; it is only ever a shapeless one on a path that
- * is already failing.)
- */
 function endOnInterrupt<T>(
   stream: Stream.Stream<T, unknown>,
 ): Stream.Stream<T, unknown> {
@@ -111,28 +23,8 @@ function endOnInterrupt<T>(
   );
 }
 
-/**
- * The first frame of `stream`, or `undefined` when it ends without emitting.
- *
- * Taking the head ENDS the stream, which releases the subscription through its
- * own finalizers — the Effect equivalent of the old `for await … return`, and
- * the reason this does not leak a held-open `get` on a socket the caller is
- * about to close.
- *
- * `undefined` means the producer genuinely emitted nothing, which every caller
- * treats as a protocol failure and reports as one. A stream that FAILS rejects
- * here rather than collapsing to `undefined`: a dropped link must never read as
- * "the run has no state".
- *
- * An INTERRUPTION is neither, and it ends the stream for the same reason and by
- * the same rule as in {@link subscribe} — this module's contract, applied to
- * both of its reading members rather than to whichever one was fixed first.
- * A one-shot read is where the interruption in question actually happens (a
- * peer closing while the subscription's dial is in flight), so the member that
- * left it unclassified was handing `firstSnapshot` and `headerSnapshot` a bare
- * `All fibers interrupted without error` in place of the odu-worded protocol
- * failure they raise for exactly this case.
- */
+/** The first frame of `stream`, or `undefined` when it ends without emitting.
+ *  Taking the head ENDS the stream; a stream that FAILS rejects. */
 export async function firstFrame<T>(
   stream: Stream.Stream<T, unknown>,
   opts: { deadlineMs?: number } = {},
@@ -145,16 +37,7 @@ export async function firstFrame<T>(
   );
 }
 
-/**
- * A read that produced NO ANSWER within its deadline.
- *
- * A third outcome beside "answered" and "failed", and kept apart from both on
- * purpose. `firstFrame`'s `undefined` means the producer answered and said
- * nothing; a rejection from the link means the wire died. Neither is "the
- * service is there and busy" — which is exactly what a caller facing a daemon
- * pinned by its own poller saw, and could only report by hanging
- * (juspay/odu#113). Named, so a face branches on `_tag` rather than on prose.
- */
+/** A read that produced no answer within its deadline. */
 export class NoAnswerWithin extends Error {
   readonly _tag = "NoAnswerWithin";
   constructor(readonly deadlineMs: number) {
@@ -162,7 +45,6 @@ export class NoAnswerWithin extends Error {
   }
 }
 
-/** Is this the deadline, rather than the wire or a refusal? */
 export function isNoAnswer(value: unknown): value is NoAnswerWithin {
   return (
     typeof value === "object" &&
@@ -171,14 +53,8 @@ export function isNoAnswer(value: unknown): value is NoAnswerWithin {
   );
 }
 
-/**
- * Bound an effect's wait for its answer, failing with {@link NoAnswerWithin}.
- *
- * A COMPOSER, not a run: the caller still runs the result at its own sanctioned
- * edge. The timeout INTERRUPTS the effect it bounds, so a stream's head that
- * never arrives releases its subscription rather than leaking it past the
- * caller's `dispose()`.
- */
+/** Bound an effect's wait for its answer, failing with {@link NoAnswerWithin}.
+ *  The timeout interrupts the effect it bounds. */
 export function withDeadline<A, E, R>(
   effect: Effect.Effect<A, E, R>,
   deadlineMs: number,
@@ -189,30 +65,13 @@ export function withDeadline<A, E, R>(
   });
 }
 
-/**
- * Subscribe to `stream` and expose it as an async iterable ITERATOR — usable
- * both hand-advanced (`await sub.next()`, for a first-frame guard) and in a `for
- * await`, over the SAME subscription, so a caller that inspects the opening
- * frame and then pumps the rest opens exactly one.
- *
- * When `signal` is given, its abort unsubscribes: a parked `next()` then
- * resolves `{ done: true }` (the fiber is interrupted, and an interruption is
- * not a failure), so a `for await` ends cleanly instead of throwing — callers
- * distinguish "we tore this down" from "the feed died" by reading the signal,
- * exactly as they did when it was a call option. Omit it for a one-shot read
- * bounded by the stream itself.
- *
- * "An interruption is not a failure" holds for an interruption from EITHER
- * direction — ours through `signal`, or one arriving from below — and the body
- * says why the second half had to be spelled out.
- */
+/** Subscribe to `stream` as an async iterable iterator, usable hand-advanced
+ *  and in a `for await` over the same subscription. When `signal` is given, its
+ *  abort unsubscribes and a parked `next()` resolves `{ done: true }`. */
 export function subscribe<T>(
   stream: Stream.Stream<T, unknown>,
   signal?: AbortSignal,
 ): AsyncIterableIterator<T> {
-  // An interruption from BELOW ends the iteration, exactly as our own abort
-  // does — see {@link endOnInterrupt}, which is where that rule and its
-  // evidence live for both reading members.
   const iterator = Stream.toAsyncIterable(endOnInterrupt(stream))[
     Symbol.asyncIterator
   ]();
@@ -225,8 +84,6 @@ export function subscribe<T>(
   }
   return {
     next: () => iterator.next(),
-    // Resolve immediately rather than awaiting the close (see the header): the
-    // caller is leaving, and the interrupt it just issued needs no witness.
     return: async () => {
       unsubscribe();
       return { done: true, value: undefined };
@@ -237,51 +94,18 @@ export function subscribe<T>(
   };
 }
 
-/**
- * Run an effect that is issued for its SIDE EFFECT and awaited by nobody.
- *
- * The one shape the other three do not cover, and it arrived with kolu's
- * `survivableSpawnDriver`: a spawn is a description until it is run, the fork
- * it performs is synchronous, and what a caller wants back is the child — which
- * it already captured at the spawn seam — not a promise. `runFork` rather than
- * `runSync` because the effect settles on the child's `spawn`/`error` event,
- * which node emits on the next tick; `runSync` would throw on the suspension.
- *
- * It is here rather than at the call site for the reason the whole module
- * exists: a second `Effect.run*` in the tree is a second boundary, and
- * `effectEdges.test.ts` enumerates them precisely so that stays a decision
- * somebody made rather than one that accumulated. It caught this one.
- *
- * Failures are NOT swallowed — they land on the fiber, and the driver's own
- * contract is that a launch failure (ENOENT, EACCES, a fork that could not) is
- * reported there rather than thrown into this process. A caller that needs to
- * know a coordinator failed to start learns it from the socket that never
- * appears, which is the same fact by the only route that also covers a child
- * that started and then died.
- */
 export function runDetached(effect: Effect.Effect<void, Error>): void {
   Effect.runFork(effect);
 }
 
-/** What to print for a rejection that may not be an `Error`. Effect RPC
- *  defects arrive as the squashed cause — often a bare string — and
- *  `(err as Error).message` on one of those prints `undefined`. Placed here
- *  rather than beside a face because the engine rejects the same way the faces
- *  do, and the import wall runs face → engine: a helper in a CLI module is
- * unreachable from the half of the codebase that gets the same defects. */
+/** Effect RPC defects arrive as the squashed cause — often a bare string — so
+ *  `(err as Error).message` on one prints `undefined`. */
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message === "" ? String(err) : err.message;
   const message = (err as { message?: unknown } | null)?.message;
   if (typeof message === "string") return message;
-  // A rejection with no message at all. `String(err)` on an object is
-  // "[object Object]", which names nothing - so show the value instead of a
-  // generic placeholder. RENDERING A FAILURE MUST NOT ITSELF FAIL: a cyclic
-  // object (or a BigInt) makes `JSON.stringify` throw, which would mask them
-  // with a fresh throw from the error path that caught the original.
   if (typeof err === "object" && err !== null) {
     try {
-      // Capped: a Cause/Exit-shaped rejection prints whole structure otherwise,
-      // and the sentence a user reads must stay a sentence, not a page.
       const rendered = JSON.stringify(err);
       return rendered.length <= 512 ? rendered : rendered.slice(0, 512) + "…";
     } catch {
@@ -291,9 +115,6 @@ export function errorMessage(err: unknown): string {
   return String(err);
 }
 
-/** The stack for a rejection that may not be an `Error`, for `$ODU_DEBUG`.
- *  Same reason as {@link errorMessage}: a squashed Effect cause has no
- *  `.stack`, and `(err as Error).stack` on one prints `undefined`. */
 export function errorStack(err: unknown): string {
   return err instanceof Error && err.stack !== undefined ? err.stack : errorMessage(err);
 }

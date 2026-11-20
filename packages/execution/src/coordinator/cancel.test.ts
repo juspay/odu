@@ -1,11 +1,3 @@
-/**
- * `cancelRun` — the shared core behind `odu ci cancel`, the MCP `cancel` tool, and
- * a `--supersede` start. Driven over a real unix-socket `oduSurface` (the
- * `serveTestSurface` harness), so the `run.cancel` call rides the same
- * transport production hits; plus the no-run no-op and the
- * cancelled-but-not-confirmed path via injected deps.
- */
-
 import { afterEach, describe, expect, it } from "bun:test";
 import { pendingNode, type PipelineState } from "@odu/run-client/surface";
 import { serveTestSurface, type TestSurface } from "./serveForTest";
@@ -51,9 +43,6 @@ describe("cancelRun", () => {
   });
 
   it("cancels a live run and confirms its socket is gone", async () => {
-    // The coordinator tears down in response to run.cancel; the harness models
-    // that by closing its listener, so cancelRun's wait-for-gone sees the
-    // socket disappear.
     const s = await serve((close) => close());
     const result = await cancelRun(s.socketPath, {
       settleTimeoutMs: 2_000,
@@ -64,8 +53,6 @@ describe("cancelRun", () => {
   });
 
   it("reports unconfirmed when the run is asked to stop but doesn't tear down", async () => {
-    // The cancel is delivered (recorded) but the listener stays up — the
-    // coordinator hung — so the bounded wait elapses and confirmed is false.
     const s = await serve();
     const result = await cancelRun(s.socketPath, {
       settleTimeoutMs: 150,
@@ -99,7 +86,6 @@ describe("cancelNodeOrPlatform", () => {
     expect(result).toEqual({ kind: "delivered", ok: true });
     expect(s.nodeCancels).toEqual(["ci::e2e@x86_64-linux"]);
     expect(s.laneCancels).toEqual([]);
-    // Full-run cancel was not invoked — coordinator stays up.
     expect(s.cancels()).toBe(0);
   });
 

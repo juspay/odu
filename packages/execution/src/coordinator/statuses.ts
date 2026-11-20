@@ -7,21 +7,6 @@
  *   description  Running: <log> | Succeeded (<dur>): <log> | Failed (<dur>): <log>
  *   log path     .ci/<sha7>/<platform>/<context-prefix>.log
  *   target_url   never set
- *
- * `Errored (<dur>): <log>` (GitHub state `error`) is odu's own addition for
- * infrastructure death — justci's wording for that case was never observed
- * in the wild, so this is a decision, not parity.
- *
- * Posts go through the {@link Forge} port over `gh api` (the `$ODU_GH_BIN`
- * override is baked to the pinned gh in the nix wrapper) from the coordinator
- * only — lane hosts never see credentials. Posting is diff-driven off the
- * fan-in state: after any gap, the next snapshot re-derives exactly the
- * transitions that were missed.
- *
- * Dedup is confirm-then-record: `confirmed` updates only after a successful
- * `postStatus`, so a failed send is re-derived and retried. Transient failures
- * retry with exponential backoff for the life of the run; the forge kills the
- * `gh` child after a timeout so one hung TCP can't wedge the post queue.
  */
 
 import { logPathFor } from "@odu/run-client/nodeId";
@@ -45,7 +30,6 @@ import { projectUnposted, type UnpostedEntry } from "@odu/run-history/legacy/rec
 
 export type { GithubState, OwedStatus, PostingHealth, UnpostedEntry };
 
-/** GitHub commit-status `state` values the statuses API accepts. */
 const GITHUB_STATES = new Set<string>([
   "pending",
   "success",
@@ -57,13 +41,10 @@ function isGithubState(state: string): state is GithubState {
   return GITHUB_STATES.has(state);
 }
 
-/** Default debounce: rapid pending→failed→pending flips collapse to latest. */
 export const DEFAULT_DEBOUNCE_MS = 1_500;
-/** First backoff after a failed send; doubles per attempt, capped. */
 export const DEFAULT_BACKOFF_BASE_MS = 5_000;
 export const DEFAULT_BACKOFF_CAP_MS = 60_000;
 
-/** Pure structural equality for status payloads. */
 export function payloadEqual(a: StatusPayload, b: StatusPayload): boolean {
   return (
     a.state === b.state &&
@@ -81,14 +62,10 @@ export function statusFor(
   durationMs: number | null,
   sha7: string,
 ): StatusPayload | null {
-  // The state + the post/no-post decision come from the shared projection;
-  // only the justci wording (with duration) is assembled locally.
   const state = STATUS_META[status].github;
   if (state === null) return null;
   const log = logPathFor(sha7, nodeId);
   const dur = formatGoDuration(durationMs ?? 0);
-  // justci wording for posts that fire — keyed by status so a new NodeStatus
-  // is one table row, not another nest of ternaries.
   const descriptions: Partial<
     Record<NodeStatus, (d: string, l: string) => string>
   > = {
@@ -100,7 +77,6 @@ export function statusFor(
   };
   const format = descriptions[status];
   if (format === undefined) {
-    // Defensive: github non-null should only land for statuses in the table.
     return { state, context: nodeId, description: `${status}: ${log}` };
   }
   return {
@@ -110,10 +86,6 @@ export function statusFor(
   };
 }
 
-/**
- * Interrupt/error status wording — the one projector for cancel/SIGINT/idle
- * `error` posts so descriptions never bypass the statuses surface (Lowy #11).
- */
 export function interruptStatus(
   context: string,
   reason: string,
@@ -132,11 +104,7 @@ export interface StatusPosterOptions {
   sha: string;
   enabled: boolean;
   onLine: (line: string) => void;
-  /** Fired whenever posting health changes (owed set / last error / attempts). */
   onHealth?: (health: PostingHealth) => void;
-  /** WHERE statuses are posted. The coordinator constructs the one `ghForge`
-   *  here; a suite hands in a fake, which is why the poster has no `gh` of its
-   *  own. */
   forge: Forge;
   debounceMs?: number;
   timeoutMs?: number;
@@ -144,28 +112,13 @@ export interface StatusPosterOptions {
   backoffCapMs?: number;
 }
 
-/** Per-context posting state — one map entry owns desired/confirmed/debt/wake. */
 interface ContextPost {
   desired?: StatusPayload;
   confirmed?: StatusPayload;
-  /**
-   * The payload of a send currently on the wire for this context.
-   *
-   * `confirmed` is what GitHub had when the last send finished, so while a send
-   * is in flight it is stale — it does not yet reflect the payload about to
-   * land. Dedup against it in that window and a status gets dropped as
-   * redundant against a state GitHub is in the act of leaving.
-   */
   inFlight?: StatusPayload;
   lastError?: string;
   attempts: number;
-  /** Single wake timer: debounce before first send, or backoff after failure. */
   wake?: ReturnType<typeof setTimeout>;
-  /**
-   * True once this run has called {@link StatusPoster.post} for the context.
-   * Seed alone does not set it — foreign GitHub contexts (Actions, other bots)
-   * stay in `confirmed` for dedup but must not enter the interrupt worklist.
-   */
   owned: boolean;
 }
 
@@ -203,7 +156,6 @@ export class StatusPoster {
     post.attempts = 0;
   }
 
-  /** Desired payload still needing a confirmed send, or `undefined` if settled. */
   private owedDesired(post: ContextPost): StatusPayload | undefined {
     const d = post.desired;
     if (d === undefined) return undefined;
@@ -213,7 +165,6 @@ export class StatusPoster {
     return d;
   }
 
-  /** Drop a post entry when it holds nothing useful. */
   private prune(context: string, post: ContextPost): void {
     if (
       post.desired === undefined &&
@@ -227,7 +178,6 @@ export class StatusPoster {
     }
   }
 
-  /** Clear desired + debt after a confirmed match; emit health. */
   private settleDesired(context: string, post: ContextPost): void {
     post.desired = undefined;
     this.clearDebt(post);
@@ -236,10 +186,6 @@ export class StatusPoster {
     this.emitHealth();
   }
 
-  /**
-   * Schedule a follow-up send when desired moved mid-flight and no wake is armed.
-   * Debounce while open; immediate enqueue while finalizing.
-   */
   private ensureWake(context: string, post: ContextPost): void {
     if (post.wake !== undefined) return;
     const phase = this.currentPhase();
@@ -248,7 +194,6 @@ export class StatusPoster {
     else this.scheduleDebounce(context);
   }
 
-  /** Current posting health for the live surface. */
   health(): PostingHealth {
     if (!this.opts.enabled) return EMPTY_POSTING;
     const owed: OwedStatus[] = [];
@@ -263,17 +208,11 @@ export class StatusPoster {
     return { owed };
   }
 
-  /** Durable form of still-unconfirmed contexts (empty when healthy). */
   unposted(): UnpostedEntry[] {
     return projectUnposted(this.health().owed);
   }
 
   /**
-   * Seed `confirmed` from GitHub's statuses for this SHA so a restart does not
-   * re-post contexts already showing the desired state (eliminates the
-   * "pending wave" of ~N writes on coordinator start). Soft-fails to an empty
-   * seed on any list error.
-   *
    * Only real GitHub states (`pending|success|failure|error`) are accepted —
    * unknown/empty remote `state` values are skipped rather than cast into
    * {@link StatusPayload}. Seed never marks a context `owned`: foreign pending
@@ -287,9 +226,6 @@ export class StatusPoster {
         repo: this.opts.repo,
         sha: this.opts.sha,
       });
-      // A failed seed is tolerated the way it always was — continuing with an
-      // empty `confirmed` costs a wave of re-posts, never a lost status — and
-      // the forge's sentence is what gets said.
       if (!listed.ok) throw new Error(listed.error);
       // GitHub returns newest-first; keep the first sighting per context.
       const seen = new Set<string>();
@@ -315,10 +251,6 @@ export class StatusPoster {
     }
   }
 
-  /** Post the payload unless this exact (context, state, description) was the
-   *  last *confirmed* post for the context. Desired state is coalesced; the
-   *  actual send is debounced so rapid re-run flips collapse to the latest.
-   *  During {@link finalize}, posts enqueue immediately (no debounce). */
   post(payload: StatusPayload): void {
     if (!this.opts.enabled || this.phase === "closed") return;
     const post = this.entry(payload.context);
@@ -328,21 +260,9 @@ export class StatusPoster {
       post.confirmed !== undefined &&
       payloadEqual(post.confirmed, payload)
     ) {
-      // Incoming matches confirmed: GitHub already shows exactly this, so there
-      // is nothing to send. What matters is the desired still queued behind it.
-      // post() sees transitions in order, so a *different* desired is older
-      // than `payload` and describes a state this one supersedes.
-      //
-      // Drop it when it is non-terminal. A `pending` left armed here is the
-      // stuck-check bug: seed loads the previous run's success as confirmed, a
-      // warm-cache node finishes inside its own debounce and re-posts a
-      // byte-identical success, and the un-sent pending then fires and moves
-      // GitHub *backwards* from a terminal status to "Running" — blocking the
-      // merge on a node that has finished, with nothing owed to show for it.
-      //
       // A terminal desired stays: it may be a failure waiting behind a
       // redundant success re-post, and dropping that would report a red node
-      // green. Losing a "was running" blip is free; losing a failure is not.
+      // green.
       const stale = post.desired;
       if (
         stale !== undefined &&
@@ -355,7 +275,6 @@ export class StatusPoster {
     post.desired = payload;
     this.emitHealth();
     if (this.phase === "finalizing") {
-      // Final drain: skip debounce so interrupt transitions still get an attempt.
       this.clearWake(post);
       this.enqueue(payload.context);
       return;
@@ -366,10 +285,6 @@ export class StatusPoster {
   /**
    * Contexts this run owns that are still `pending` (desired and/or confirmed)
    * — the interrupt finalizer's worklist for posting `error`.
-   *
-   * Only {@link ContextPost.owned} contexts (this run called {@link post}) are
-   * included. Seeded foreign/third-party pending checks (CI Actions, other bots)
-   * must never receive an interrupt `error` POST.
    */
   pendingContexts(): string[] {
     if (!this.opts.enabled) return [];
@@ -379,30 +294,20 @@ export class StatusPoster {
       if (post.desired?.state === "pending") out.add(context);
       if (post.confirmed?.state !== "pending") continue;
       const d = post.desired;
-      // Confirmed pending with no newer desired terminal, or desired still pending.
       if (d === undefined || d.state === "pending") out.add(context);
     }
     return [...out];
   }
 
-  /**
-   * Flush debounced posts, cancel backoff, make final attempts at everything
-   * owed (including posts that arrive mid-drain), then stop retrying. Returns
-   * contexts that still failed to post.
-   */
   async finalize(): Promise<UnpostedEntry[]> {
     if (!this.opts.enabled) return [];
     this.phase = "finalizing";
-    // Cancel pending backoffs/debounces — enqueue immediate final attempts.
     for (const [context, post] of this.posts) {
       if (post.wake !== undefined) {
         this.clearWake(post);
         this.enqueue(context);
       }
     }
-    // Drain until the queue is stable and every current unconfirmed desired
-    // has been attempted once. No fixed pass cap — bound by unique
-    // (context, payload) pairs that appear as desired during the drain.
     const attempted = new Set<string>();
     for (;;) {
       for (const [context, post] of this.posts) {
@@ -431,8 +336,6 @@ export class StatusPoster {
     return this.unposted();
   }
 
-  /** Wait for the post queue to drain (call before process exit). Prefer
-   *  {@link finalize} when ending a run so owed posts get a last attempt. */
   settle(): Promise<void> {
     return this.queue;
   }
@@ -465,7 +368,6 @@ export class StatusPoster {
     if (post === undefined) return;
     const payload = this.owedDesired(post);
     if (payload === undefined) {
-      // Desired matches confirmed (or is absent) — drop any stale desired.
       if (post.desired !== undefined) this.settleDesired(context, post);
       return;
     }
@@ -473,33 +375,24 @@ export class StatusPoster {
     post.inFlight = payload;
     const result = await this.send(payload);
     post.inFlight = undefined;
-    // Record the send before the phase check, not after: a status that reached
-    // GitHub as the poster closed is still on GitHub, and dropping the
-    // confirmation makes `unposted` report reporting debt (attempts: 0) for a
-    // status nobody owes — a green run that looks like it failed to report.
     if (result.ok) post.confirmed = payload;
     if (this.currentPhase() === "closed") return;
 
-    // Desired may have moved while the request was in flight.
     const still = post.desired;
     const desiredMoved =
       still !== undefined && !payloadEqual(still, payload);
 
     if (result.ok) {
-      // Confirmed above — recorded even when desired moved mid-flight, so the
-      // next comparison is against what GitHub actually has.
       if (!desiredMoved) {
         this.settleDesired(context, post);
         return;
       }
-      // Keep the newer desired; arm a follow-up if post() did not already.
       this.emitHealth();
       this.ensureWake(context, post);
       return;
     }
 
     if (desiredMoved) {
-      // Failure was about the old payload; leave debt/attempts for the new desired.
       this.ensureWake(context, post);
       return;
     }
@@ -511,7 +404,6 @@ export class StatusPoster {
     );
     this.emitHealth();
 
-    // No infinite retry during finalize — one final attempt, then record debt.
     if (this.currentPhase() !== "open") return;
 
     const base = this.opts.backoffBaseMs ?? DEFAULT_BACKOFF_BASE_MS;
@@ -530,13 +422,6 @@ export class StatusPoster {
     this.opts.onHealth?.(this.health());
   }
 
-  /**
-   * One send, through the forge. The forge owns the KILL — its `ghForge` bound
-   * has the timeout, and a poster-configured number must not shorten a child
-   * some other caller handed it. This race stays only as a guard against a fake
-   * that never answers (`$ODU_GH_BIN` in a suite), so one stuck promise cannot
-   * wedge the serialized queue.
-   */
   private send(payload: StatusPayload): Promise<ForgeResult> {
     const timeoutMs = this.opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
     return withTimeout(
@@ -556,7 +441,6 @@ function attemptMark(payload: StatusPayload): string {
   return `${payload.context}\0${payload.state}\0${payload.description}`;
 }
 
-/** Race a promise against a timeout; does not cancel the underlying work. */
 function withTimeout<T extends ForgeResult>(
   attempt: Promise<T>,
   timeoutMs: number,
@@ -598,25 +482,16 @@ export function parseGithubRemote(
   return { owner, repo };
 }
 
-/** Format a parsed GitHub remote as its `owner/repo` slug — the durable run
- *  record's repo identity. */
 export function repoSlug(gh: { owner: string; repo: string }): string {
   return `${gh.owner}/${gh.repo}`;
 }
 
-/** Normalize a GitHub remote to the anonymous-https form lane hosts fetch
- *  from (they have no GitHub ssh identity — the repo being public is what
- *  makes remote lanes work). */
 export function fetchUrlFor(url: string): string {
   const gh = parseGithubRemote(url);
   if (gh === null) return url.trim();
   return `https://github.com/${gh.owner}/${gh.repo}`;
 }
 
-/** Shared "N statuses never reached GitHub" note for verdict lines. */
-
-
-/** Structural equality for posting health — avoids JSON.stringify on the hot path. */
 export function postingEqual(
   a: PostingHealth | undefined | null,
   b: PostingHealth,

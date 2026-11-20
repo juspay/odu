@@ -1,27 +1,3 @@
-/**
- * The survival property of the coordinator spawn, measured — not assumed:
- * a coordinator outlives the process that launched it.
- *
- * This is what makes "your run survives this shell" true. Whatever asked for
- * the run — the web daemon, a terminal, an agent's MCP bridge — is a launcher
- * that may exit, restart or be Ctrl-C'd a second later, and none of that may
- * reach the work.
- *
- * Measured against the REAL runtime (`process.execPath` — bun, the runtime
- * every shipped coordinator runs on) and the REAL spawn options
- * (`coordinatorSpawnSpec`), through the REAL hazard: the launcher EXITS, its
- * ends of the child's output pipes die with it, and the child keeps writing.
- * Two facts are load-bearing and either's regression must fail this file:
- *
- *   - the spawn (`detached` + `unref`): the child is its own process-group
- *     leader and its handle doesn't hold the launcher open, so the launcher's
- *     exit leaves the run reparented, not reaped;
- *   - the write contract: bun's stdio swallows EPIPE — a write to a pipe
- *     whose reader is gone never becomes an uncaughtException (Node would
- *     crash the child here). If a runtime bump changes that, this file goes
- *     red and `spawn.ts`'s run-descriptor comment goes with it.
- */
-
 import { spawn } from "node:child_process";
 import {
   existsSync,
@@ -38,12 +14,10 @@ import { coordinatorSpawnSpec } from "./spawn";
 const dirs: string[] = [];
 const pids: number[] = [];
 afterEach(() => {
-  // Kills by explicit PID only: grandchildren this suite spawned via a parent.
   for (const pid of pids.splice(0)) {
     try {
       process.kill(pid, "SIGKILL");
     } catch {
-      /* already gone */
     }
   }
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -68,14 +42,8 @@ describe("a spawned run outlives the process that launched it", () => {
     const aliveFile = join(dir, "alive");
     const pidFile = join(dir, "pid");
 
-    // The grandchild: a bun process writing to stdout (the dead-to-be pipe)
-    // AND stamping a file, so liveness is observable from the test after the
-    // pipe is gone.
     writeChildAndParent(dir);
 
-    // Spawn the PARENT (the stand-in for any launcher that exits under its
-    // run): it spawns the child with the real spawn spec, unrefs, and exits.
-    // Every path it needs arrives as ARGV — see `writeChildAndParent`.
     const parent = spawn(
       process.execPath,
       [
@@ -93,8 +61,6 @@ describe("a spawned run outlives the process that launched it", () => {
     });
     expect(await parentExit).toBe(0);
 
-    // The parent reports its child's pid; then the child must keep stamping
-    // for a window WIDE ENOUGH to span several writes past the parent's death.
     await waitForFile(pidFile);
     const pid = Number(readFileSync(pidFile, "utf8").trim());
     expect(Number.isFinite(pid) && pid > 0).toBe(true);
@@ -111,22 +77,6 @@ describe("a spawned run outlives the process that launched it", () => {
   }, 20_000);
 });
 
-/**
- * Write the two scripts this test drives, WITHOUT interpolating a single value
- * into either of them.
- *
- * Both used to be assembled by splicing `JSON.stringify(path)` into source
- * text. That is code construction from data, and `JSON.stringify` is not an
- * escape for it: it leaves U+2028/U+2029 raw, which are line terminators to a
- * JavaScript parser but not to JSON. A test fixture under a temp path will
- * never carry one — and a guard that holds only because of what the input
- * happens to be is not a guard, which is why the tooling flags the shape
- * rather than the instance.
- *
- * So the scripts became CONSTANT text and every path arrives on `process.argv`.
- * There is nothing left to escape, and the two files are now readable as the
- * programs they are.
- */
 function writeChildAndParent(dir: string): void {
   writeFileSync(
     join(dir, "child.ts"),
@@ -147,9 +97,6 @@ function writeChildAndParent(dir: string): void {
       `import { spawn } from "node:child_process";`,
       `import { writeFileSync } from "node:fs";`,
       `const [specModule, childPath, cwd, pidFile, aliveFile] = process.argv.slice(2);`,
-      // The REAL spawn spec, imported from the module that ships it — a
-      // dynamic import because the path is data now, and the point of the
-      // test is that these options are odu's own and not a copy.
       `const { coordinatorSpawnSpec } = await import(specModule);`,
       `const child = spawn(process.execPath, [childPath, aliveFile], coordinatorSpawnSpec(cwd));`,
       `child.unref();`,

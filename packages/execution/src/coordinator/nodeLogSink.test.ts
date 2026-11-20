@@ -1,12 +1,3 @@
-/**
- * appendIfOpen is the coordinator's sealed-log skip. Removing the isEnded
- * guard here must fail this file: every append path (tap frame, lane-death
- * line, setup narration, truncation stamp) shares it.
- *
- * And the sink addresses a node's TWO logs — the recipe's and the push's —
- * by stream, which is two files and two terminals, never one of each.
- */
-
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,9 +43,6 @@ describe("appendIfOpen", () => {
 
 describe("a node's two durable logs", () => {
   it("keeps the recipe's bytes and the push's in separate files", () => {
-    // The whole point of the second stream: a recipe's log is worth exactly
-    // its promise to hold the recipe's output. One file per stream is what
-    // makes that promise keepable on disk as well as on the wire.
     const dir = mkdtempSync(join(tmpdir(), "odu-sink-"));
     dirs.push(dir);
     const sink = createNodeLogSink(dir, "abc1234");
@@ -72,11 +60,6 @@ describe("a node's two durable logs", () => {
   });
 
   it("seals one stream without sealing the other", () => {
-    // A node's two logs end together in practice — the runner ends them in
-    // lockstep — but the SINK must not conflate them: a push that is still
-    // uploading when the recipe's terminal lands would otherwise have its
-    // remaining lines dropped by `appendIfOpen` or kill the coordinator
-    // through `append`'s deliberate throw.
     const dir = mkdtempSync(join(tmpdir(), "odu-sink-"));
     dirs.push(dir);
     const sink = createNodeLogSink(dir, "abc1234");

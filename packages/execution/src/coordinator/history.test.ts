@@ -1,31 +1,3 @@
-/**
- * The coordinator's adapter onto the run catalog — the three rules its header
- * states, each falsifiable on its own.
- *
- *   - HISTORY IS NEVER A GATE. A catalog that cannot be opened yields the
- *     working no-op, not an exception, because a run must not die of its own
- *     bookkeeping.
- *   - BEING FENCED IS A GATE. The one failure this adapter refuses to swallow:
- *     once another process owns the record, it writes NOTHING further — a
- *     second writer on one journal is the unrecoverable case.
- *   - AN ATTEMPT IS SEALED BY THE LOG BARRIER, NOT BY THE STATUS. The outcome
- *     and the output arrive separately and in either order, so an attempt
- *     closes when BOTH have. This is the easy thing to get wrong in both
- *     directions: sealing on the status alone freezes a `_ci-setup` log
- *     half-written, and sealing on the log alone seals an attempt with no
- *     outcome. Sealing wrongly is unrecoverable — the log is chmod'd read-only
- *     and the ordinal is never named again.
- *
- * Around that sits the ALLOCATOR, which is the same property from the other
- * side: a retry gets the NEXT ordinal, so it cannot write over the failure
- * somebody is reading. And the completeness stamp is FAIL-CLOSED — a short log
- * must never wear a completion frame.
- *
- * Every test builds its own catalog root under `tmpdir()` and injects a fixed
- * clock: a suite that wrote into the developer's real `~/.local/state/odu`, or
- * that read the wall clock, is a suite nobody can run twice.
- */
-
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,21 +25,16 @@ import {
 const T0 = 1_700_000_000_000;
 const SHA = "26d2c2dabcdef0123456789012345678901234ab";
 const NODE = "ci::e2e@x86_64-linux";
-/** The coordinator's own bookkeeping node — the one whose status LEADS its
- *  output, which is what half the barrier tests below are about. */
 const SETUP = "_ci-setup@x86_64-linux";
 
 const dirs: string[] = [];
 const opened: RunHistory[] = [];
 
 afterEach(() => {
-  // Close first: the heartbeat timer is unref'd, but a suite that left one per
-  // test running would still be holding an epoch it has stopped speaking for.
   for (const history of opened.splice(0)) history.close();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A catalog root of our own. Never the real one. */
 function tmpCatalog(): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-history-"));
   dirs.push(dir);
@@ -101,16 +68,12 @@ function openHistory(root: string, over: Partial<RunHistoryInit> = {}): RunHisto
   return history;
 }
 
-/** The store-side handle for a registered run, so every assertion reads the
- *  records back through the store's own readers rather than through the
- *  adapter's memory. */
 function handleOf(history: RunHistory, root: string): RunHandle {
   const runId = history.runId;
   if (runId === null) throw new Error("history did not register");
   return handleFor(runId, { root });
 }
 
-/** A registered run, and the handle onto what it writes. */
 function started(over: Partial<RunHistoryInit> = {}): {
   root: string;
   history: RunHistory;
@@ -121,9 +84,6 @@ function started(over: Partial<RunHistoryInit> = {}): {
   return { root, history, handle: handleOf(history, root) };
 }
 
-/** Take the run over the way a successor does: a heartbeat older than the
- *  grace, and an incumbent pid that is gone. (The incumbent here is US, and our
- *  pid is very much alive, so the liveness probe is injected.) */
 function takeOver(handle: RunHandle): void {
   const claim = claimOwnership({
     runId: handle.runId,
@@ -139,7 +99,6 @@ function logText(handle: RunHandle, node: string, attempt: number): string | und
   return readAttemptLog(handle, node, attempt)?.text;
 }
 
-/** The permission bits on an attempt's log — 0444 once the attempt is sealed. */
 function logMode(handle: RunHandle, node: string, attempt: number): number {
   const path = join(
     attemptDir(handle.dir, encodeNodeKey(node), attempt),
@@ -174,8 +133,6 @@ describe("registering a run", () => {
   it("publishes the identity it was given, claims the epoch, and opens the journal with `registered`", () => {
     const { root, handle } = started();
 
-    // `handle` is addressed by the id the adapter reports, so a manifest that
-    // reads back here is one `runId` can be dialled with.
     const manifest = readManifest(handle);
     expect(manifest?.runId).toBe(handle.runId);
     expect(manifest?.repo).toBe("juspay/odu");
@@ -183,8 +140,6 @@ describe("registering a run", () => {
     expect(manifest?.seq).toBe(7);
     expect(manifest?.pipeline).toBe("ci");
     expect(manifest?.repoRoot).toBe("/checkouts/odu");
-    // The injected clock, not the wall one — a record whose createdAt drifted
-    // would sort against ids that encode the same instant.
     expect(manifest?.createdAt).toBe(T0);
     expect(manifest?.scope).toEqual({
       selectors: ["e2e"],
@@ -195,13 +150,9 @@ describe("registering a run", () => {
     expect(manifest?.parentRunId).toBeNull();
     expect(manifest?.requestId).toBeNull();
 
-    // Ownership is claimed as part of registering. `registeredBy` is
-    // PROVENANCE — stamped once, never refreshed — so a reader asking "is this
-    // run live" asks `owner.json` instead; see `CatalogRow.liveness`.
     expect(manifest?.registeredBy.epoch).toBe(1);
     expect(manifest?.registeredBy.endpoint).toBe("/checkouts/odu/.ci/odu.sock");
 
-    // REGISTER BEFORE EXECUTE: the run is addressable before it does anything.
     const journal = readJournal(handle);
     expect(journal.unreadable).toBe(0);
     expect(journal.entries).toHaveLength(1);
@@ -211,7 +162,6 @@ describe("registering a run", () => {
       scope: { selectors: ["e2e"], platforms: [], noDeps: false },
     });
 
-    // And it is discoverable at the id the adapter reports, in OUR catalog.
     expect(handle.dir.startsWith(root)).toBe(true);
   });
 
@@ -225,14 +175,8 @@ describe("registering a run", () => {
   });
 
   it("records WHO started the run, and omits the field when nobody said", () => {
-    // PLAN 4.4. The actor is the connection's principal, flattened to one
-    // word by the service and carried down the launch argv — a login, or the
-    // reserved `@local` for a loopback caller.
     expect(readManifest(started({ actor: "srid" }).handle)?.actor).toBe("srid");
     expect(readManifest(started({ actor: "@local" }).handle)?.actor).toBe("@local");
-    // ABSENT, not `null` and not `"@local"`: a launch that named no actor is a
-    // record with no answer to "who started this", which is a different fact
-    // from "the machine's own owner did" and must stay distinguishable from it.
     expect(readManifest(started().handle)?.actor).toBeUndefined();
   });
 
@@ -241,16 +185,12 @@ describe("registering a run", () => {
     expect(minted).not.toBeNull();
     expect(isRunId(minted ?? "")).toBe(true);
 
-    // A launcher that pre-minted an id told its caller that id; registering
-    // under a different one would make the receipt address nothing.
     const { history, handle } = started({ runId: "0000000a-0001" });
     expect(history.runId).toBe("0000000a-0001");
     expect(readManifest(handle)?.runId).toBe("0000000a-0001");
   });
 
   it("marks only a clean strict snapshot retryable", () => {
-    // This is the flag a finalized retry refuses on, so all three cases are
-    // pinned: a replay needs inputs it can reconstruct from the sha alone.
     expect(readManifest(started().handle)?.snapshot).toEqual({
       mode: "strict",
       expectedSha: SHA,
@@ -258,22 +198,16 @@ describe("registering a run", () => {
       retryable: true,
     });
 
-    // A live tree ran whatever was on disk; the sha does not describe it.
     const live = started({ snapshotMode: "live" });
     expect(readManifest(live.handle)?.snapshot.mode).toBe("live");
     expect(readManifest(live.handle)?.snapshot.retryable).toBe(false);
 
-    // Uncommitted changes were never committed, so there is nothing to replay.
     const dirty = started({ dirty: true });
     expect(readManifest(dirty.handle)?.snapshot.dirty).toBe(true);
     expect(readManifest(dirty.handle)?.snapshot.retryable).toBe(false);
   });
 
   it("collapses to the working no-op when the catalog cannot be created", () => {
-    // A catalog root whose parent is a FILE: `mkdir -p` cannot succeed, which
-    // stands in for every no-writable-state-root case. History is never a gate,
-    // so this is a run without a record — not a throw, and not a null a caller
-    // has to branch on.
     const blocker = join(tmpCatalog(), "not-a-directory");
     writeFileSync(blocker, "");
     const history = openHistory(join(blocker, "runs"));
@@ -316,7 +250,6 @@ describe("allocating attempts", () => {
       platform: "x86_64-linux",
       host: "builder-1",
     });
-    // BYTES, not characters: a resuming reader seeks by this number.
     expect(record?.logBytes).toBe(Buffer.byteLength("compiling…\nok\n"));
 
     expect(kinds(handle)).toEqual([
@@ -329,13 +262,6 @@ describe("allocating attempts", () => {
   });
 
   it("replaces a RE-SYNC in place rather than allocating a ghost attempt", () => {
-    // The distinction between a lane re-sending its buffered tail and a node
-    // actually being re-run. Both arrive as a `snapshot` frame, and treating
-    // them alike is not a cosmetic error: every node whose first output landed
-    // after its `running` frame got an empty attempt 1 and did its real work
-    // in attempt 2, so the ordinal a failure reported was off by one and the
-    // log at the ordinal below it was zero bytes. Seen in a real run before it
-    // was fixed.
     const { history, handle } = started();
 
     history.nodeStatus(NODE, "running", running);
@@ -347,17 +273,6 @@ describe("allocating attempts", () => {
   });
 
   it("does not let a re-sent TAIL delete the beginning of a log", async () => {
-    // THE FIELD FAILURE. A `snapshot` frame is the producer's in-memory buffer,
-    // and that buffer is clamped to 64 KiB — so once a node has printed more
-    // than that, a snapshot is a TAIL, not the log. Writing it over the file
-    // threw away everything before it, silently: a 200,000-line recipe recorded
-    // 198,092 lines, ending at its true last line, with no truncation notice,
-    // because a lane re-attached after the first 133 KB had already been
-    // written.
-    //
-    // Two facts make the loss invisible without this test. The end of the log
-    // is intact, so every "is it complete" check passes; and the `end` frame
-    // still arrives, so the truncation sweep has nothing to stamp.
     const { history, handle } = started();
     history.nodeStatus(NODE, "running", running);
 
@@ -366,8 +281,6 @@ describe("allocating attempts", () => {
       (_, i) => `line ${String(i).padStart(6, "0")}\n`,
     ).join("");
     history.log(NODE, early);
-    // A lane re-attaches and re-sends what the producer still holds: the last
-    // slice of what we already have.
     const resent = early.slice(early.length - 4_000);
     history.replaceLog(NODE, resent);
     history.log(NODE, "and then the rest\n");
@@ -376,14 +289,10 @@ describe("allocating attempts", () => {
     expect(written.startsWith("line 000000\n")).toBe(true);
     expect(written.split("\n").filter((l) => l.startsWith("line ")).length).toBe(2_000);
     expect(written.endsWith("and then the rest\n")).toBe(true);
-    // And nothing was written twice.
     expect(written).toBe(`${early}and then the rest\n`);
   });
 
   it("catches up when the re-sent tail continues where the file stops", () => {
-    // The other direction: the producer is AHEAD of us, and its snapshot
-    // overlaps the end of what we hold. Only the part we do not have is
-    // appended — writing the whole snapshot would duplicate the overlap.
     const { history, handle } = started();
     history.nodeStatus(NODE, "running", running);
 
@@ -394,9 +303,6 @@ describe("allocating attempts", () => {
   });
 
   it("says so when a re-sent tail does not meet the file at all", () => {
-    // The producer's buffer has run past everything we hold — real loss, and
-    // the only honest thing to do is record the answer AND the fact that it is
-    // not continuous. Silence here is the failure this whole path is about.
     const { history, handle } = started();
     history.nodeStatus(NODE, "running", running);
 
@@ -410,8 +316,6 @@ describe("allocating attempts", () => {
   });
 
   it("seals the open attempt on a RESTART, so the next bytes land on a NEW ordinal", () => {
-    // The property the whole allocator exists for: a retry cannot write over
-    // the failure somebody is reading.
     const { history, handle } = started();
 
     history.nodeStatus(NODE, "running", running);
@@ -423,15 +327,12 @@ describe("allocating attempts", () => {
     expect(logText(handle, NODE, 1)).toBe("first go\n");
     expect(logText(handle, NODE, 2)).toBe("second go\n");
 
-    // Attempt 1 is closed and read-only; nothing that follows can name it.
     expect(readAttemptRecord(handle, NODE, 1)?.endedAt).toBe(T0);
     expect(logMode(handle, NODE, 1)).toBe(0o444);
-    // A reset is not a completion, and it says so.
     expect(readAttemptRecord(handle, NODE, 1)?.logComplete).toBe(false);
     expect(readAttemptRecord(handle, NODE, 1)?.logTruncationReason).toBe(
       "the lane running this node died",
     );
-    // Attempt 2 is still open — a reset supplies neither half of the barrier.
     expect(readAttemptRecord(handle, NODE, 2)?.endedAt).toBeNull();
   });
 
@@ -457,7 +358,6 @@ describe("allocating attempts", () => {
     const first = readAttemptRecord(handle, NODE, 1);
     expect(first?.status).toBe("failed");
     expect(first?.exitCode).toBe(137);
-    // The shell's `128 + N` reading, made where the exit code is.
     expect(first?.signal).toBe("SIGKILL");
     expect(first?.placement.host).toBe("builder-1");
     expect(logText(handle, NODE, 1)).toBe("boom\n");
@@ -472,9 +372,6 @@ describe("allocating attempts", () => {
   });
 
   it("opens attempt 1 lazily for output that arrives before any status", () => {
-    // The provisioning narration into `_ci-setup@<platform>` is exactly this:
-    // bytes nobody else will ever write down, arriving before the node has a
-    // status to hang them on.
     const { history, handle } = started();
 
     history.log(SETUP, "claiming a lane…\n");
@@ -482,7 +379,6 @@ describe("allocating attempts", () => {
 
     expect(attemptsFor(handle, SETUP)).toEqual([1]);
     expect(logText(handle, SETUP, 1)).toBe("claiming a lane…\nleased builder-1\n");
-    // The placement is the platform the id names; no host is known yet.
     expect(readAttemptRecord(handle, SETUP, 1)?.placement).toEqual({
       platform: "x86_64-linux",
       host: null,
@@ -493,12 +389,9 @@ describe("allocating attempts", () => {
   it("gives a node that never ran an attempt anyway, so its outcome has somewhere to hang", () => {
     const { history, handle } = started();
 
-    // `pending` is not work starting, so it allocates nothing.
     history.nodeStatus(NODE, "pending", { exitCode: null, durationMs: null, host: null });
     expect(attemptsFor(handle, NODE)).toEqual([]);
 
-    // `skipped` is a terminal outcome with no run behind it — the routine case
-    // for a node whose dependency failed.
     history.nodeStatus(NODE, "skipped", { exitCode: null, durationMs: null, host: null });
     expect(attemptsFor(handle, NODE)).toEqual([1]);
 
@@ -512,16 +405,12 @@ describe("allocating attempts", () => {
 
 describe("the log barrier", () => {
   it("does not seal on a terminal status alone — later bytes still land in the same attempt", () => {
-    // `_ci-setup` reaches `ok` when provisioning finishes and then keeps being
-    // narrated into for the rest of the run (lane deaths, operator cancels).
-    // Sealing on the status would freeze that log half-written.
     const { history, handle } = started();
 
     history.nodeStatus(SETUP, "running", running);
     history.log(SETUP, "provisioning\n");
     history.nodeStatus(SETUP, "ok", passed);
 
-    // Still open: one half of the barrier has arrived.
     expect(readAttemptRecord(handle, SETUP, 1)?.endedAt).toBeNull();
     expect(logMode(handle, SETUP, 1)).not.toBe(0o444);
 
@@ -550,15 +439,12 @@ describe("the log barrier", () => {
   });
 
   it("seals the same way when the log's last word arrives BEFORE the status", () => {
-    // The recipe-node order: the lane's `end` frame is what releases the
-    // verdict, so the log lands first. Both orders are real; both must seal.
     const { history, handle } = started();
 
     history.nodeStatus(NODE, "running", running);
     history.log(NODE, "tests passed\n");
     history.logFinalized(NODE, true, null);
 
-    // Half the barrier: no outcome yet, so nothing is sealed.
     expect(readAttemptRecord(handle, NODE, 1)?.endedAt).toBeNull();
 
     history.nodeStatus(NODE, "ok", passed);
@@ -572,10 +458,6 @@ describe("the log barrier", () => {
   });
 
   it("keeps the FIRST word about a log, so a stamped-short log is never upgraded", () => {
-    // The truncation notice and the lane's own `end` frame both arrive for one
-    // attempt and they disagree BY DESIGN — the notice is written precisely
-    // because the `end` never came. If the second word won, the end-of-run
-    // sweep would dress a truncated log in a completion frame.
     const { history, handle } = started();
 
     history.nodeStatus(NODE, "running", running);
@@ -591,8 +473,6 @@ describe("the log barrier", () => {
   });
 
   it("seals FAIL-CLOSED when nobody ever said the log was finished", () => {
-    // The one outcome this adapter must never produce is a short log wearing a
-    // completion frame, so silence reads as incomplete — with a reason.
     const { history, handle } = started();
 
     history.nodeStatus(NODE, "running", running);
@@ -606,15 +486,10 @@ describe("the log barrier", () => {
     expect(record?.logTruncationReason).toBe(
       "the run ended before this node's output was complete",
     );
-    // No attempt is left claiming to be running behind the run's terminal line.
     expect(logMode(handle, NODE, 1)).toBe(0o444);
   });
 
   it("amends the sidecar when the log's last word arrives after the seal", () => {
-    // The status led, the run ended before the log did, and the drain's stamp
-    // turns up afterwards. The record is a projection: correcting it costs
-    // nothing, and leaving it saying "nobody said" when somebody did would be a
-    // standing lie about complete evidence.
     const { history, handle } = started();
 
     history.nodeStatus(SETUP, "running", running);
@@ -628,21 +503,15 @@ describe("the log barrier", () => {
     const record = readAttemptRecord(handle, SETUP, 1);
     expect(record?.logComplete).toBe(true);
     expect(record?.logTruncationReason).toBeNull();
-    // The outcome the seal recorded survives the amendment.
     expect(record?.status).toBe("ok");
     expect(record?.exitCode).toBe(0);
     expect(record?.endedAt).toBe(T0);
-    // And no second ordinal was invented to hold the correction.
     expect(attemptsFor(handle, SETUP)).toEqual([1]);
   });
 });
 
 describe("recording who asked for a retry", () => {
   it("writes the request id against the run, and says it did", () => {
-    // The coordinator's half of idempotency. A reconciler that lost its reply
-    // reads THIS line; without it, the only evidence is an attempt that
-    // started, which names no requester and so proves nothing about whose
-    // retry it was.
     const { history, handle } = started();
 
     expect(
@@ -666,9 +535,6 @@ describe("recording who asked for a retry", () => {
   });
 
   it("reports FALSE once fenced, so no caller promises a line that was refused", () => {
-    // A fenced adapter writes nothing, and a caller that assumed otherwise
-    // would answer its own client `recorded: true` about a journal entry that
-    // does not exist — turning "unknown" into a false "reconstructable".
     const { history, handle } = started();
     takeOver(handle);
 
@@ -686,12 +552,6 @@ describe("recording who asked for a retry", () => {
 
 describe("recording what a node warmed", () => {
   it("writes every field of the push, the duration included", () => {
-    // THE FIELD THE TYPES ALONE DID NOT CARRY. `durationMs` existed on the
-    // event schema and in the fold, and the writer's own fact type left it
-    // out — so the number was right on the live coordinator's cell and
-    // became `0` the moment the run finalized, which is the reading every
-    // catalog consumer gets. A fold test cannot see this: it hand-builds the
-    // event this writer is the only producer of.
     const { history, handle } = started();
 
     history.pushed({
@@ -715,14 +575,6 @@ describe("recording what a node warmed", () => {
   });
 
   it("writes the push's BEGINNING and its failure, which a red status cannot say", () => {
-    // A push is a step with a beginning, and the run page reads a fold of
-    // this journal — live run included. A `pushing` that never reached a line
-    // here would be invisible to every reader the moment the coordinator went
-    // away, and a minute-long upload would appear, finished, out of nothing.
-    //
-    // `push_failed` is the other half: a node's red status alone cannot say
-    // WHICH of its two steps failed, so a reader of a finished run would see
-    // a red recipe where the recipe in fact passed.
     const { history, handle } = started();
 
     history.pushing({ node: NODE, bucket: "kolu-r2" });
@@ -748,21 +600,9 @@ describe("recording what a node warmed", () => {
 });
 
 describe("settle → retry → settle, through the real writer and the real reader", () => {
-  // The mismatch a fold test cannot see. `resumed` is cleared by a `finalized`
-  // line and by nothing else, so the reader's correctness depends entirely on
-  // the writer emitting one per EXECUTION GENERATION. It emitted one per RUN.
-  //
-  // Each half was defensible alone — "a journal is a history, not a stack of
-  // terminals" on one side, "a resumed run is not settled" on the other — and
-  // together they made every retried run permanently unsettled: a caller
-  // waiting on the retry it had just asked for could never observe it finish.
-  // So this drives the ACTUAL adapter and reads back through the ACTUAL
-  // attention query, because supplying the second `finalized` by hand is
-  // precisely the assumption under test.
   it("a run that finished, resumed, and finished again is settled again", () => {
     const { history, handle } = started();
 
-    // Generation 1: it fails and settles.
     history.roster([NODE]);
     history.nodeStatus(NODE, "running", running);
     history.log(NODE, "boom\n");
@@ -774,17 +614,13 @@ describe("settle → retry → settle, through the real writer and the real read
     expect(settled.settled).toBe(true);
     expect(settled.outcome).toBe("failed");
 
-    // The retry lands: the node restarts on a new ordinal.
     history.resetNode(NODE, "rerun requested");
     history.nodeStatus(NODE, "running", running);
 
-    // Mid-generation the run is NOT settled — the property the previous fix
-    // established, and which must survive this one.
     const during = readAttention(handle, {}, T0 + 1);
     expect(during.settled).toBe(false);
     expect(during.outcome).toBeNull();
 
-    // Generation 2: it passes and settles again.
     history.log(NODE, "ok\n");
     history.logFinalized(NODE, true, null);
     history.nodeStatus(NODE, "ok", { exitCode: 0, durationMs: 4, host: "builder-1" });
@@ -794,16 +630,11 @@ describe("settle → retry → settle, through the real writer and the real read
     expect(again.settled).toBe(true);
     expect(again.outcome).toBe("passed");
 
-    // Two generations, two terminals — and the last word is the last one.
     expect(kinds(handle).filter((kind) => kind === "finalized")).toHaveLength(2);
     expect(kinds(handle).at(-1)).toBe("finalized");
   });
 
   it("re-finalizing without any work in between still appends nothing", () => {
-    // The other half of the same rule, and the reason it is a rule about
-    // generations rather than a licence to append: a `--linger` run drains
-    // repeatedly, and a terminal per drain would be many claims about one
-    // ending.
     const { history, handle } = started();
 
     history.nodeStatus(NODE, "failed", { exitCode: 1, durationMs: 3, host: "builder-1" });
@@ -818,9 +649,6 @@ describe("settle → retry → settle, through the real writer and the real read
 
 describe("finalizing", () => {
   it("writes the verdict, seals what is open, and appends exactly ONE terminal", () => {
-    // A `--linger` run re-finalizes on every drain. The verdict file is a
-    // projection and may be rewritten; the journal is a history, and two
-    // `finalized` lines would be two claims about how the run ended.
     const { history, handle } = started();
 
     history.nodeStatus(NODE, "running", running);
@@ -837,7 +665,6 @@ describe("finalizing", () => {
       }),
     );
 
-    // The projection carries the LATEST drain…
     const written = readVerdict(handle);
     expect(written?.outcome).toBe("failed");
     expect(written?.failed).toEqual([NODE]);
@@ -846,11 +673,8 @@ describe("finalizing", () => {
       { context: "ci/e2e", lastError: "503 from GitHub", attempts: 4 },
     ]);
 
-    // …and the history carries one terminal.
     expect(kinds(handle).filter((kind) => kind === "finalized")).toHaveLength(1);
     expect(kinds(handle).at(-1)).toBe("finalized");
-    // The open attempt was sealed BEFORE the verdict, so a reader that trusts
-    // the terminal line never finds a node still claiming to be running.
     expect(readAttemptRecord(handle, NODE, 1)?.status).toBe("failed");
     expect(readAttemptRecord(handle, NODE, 1)?.endedAt).toBe(T0);
   });
@@ -864,8 +688,6 @@ describe("finalizing", () => {
     history.finalize(verdict());
 
     expect(kinds(handle).filter((kind) => kind === "posting_debt")).toHaveLength(2);
-    // Debt is not a verdict: statuses that did not land say nothing about
-    // whether the run passed on its own merits.
     expect(readVerdict(handle)?.outcome).toBe("passed");
   });
 });
@@ -881,13 +703,9 @@ describe("the ownership fence", () => {
 
     takeOver(handle);
 
-    // The next journal write is where a superseded coordinator finds out.
     history.roster([NODE, SETUP]);
     expect(history.fenced).toBe(true);
 
-    // And from there it stops claiming to be the author of this run's history:
-    // nothing further is appended, no attempt is allocated, no bytes are
-    // mirrored. Two writers on one journal is the unrecoverable case.
     history.phase("no_lanes");
     history.lane("x86_64-linux", "leased", "builder-9", [], "/etc/odu/hosts.json");
     history.nodeStatus(NODE, "running", running);
@@ -901,8 +719,6 @@ describe("the ownership fence", () => {
   });
 
   it("publishes no verdict once fenced", () => {
-    // The successor owns the terminal outcome now. A fabricated `finalized`
-    // from the process that was replaced cannot be un-said.
     const { history, handle } = started();
     takeOver(handle);
     history.roster([NODE]);

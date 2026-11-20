@@ -1,24 +1,3 @@
-/**
- * The odu lane runner — owns one platform's slice of the pipeline: the task
- * DAG, each node's child process, and each node's log tail, served as a
- * `@kolu/surface` over stdio. Grown from the mini-ci example runner (which
- * stays untouched as the reference substrate); the deltas that make it CI:
- *
- *   - **Spawns idle.** HostSession's argv is fixed (`odu-runner --stdio`), so
- *     per-run config arrives over the surface: `run.configure` validates,
- *     seeds the DAG, acks immediately, and reports workspace prep through the
- *     synthetic `_ci-setup` node (never a multi-minute blocking RPC).
- *   - **`_ci-setup` is a builtin node** every recipe depends on — the skip
- *     cascade, log stream, and dashboard rows treat setup like any node,
- *     mirroring justci's `_ci-setup@<platform>` bookkeeping context.
- *   - **Process-group kills.** A recipe node is `just --no-deps <namepath>`
- *     wrapping `nix develop -c …` wrapping the real work; killing only the
- *     direct child would orphan grandchildren that keep writing into the
- *     workspace. Nodes spawn `detached` and die as a group — every teardown
- *     path routes through one `GroupReaper` (SIGTERM → grace → SIGKILL; see
- *     reap.ts), including the runner's own death by signal (main.ts).
- */
-
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -56,10 +35,6 @@ import { createGroupReaper } from "./reap";
 import { hasSnapshot, narrateSnapshot, prepareWorkspace } from "./workspace";
 import { createSnapshotUploads } from "./snapshotUpload";
 import { runsOutsideWorkspace } from "../just/ingest";
-// THE PUSH CLIENT'S OWN READING OF A FAILURE. It lives beside the client
-// because the client is what knows which of a rejection's many shapes carry
-// diagnostics; the lane's job is only to put the whole of that reading in the
-// push log rather than the first sentence of it.
 import { describeFailure } from "@odu/cache/push";
 import {
   createLanePusher,
@@ -68,34 +43,14 @@ import {
   PUSH_TOKEN_ENV,
 } from "./pushResults";
 
-/** Lane-local setup node id — same namepath as fan-in `_ci-setup@plat`. */
 export const SETUP_NODE_ID = SETUP_NAMEPATH;
 
 export interface LaneRunner {
-  /** The served surface: the flat `RpcGroup` `defineSurface` minted and the
-   *  tag-keyed handler record `implementSurface` bound to it — the pair
-   *  `serveOverStdio({ group, handlers })` takes. `implementSurface` asserts at
-   *  boot that the two agree in BOTH directions (no advertised tag unbound, no
-   *  handler at a tag the group never minted), which is what retired the
-   *  `any`-typed oRPC router this field used to be. */
   group: RpcGroup.RpcGroup<Rpc.Any>;
   handlers: SurfaceHandlers;
-  /** Kill running process groups and stop scheduling; cleans up this run's
-   *  worktree when the pipeline settled green. */
   dispose(): void;
 }
 
-/**
- * A TASK'S ENVIRONMENT, AS THE RECIPE SEES IT — everything the coordinator
- * injected except the run's write token (PLAN 4.1).
- *
- * The runner IS the node's process, so "the token reaches the lane as process
- * environment" is satisfied without the recipe's own shell inheriting it. The
- * pusher reads the task map directly; nothing else has a use for it, and a
- * recipe that prints its environment — `env`, a crash dump, a `set -x` over
- * an assignment — would otherwise write a live credential into the node's
- * attempt log, which is persisted in the catalog and served by `log_read`.
- */
 function recipeEnv(
   env: Readonly<Record<string, string>> | undefined,
 ): Record<string, string> {
@@ -110,10 +65,6 @@ function recipeEnv(
 
 export function createLaneRunner(
   deps: {
-    /** WHERE THIS LANE'S OUTPUTS GO (PLAN 4.1), and what it has already sent.
-     *  One per runner process, because both are facts about the LANE rather
-     *  than about any node: a path node A pushed is on the bucket for node B
-     *  too. Injected so a suite can state a bucket that refuses without one. */
     pusher?: LanePusher;
   } = {},
 ): LaneRunner {
@@ -121,25 +72,12 @@ export function createLaneRunner(
   const pusher = deps.pusher ?? createLanePusher();
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
-  /** A NODE'S LOGS END TOGETHER, ALWAYS.
-   *
-   *  A log's terminal is a promise that nothing more is coming, and the
-   *  coordinator's drain waits for one per stream it subscribed to — so a
-   *  path that ends the recipe's log and forgets the push's does not lose a
-   *  line, it hangs the lane's teardown for the whole idle window and then
-   *  stamps a truncation notice on a node that finished cleanly. Every
-   *  terminal path routes through here for that reason: the skip cascade, the
-   *  child's `close`, setup, and an operator's cancel. A node that never
-   *  pushed ends an empty push log, which is the honest answer and the one a
-   *  reader can wait on. */
   const endNodeLogs = (id: string): void => {
     tail.end(id);
     tail.end(logStreamKey(id, "push"));
   };
 
-  /** Venue hold for this agent process — at most one; release on dispose. */
   let venueHold: LocalHold | null = null;
-  /** Inbound stdio (incl. system.live) counts as a dead-man pulse. */
   const onStdinPulse = (): void => {
     venueHold?.noteActivity();
   };
@@ -150,25 +88,10 @@ export function createLaneRunner(
       nodes: { store: stateStore },
     },
     streams: {
-      // TWO STREAMS PER NODE, ONE PUMP. A node's recipe output and its push
-      // output are separate logs with separate terminals, and the tail keys
-      // them apart (`logStreamKey`) rather than the pump growing a second
-      // map: everything a log is — the clamp, the terminal, the late
-      // subscriber's replay — is identical for both, and a second copy of it
-      // would be a second place for the `end` protocol to go subtly wrong.
-      // `stream` absent means the recipe's, which is every subscription that
-      // existed before the push became a step.
       nodeLog: {
         source: ({ id, stream }) => tail.streamSource({ id: logStreamKey(id, stream) }),
       },
     },
-    // A procedure is now ONE arm — `({ input }) => Effect<Out>` — where it used
-    // to be an `async` function. `Effect.sync` for the bodies that never
-    // awaited, `Effect.promise` for the one that does (`claimLocal`). Nothing
-    // here declares a failure channel: every "no" this surface says is a value
-    // on the success side (`{ ok: false }`, `{ status: "error" }`), which is
-    // what its schemas have always spelled. An unexpected throw stays a DEFECT
-    // and dies loudly rather than masquerading as a member failure.
     procedures: {
       snapshot: {
         has: ({ input }) => Effect.sync(() => ({ present: hasSnapshot(input.origin, input.commit) })),
@@ -220,10 +143,6 @@ export function createLaneRunner(
                   process.stderr.write(
                     `odu-runner: venue lease self-released (${reason})\n`,
                   );
-                  // Exit so the coordinator session sees link death and
-                  // `lease.lost` fires — flock is already free. This is a
-                  // teardown path like any other: sweep recipe groups first
-                  // (an agent can hold the venue lease AND run a lane).
                   dispose();
                   process.exit(0);
                 },
@@ -244,11 +163,6 @@ export function createLaneRunner(
         probe: ({ input }) =>
           Effect.sync(() => {
             const lockPath = agentLeaseLockPath(input.lockPath);
-            // The coordinator probes its own hold every two seconds. Answering
-            // that question by spawnSync-ing flock blocks this runner's event
-            // loop, which can starve the transport keep-alive under load and
-            // turn a healthy lease into a false link death. The hold child is
-            // already the authority for this exact lock and identity.
             const own = venueHold?.probe(lockPath);
             if (own != null) return own;
             return probeLocal(lockPath);
@@ -266,31 +180,7 @@ export function createLaneRunner(
   });
 
   const ctx = runtime.ctx;
-  // Owns the death of every recipe process group (reap.ts): tracked from
-  // spawn, reaped (TERM → grace → KILL) on node exit / cancel / rerun, and
-  // swept synchronously on dispose — the recipe trees are `detached`, so
-  // nothing else would ever kill them.
   const reaper = createGroupReaper();
-  /** One START of one node, and the whole of that start's state.
-   *
-   *  IDENTITY IS THE RECORD. A rerun or a cancel REPLACES a node's entry, so
-   *  every closure still holding the old one fails `isCurrent` forever after,
-   *  on every handler, with nothing to compare and no counter to keep. That is
-   *  the distinction map-membership could not make: a child keeps delivering
-   *  output *after* it has finished — `exit` fires when the process dies,
-   *  `close` only once its stdio has drained, and both the tail of a recipe's
-   *  output and its log's `end` frame live in that window (juspay/odu#87) — so
-   *  "this one finished" and "this one was replaced" must not be the same fact.
-   *
-   *  `phase` names the three states an invocation actually has, so no
-   *  combination of separate flags can spell one the domain does not:
-   *    running — spawned, or (for the builtin setup node) preparing;
-   *    settled — status stamped, stdio still draining;
-   *    closed  — log terminal published; nothing more will ever be written.
-   *
-   *  `child` is null for the setup node, whose work is async prep rather than a
-   *  process — one mechanism covering both node kinds, as the generation
-   *  counter it replaces did. */
   interface Invocation {
     phase: "running" | "settled" | "closed";
     child: ChildProcess | null;
@@ -298,18 +188,12 @@ export function createLaneRunner(
   const invocations = new Map<string, Invocation>();
   const isCurrent = (id: string, inv: Invocation): boolean =>
     !disposed && invocations.get(id) === inv;
-  /** Begin an invocation of `id`, superseding whatever held it. */
   const beginInvocation = (id: string): Invocation => {
     supersede(id);
     const inv: Invocation = { phase: "running", child: null };
     invocations.set(id, inv);
     return inv;
   };
-  /** Retire whatever invocation holds `id`: kill its process group and drop the
-   *  record, so nothing it left behind can write into the log the next one
-   *  opens. The counter this replaces spelled both verbs — "begin invocation N"
-   *  and "invalidate whatever is current" — with one call whose meaning was the
-   *  caller's choice to keep or discard its return value. */
   function supersede(id: string): void {
     const inv = invocations.get(id);
     if (inv === undefined) return;
@@ -326,9 +210,7 @@ export function createLaneRunner(
     getState().nodes[id]?.status;
   /** Merge a patch onto one node. `drop` removes keys outright — a
    *  `Partial<NodeState>` cannot, because the wire's `optionalKey` fields
-   *  reject a present-but-`undefined` spelling, and a reset node that KEPT
-   *  its `push` would paint the previous attempt's push step under a node
-   *  that is pending again. */
+   *  reject a present-but-`undefined` spelling. */
   const setNode = (
     id: string,
     patch: Partial<NodeState>,
@@ -345,7 +227,6 @@ export function createLaneRunner(
     });
   };
 
-  // ── configure: seed the DAG, ack, let the scheduler take it ──
   const configure = (input: ConfigureInput): ConfigureOutput => {
     if (disposed) return { ok: false, error: "runner is disposed" };
     if (config !== undefined) {
@@ -391,10 +272,6 @@ export function createLaneRunner(
     }
     ctx.cells.nodes.set({
       name: input.name,
-      // Commit identity is fan-in state: the coordinator stamps the
-      // authoritative sha7/dirty onto `.ci/odu.sock` (what attach reads). A
-      // lane only echoes the sha it was handed (none in workspace mode) and
-      // never assesses tree dirtiness, so its copy is advisory.
       sha7: input.sha?.slice(0, 7) ?? "",
       dirty: false,
       order: [SETUP_NODE_ID, ...input.tasks.map((t) => t.id)],
@@ -404,8 +281,6 @@ export function createLaneRunner(
     return { ok: true, error: null };
   };
 
-  /** Add tasks after configure without replacing any state already earned.
-   * The combined DAG is validated as one value before it is published. */
   const extend = (tasks: ConfigureInput["tasks"]): ConfigureOutput => {
     if (disposed) return { ok: false, error: "runner is disposed" };
     const current = config;
@@ -441,7 +316,6 @@ export function createLaneRunner(
     return { ok: true, error: null };
   };
 
-  // ── scheduling (mini-ci semantics: fixed-point pass, skip cascade) ──
   const runnable = (node: NodeState): boolean =>
     node.status === "pending" &&
     node.needs.every((dep) => statusOf(dep) === "ok");
@@ -449,10 +323,6 @@ export function createLaneRunner(
     node.status === "pending" &&
     node.needs.some((dep) => {
       const s = statusOf(dep);
-      // 'errored' is coordinator-only (@odu/run-client/surface) and unreachable in lane
-      // state; kept so blocked() reads as the full failed-set and survives any
-      // future in-lane errored. 'cancelled' is deliberate operator cancel —
-      // dependents skip the same way as failed (juspay/odu#68).
       return (
         s === "failed" ||
         s === "skipped" ||
@@ -472,9 +342,6 @@ export function createLaneRunner(
         if (node === undefined || node.status !== "pending") continue;
         if (blocked(node)) {
           setNode(id, { status: "skipped" });
-          // A skipped node never runs, so its (empty) logs are complete the
-          // instant it is skipped. Terminal status and log terminals stay in
-          // lockstep on EVERY path, so a reader can wait on all nodes alike.
           endNodeLogs(id);
           changed = true;
         } else if (runnable(node) && invocations.get(id)?.phase !== "running") {
@@ -486,7 +353,6 @@ export function createLaneRunner(
     }
   };
 
-  // ── the builtin setup node: workspace prep as a node, not an RPC ──
   const runSetup = (): void => {
     const cfg = config;
     if (cfg === undefined) return;
@@ -501,11 +367,6 @@ export function createLaneRunner(
         exitCode: ok ? 0 : 1,
         durationMs: Date.now() - startedAt,
       });
-      // Setup writes its narration synchronously through `tail.append`, so
-      // reaching a terminal status IS the last of its output. Setup never
-      // pushes — it builds nothing — but its push stream is ended with the
-      // rest, because "every node ends every stream" is a rule worth more
-      // than the one exception it would otherwise carry.
       inv.phase = "closed";
       endNodeLogs(SETUP_NODE_ID);
       tick();
@@ -526,7 +387,6 @@ export function createLaneRunner(
     }
 
     void prepareWorkspace(
-      // configure() validated origin+sha when workspace is null
       { origin: cfg.origin as string, sha: cfg.sha as string,
         ...(cfg.snapshot === undefined ? {} : { snapshot: {
           commit: cfg.snapshot.commit, requires: cfg.snapshot.requires,
@@ -534,9 +394,6 @@ export function createLaneRunner(
         } }),
       },
       (line) => {
-        // Narration belongs to a prep that is still running: a superseded one
-        // must not write into the log its replacement opened, and a finished
-        // one has already published its terminal.
         if (live() && inv.phase === "running") {
           tail.append(SETUP_NODE_ID, `${line}\n`);
         }
@@ -554,13 +411,8 @@ export function createLaneRunner(
     });
   };
 
-  // ── recipe nodes: own process group, merged output ──
   const spawnNode = (node: NodeState): void => {
     const inv = beginInvocation(node.id);
-    /** This invocation is still the node's current one — i.e. no rerun/cancel
-     *  has replaced it. The record stays in the map across `exit`, because the
-     *  child's stdio keeps delivering until `close` and output in that window
-     *  belongs to this node; it leaves only on SUPERSESSION. */
     const current = (): boolean => isCurrent(node.id, inv);
     const startedAt = Date.now();
     setNode(node.id, { status: "running", startedAt });
@@ -582,13 +434,6 @@ export function createLaneRunner(
         detached: true,
         env: {
           ...process.env,
-          // THE TASK'S ENVIRONMENT, LESS THE RUN'S WRITE TOKEN. Nothing in
-          // the recipe needs it — the pusher below is its only consumer, and
-          // it reads the task map directly. A recipe that runs `env`, a tool
-          // that dumps its environment on a crash or a `set -x` over an
-          // assignment would otherwise write a live credential into the
-          // node's attempt log, which is persisted in the catalog and served
-          // by `log_read`: the one place the design says it must never be.
           ...recipeEnv(task?.env),
         },
       },
@@ -604,44 +449,18 @@ export function createLaneRunner(
     child.stdout?.on("data", onOutput);
     child.stderr?.on("data", onOutput);
     const taskEnv = task?.env;
-    /** `close` arrived while a push was still running. The log terminal is a
-     *  promise that nothing more is coming, and the push client's lines are
-     *  still coming — so the frame waits for it. */
     let closeSeen = false;
     let pushing = false;
-    /** When this node's push step began, by the RUNNER's clock. Set when the
-     *  push is handed to the pusher and moved forward to the moment the
-     *  pusher announces an actual step, so the `result*` glob that precedes
-     *  one is not charged to the upload.
-     *
-     *  ONE STOPWATCH FOR BOTH ENDINGS, which is why the pusher's success
-     *  value stopped carrying a duration: a failure leaves by `throw` and can
-     *  carry nothing, so timing it there meant the red half of the feature
-     *  had no number at all and had to report zero. */
     let pushStartedAt = 0;
     const endLog = (): void => {
       if (inv.phase === "closed") return;
       inv.phase = "closed";
       endNodeLogs(node.id);
     };
-    /** Stamp the terminal status, after whatever post-exit work this node
-     *  owed. Split out of `finish` because a push runs between the two, and a
-     *  node that read `ok` before its push landed would be a green that had
-     *  warmed nothing. */
     const stamp = (
       status: NodeStatus,
       exitCode: number | null,
-      /** The push step's final state, or `null` for a node that has none —
-       *  no cache target, a recipe that built nothing, a closure an earlier
-       *  node already sent. `null` AFTER `begin()` fired is unreachable by
-       *  construction: `begin` is called exactly when there are fresh paths,
-       *  and from there the pusher can only answer with a fact or throw. So
-       *  there is no "was pushing, ended up with nothing" case to defend
-       *  against, and no stale `pushing` can survive this call. */
       push: NodePush | null,
-      /** The RECIPE's own duration, measured when the child exited. A push
-       *  runs after that and must not be charged to it: every existing timing
-       *  surface reads `durationMs` as how long the work took. */
       durationMs: number,
     ): void => {
       if (!current()) return;
@@ -660,45 +479,14 @@ export function createLaneRunner(
       // phase — not a second flag beside it — is what makes the first one win.
       if (!current() || inv.phase !== "running") return;
       inv.phase = "settled";
-      // Backstop for a child that never spawned. The status obligation has two
-      // producers (`exit` and `error`, because a spawn failure emits no exit);
-      // the log terminal has one, `close`. A child with no pid has no stdio to
-      // drain, so this is the last moment its (empty) log is complete — and a
-      // log left unterminated here would cost a 15s drain and then a truncation
-      // notice stamped on a node that finished, which is the class of lie the
-      // notice exists to prevent.
       if (child.pid === undefined) endLog();
-      // The direct child is gone, but a stray it backgrounded (with its stdio
-      // redirected, so `cat` still saw EOF) may survive in the group — reap it
-      // rather than leaving the group unowned forever.
       if (child.pid !== undefined) reaper.reap(child.pid);
-      // ── WHAT THIS RECIPE BUILT GOES TO THE CACHE (PLAN 4.1) ──
-      //
-      // Only a GREEN node: a failed recipe's `result` is the previous run's
-      // link, and pushing it would store bytes this run never produced. Only a
-      // CONFIGURED one: a run with no cache target carries no token on any
-      // task and takes this branch never.
-      //
-      // The RECIPE's duration is taken here, before the push, so a node's
-      // `durationMs` stays what it has always meant.
       const durationMs = Date.now() - startedAt;
       const pushConfig = status === "ok" ? pushConfigOf(taskEnv) : null;
       if (pushConfig === null || workspace === undefined) {
         stamp(status, exitCode, null, durationMs);
         return;
       }
-      // WHERE THE RECIPE ACTUALLY RAN. `just` runs a module's recipe in the
-      // module's own directory, so a module DAG — the shape odu itself ships
-      // — leaves `ci/result`, which a glob of the workspace root never sees.
-      // `workdir` is the ingest's answer; absent means the workspace root.
-      //
-      // An ABSOLUTE answer means `set working-directory` took the recipe out
-      // of the workspace. Nothing is globbed there: a directory outside the
-      // run's own tree can hold a `result` link a different run — or a
-      // different user, on a shared lane host — left behind, and pushing that
-      // would store bytes this run never built. SAID on the node, because
-      // "nothing was pushed" is otherwise indistinguishable from "there was
-      // nothing to push".
       if (runsOutsideWorkspace(task?.workdir)) {
         if (current()) {
           tail.append(
@@ -715,25 +503,9 @@ export function createLaneRunner(
       pushStartedAt = Date.now();
       void pusher
         .push(workdir, pushConfig, {
-          // The lane declining to push: the recipe's log, because there is no
-          // push step for it to be the output of.
           note: (line) => {
             if (current()) tail.append(node.id, `${line}\n`);
           },
-          // THE STEP OPENS HERE, on the node and on the clock. The board draws
-          // `pushing` from this and nothing else: a push that only appeared in
-          // its finished form would make a minute-long upload look like a node
-          // that sat idle and then claimed some bytes.
-          //
-          // AND THE RECIPE'S DURATION GOES WITH IT, in the same cell write.
-          // It is already a fact — the child exited and `durationMs` above
-          // measured it — and withholding it until `stamp` would mean that
-          // for the whole minute an upload takes the node reads as a recipe
-          // STILL RUNNING. A reader cannot draw a push beside a recipe whose
-          // bar has no end: the recipe fills the track and the push step is
-          // left with nothing to occupy. Publishing it here changes nothing
-          // about what `durationMs` MEANS — it is the recipe's own time here
-          // and at `stamp`, and the push's time stays on the push.
           begin: () => {
             pushStartedAt = Date.now();
             if (current()) {
@@ -746,9 +518,6 @@ export function createLaneRunner(
         })
         .then((pushed) => {
           pushing = false;
-          // `null` means this node had no push step at all (nothing fresh to
-          // send), and `begin` cannot have fired — so there is no `pushing`
-          // state left standing and nothing to retract.
           stamp(
             "ok",
             exitCode,
@@ -760,28 +529,6 @@ export function createLaneRunner(
         })
         .catch((err: unknown) => {
           pushing = false;
-          // TWO AUDIENCES, TWO SENTENCES, AND THE LOG GETS EVERYTHING.
-          //
-          // `message` is the CELL's: one short human sentence that crosses
-          // the wire, lands on the board's row and is journalled, read by
-          // people who no longer have the log at all. It stays short because
-          // a row is one line wide. Thanks to the pusher's re-throw it now
-          // names the bucket and the origin, which is the minimum a row must
-          // carry to be worth reading.
-          //
-          // `detail` is the PUSH LOG's: `describeFailure` walks `cause` to
-          // the bottom of the chain and keeps every diagnostic the runtime
-          // attached — `code`, `errno`, `syscall`, `hostname`, `address`,
-          // `port`. Nothing here reduces an error to `.message` any more:
-          // that reduction is exactly what turned a refused connection into
-          // the bare sentence "Unable to connect. Is the computer able to
-          // access the url?" — Bun's own `fetch` wording, with no URL and no
-          // host in it — and left the operator with nothing to act on.
-          //
-          // GREEN MEANS WARMED: the recipe passed and its outputs did not
-          // reach the bucket, so the node is red, and the step that failed is
-          // the one that says why. The recipe's log keeps the recipe's
-          // output.
           const message = err instanceof Error ? err.message : String(err);
           const detail = describeFailure(err);
           if (current()) {
@@ -810,27 +557,20 @@ export function createLaneRunner(
     child.on("close", () => {
       if (!current() || inv.phase === "closed") return;
       closeSeen = true;
-      // A push still owes this log its lines; `stamp` ends the frame when it
-      // is done. Without this the coordinator would be told the node's output
-      // was complete and then be sent more of it.
       if (pushing) return;
       endLog();
     });
   };
 
   // Negative pid ⇒ the whole detached process group (just → nix develop →
-  // bun → the recipe's own children), not only the shell at the top; the
-  // reaper escalates SIGTERM → grace → SIGKILL so a TERM-ignoring tree still
-  // dies.
+  // bun → the recipe's own children), not only the shell at the top.
   const killGroup = (child: ChildProcess): void => {
     if (child.pid !== undefined) reaper.reap(child.pid);
   };
 
-  // ── rerun: reset target + transitive dependents, then reschedule ──
   const rerun = (id: string): boolean => {
     const initial = getState();
     if (disposed || initial.nodes[id] === undefined) return false;
-    // Same DAG closure as CLI multi-rerun collapse (`transitiveDependents`).
     const toReset = new Set<string>([
       id,
       ...transitiveDependents(
@@ -840,13 +580,7 @@ export function createLaneRunner(
       ),
     ]);
     for (const rid of toReset) {
-      // Supersede whatever invocation held this node — a running child, an
-      // in-flight setup prep, or a finished child whose `close` has yet to
-      // fire — so none of them can write into the log this rerun just opened.
       supersede(rid);
-      // BOTH LOGS RE-OPEN. `reset` withdraws a terminal as well as the bytes,
-      // and a push stream left sealed here would make the next attempt's
-      // first `[odu] pushing …` line a throw instead of a log line.
       tail.reset(rid, "");
       tail.reset(logStreamKey(rid, "push"), "");
       setNode(
@@ -857,9 +591,6 @@ export function createLaneRunner(
           startedAt: null,
           durationMs: null,
         },
-        // WHAT IT WARMED IS NOT TRUE ANY MORE. A node about to run again has
-        // pushed nothing yet, and if its re-run finds nothing new (the dedupe
-        // set) the old claim would otherwise stand for good.
         ["push"],
       );
     }
@@ -867,12 +598,10 @@ export function createLaneRunner(
     return true;
   };
 
-  // ── cancel: stop one pending/running node; dependents skip via tick ──
   const cancel = (id: string): boolean => {
     const initial = getState();
     const node = initial.nodes[id];
     if (disposed || node === undefined) return false;
-    // Idempotent: already cancelled is success (same as re-cancel platform).
     if (node.status === "cancelled") return true;
     if (node.status !== "pending" && node.status !== "running") return false;
     supersede(id);
@@ -885,20 +614,11 @@ export function createLaneRunner(
       exitCode: null,
       durationMs,
     });
-    // The supersession above already silenced the killed child, so this
-    // cancel line is the log's last word — on both streams, because a cancel
-    // during a push leaves that stream owed a terminal nobody else will send.
     endNodeLogs(id);
     tick();
     return true;
   };
 
-  // ── dispose: the one teardown every exit path shares ──
-  // Called on stdin EOF (main's post-serve line, before the framework-owned
-  // exit), on death by signal (main's handlers), on the fatal-error exit, and
-  // on venue-lease self-release (above). Idempotent — several of those can
-  // stack on one exit. A hoisted function declaration so `onSelfRelease`
-  // (defined earlier in this closure) can reach it.
   function dispose(): void {
     if (disposed) return;
     disposed = true;
@@ -908,15 +628,8 @@ export function createLaneRunner(
       venueHold.release();
       venueHold = null;
     }
-    // Synchronous sweep of EVERY group ever spawned — running nodes, but
-    // also TERM-ignoring survivors of a cancel/rerun and strays left behind
-    // by finished nodes. Synchronous because this runs on process-exit
-    // paths (stdin EOF before the framework-owned exit; the signal handlers
-    // in main.ts), where a timer-based escalation would never fire.
     invocations.clear();
     reaper.reapAllSync();
-    // Keep the worktree when anything failed — it is the debugging trail;
-    // the host tmpdir reaper owns the long tail.
     const state = getState();
     const settledGreen =
       state.order.length > 0 &&
@@ -924,8 +637,6 @@ export function createLaneRunner(
     if (settledGreen) cleanupWorkspace?.();
   }
 
-  // `implementSurface` returns the group it advertises and the handlers bound
-  // to it, already route-set-checked against each other — serve the pair.
   const { group, handlers } = runtime;
 
   return { group, handlers, dispose };

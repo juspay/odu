@@ -1,19 +1,3 @@
-/**
- * The WALL, enforced — what this package is allowed to import.
- *
- * Same instrument as the other members carry, and deliberately a SIBLING
- * rather than a shared helper: each package must be able to state its own
- * closure from inside its own directory, because that directory is the unit
- * the boundary is about. A guard imported from a neighbour is a guard that
- * only reaches as far as the neighbour does.
- *
- * What this one asserts that the others cannot: the engine never imports a
- * FACE. That is the property PR 2's service is built on.
- *
- * The walk is a PARSE, not a line scan, and TYPE-ONLY EDGES COUNT — see the
- * `@odu/run-client` twin for both arguments.
- */
-
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -27,36 +11,21 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned as a literal set: every entry is a wall this package leans on. */
 const EXPECTED_DEPENDENCIES = [
-  // THE ONE CROSS-ROW EDGE (PLAN 4.1), and it is narrow: the lane runner
-  // reaches `@odu/cache/push` — the HTTP client door, not the cache row's
-  // server, its database or its face — because a run pushes what it built and
-  // the bytes have to leave from the machine holding them. The fence permits
-  // ci→cache; what it forbids is either row reaching `@odu/auth`.
   "@odu/cache",
   "@odu/run-client",
   "@odu/run-history",
   "effect",
 ];
 
-/** The `@kolu/*` sources hydrated from a Nix pin rather than installed — a
- *  manifest cannot name them (see the root bunfig.toml), so the set is pinned
- *  here instead. A NEW one is a new directory the packaging must copy. */
 const HYDRATED = new Set<string>([
   "@kolu/log",
   "@kolu/shell-quote",
   "@kolu/surface",
   "@kolu/surface-remote",
-  // The survivable-spawn spine (`coordinator/spawn.ts`). Its own manifest
-  // drags `@kolu/surface-daemon` and `osfacts-client` along, and the second is
-  // grafted from a SEPARATE upstream (juspay/osfacts) because kolu gitignores
-  // it — see nix/overlay.nix. Neither is imported by odu; both are hydrated
-  // because hydration is per-package.
   "@kolu/surface-daemon-supervisor",
 ]);
 
-/** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
 function tsFilesUnder(dir: string): string[] {
@@ -73,15 +42,12 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
-/** Every module specifier a consumer's compiler would have to resolve: static
- *  imports and re-exports (`import type` included), `import x = require("…")`,
- *  dynamic `import()`, and `import("…").T` in type position. */
 function specifiersIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
+    false,
     ts.ScriptKind.TS,
   );
   const out: string[] = [];
@@ -110,7 +76,6 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
-/** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@")
@@ -170,11 +135,6 @@ describe("@odu/execution's import closure", () => {
   });
 
   it("never imports a FACE", () => {
-    // The claim this package makes, and the reason PR 2 can serve this engine
-    // from something that is not a terminal: `@odu/cli` carries a renderer and
-    // a terminal emulator, and an engine that reached for one would drag both
-    // into every consumer's closure. Watched-ness arrives through
-    // `common/presentation.ts` instead, and `RunDeps.face` defaults to silence.
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
       for (const spec of specifiers) {
@@ -185,16 +145,6 @@ describe("@odu/execution's import closure", () => {
   });
 
   it("reaches the cache row through its PUSH DOOR and nothing else", () => {
-    // The manifest says `@odu/cache`, and a manifest cannot say which door.
-    // What makes the edge defensible is that it is the HTTP client — the one
-    // module `@odu/cache` publishes for a machine with no daemon — and not
-    // the row's server, its SQLite, its routes or its Solid face. `packageOf`
-    // cannot see that, so this compares the whole specifier: an
-    // `import { createCache } from "@odu/cache/cache"` would otherwise pass
-    // the manifest check unremarked and drag `@odu/objects` and a database
-    // into the lane runner.
-    // ONE DOOR, listed literally; it grows only when somebody argues for a
-    // second one.
     const allowed: Record<string, true> = { "@odu/cache/push": true };
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {

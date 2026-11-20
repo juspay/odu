@@ -176,7 +176,6 @@ describe("working-tree capture", () => {
     expect(readFileSync(join(snapshot.worktreeDir, "marker"), "utf8")).toBe(
       "uncommitted",
     );
-    // The same captured content must still enforce the ceiling if transport is requested.
     expect(() => snapshot.prepareBundle()).toThrow("ODU_SNAPSHOT_MAX_BYTES=1");
   });
   it("identifies history rather than overlay paths when a clean bundle exceeds the ceiling", () => {

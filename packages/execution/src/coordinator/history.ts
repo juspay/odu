@@ -1,44 +1,3 @@
-/**
- * The coordinator's half of the durable run catalog — the adapter that turns a
- * run's in-process events into `@odu/run-history` records, and the only place
- * in the engine that knows the catalog exists.
- *
- * Three rules shape everything below.
- *
- * **History is never a gate.** A failed catalog write must not fail a run, and
- * it must not change a verdict. That is the rule the checkout ledger already
- * followed and it is stricter here, because there is now much more to write:
- * a full disk in the middle of a pipeline is a bad afternoon, not a lost run.
- * So every method is best-effort, and the constructor itself returns
- * {@link NO_HISTORY} — a working no-op — rather than throwing, so no call site
- * needs a null check.
- *
- * **Except being fenced, which is a gate.** There is exactly one failure this
- * adapter refuses to swallow: discovering that another process now owns this
- * run's record. That is not an I/O hiccup, it is this coordinator having been
- * superseded, and continuing to write would produce the two-writer journal the
- * fence exists to prevent. {@link RunHistory.fenced} goes true and every
- * subsequent write is dropped; the run itself keeps going (its lanes are real
- * and its verdict is real), but it stops claiming to be the author of this
- * run's history.
- *
- * **An attempt is sealed by the LOG BARRIER, not by the status.** This is the
- * one piece of ordering that has to be right, and it is easy to get wrong in
- * both directions. A node's outcome and its output are two facts that arrive
- * separately: for a recipe node the lane's `end` frame is what RELEASES the
- * verdict, so the log lands first; for `_ci-setup@<platform>` the status lands
- * first and the coordinator keeps narrating lane deaths and operator cancels
- * into that log long afterwards. So an attempt closes when BOTH have arrived —
- * the same barrier the verdict gate already holds — and until then its log
- * stays writable. Sealing on the status alone would freeze a setup log
- * half-written; sealing on the log alone would seal an attempt with no outcome.
- *
- * Attempts are also ALLOCATED here. One opens when a node begins work
- * (whichever arrives first: the lane's snapshot reset, or the `running`
- * transition), and the next ordinal is never the same file — so a retry cannot
- * write over the failure somebody is reading.
- */
-
 import type { NodeStatus } from "@odu/run-client/surface";
 import { type LogStream, splitFanId } from "@odu/run-client/nodeId";
 import { signalFromExit } from "@odu/run-history/exit";
@@ -66,9 +25,6 @@ import {
   writeVerdict,
 } from "@odu/run-history/store";
 
-/** The statuses that leave a node still in flight. Spelled from the status
- *  vocabulary rather than as bare string literals so a new `NodeStatus` is a
- *  compile error here, not a node whose evidence silently never seals. */
 const IN_FLIGHT: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
   "pending",
   "running",
@@ -77,22 +33,12 @@ const IN_FLIGHT: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
 export interface RunHistoryInit {
   repoRoot: string;
   repo: string | null;
-  /** The branch this run was started on, when HEAD named one. Recorded here
-   *  rather than looked up by a reader — see `RunManifestSchema.branch`. */
   branch?: string | null;
   sha: string;
   seq: number | null;
   pipeline: string;
   scope: RunScope;
-  /** The `PLATFORM=ADDR` pins this run was launched under, verbatim — the
-   *  caller's explicit placement constraint, recorded so a finalized retry can
-   *  replay it instead of widening to whatever the ambient hosts file says
-   *  today. See `RunManifestSchema.hostPins`; an empty array is "explicitly
-   *  unpinned" and is a different fact from the field being absent. */
   hostPins: readonly string[];
-  /** The inventory those pins were names in — the caller's `$ODU_HOSTS`, as
-   *  this coordinator saw it. `""` is a real answer ("the caller's shell had
-   *  none"); see `RunManifestSchema.hostsFile`. */
   hostsFile: string;
   snapshotMode: "strict" | "live";
   contentSha?: string;
@@ -100,58 +46,33 @@ export interface RunHistoryInit {
   dirty: boolean;
   runnerFlake: string | null;
   oduVersion: string;
-  /** Where this coordinator serves its live surface, so a catalog reader can
-   *  find the run behind the record. */
   endpoint: string;
-  /** A retry's link back to the run it replays. */
   parentRunId?: string | null;
-  /** The caller's idempotency key, when the launch carried one. */
   requestId?: string | null;
-  /** WHO STARTED THIS RUN (PLAN 4.4) — a login, or `@local` for a loopback
-   *  connection. Absent means nobody told this process, which the manifest
-   *  records by omitting the field. */
   actor?: string;
-  /** The id this run must publish under, when a launcher pre-minted one.
-   *  Absent means mint — see `./launcher` on why a launcher does not. */
   runId?: string;
 
-  /** Where this run pushed what it built, and what it said about doing so
-   *  (PLAN 4.1). Absent means this build recorded nothing either way; a run
-   *  that resolved to nothing records a `skipped` reason and no target. */
   push?: {
     target: { substituter: string; bucket: string; tokenId: string } | null;
     skipped: string | null;
     keyWarning: string | null;
   };
-  /** Injected for tests; production reads the real catalog root. */
   catalogRoot?: string;
   now?: () => number;
 }
 
 export interface RunHistory {
-  /** The catalog id this run publishes under, or null when no record could be
-   *  opened at all. Faces print it, and a retry addresses it. */
   readonly runId: string | null;
-  /** Another process took ownership of this run's record. See the header. */
   readonly fenced: boolean;
   roster: (order: readonly string[]) => void;
   phase: (phase: "provisioning" | "lanes" | "no_lanes") => void;
-  /** A lane's whole state, journalled so it outlives the coordinator.
-   *
-   *  `pool` and `hostsSource` are carried because "which boxes is this waiting
-   *  on, and which file said so" is a question about a run and not about a
-   *  process — and while only the live header could answer it, the one face
-   *  that asked (`odu ci status`) had to be allowed to dial a checkout's socket. */
   lane: (
     platform: string,
     state: "claiming" | "leased",
     host: string | null,
-    /** The candidates a `claiming` lane may land on. Empty for a `leased` one:
-     *  the machine is the answer, and the pool it came from is history. */
     pool: readonly string[],
     hostsSource: string | null,
   ) => void;
-  /** A node reached a status. A terminal one supplies half the seal. */
   nodeStatus: (
     node: string,
     status: NodeStatus,
@@ -161,124 +82,42 @@ export interface RunHistory {
       host: string | null;
     },
   ) => void;
-  /** Mirror a node's output into its current attempt's log. `stream` picks
-   *  WHICH of the attempt's two logs — the recipe's, unless the caller is
-   *  routing a push frame. */
   log: (
     node: string,
     text: string,
     host?: string | null,
     stream?: LogStream,
   ) => void;
-  /** This node's log has had its last word — the other half of the seal.
-   *  FIRST caller wins: a truncation notice and the lane's own `end` frame
-   *  both arrive for one attempt and they disagree by design, since the notice
-   *  is written precisely because the `end` never came.
-   *
-   *  NO STREAM ARGUMENT, deliberately. An attempt has ONE `logComplete` and
-   *  one seal, and a node's two streams end together (the runner ends them in
-   *  lockstep on every terminal path) — so this is a fact about the attempt,
-   *  spoken by the recipe's terminal. A per-stream completion would be two
-   *  flags for one question, and a reader would have to decide which of them
-   *  "this attempt's log is complete" meant. */
   logFinalized: (node: string, complete: boolean, reason: string | null) => void;
-  /** A lane re-sent this node's buffered tail. NOT a retry: the attempt is the
-   *  same attempt, so its bytes are replaced in place — in the stream the
-   *  snapshot came from. */
   replaceLog: (
     node: string,
     text: string,
     host?: string | null,
     stream?: LogStream,
   ) => void;
-  /** This node's work is starting over on a new invocation — a resurrection
-   *  re-running an interrupted node. Seals the open attempt as superseded so
-   *  the bytes that follow land on a NEW ordinal, never on top of the failure
-   *  somebody is reading. */
   resetNode: (node: string, reason: string) => void;
   postingDebt: (
     rows: readonly { context: string; lastError: string; attempts: number }[],
   ) => void;
-  /**
-   * A node's push BEGAN (PLAN 4.1) — its recipe exited 0 and the lane started
-   * sending the closure.
-   *
-   * Journalled rather than kept in the live cell, because every face that
-   * paints a run reads a fold of this journal — including the live one. A
-   * `pushing` that never reached a line here would be invisible to a reader
-   * the moment the coordinator's socket went away, and an upload that takes a
-   * minute would appear, finished, out of nothing.
-   *
-   * `durationMs` is the RECIPE's time, not the push's, and it rides this line
-   * because this line is the only one the journal gets while the upload runs:
-   * the node stays `running` until the push lands, so no `node_status` is
-   * written, and a fold with no duration for the recipe draws its bar to the
-   * end of the track and leaves the push step nowhere to go. `undefined` for
-   * a caller that has none — the fold then keeps waiting for the status.
-   */
   pushing: (fact: {
     node: string;
     bucket: string;
     durationMs?: number | undefined;
   }) => void;
-  /** A node's outputs landed in the cache (PLAN 4.1). Written when a recipe
-   *  exits 0 and its `result*` closure was pushed, so a finished run can say
-   *  what it warmed without the bucket having to be asked. `durationMs` is
-   *  the PUSH's own time, which the node's `durationMs` deliberately does not
-   *  include — leaving it out here would make the number right on a live
-   *  coordinator's cell and zero the moment the run finalized, which is the
-   *  reading every catalog consumer gets. */
   pushed: (fact: {
     node: string;
     bucket: string;
-    /** What the bucket SERVES as a result of this node — stored plus
-     *  already-present. The journal keeps the total and the part rather than
-     *  the two parts, so lines written by earlier releases keep their
-     *  meaning; the fold subtracts. */
     paths: number;
-    /** Of `paths`, how many the bucket already had. */
     present: number;
     bytes: number;
     durationMs: number;
   }) => void;
-  /**
-   * A node's push FAILED — the recipe passed and its outputs did not reach
-   * the bucket, which is what reddens the node.
-   *
-   * Its own line rather than nothing, because a red status alone cannot say
-   * WHICH half of the node failed: a reader of a finished run would see a red
-   * recipe where the recipe in fact passed. `message` is the sentence that
-   * went into the node's push log, so a catalog reader gets the reason
-   * without having to open the log beside it.
-   */
   pushFailed: (fact: {
     node: string;
     bucket: string;
     message: string;
     durationMs: number;
   }) => void;
-  /**
-   * Record that a retry carrying `requestId` was ACCEPTED against this run,
-   * before the reset it asked for is performed.
-   *
-   * This is the coordinator's half of idempotency, and it is written here
-   * rather than inferred by the caller because only this process knows the
-   * request was accepted. A reconciler that has lost its reply reads this line
-   * and replays it; one that does not find it, on a journal it could read
-   * whole, has PROOF that nothing was accepted rather than an absence of
-   * evidence.
-   *
-   * BEFORE the mutation, deliberately. The two orderings fail differently and
-   * only one of them fails safe: recording after would let a crash in between
-   * hide a reset that really happened, and a caller told "nothing happened"
-   * repeats it. Recording first can at worst claim an acceptance whose reset
-   * did not follow — which costs a caller one redundant retry and never a
-   * silent double mutation.
-   */
-  /** Which attempt this node is on, by the ALLOCATOR that hands ordinals out.
-   *  The authority a caller's `expectAttempt` is checked against: a directory
-   *  listing can be inflated by a half-written retry, and the journal is what
-   *  the schema says decides. `0` for a node that has not started one. */
   currentAttempt: (node: string) => number;
   retryAccepted: (accepted: {
     requestId: string;
@@ -286,24 +125,11 @@ export interface RunHistory {
     roots: readonly string[];
     resetDependants: readonly string[];
   }) => boolean;
-  /**
-   * Resolve an accepted retry: the lane took the reset, or refused it.
-   *
-   * The half that makes {@link RunHistory.retryAccepted} safe to write early.
-   * Acceptance is INTENT — the coordinator can die before the reset, and the
-   * lane can decline it — so a reconciler that finds an acceptance with no
-   * resolution reports the outcome as unknown rather than as success. Both
-   * outcomes are recorded, because a refusal is an answer.
-   */
   retryApplied: (resolved: {
     requestId: string;
     node: string;
     applied: boolean;
   }) => void;
-  /** Publish the terminal outcome. Safe to call more than once (a `--linger`
-   *  run re-finalizes on every drain); it appends a `finalized` line once per
-   *  EXECUTION GENERATION — again after a rerun resumed the run, never twice
-   *  for one settle. */
   finalize: (verdict: {
     outcome: "passed" | "failed" | "incomplete";
     startedAt: number;
@@ -313,20 +139,15 @@ export interface RunHistory {
     cancelled: readonly string[];
     unposted: readonly { context: string; lastError: string; attempts: number }[];
   }) => void;
-  /** Drop the endpoint and stop the heartbeat. The record stays; nothing is
-   *  serving it any more. */
   close: () => void;
 }
 
-/** The working no-op every failure path collapses to, so no caller branches on
- *  whether history is available. */
 export const NO_HISTORY: RunHistory = {
   runId: null,
   fenced: false,
   roster: () => {},
   phase: () => {},
   lane: () => {},
-  // (the no-op writer: every arm ignores its arguments)
   nodeStatus: () => {},
   log: () => {},
   logFinalized: () => {},
@@ -336,9 +157,6 @@ export const NO_HISTORY: RunHistory = {
   pushing: () => {},
   pushed: () => {},
   pushFailed: () => {},
-  // `false`, not `true`: no history means no durable record, and a caller must
-  // be able to tell its reply "the acceptance was not written down" rather
-  // than promise a line that will never exist.
   currentAttempt: () => 0,
   retryAccepted: () => false,
   retryApplied: () => {},
@@ -346,25 +164,13 @@ export const NO_HISTORY: RunHistory = {
   close: () => {},
 };
 
-/** What the two halves of the barrier have said so far about one attempt. */
 interface OpenAttempt {
   attempt: number;
   placement: Placement;
-  /** Set by a terminal `nodeStatus`. */
   outcome?: { status: NodeStatus; exitCode: number | null };
-  /** Set by `logFinalized`, first word only. */
   log?: { complete: boolean; reason: string | null };
 }
 
-/**
- * Register this run in the catalog and return the writer for it.
- *
- * Called BEFORE the run executes — before the venue claim, before any lane —
- * so a coordinator that dies in its first second still leaves a run somebody
- * can address. A registration that cannot happen (no writable state root, a
- * live owner on the same id, a full disk) yields {@link NO_HISTORY}: the run
- * proceeds without a catalog record, exactly as every odu before this one did.
- */
 export function openRunHistory(init: RunHistoryInit): RunHistory {
   const now = init.now ?? Date.now;
   const opts = init.catalogRoot === undefined ? {} : { root: init.catalogRoot };
@@ -378,24 +184,13 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         sha: init.sha,
         seq: init.seq,
         pipeline: init.pipeline,
-        // `optionalKey` REJECTS a present-but-`undefined` key on encode, so a
-        // run with no branch omits it rather than spelling it — the same law
-        // every other optional wire field in this tree keeps.
         ...(init.branch === undefined || init.branch === null
           ? {}
           : { branch: init.branch }),
         repoRoot: init.repoRoot,
         createdAt: now(),
         scope: init.scope,
-        // ALWAYS written, including empty. Absence is reserved for records an
-        // older build wrote, and is the only thing that lets a finalized retry
-        // tell "the caller asked for no pins" from "nobody wrote down what the
-        // caller asked for".
         hostPins: [...init.hostPins],
-        // ALWAYS written too, and for the same reason: absence is reserved for
-        // records an older build wrote, and is the only thing that lets a
-        // finalized retry tell "the caller's shell had no `$ODU_HOSTS`" from
-        // "nobody wrote down which fleet this ran against".
         hostsFile: init.hostsFile,
         snapshot: {
           mode: init.snapshotMode,
@@ -403,9 +198,6 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
           ...(init.overlay === undefined ? {} : { overlay: init.overlay }),
           expectedSha: init.sha,
           dirty: init.dirty,
-          // A dirty live tree was never committed, so its inputs cannot be
-          // reconstructed from the sha — a finalized retry of it must refuse
-          // rather than run something else and call it the same run.
           retryable: init.snapshotMode === "strict" && !init.dirty,
         },
         build: {
@@ -415,13 +207,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         },
         parentRunId: init.parentRunId ?? null,
         requestId: init.requestId ?? null,
-        // WHO STARTED IT (PLAN 4.4). `optionalKey`, which rejects a
-        // present-but-`undefined` key on encode — so a launch that named no
-        // actor omits the field rather than claiming one.
         ...(init.actor === undefined ? {} : { actor: init.actor }),
-        // WHERE THIS RUN PUSHES (PLAN 4.1). `optionalKey`, so a build that
-        // resolved nothing at all omits it rather than claiming the checkout
-        // reads from no cache.
         ...(init.push === undefined ? {} : { push: init.push }),
       },
       { ...opts, endpoint: init.endpoint, now: now() },
@@ -433,52 +219,22 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     return NO_HISTORY;
   }
 
-  // One journal, held open for the run: the ordinal lives in the writer, so a
-  // long run does not re-read its own history once per event. See
-  // `openJournal`.
   const journal: JournalWriter = openJournal(handle, token);
   let fenced = false;
   let finalized = false;
-  /** Has work resumed since the last terminal line? The writer's half of the
-   *  generation rule — see {@link emit}. */
   let resumedSinceFinalized = false;
   const open = new Map<string, OpenAttempt>();
-  /** The highest ordinal handed out per node — the allocator. In memory
-   *  because this process owns the run for its whole life; a successor
-   *  re-derives it from the journal when it takes over. */
   const highest = new Map<string, number>();
-  /**
-   * What each attempt's producer SAID about its log, keyed `<node>#<attempt>`
-   * and kept ACROSS the seal.
-   *
-   * On `open` alone this would not survive the moment it matters. Where a
-   * node's status leads its output — `_ci-setup@<platform>`, whose log the
-   * coordinator keeps narrating into long after the lane is done — a
-   * truncation stamp seals the attempt immediately, and the end-of-run sweep's
-   * `logFinalized(…, true, null)` then arrives at an attempt that is no longer
-   * open. Consulting only the open record there would let the sweep dress a
-   * stamped-short log in a completion frame, which is the exact outcome this
-   * file's header forbids. So first-word-wins is remembered here, where the
-   * seal cannot erase it.
-   */
   const said = new Map<string, { complete: boolean; reason: string | null }>();
   const attemptKey = (node: string, attempt: number): string =>
     `${node}#${attempt}`;
 
-  /** Every journal write goes through here, so the fence is checked in ONE
-   *  place and `fenced` cannot be true for some writers and false for others. */
   const emit = (event: RunEvent): void => {
     if (fenced) return;
-    // Work happening after this run was called finished OPENS A NEW
-    // GENERATION, and the writer owes that generation its own terminal line.
-    // The rule is `isResumptionEvent`, in run-history beside the event union,
-    // because the reader draws the other half of this conclusion from exactly
-    // the same events — see {@link RunHistory.finalize}.
     if (finalized && isResumptionEvent(event)) resumedSinceFinalized = true;
     try {
       if (journal.append(event, now()) === null) fenced = true;
     } catch {
-      // Best-effort: a write that throws is a disk problem, not a fence.
     }
   };
 
@@ -487,10 +243,6 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     host,
   });
 
-  /** Write the seal. FAIL-CLOSED on completeness: an attempt nobody said was
-   *  finished is sealed INCOMPLETE with a reason that says so, because the one
-   *  outcome this file must never produce is a short log wearing a completion
-   *  frame. */
   const seal = (
     node: string,
     current: OpenAttempt,
@@ -504,7 +256,6 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         endedAt: now(),
         status: current.outcome?.status ?? null,
         exitCode: current.outcome?.exitCode ?? null,
-        // The shell's `128 + N` reading, made once, where the exit code is.
         signal: signalFromExit(current.outcome?.exitCode ?? null),
         logComplete: log?.complete ?? false,
         logTruncationReason:
@@ -513,11 +264,9 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
             : log.reason,
       });
     } catch {
-      // See the header: evidence is best-effort against the run.
     }
   };
 
-  /** THE BARRIER. Seal only once both halves have arrived. */
   const sealIfComplete = (node: string): void => {
     const current = open.get(node);
     if (current === undefined) return;
@@ -549,13 +298,6 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     emit({ kind: "attempt_started", node, attempt, placement });
   };
 
-  /** A late `logFinalized` — the log's last word arriving after the attempt was
-   *  already sealed, from a producer that had not spoken when it was.
-   *
-   *  Correcting a record that says "nobody said this log was finished" when
-   *  somebody since has costs nothing and removes a standing understatement.
-   *  Correcting one that says the log is SHORT would be the opposite, so this
-   *  is reached only when `said` has no earlier word — see its note. */
   const amendSealedLog = (
     node: string,
     attempt: number,
@@ -575,7 +317,6 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         logTruncationReason: reason,
       });
     } catch {
-      // Best-effort, like every other write here.
     }
   };
 
@@ -584,12 +325,8 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     try {
       if (!heartbeat(token, now())) fenced = true;
     } catch {
-      // A heartbeat that cannot be written is not proof of anything; the next
-      // one may succeed, and a successor still has to outlive the grace.
     }
   }, HEARTBEAT_INTERVAL_MS);
-  // The heartbeat must never be the reason a process stays alive: a run that
-  // has finished its work exits, and this timer follows it out.
   heart.unref?.();
 
   return {
@@ -604,21 +341,14 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     lane: (platform, state, host, pool, hostsSource) =>
       emit({ kind: "lane", platform, state, host, pool: [...pool], hostsSource }),
     nodeStatus: (node, status, outcome) => {
-      // A node can reach a terminal status without ever having run — `skipped`
-      // is the routine case, a lane that died during provisioning the other —
-      // and its outcome still needs somewhere to hang. So an attempt is opened
-      // for any status that is not merely `pending`.
       if (status !== "pending") beginAttempt(node, outcome.host);
       const current = open.get(node);
-      // Provisioning/log output can allocate before the venue is known. Fill
-      // that missing fact on the same attempt; never rewrite a known old host.
       if (current?.placement.host === null && outcome.host !== null) {
         const placement = placementOf(node, outcome.host);
         try {
           if (locateAttempt(handle, token, node, current.attempt, placement))
             current.placement = placement;
         } catch {
-          /* history remains best-effort */
         }
       }
       const attempt = current?.attempt ?? highest.get(node) ?? 1;
@@ -637,9 +367,6 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     },
     log: (node, text, host = null, stream = "recipe") => {
       if (fenced) return;
-      // Output before any status — the provisioning narration into
-      // `_ci-setup@<platform>` is exactly this. Open attempt 1 lazily rather
-      // than dropping bytes nobody else will ever write down.
       if (!open.has(node)) beginAttempt(node, host);
       const attempt = open.get(node)?.attempt;
       if (attempt === undefined) return;
@@ -649,19 +376,11 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       const current = open.get(node);
       const attempt = current?.attempt ?? highest.get(node);
       if (attempt === undefined) return;
-      // FIRST WORD WINS, and the check is against `said` rather than against
-      // the open record — so it holds whether or not the attempt has been
-      // sealed since. A truncation stamp and the end-of-run sweep both reach
-      // here for one attempt and disagree by design: the stamp is written
-      // precisely because the sweep's `end` never came.
       const key = attemptKey(node, attempt);
       if (said.has(key)) return;
       said.set(key, { complete, reason });
       emit({ kind: "log_finalized", node, attempt, bytes: 0, complete, reason });
       if (current === undefined) {
-        // The attempt was sealed before any producer spoke — reachable for a
-        // node whose status leads its output. Correct the sidecar rather than
-        // dropping the fact.
         amendSealedLog(node, attempt, complete, reason);
         return;
       }
@@ -673,46 +392,22 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       if (!open.has(node)) beginAttempt(node, host);
       const attempt = open.get(node)?.attempt;
       if (attempt === undefined) return;
-      // A SNAPSHOT IS A BOUNDED TAIL, NOT A WHOLE LOG — and taking it as a
-      // replacement is how a durable log silently lost its beginning.
-      //
-      // `snapshot` re-sends the producer's in-memory buffer, which is clamped
-      // to `MAX_LOG_CHARS` (64 KiB). While the log is smaller than that, the
-      // snapshot IS the whole log and replacing is right. Once it is bigger, a
-      // snapshot arriving mid-run — a lane re-attaching after a reconnect —
-      // carries only the last 64 KiB, and writing it over the file threw away
-      // everything before it. Field evidence: a 200,000-line recipe recorded
-      // 198,092 lines, ending correctly, with no truncation notice, because the
-      // first 133 KB were replaced by a 64 KiB tail.
-      //
-      // So the file is RECONCILED against the snapshot rather than replaced by
-      // it. Three cases, and the third is the one worth naming:
       const held = readAttemptLog(handle, node, attempt, {}, stream)?.text ?? "";
       if (held !== "" && held.endsWith(text)) {
-        // We are level with the producer or ahead of it. Nothing to do — and
-        // in particular nothing to UNDO.
         return;
       }
       const overlap = longestOverlap(held, text);
       if (overlap > 0 || held === "") {
-        // We are behind: the snapshot continues where our bytes stop. Append
-        // only the part we do not have.
         appendAttemptLog(handle, node, attempt, text.slice(overlap), stream);
         return;
       }
-      // NO OVERLAP AT ALL. Either the producer started over (a rerun's
-      // `reset`), or its buffer has moved past everything we hold — which is
-      // loss, and loss is reported rather than papered over. Replacing is right
-      // for the first and the best available answer for the second; the notice
-      // is what tells them apart to whoever reads the log.
       writeAttemptLog(
         handle,
         node,
         attempt,
         held === ""
           ? text
-          : // ONE write, notice included. Stamping it first and replacing after
-            // would erase the stamp with the very replacement it is about.
+          :
             "[odu] log truncated: this node's output ran ahead of the recorder" +
               " — what follows does not continue what precedes it\n" +
               text,
@@ -739,9 +434,6 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
         kind: "pushing",
         node,
         bucket,
-        // ABSENT rather than `undefined`: the key is `optionalKey` on the
-        // wire, and a reader must be able to tell a line written before this
-        // field from one whose writer had no duration to give.
         ...(durationMs === undefined ? {} : { durationMs }),
       }),
     pushed: ({ node, bucket, paths, present, bytes, durationMs }) =>
@@ -754,18 +446,11 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       emit({
         kind: "retry_accepted",
         requestId,
-        // A live retry acts on THIS run — it resets a node on a coordinator
-        // already going, and starts nothing new. The finalized path, which
-        // does start a new run, never reaches this method: it has no
-        // coordinator to ask.
         effectiveRunId: handle.runId,
         roots: [...roots],
         resetDependants: [...resetDependants],
         inputDigest,
       });
-      // `emit` sets `fenced` when the append is refused, so this reports what
-      // actually reached the journal rather than what was attempted — which is
-      // the whole value of the flag to the caller reconciling later.
       return !fenced;
     },
     retryApplied: ({ requestId, node, applied }) => {
@@ -774,8 +459,6 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     },
     finalize: (verdict) => {
       if (fenced) return;
-      // Seal anything still open BEFORE the verdict, so a reader that trusts
-      // the terminal line never finds an attempt still claiming to be running.
       for (const [node, current] of [...open.entries()]) {
         seal(
           node,
@@ -795,21 +478,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
           unposted: verdict.unposted.map((u) => ({ ...u })),
         });
       } catch {
-        // Best-effort, like every other write here.
       }
-      // ONE terminal line PER GENERATION, not one per run.
-      //
-      // A `--linger` run calls this on every drain, and repeating the same
-      // terminal line each time would be two claims about how one execution
-      // ended — so a drain that follows no new work is silent. But a run that
-      // FINISHED, took a rerun, and finished again really did end twice, and
-      // those are two facts, not a contradiction. Suppressing the second was
-      // the inverse of the premature-settlement bug: `resumed` is cleared by a
-      // `finalized` line, so a writer that never emitted one left every
-      // retried run permanently unsettled, and a caller waiting on the retry
-      // could not observe it finish.
-      //
-      // The condition is the writer's half of the shared rule in `emit`.
       if (!finalized || resumedSinceFinalized) {
         finalized = true;
         resumedSinceFinalized = false;
@@ -822,26 +491,11 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       try {
         releaseOwnership(token, now());
       } catch {
-        // Nothing depends on a clean release: a reader that finds a stale
-        // endpoint dials it, gets nothing, and falls back to the record.
       }
     },
   };
 }
 
-/**
- * How much of `snapshot`'s beginning we already hold at the end of `held`.
- *
- * The producer's snapshot is a suffix of everything it has ever written; our
- * file is a prefix of the same thing. So the two overlap at our end and its
- * beginning, and the length of that overlap is exactly what we must NOT write
- * again. Zero means they do not meet — the buffer has moved past us, or the log
- * started over.
- *
- * Searched longest-first because a short accidental match (a repeated line) at
- * a shorter length would append bytes we already have. Bounded by the
- * snapshot's own length, which is bounded by `MAX_LOG_CHARS`.
- */
 export function longestOverlap(held: string, snapshot: string): number {
   const most = Math.min(held.length, snapshot.length);
   for (let n = most; n > 0; n -= 1) {

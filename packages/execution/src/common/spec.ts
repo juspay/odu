@@ -1,28 +1,6 @@
-/**
- * The pipeline spec — the wire shape `run.configure` carries to a lane
- * runner, and the in-memory shape the coordinator derives from the `just`
- * DAG (packages/execution/src/just/ingest.ts).
- *
- * Task ids are `just` namepaths (`ci::e2e`); the synthetic `_ci-setup` node
- * the runner prepends (packages/execution/src/runner/runner.ts) is the one non-namepath id,
- * mirroring justci's `_ci-setup@<platform>` bookkeeping context.
- */
-
 import { Effect, Schema } from "effect";
 import { NodeIdSchema } from "@odu/run-client/nodeId";
 
-/** The zod→Effect mapping is LAW here (kolu PLAN #17), and both idioms in this
- *  file are wire-bearing — `TaskSpecSchema` is embedded in `ConfigureInput`,
- *  which crosses the stdio wire to `odu-runner`:
- *
- *    - `.optional()` → `Schema.optionalKey`, never `Schema.optional`. Absent
- *      means ABSENT on this wire; `optional` would round-trip an explicit
- *      `undefined` through `null`.
- *    - `.default(v)` → `Schema.withDecodingDefaultKey`. STRICTER than zod on an
- *      in-memory `undefined`: zod's `.default([])` accepted `{needs: undefined}`
- *      and substituted; this rejects it. Every in-process producer must OMIT the
- *      key rather than spell it `undefined` (`just/ingest.ts` builds `needs` and
- *      `os` totally, which is why nothing here needs a conditional spread). */
 export const TaskSpecSchema = Schema.Struct({
   id: NodeIdSchema,
   /** Display name; defaults to the id. */
@@ -32,57 +10,24 @@ export const TaskSpecSchema = Schema.Struct({
   needs: Schema.Array(NodeIdSchema).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed<readonly string[]>([])),
   ),
-  /** `just` OS-family attributes (`[linux]` / `[macos]` / `[unix]` / …) that
-   *  restrict which platforms schedule this recipe; absent / empty ⇒ every
-   *  platform. Consumed coordinator-side at fan-out (packages/execution/src/just/ingest.ts
-   *  `laneTasks`); the runner ignores it, since a task only ever reaches a lane
-   *  it's enabled on. */
+  /** `just` OS-family attributes restricting which platforms schedule this
+   *  recipe; absent / empty ⇒ every platform. */
   os: Schema.optionalKey(Schema.Array(Schema.String)),
-  /** Maximum number of execution slots this recipe may burst across. The
-   *  coordinator chooses the actual total from currently free capacity. */
+  /** Maximum number of execution slots this recipe may burst across. */
   shards: Schema.optionalKey(
     Schema.Int.check(Schema.isGreaterThan(1)),
   ),
-  /** The git REFS whose runs pin this recipe's pushed closure
-   *  (`[metadata("odu:pin=main")]`, repeated to name more than one) — with
-   *  `null` for a bare `[metadata("odu:pin")]`, meaning the REPOSITORY'S
-   *  DEFAULT BRANCH, which the recipe names without spelling. A set, carried
-   *  as an array because the wire has no set: the decision is a membership
-   *  test and the order carries no meaning.
-   *
-   *  NAMES, not a decision, and not a resolution either: the COORDINATOR
-   *  resolves `null` against the checkout's `origin/HEAD`, compares the set
-   *  to the ref the run is actually on, and only then derives the single pin
-   *  name the lane is handed (`runner/pushResults.ts`'s `ODU_CACHE_PIN`).
-   *  Neither the dump nor the lane may resolve it: the dump is read wherever
-   *  `just` ran, and a lane answers from a COPY of the checkout that may have
-   *  fetched since — and a wrong pin name does not fail, it holds the wrong
-   *  closure open. Absent for a recipe whose output nothing holds open. */
+  /** The git REFS whose runs pin this recipe's pushed closure, with `null`
+   *  meaning the repository's default branch. Absent for a recipe whose output
+   *  nothing holds open. */
   pin: Schema.optionalKey(
     Schema.Array(Schema.NullOr(Schema.String)).check(Schema.isMinLength(1)),
   ),
-  /** Coordinator-injected task environment. Kept generic on the wire; shard
-   *  lanes currently use it for ODU_SHARD_INDEX / ODU_SHARD_TOTAL. */
+  /** Coordinator-injected task environment. */
   env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
-  /**
-   * WHERE THE RECIPE ACTUALLY RUNS, relative to the workspace root — absent
-   * when that IS the workspace root, which is every recipe of a single-file
-   * justfile.
-   *
-   * `just` runs a MODULE's recipe in the module's own directory, which `set
-   * working-directory` moves and `[no-cd]` cancels. The runner does not
-   * choose the cwd (the command is `just --no-deps <namepath>` from the
-   * workspace, and `just` does the chdir itself) — it needs this to know
-   * where a recipe's `result*` links landed, which for a module recipe is not
-   * the workspace root. Derived once at ingest, because the `just --dump` is
-   * the only thing that knows.
-   *
-   * ABSOLUTE when `set working-directory` took the recipe out of the
-   * workspace entirely — a directory this run does not own, whose `result`
-   * links belong to whoever left them there. `runsOutsideWorkspace` in
-   * `../just/ingest` is the one reader of that encoding, because the module
-   * that chose it is the one to ask about it.
-   */
+  /** Where the recipe runs, relative to the workspace root — absent when that
+   *  IS the workspace root, absolute when `set working-directory` took it out
+   *  of the workspace. */
   workdir: Schema.optionalKey(Schema.String),
 });
 export type TaskSpec = typeof TaskSpecSchema.Type;
@@ -96,8 +41,7 @@ export const PipelineSpecSchema = Schema.Struct({
 export type PipelineSpec = typeof PipelineSpecSchema.Type;
 
 /** Throws unless every dependency names a declared task, ids are unique, and
- *  the `needs` graph is acyclic (Kahn's algorithm as a cycle check: if not
- *  every node drains, a cycle remains). */
+ *  the `needs` graph is acyclic. */
 export function validatePipeline(spec: PipelineSpec): PipelineSpec {
   const ids = new Set<string>();
   for (const task of spec.tasks) {

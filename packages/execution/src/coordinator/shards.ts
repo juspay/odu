@@ -1,11 +1,3 @@
-/**
- * Shard topology, independent of venue acquisition and lane transport.
- *
- * A framework shard count is immutable once a lane is configured. This module
- * describes the resulting DAG and node projection after capacity has already
- * been chosen; it neither leases machines nor starts them.
- */
-
 import { fanId, SETUP_NAMEPATH } from "@odu/run-client/nodeId";
 import {
   type NodeState,
@@ -19,24 +11,15 @@ const SETUP = SETUP_NAMEPATH;
 
 export interface ShardTopology {
   rootId: string;
-  /** The root and its transitive prerequisites, in runner order. */
   tasks: TaskSpec[];
   total: number;
 }
 
 export interface ShardCapacityRequest {
   rootId: string;
-  /** Optional workers only; every root also uses the primary lane. */
   limit: number;
 }
 
-/**
- * Let independent shard roots reuse a platform's optional workers.
- *
- * The lease belongs to the run, not to one recipe. Each root therefore takes a
- * prefix up to its own ceiling; one worker may appear in several roots and its
- * lease stays held until every lane using it settles.
- */
 export function shareShardCapacity<T>(
   requests: readonly ShardCapacityRequest[],
   workers: readonly T[],
@@ -57,7 +40,6 @@ export function shardNamepath(
   return `${namepath}[${index + 1}-of-${total}]`;
 }
 
-/** Public name for one node in a shard lane's private dependency closure. */
 export function shardLaneNamepath(
   root: string,
   index: number,
@@ -111,7 +93,6 @@ export interface ShardLaneProjection {
   publicId(laneNode: string): string;
 }
 
-/** The one mapping from a runner-local node id to its fan-in shard node. */
 export function shardLaneProjection(
   platform: string,
   topology: ShardTopology,
@@ -135,7 +116,6 @@ export function shardLaneProjection(
   };
 }
 
-/** Add the first-class shard executions to the public run graph. */
 export function installShardTopology(
   state: PipelineState,
   platform: string,
@@ -186,17 +166,6 @@ export function installShardTopology(
     nodes[projection.rootId] = pendingNode({
       id: projection.rootId,
       name: shardNamepath(topology.rootId, index, topology.total),
-      // THE RECIPE'S COMMAND, AND NOTHING PREPENDED TO IT.
-      //
-      // This string used to lead with `ODU_SHARD_INDEX=… ODU_SHARD_TOTAL=…`,
-      // which was a second, DISPLAYED spelling of what `tasksForShard` already
-      // puts in `TaskSpec.env` for the runner to hand to `spawn`. It said
-      // nothing the node's own name does not — `ci::e2e (2/4)` is the index and
-      // the total — and it made a node's `command` a place a task's environment
-      // lands. PLAN 4.1 puts `$ODU_CACHE_TOKEN` in that same `env`, and a
-      // command string is public: it rides the run's journal, every face that
-      // paints a node, and `run_read`. One rule, cheaply kept: a task's
-      // environment goes to `spawn` and never into a command.
       command: root.command,
       needs:
         index === 0
@@ -234,7 +203,6 @@ export function shardAggregateStatus(
   return "ok";
 }
 
-/** Parallel recipe duration is the critical child execution, not lane skew. */
 export function shardAggregateDuration(
   nodes: readonly Pick<NodeState, "durationMs">[],
 ): number {

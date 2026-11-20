@@ -1,4 +1,3 @@
-/** Content-addressed working-tree capture. Only the temporary index is staged. */
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,7 +12,6 @@ export interface WorkingTreeSnapshot {
   worktreeDir: string;
   requires: string[];
   bundle: { path: string; bytes: number } | null;
-  /** Build transport bytes only after a run has resolved a pool that needs them. */
   prepareBundle(): void;
   cleanup(): void;
 }
@@ -79,7 +77,6 @@ export function snapshotWorkingTree(
     try {
       git(["worktree", "remove", "--force", worktreeDir]);
     } catch {
-      /* may not have been created */
     }
     rmSync(temp, { recursive: true, force: true });
   };

@@ -44,7 +44,6 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
         try {
           if (existsSync(p)) unlinkSync(p);
         } catch {
-          /* ignore */
         }
       }
     }
@@ -141,7 +140,6 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     expect(c.status).toBe("held");
     if (c.status !== "held") return;
 
-    // Advance past dead-man without pulsing.
     clock += 50_000;
     for (const t of [...timers]) t.cb();
     expect(self).toHaveBeenCalledWith("dead-man");
@@ -179,11 +177,11 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
 
     clock += 40_000;
     c.hold.noteActivity();
-    clock += 40_000; // would have fired without pulse; still within 45s of pulse
+    clock += 40_000;
     for (const t of [...timers]) t.cb();
     expect(self).not.toHaveBeenCalled();
 
-    clock += 10_000; // now past dead-man from last pulse
+    clock += 10_000;
     for (const t of [...timers]) t.cb();
     expect(self).toHaveBeenCalledWith("dead-man");
     c.hold.release();
@@ -219,7 +217,7 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     if (c.status !== "held") return;
 
     clock += 3_600_000;
-    c.hold.noteActivity(); // still max-hold
+    c.hold.noteActivity();
     for (const t of [...timers]) t.cb();
     expect(self).toHaveBeenCalledWith("max-hold");
     await new Promise((r) => setTimeout(r, 200));

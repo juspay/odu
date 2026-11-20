@@ -1,32 +1,3 @@
-/**
- * THE LANE'S PUSH (PLAN 4.1) — what it finds, what it sends ONCE, and what
- * happens when the bucket refuses.
- *
- * Four properties, and each would otherwise be discovered in production:
- *
- *   - **`result*`, resolved.** A `nix build --out-link result` leaves a
- *     symlink, and the closure is of what it POINTS AT. A chain of links, a
- *     dangling one, and a `results.md` a recipe wrote are all things a
- *     workspace holds.
- *   - **Once per run.** Every recipe in a DAG typically leaves the same
- *     `./result`, so a push per node would be N closure queries for one set of
- *     bytes and would make every node after the first claim a push it did not
- *     perform.
- *   - **A refusal is a throw**, because the runner turns it into a red node:
- *     green means warmed, and a recipe whose outputs did not reach the bucket
- *     has not given the next run what this run promised.
- *   - **Three sinks, and `begin` is a promise.** The push's own output goes to
- *     the push step's log, the lane explaining itself goes to the recipe's,
- *     and `begin` fires exactly when there is something to send — so a runner
- *     that saw it may rely on a fact or a throw arriving after, and a node
- *     with nothing fresh never opens a step at all.
- *
- * The store directory, the cache description and the push client are all
- * injected. This is about the lane's decisions; a suite that needed a Nix and
- * a bucket to assert "the second node pushes nothing" would assert it against
- * a bucket.
- */
-
 import { describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,13 +13,10 @@ import {
 
 const CONFIG = { origin: "https://odu.example.org", bucket: "main", token: "odu_run" };
 
-/** A workspace, and a store beside it that its links point into. */
 interface World {
   workspace: string;
   storeDir: string;
-  /** Put a store path there and link to it from the workspace. */
   build: (link: string, name: string) => string;
-  /** A file in the workspace that is not a link at all. */
   write: (name: string) => void;
   dispose: () => void;
 }
@@ -90,10 +58,6 @@ const summary = (over: Partial<PushSummary> = {}): PushSummary => ({
   ...over,
 });
 
-/** A pusher with a stated upload. No clock seam any more: the push's own
- *  duration is the RUNNER's measurement now, which is what lets the success
- *  and failure paths share one stopwatch — see `lanePush.test.ts` for the
- *  node-visible half. */
 function laneWith(
   storeDir: string,
   push: (options: PushOptions) => Promise<PushSummary>,
@@ -101,11 +65,6 @@ function laneWith(
   return createLanePusher({ storeDir, push });
 }
 
-/** The three sinks a push narrates through, each remembered apart — which is
- *  itself the property under test. `note` is the lane explaining itself on
- *  the RECIPE's log, `say` is the push step's own output, and `begin` is the
- *  step opening at all; a module that mixed them would put `[odu] pushing 4
- *  result paths` in the log whose whole promise is the recipe's bytes. */
 function sinks(): {
   hooks: Parameters<LanePusher["push"]>[2];
   notes: string[];
@@ -139,18 +98,11 @@ describe("what a lane finds to push", () => {
     try {
       const one = w.build("result", "aaa-one");
       w.build("result-doc", "bbb-doc");
-      // A FILE A RECIPE WROTE. `result*` is a glob, and `results.md` matches
-      // it — the store-prefix check is what keeps a note out of a closure.
       w.write("results.md");
-      // A CHAIN, which a justfile leaves behind: only the final target is a
-      // store path, and `realpath` is what follows it.
       symlinkSync(join(w.workspace, "result"), join(w.workspace, "result-alias"));
-      // AND A DANGLING ONE, from a store path collected since the build.
       symlinkSync(join(w.storeDir, "ccc-gone"), join(w.workspace, "result-gone"));
 
       const found = resultPathsIn(w.workspace, w.storeDir);
-      // `result-alias` resolves to the SAME path as `result`, so it appears
-      // once: a closure named twice is uploaded twice.
       expect(found).toEqual([one, join(w.storeDir, "bbb-doc")]);
     } finally {
       w.dispose();
@@ -158,11 +110,6 @@ describe("what a lane finds to push", () => {
   });
 
   it("THROWS for a directory that is not there, and the lane NOTES it on the recipe's log", async () => {
-    // The silent half of the module-workdir bug. Where a recipe ran is
-    // DERIVED from `just`'s dump, so it can be derived wrongly — and an empty
-    // list made a wrong answer indistinguishable from a recipe that built
-    // nothing: a green run that pushed nothing, with no line anywhere saying
-    // which directory was looked in.
     expect(() => resultPathsIn("/nonexistent-workspace")).toThrow();
 
     const s = sinks();
@@ -170,10 +117,6 @@ describe("what a lane finds to push", () => {
       throw new Error("the push client must never be reached");
     });
     expect(await lane.push("/nonexistent-workspace", CONFIG, s.hooks)).toBeNull();
-    // ON THE RECIPE'S LOG, and nowhere else. There is no push step here —
-    // `begin` never fired — so there is no push log for this sentence to land
-    // in, and a reader asking why this node warmed nothing is reading the
-    // recipe's output.
     expect(s.notes.join("\n")).toContain("not pushing: /nonexistent-workspace");
     expect(s.said).toEqual([]);
     expect(s.begins()).toBe(0);
@@ -184,8 +127,6 @@ describe("what a lane finds to push", () => {
     expect(pushConfigOf({ ODU_CACHE_ORIGIN: "https://a" })).toBeNull();
     expect(pushConfigOf({ ODU_CACHE_ORIGIN: "https://a", ODU_CACHE_BUCKET: "m" })).toBeNull();
     expect(pushConfigOf({ ODU_CACHE_TOKEN: "t" })).toBeNull();
-    // A BLANK IS AN ABSENCE. An empty token would otherwise reach the push
-    // client as a credential and fail there, naming the wrong thing.
     expect(
       pushConfigOf({
         ODU_CACHE_ORIGIN: "https://a",
@@ -212,12 +153,7 @@ describe("what a lane finds to push", () => {
       commit: "c0ffee",
     };
     expect(pushConfigOf(pushEnvFor(full))).toEqual(full);
-    // NO CONFIGURATION, NO KEYS AT ALL — what every task of a run that pushes
-    // nowhere carries, so such a task keeps exactly the environment it had.
     expect(pushEnvFor(null)).toEqual({});
-    // And the optional three are ABSENT, not blank: a `pin: undefined` reaching
-    // the environment would spell the key with an empty value, and the lane
-    // would then be holding a pin named "".
     expect(
       pushEnvFor({ origin: "https://a", bucket: "m", token: "t" }),
     ).toEqual({
@@ -242,28 +178,15 @@ describe("a lane that pushes", () => {
       const s = sinks();
       const first = await lane.push(w.workspace, CONFIG, s.hooks);
       expect(first).toEqual({ stored: 1, present: 0, bytes: 4096 });
-      // THE STEP OPENED ONCE, and its narration is the PUSH's — not a line of
-      // it on the recipe's log.
       expect(s.begins()).toBe(1);
       expect(s.said.join("\n")).toContain("pushing 1 result path to bucket main");
       expect(s.notes).toEqual([]);
       expect(sent).toHaveLength(1);
       expect(sent[0]?.paths).toEqual([one]);
-      // WHERE THE DAEMON SAID, and nowhere else: the lane asks no server what
-      // a URL is, because a server a repository named is exactly the thing
-      // that must not decide where a write token goes.
       expect(sent[0]).toMatchObject({ bucket: CONFIG.bucket, origin: CONFIG.origin });
-      // AND THE TOKEN AS A TOKEN. Not through the client's discovery
-      // environment, which describes a MACHINE — its `HOME`, its saved logins
-      // — and which a lane handing over a one-key object would also be
-      // claiming to have none of.
       expect(sent[0]?.credential).toBe(CONFIG.token);
       expect(sent[0]?.env).toEqual({});
 
-      // THE SECOND NODE leaves the same link. Nothing new, so nothing is sent,
-      // nothing is claimed — and NO STEP IS OPENED: a node with nothing fresh
-      // to push has no push step at all, which is what `begin` firing exactly
-      // when `fresh` is non-empty buys the runner.
       const again = sinks();
       const second = await lane.push(w.workspace, CONFIG, again.hooks);
       expect(second).toBeNull();
@@ -295,11 +218,6 @@ describe("a lane that pushes", () => {
   });
 
   it("tells what it STORED apart from what the bucket already had", async () => {
-    // THE SUMMARY HAS ALWAYS KNOWN BOTH and the lane used to report their
-    // sum, so a node that uploaded one path into a closure the bucket mostly
-    // had read as four paths of traffic. The two are different facts about
-    // different things — this run's work, and this bucket's state — and the
-    // bytes belong to the first of them alone.
     const w = world();
     try {
       w.build("result", "aaa-one");
@@ -317,16 +235,6 @@ describe("a lane that pushes", () => {
   });
 
   it("names the bucket and the origin when the SEND ITSELF rejects, and keeps the cause", async () => {
-    // THE DEFECT THIS PINS. A rejection of the send itself — a host that
-    // does not resolve, a refused connection — is a `fetch` `TypeError`
-    // whose entire message is "Unable to connect. Is the computer able to
-    // access the url?". It names no URL, no host, no bucket, and that
-    // sentence alone is what a whole push failure used to amount to.
-    //
-    // So the lane re-throws naming the two things only it knows, and keeps
-    // the original as `cause` rather than flattening it: everything the
-    // runtime attached — the `code`, the hostname — is still reachable from
-    // the error a reader is handed.
     const w = world();
     try {
       w.build("result", "aaa-one");
@@ -346,7 +254,6 @@ describe("a lane that pushes", () => {
       expect(thrown).toBeInstanceOf(Error);
       expect((thrown as Error).message).toContain(CONFIG.bucket);
       expect((thrown as Error).message).toContain(CONFIG.origin);
-      // THE ORIGINAL, INTACT — not a string that once described it.
       expect((thrown as Error).cause).toBe(dial);
     } finally {
       w.dispose();
@@ -382,17 +289,11 @@ describe("a lane that pushes", () => {
         .push(w.workspace, CONFIG, s.hooks)
         .then(() => null)
         .catch((err: unknown) => err);
-      // THE STEP HAD ALREADY OPENED. A throw can only reach the runner after
-      // `begin`, which is what lets it time the failure off one clock and
-      // paint a `failed` push step rather than a node that never pushed.
       expect(s.begins()).toBe(1);
       expect(thrown).toBeInstanceOf(Error);
       const said = (thrown as Error).message;
       expect(said).toContain("413 too large");
       expect(said).toContain("main");
-      // AND THE REFUSAL'S OWN FACTS. "413 too large" on its own does not say
-      // which endpoint refused or what it said while refusing, and an
-      // operator cannot act on a status without a URL beside it.
       expect(said).toContain("https://odu.example.org/cache/main/nar/aaa-one");
       expect(said).toContain("413");
       expect(said).toContain("object exceeds the part limit");
@@ -402,8 +303,6 @@ describe("a lane that pushes", () => {
   });
 
   it("does not re-send a path the bucket already serves, even when a sibling was refused", async () => {
-    // A partial push still TAUGHT this lane something: the served paths are on
-    // the bucket, and the next node must not upload them again to find out.
     const w = world();
     try {
       const one = w.build("result", "aaa-one");
@@ -438,18 +337,7 @@ describe("a lane that pushes", () => {
   });
 });
 
-/**
- * THE PIN AND THE PROVENANCE A LANE WAS HANDED (PLAN 4.2).
- *
- * The lane decides nothing here: it is given a pin name on the environment or
- * it is not. What it DOES decide is which paths the pin names — and that is
- * the one place `fresh` is wrong, because a root subtracted as "already sent"
- * is a root the pin would stop holding.
- */
 describe("a lane that was handed a pin", () => {
-  /** A client that applies `pushToCache`'s OWN rule — pin last, and only when
-   *  nothing was refused (`push.ts`'s `options.pin … || failures.length > 0`)
-   *  — so these tests show the lane deferring to it rather than copying it. */
   const client =
     (sent: PushOptions[], over: Partial<PushSummary> = {}) =>
     async (options: PushOptions): Promise<PushSummary> => {
@@ -504,8 +392,6 @@ describe("a lane that was handed a pin", () => {
         .push(w.workspace, { ...CONFIG, pin: "acme/widget@main/x86_64-linux" }, sinks().hooks)
         .then(() => null)
         .catch((err: unknown) => err);
-      // The node is RED, which is the whole answer: a pin over a half-pushed
-      // closure would promise to hold paths the bucket does not have.
       expect(thrown).toBeInstanceOf(Error);
       expect(sent[0]?.pin).toBe("acme/widget@main/x86_64-linux");
     } finally {
@@ -514,12 +400,6 @@ describe("a lane that was handed a pin", () => {
   });
 
   it("names its WHOLE result set, even paths an earlier node already sent", async () => {
-    // THE DEFECT THIS PINS. `fresh` keeps one store path from being uploaded
-    // twice in a run — but a pin names ROOTS, and the bucket holds the closure
-    // of exactly the roots named. Subtracting the shared `./result` an earlier
-    // node pushed would hand the pin a smaller closure than the recipe built,
-    // and a node whose every path was already sent would return before the
-    // step opened and never pin at all.
     const w = world();
     try {
       const one = w.build("result", "aaa-one");
@@ -537,8 +417,6 @@ describe("a lane that was handed a pin", () => {
       expect(sent).toHaveLength(2);
       expect(sent[1]?.paths).toEqual([one]);
       expect(s.begins()).toBe(1);
-      // The bytes were not re-uploaded: the bucket answers `alreadyPresent`
-      // for what it holds, which is what makes sending the full set cheap.
       expect(pinned).not.toBeNull();
     } finally {
       w.dispose();

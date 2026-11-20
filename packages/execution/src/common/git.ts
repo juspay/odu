@@ -1,10 +1,3 @@
-/**
- * Minimal git probes for the MCP face's durable-log fallback: when no run is
- * live, a log read resolves `.ci/<sha7>/<platform>/<node>.log` directly, which
- * needs the repo root and the current short SHA. Best-effort — a non-git cwd
- * or a missing HEAD returns `null`, and the caller reports "missing".
- */
-
 import { spawnSync } from "node:child_process";
 import { shortSha } from "@odu/run-client/nodeId";
 
@@ -13,10 +6,6 @@ function git(args: string[]): string | null {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-/** Re-exported, not re-defined: the prefix rule lives beside `logPathFor` in
- *  `@odu/run-client/nodeId`, which already spells `.ci/<sha7>/…`. Kept
- *  reachable from here so the many call sites that already ask this module for
- *  git facts do not each learn a second import path. */
 export { shortSha };
 
 export function gitTopLevel(): string | null {
@@ -32,19 +21,7 @@ export function headSha7(repoRoot: string | null): string | null {
   return sha.status === 0 ? shortSha(sha.stdout.trim()) : null;
 }
 
-/**
- * The branch `repoRoot` has checked out, or `null` for a detached HEAD (and for
- * anything else git declines to answer).
- *
- * Read ONCE, at registration, and stamped on the run record — never by a reader
- * of that record. The distinction is the whole point: this checkout's branch is
- * a fact that moves at the developer's clock, and a board asking it now about a
- * run from last Tuesday would print today's branch under that run's commit.
- *
- * `--symbolic-full-name` rather than `--abbrev-ref`, because the latter answers
- * the literal string `HEAD` when detached — a value that reads exactly like a
- * branch called HEAD.
- */
+/** The branch `repoRoot` has checked out, or `null` for a detached HEAD. */
 export function gitBranch(repoRoot: string): string | null {
   const ref = spawnSync("git", ["symbolic-ref", "--short", "-q", "HEAD"], {
     cwd: repoRoot,
@@ -55,22 +32,8 @@ export function gitBranch(repoRoot: string): string | null {
   return name === "" ? null : name;
 }
 
-/**
- * The branch `origin` calls its default — `master`, `main`, whatever the
- * remote's HEAD points at — or `null` when this checkout cannot say.
- *
- * LOCAL AND OFFLINE: `symbolic-ref refs/remotes/origin/HEAD` reads the ref
- * `git clone` (or `git remote set-head`) already wrote under `.git`. No
- * network, so a run's pin decision cannot hang on, or be decided by, a remote
- * that is unreachable at that moment — and a clone made with `--no-tags
- * --depth 1` or a repo whose origin was added by hand simply has no such ref,
- * which is `null` here and a sentence on `_ci-setup` there. Never guessed:
- * assuming `main` would pin a `master` repository's closure under a branch
- * nothing is ever on, silently.
- *
- * Read ONCE per run, beside {@link gitBranch}, for the same reason: a second
- * read is a second chance for two decisions to name different refs.
- */
+/** The branch `origin` calls its default, read from the local
+ *  `refs/remotes/origin/HEAD` ref, or `null` when this checkout has none. */
 export function gitDefaultBranch(repoRoot: string): string | null {
   const ref = spawnSync(
     "git",
@@ -85,9 +48,7 @@ export function gitDefaultBranch(repoRoot: string): string | null {
     : null;
 }
 
-/** The durable-log identity from the process's real git: the repo root and the
- *  current short SHA. Returns `null` outside a git checkout (→ "missing" for
- *  any durable-log read). Used by both `mcpCommand` and the test harness. */
+/** The repo root and current short SHA; `null` outside a git checkout. */
 export function gitRunContext(): { repoRoot: string; sha7: string } | null {
   const repoRoot = gitTopLevel();
   const sha7 = headSha7(repoRoot);
@@ -95,12 +56,8 @@ export function gitRunContext(): { repoRoot: string; sha7: string } | null {
   return { repoRoot, sha7 };
 }
 
-/** A run-context resolver pinned to one NAMED checkout (an absolute repo
- *  root — the `mcp/agentSurface.ResolveRunContext` shape) rather than the
- *  process's cwd: the per-call form `wait_for_settle`'s `checkout` argument
- *  needs. The root is taken as given (the tool's contract is "the checkout
- *  root"); only the SHA is probed, and an unreadable HEAD still resolves to
- *  `null`, same as the cwd probe. */
+/** A run-context resolver pinned to one NAMED checkout rather than the
+ *  process's cwd; an unreadable HEAD resolves to `null`. */
 export function gitRunContextFor(
   repoRoot: string,
 ): () => { repoRoot: string; sha7: string } | null {

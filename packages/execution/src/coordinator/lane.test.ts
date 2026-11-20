@@ -1,8 +1,3 @@
-/**
- * Lane feed-death: die is exception-safe, the absorb is sealed-log-only, and
- * an isolated stream fault does not error the whole lane.
- */
-
 import { describe, expect, it } from "bun:test";
 import { reportLogStreamDeath, runLaneDeath } from "./lane";
 
@@ -86,8 +81,6 @@ describe("reportLogStreamDeath", () => {
         order.push(`append:${nodeId}:${stream}:${frame.kind}`);
       },
       nodeId: "fast",
-      // A PUSH tap that lost its feed. The note belongs on the push log: the
-      // recipe's log holds the recipe's bytes, and a reader greps it for them.
       stream: "push",
       error: new Error("EPIPE"),
     });

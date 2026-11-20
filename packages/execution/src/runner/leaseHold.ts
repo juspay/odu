@@ -1,11 +1,4 @@
 /**
- * Venue lock held *inside* the odu-runner agent process.
- *
- * The coordinator never runs flock over raw ssh. It dials this agent via
- * surface-remote and calls `lease.claim` / `lease.probe` / `lease.release`.
- * Flock comes from odu-runner's Nix-wrapped PATH (`util-linux`), so builders
- * do not need a system-installed flock.
- *
  * Hold model: a child `flock -n -x <lock> -c '…; cat'` keeps the exclusive
  * lock while its stdin stays open. Release closes stdin (and kills the child);
  * agent process death drops the ssh pipe → child dies → flock frees.
@@ -14,8 +7,6 @@
  * the flock would stick until remote sshd times out (~2h). While holding we
  * treat any inbound stdio activity (including ownership probes) as a pulse;
  * ~45s without a pulse releases the flock and exits.
- * Max-hold (default 1h, `ODU_LEASE_MAX_HOLD_MS`) self-releases forgotten holds.
- * No separate `lease.beat` — normal RPC traffic and ownership probes pulse it.
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
@@ -23,12 +14,10 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { shellQuoteArg } from "@kolu/shell-quote";
 import { DEFAULT_LEASE_LOCK, type LeaseHolder } from "../common/laneSurface";
 
-/** Idle without inbound activity before the hold self-releases (ms). */
 export function deadManMs(): number {
   return envNumber("ODU_LEASE_DEAD_MAN_MS", 45_000, 1_000);
 }
 
-/** Absolute hold ceiling (ms). Default 1h; `0` = unlimited. */
 export function maxHoldMs(): number {
   return envNumber("ODU_LEASE_MAX_HOLD_MS", 3_600_000, 0);
 }
@@ -80,7 +69,6 @@ function flockMissingError(): string {
   return "flock(1) missing on agent PATH — odu-runner must ship util-linux";
 }
 
-/** Non-blocking probe; never holds. */
 export function probeLocal(
   lockPath: string,
 ):
@@ -104,42 +92,27 @@ export function probeLocal(
 }
 
 export interface LocalHold {
-  /** The one lock this child actually owns. */
   readonly lockPath: string;
-  /** Stable identity written beside the lock when it was acquired. */
   readonly heldBy: LeaseHolder;
-  /** False after explicit release, self-release, or unexpected child exit. */
   isHeld: () => boolean;
-  /**
-   * Answer an ownership probe for this hold without forking `flock`.
-   * `null` means this hold cannot answer (different path or no longer held).
-   */
   probe: (
     lockPath: string,
   ) => { state: "busy"; heldBy: LeaseHolder } | null;
   release: () => void;
-  /** Mark inbound activity (RPC / stdio pulse) for the dead-man timer. */
   noteActivity: () => void;
 }
 
 export interface ClaimLocalOpts {
   nowMs?: number;
   settleTimeoutMs?: number;
-  /** Injected clock for tests. */
   now?: () => number;
-  /** Injected timers for tests. */
   setIntervalFn?: typeof setInterval;
   clearIntervalFn?: typeof clearInterval;
   deadManMs?: number;
   maxHoldMs?: number;
-  /** Called when dead-man or max-hold fires (after release). */
   onSelfRelease?: (reason: "dead-man" | "max-hold" | "hold-exit") => void;
 }
 
-/**
- * Non-blocking claim. On success, keeps a child flock session until
- * `release()` or dead-man / max-hold self-release.
- */
 export async function claimLocal(
   lockPath: string,
   identity: { holder: string; run: string | null },
@@ -198,7 +171,6 @@ export async function claimLocal(
       try {
         child.stdin?.end();
       } catch {
-        /* already closed */
       }
       setTimeout(() => {
         if (!child.killed) child.kill("SIGTERM");
@@ -206,7 +178,6 @@ export async function claimLocal(
       try {
         unlinkSync(holderFile);
       } catch {
-        /* child may have removed it */
       }
     };
 
@@ -225,10 +196,6 @@ export async function claimLocal(
     }, Math.min(5_000, deadMs, maxMs > 0 ? maxMs : deadMs));
     watch.unref?.();
 
-    // A direct child failure is ownership loss even though the runner itself
-    // is still alive. Surface that through the same teardown path as the two
-    // timers; otherwise an in-process self probe could report a dead hold as
-    // healthy until an external flock probe happened to run.
     child.once("close", () => {
       if (released) return;
       released = true;
@@ -236,7 +203,6 @@ export async function claimLocal(
       try {
         unlinkSync(holderFile);
       } catch {
-        /* child may have removed it */
       }
       opts.onSelfRelease?.("hold-exit");
     });
@@ -263,7 +229,6 @@ export async function claimLocal(
   try {
     if (!child.killed) child.kill("SIGTERM");
   } catch {
-    /* ignore */
   }
 
   if (settle.kind === "enoent") {

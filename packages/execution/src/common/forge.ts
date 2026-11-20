@@ -1,39 +1,12 @@
 /**
- * THE FORGE — the one place odu speaks to GitHub.
- *
- * Two processes need GitHub, and neither may learn the other's argv:
- *
- *   - the **coordinator** posts commit statuses on every transition
- *     (`coordinator/statuses.ts`), and
- *   - the **service** reads and writes a branch's ruleset on `protect.apply`
- *     (`@odu/cli`'s protect port).
- *
- * Each used to carry a private `gh()` over the `$ODU_GH_BIN` seam. That is two
- * spellings of one credential decision, and the next one — an installation
- * token from a different identity — would have had to be threaded through both.
- * The operations are named here in GitHub's vocabulary instead, and
- * {@link ghForge} is the one implementation: the user's `gh`, behind the
- * `$ODU_GH_BIN` override the e2e suites fake. It lives in the engine because the
- * coordinator is a separately spawned process and cannot be handed a function
- * by the daemon; the service root binds the same implementation for protect.
- *
- * **Reads return RAW JSON TEXT, and that is deliberate.** The wire shapes of a
- * ruleset are volatile (a rule's `parameters` is an opaque bag that must survive
- * a read-modify-write byte-for-byte), and their schemas live with the policy
- * that reads them, in `@odu/cli`'s `rulesets.ts`. Moving them here would put a
- * face's policy in the engine. The forge's job is to make the call and say what
- * came back; deciding what the answer means belongs to the caller.
- *
- * `postStatus`/`listStatuses` do decode, because their shapes are the
- * coordinator's own contract with GitHub and nothing above the engine reads
- * them.
+ * The one place odu speaks to GitHub. Reads return RAW JSON TEXT: a ruleset's
+ * `parameters` is an opaque bag that must survive a read-modify-write
+ * byte-for-byte. `postStatus`/`listStatuses` do decode.
  */
 
 import { spawn } from "node:child_process";
 import type { GithubState } from "@odu/run-client/surface";
 
-/** Kill a hung `gh` so it can neither wedge the serialized status queue nor
- *  leave a protect call waiting on a TCP connection forever. */
 export const DEFAULT_GH_TIMEOUT_MS = 30_000;
 
 /** What GitHub is told about one context. */
@@ -54,7 +27,7 @@ export interface RemoteStatus {
 export type ForgeResult = { ok: true } | { ok: false; error: string };
 
 /** A call whose answer is a value — `error` is the forge's own sentence, never
- *  a throw, so a caller can turn it into its own refusal. */
+ *  a throw. */
 export type ForgeOutcome<T> =
   | { ok: true; value: T }
   | { ok: false; error: string };
@@ -66,18 +39,11 @@ export interface ForgeRepo {
 }
 
 /** Which ruleset read is meant: the rules in force on a branch, or one ruleset
- *  in full. Both are `readRuleset` because both are GitHub's read of the same
- *  policy object, and a second method would be two names for one verb. */
+ *  in full. */
 export type RulesetRef =
   | { readonly branch: string }
   | { readonly id: number };
 
-/**
- * WHAT ODU NEEDS FROM A FORGE, and no more.
- *
- * The five methods are the five calls the two call sites actually make. A sixth
- * arrives when a caller does, not because a hypothetical forge might offer one.
- */
 export interface Forge {
   /** Post one commit status. */
   postStatus(
@@ -97,19 +63,14 @@ export interface Forge {
   createRuleset(
     request: ForgeRepo & { body: string },
   ): Promise<ForgeOutcome<string>>;
-  /** Replace a ruleset wholesale. Nothing above reads the answer: the write is
-   *  the outcome, and a value here would invite a reader that does not exist. */
+  /** Replace a ruleset wholesale. */
   replaceRuleset(
     request: ForgeRepo & { id: number; body: string },
   ): Promise<ForgeResult>;
 }
 
-/** The forge every odu process gets today: the user's `gh`.
- *
- *  `timeoutMs` is the ONE owner of the kill. A caller that wants to give up
- *  sooner does so around the call (the status poster's own race against a fake
- *  that never answers); it does not shorten the child's life, because a killed
- *  subprocess is the forge's fact, not its caller's. */
+/** The forge every odu process gets today: the user's `gh`. `timeoutMs` kills
+ *  the child. */
 export function ghForge(opts: { timeoutMs?: number } = {}): Forge {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
   return {
@@ -131,7 +92,6 @@ export function ghForge(opts: { timeoutMs?: number } = {}): Forge {
     listStatuses: async (request) => {
       const out: RemoteStatus[] = [];
       const seen = new Set<string>();
-      // Bound pages so a pathological history cannot hang seed forever.
       const maxPages = 50;
       for (let page = 1; page <= maxPages; page++) {
         const result = await runGh(
@@ -219,9 +179,6 @@ type GhRunResult =
   | { ok: true; stdout: string }
   | { ok: false; error: string };
 
-/** Spawn `gh` with kill-on-timeout. Every forge call goes through here, which is
- *  what keeps `$ODU_GH_BIN` the one seam — read at CALL time so a suite that
- *  swaps the binary between two calls is not looking at a captured value. */
 function runGh(
   args: string[],
   opts: { captureStdout: boolean; input?: string; timeoutMs: number },

@@ -44,9 +44,6 @@ describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
   const empty = { hosts: {}, source: null };
 
   it("REFUSES a bare run with no hosts config — never a silent localhost lane", () => {
-    // The incident: a bare `odu ci run` with no config anywhere silently resolved
-    // x86_64-linux to `localhost` and fork-bombed a production workstation.
-    // The correct behavior is a loud refusal, NOT any localhost lane.
     let thrown: Error | undefined;
     try {
       fanoutPools(empty, [], []);
@@ -54,9 +51,6 @@ describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
       thrown = e as Error;
     }
     expect(thrown).toBeDefined();
-    // The throw itself is the guarantee (no localhost lane is ever returned);
-    // the message must read as a refusal, not the removed "running locally on
-    // <system>" graceful-degradation note.
     expect(thrown?.message).not.toMatch(/running locally on/i);
     expect(thrown?.message).toMatch(/refus/i);
   });
@@ -75,8 +69,6 @@ describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
   });
 
   it("names the winning-but-empty file when a hosts file exists yet configures nothing", () => {
-    // A `{}` file that won resolution still resolves zero pools → refuse. The
-    // diagnosis must name that file, not claim nothing existed.
     const emptyFile = { hosts: {}, source: "/home/me/.config/odu/hosts.json" };
     const msg = messageOf(() => fanoutPools(emptyFile, [], []));
     expect(msg).toMatch(/refus/i);
@@ -105,8 +97,6 @@ describe("fanoutPools — the no-config fail-fast (juspay/odu#46)", () => {
       hosts: { "x86_64-linux": ["builder.example"] },
       source: "/some/hosts.json",
     };
-    // aarch64-darwin absent from the config simply doesn't join the fanout —
-    // a partial config someone wrote, distinct from the no-config refusal above.
     expect(fanoutPools(config, [], []).hosts).toEqual({
       "x86_64-linux": ["builder.example"],
     });
@@ -153,8 +143,6 @@ describe("shortHost", () => {
   });
 });
 
-/** Write a hosts file to a throwaway dir and point $ODU_HOSTS at it, so
- *  `loadHosts` reads it through the same resolution chain production uses. */
 function writeHosts(body: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-hosts-"));
   const path = join(dir, "hosts.json");
@@ -164,7 +152,6 @@ function writeHosts(body: unknown): string {
 }
 
 describe("loadHosts — string | list values", () => {
-
   it("normalizes a plain string to a one-host pool", () => {
     writeHosts({ "x86_64-linux": "builder" });
     expect(loadHosts().hosts).toEqual({ "x86_64-linux": ["builder"] });
@@ -209,10 +196,6 @@ describe("loadHosts — string | list values", () => {
   });
 
   it("parses a mixed pool — locality is judged per run, not per file (juspay/odu#66)", () => {
-    // This test used to assert the throw right here. That contract failed a
-    // run over a platform it never touched, so the refusal moved to the lease
-    // seam — see lease.test.ts ("REFUSES a mixed pool at the lease entry") for
-    // where it now fires and that it still names the hosts file.
     writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
     expect(loadHosts().hosts).toEqual({
       "x86_64-linux": ["ci-1", "localhost", "ci-2"],
@@ -226,10 +209,7 @@ describe("loadHosts — string | list values", () => {
 });
 
 describe("pool locality is judged over what a run resolves (juspay/odu#66)", () => {
-
   it("lets a darwin-only pinned run through past a mixed linux pool it never touches", () => {
-    // The operator's linux pool is illegal, but this run names only darwin and
-    // pins it — nothing about x86_64-linux is ever dialed, leased, or read.
     writeHosts({
       "x86_64-linux": ["ci-1", "localhost", "ci-2"],
       "aarch64-darwin": ["rasam"],
@@ -242,12 +222,6 @@ describe("pool locality is judged over what a run resolves (juspay/odu#66)", () 
   });
 
   it("resolves a mixed pool without judging it — the lease seam owns that rule", () => {
-    // Resolution reports declared inventory; `leaseLanes`/`acquireFromPool`
-    // refuse a mixed pool the run actually claims from (see lease.test.ts).
-    // Judging here would refuse runs that never lease this platform — a
-    // `--platform` slice, a `--host` pin, OR a selector like
-    // `odu ci run fmt@aarch64-darwin`, which resolution cannot see at all
-    // (juspay/odu#66).
     writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
     const config = loadHosts();
     expect(fanoutPools(config, [], []).hosts).toEqual({
@@ -256,8 +230,6 @@ describe("pool locality is judged over what a run resolves (juspay/odu#66)", () 
   });
 
   it("lets a pin stand alone — it replaces the file's mixed pool, so nothing mixed resolves", () => {
-    // `resolvePools` sets hosts[platform] = [addr]; a pool of one is pure by
-    // construction, so the file's entry for a pinned platform is never judged.
     writeHosts({ "x86_64-linux": ["ci-1", "localhost", "ci-2"] });
     const config = loadHosts();
     expect(fanoutPools(config, ["x86_64-linux=ci-9"], []).hosts).toEqual({

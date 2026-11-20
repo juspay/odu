@@ -13,7 +13,6 @@ interface PlatformExecution {
   leases: Set<LeaseHandle>;
 }
 
-/** Runtime ownership and routing for a platform, independent of lane count. */
 export class ExecutionRoster {
   readonly #platforms = new Map<string, PlatformExecution>();
   readonly #release: (lease: LeaseHandle) => void;
@@ -59,9 +58,6 @@ export class ExecutionRoster {
     this.#release(lease);
   }
 
-  /** Give every box this platform holds back. The lane may be gone (a
-   *  resurrection) or the whole platform may be (a cancel) — both want the same
-   *  thing, so both ask for it here rather than writing the loop again. */
   releaseLeases(platform: string): void {
     const execution = this.#platforms.get(platform);
     if (execution === undefined) return;
@@ -89,13 +85,6 @@ export class ExecutionRoster {
     });
   }
 
-  /** Forget one lane and every route it owned. For a lane being REPLACED — a
-   *  dead primary whose successor is about to be registered for the same
-   *  nodes: leaving the corpse in would keep it first in `route`'s scan (so a
-   *  rerun would be dispatched to a closed session) and would keep it in
-   *  `lanes()`, where the log drain would stamp truncation notices on nodes
-   *  the run is about to run again. Does NOT close the lane — the caller
-   *  decides how it dies. */
   dropLane(platform: string, handle: Lane): void {
     const execution = this.#platforms.get(platform);
     if (execution === undefined) return;
@@ -104,7 +93,6 @@ export class ExecutionRoster {
     execution.lanes.splice(index, 1);
   }
 
-  /** Add routes after a lane receives its deferred task phase. */
   extendLane(
     platform: string,
     handle: Lane,

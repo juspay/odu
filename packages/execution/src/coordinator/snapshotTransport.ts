@@ -9,7 +9,6 @@ export interface LaneSnapshot {
   bytes: number;
 }
 const CHUNK_BYTES = 2 * 1024 * 1024;
-/** Called only after the cheap first nodes frame satisfies the watchdog. */
 export async function uploadSnapshot(
   client: LaneClient["surface"],
   snapshot: LaneSnapshot,

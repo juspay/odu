@@ -1,13 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { formatGoDuration } from "./duration";
 
-// Byte-parity with observed justci status descriptions (recon over merged
-// PRs): 4s, 58s, 1m0s, 3m26s, 48m34s — Go time.Duration truncated to
-// seconds, zero-padded units always present once a larger unit appears.
 describe("formatGoDuration", () => {
   it("renders sub-minute durations as bare seconds", () => {
     expect(formatGoDuration(4_000)).toBe("4s");
-    expect(formatGoDuration(58_900)).toBe("58s"); // truncation, not rounding
+    expect(formatGoDuration(58_900)).toBe("58s");
     expect(formatGoDuration(0)).toBe("0s");
   });
 

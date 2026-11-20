@@ -1,31 +1,3 @@
-/**
- * The argv a launch request becomes — "structured data, never a string to
- * eval", made falsifiable.
- *
- * A retry re-launches a run from a RECORDED scope, and the scope contains
- * caller-supplied selectors. The moment that argv is built by concatenating
- * into a shell string, a selector is a command; the moment a flag is dropped, a
- * replay silently becomes a different run than the one it claims to replay. So
- * two properties, and both of them are easy to lose without a test noticing:
- *
- *   - EVERY ARGUMENT IS ITS OWN TOKEN. A selector containing a space, a quote
- *     or a semicolon stays exactly one element of the array. Nothing here joins.
- *   - IDENTITY AND COMMIT ARE NEVER OPTIONAL. `--run-id` and `--expected-sha`
- *     ride on every launch, because the caller minted the id before the spawn
- *     (that is what makes a lost reply recoverable) and because a launcher must
- *     never substitute today's HEAD for the commit being replayed.
- *
- * The optional half is pinned from BOTH sides — present when the request says
- * so, absent when it does not — since a flag that is always emitted is as wrong
- * as one that never is: `--no-deps` on a replay would run a node without what
- * it needs.
- *
- * `packagedLauncher` is deliberately not tested here: it spawns real
- * coordinator processes and waits on real sockets. What it is MADE of — the
- * argv, the unit name, and the spawn plan (`./spawn.test.ts`) — is all pure and
- * all here.
- */
-
 import { describe, expect, it } from "bun:test";
 import type { RunScope } from "@odu/run-history/schema";
 import {
@@ -69,7 +41,6 @@ function request(over: Partial<LaunchRequest> = {}): LaunchRequest {
   };
 }
 
-/** The value that follows `flag`, or undefined when the flag is absent. */
 function valueAfter(argv: string[], flag: string): string | undefined {
   const at = argv.indexOf(flag);
   return at === -1 ? undefined : argv[at + 1];
@@ -77,9 +48,6 @@ function valueAfter(argv: string[], flag: string): string | undefined {
 
 describe("launchArgv", () => {
   it("always carries the minted run id and the commit being replayed", () => {
-    // The two fields with no "when" clause. Without the id, a launcher that
-    // lost its answer cannot ask whether the run happened; without the sha, the
-    // child's strict gate has nothing to refuse against.
     const argv = launchArgv(request());
     expect(argv[0]).toBe("run-coordinator");
     expect(valueAfter(argv, "--run-id")).toBe(RUN_ID);
@@ -95,8 +63,6 @@ describe("launchArgv", () => {
         }),
       }),
     );
-    // The INTERNAL verb, not the public one. `odu ci run` is a service client now,
-    // and a launcher that invoked it would recurse through `run.start` forever.
     expect(argv.slice(0, 3)).toEqual(["run-coordinator", "unit", "e2e"]);
     expect(argv.filter((a) => a === "--platform")).toHaveLength(2);
     expect(argv.slice(3, 7)).toEqual([
@@ -114,8 +80,6 @@ describe("launchArgv", () => {
   });
 
   it("passes --no-deps only when the scope says the selectors ran alone", () => {
-    // A replay that invented `--no-deps` would run a node without the
-    // dependencies it needs, and call the result the same run.
     expect(launchArgv(request())).not.toContain("--no-deps");
     expect(launchArgv(request({ scope: scope({ noDeps: true }) }))).toContain(
       "--no-deps",
@@ -123,8 +87,6 @@ describe("launchArgv", () => {
   });
 
   it("carries the strict-mode flags so a replay reproduces its parent", () => {
-    // Not today's defaults: a run recorded as `live` must replay as `live`, or
-    // the replay is a different run wearing the same lineage.
     const bare = launchArgv(request());
     expect(bare).not.toContain("--no-strict");
     expect(bare).not.toContain("--no-snapshot");
@@ -139,20 +101,11 @@ describe("launchArgv", () => {
   });
 
   it("carries --supersede, because dropping it silently declines the request", () => {
-    // The service accepts `supersede` and the browser has a checkbox for it,
-    // but only the coordinator can perform it: cancel the incumbent, confirm it
-    // is gone, then claim the lock, with no window in between. A launcher that
-    // swallowed the flag sent the caller's explicit "replace it" straight into
-    // the ordinary busy-checkout refusal.
     expect(launchArgv(request())).not.toContain("--supersede");
     expect(launchArgv(request({ supersede: true }))).toContain("--supersede");
   });
 
   it("carries --linger, the caller's shape of run", () => {
-    // `odu ci run --linger` parks the coordinator at settle instead of tearing
-    // down, so its socket is still answerable when a caller goes to read the
-    // log. Dropping the flag turns that into a race the caller cannot win, and
-    // it is the shape an agent's settle-then-read loop actually uses.
     expect(launchArgv(request())).not.toContain("--linger");
     expect(launchArgv(request({ linger: true }))).toContain("--linger");
   });
@@ -170,9 +123,6 @@ describe("launchArgv", () => {
   });
 
   it("names the actor only when the launch knew one", () => {
-    // PLAN 4.4. `null` is a launcher that was told nothing, and it must not
-    // become `--actor @local`: the child would then record the machine's own
-    // owner for a run nobody attributed.
     expect(launchArgv(request())).not.toContain("--actor");
     expect(valueAfter(launchArgv(request({ actor: "srid" })), "--actor")).toBe("srid");
     expect(valueAfter(launchArgv(request({ actor: "@local" })), "--actor")).toBe("@local");
@@ -185,8 +135,6 @@ describe("launchArgv", () => {
   });
 
   it("keeps a hostile selector as ONE token, with nothing joined or quoted", () => {
-    // The property the whole port exists for. A selector is a caller's string;
-    // if anything here joined tokens, this is where a shell would get one.
     const nasty = "unit; rm -rf / #@x86_64-linux";
     const argv = launchArgv(
       request({ scope: scope({ selectors: [nasty, "a b"], root: "with space" }) }),
@@ -194,8 +142,6 @@ describe("launchArgv", () => {
     expect(argv).toContain(nasty);
     expect(argv).toContain("a b");
     expect(valueAfter(argv, "--root")).toBe("with space");
-    // Nothing in the array is a shell line: no element holds two of the tokens
-    // we put in, and no element was wrapped in quotes on its way through.
     expect(argv.filter((a) => a === nasty)).toHaveLength(1);
     for (const token of argv) {
       expect(token.startsWith('"')).toBe(false);
@@ -214,25 +160,15 @@ describe("unitNameFor", () => {
   it("embeds the run id, so `systemctl --user status` names the right run", () => {
     expect(unitNameFor(RUN_ID)).toBe(`odu-run-${RUN_ID}`);
     expect(unitNameFor(RUN_ID)).toContain(RUN_ID);
-    // Two runs never collide on a unit name.
     expect(unitNameFor(RUN_ID)).not.toBe(unitNameFor(PARENT));
   });
 
   it("is a plausible unit name", () => {
-    // systemd unit names are a restricted alphabet; a name that needed escaping
-    // would fail at `systemd-run` time on someone else's machine.
     expect(unitNameFor(RUN_ID)).toMatch(/^[A-Za-z0-9:_.@-]+$/);
   });
 });
 
 describe("when a launch may be tried again", () => {
-  // The GitHub-runner case: a host that sets every systemd marker, has a bus
-  // socket, and whose user manager still refuses the job. That refusal used to
-  // be reported as a run that could not start — nothing was wrong with the run.
-  //
-  // Retrying is only safe when NOTHING was started, so this decision is pure
-  // and pinned here; getting it wrong in the other direction is two
-  // coordinators for one request.
   const submitter: SpawnPlan = {
     mechanism: "systemd-run",
     reason: "under a unit",
@@ -259,18 +195,12 @@ describe("when a launch may be tried again", () => {
   });
 
   it("never retries a detached spawn: that exit IS the coordinator's death", () => {
-    // A dirty tree, a bad justfile, a strict-gate refusal. Launching again
-    // would paper over an answer the caller is entitled to.
     expect(mayRelaunchDetached(detached, 1)).toBe(false);
     expect(mayRelaunchDetached(detached, 0)).toBe(false);
   });
 });
 
 describe("the environment a coordinator is started in", () => {
-  // The service is a per-user SINGLETON. Somebody's shell started it — maybe
-  // days ago, maybe with `$ODU_HOSTS` pointing at their own builders — and
-  // every run since resolves its inventory in a child of that process. So the
-  // launcher's own environment is never evidence about the caller.
   const daemon = { PATH: "/bin", ODU_HOSTS: "/daemons/hosts.json" };
 
   it("gives the child the caller's hosts file, not this process's", () => {
@@ -279,19 +209,11 @@ describe("the environment a coordinator is started in", () => {
   });
 
   it("blanks it when the caller's own shell has none", () => {
-    // `""` and `null` look like the same nothing at a call site and mean
-    // opposite things. This one is a TERMINAL reporting that its shell has no
-    // `$ODU_HOSTS` — so the child's chain must start where that shell's does,
-    // at `~/.config/odu/hosts.json`, and not at the daemon's file.
     const env = coordinatorEnv(request({ hostsFile: "" }), daemon);
     expect(env.ODU_HOSTS).toBe("");
   });
 
   it("leaves the service's own standing when the caller expressed nothing", () => {
-    // An agent and a browser have no shell to have a `$ODU_HOSTS` in. A
-    // service started with an explicit hosts file was configured on purpose,
-    // and discarding that for callers who never mentioned it would be its own
-    // surprise.
     const env = coordinatorEnv(request({ hostsFile: null }), daemon);
     expect(env.ODU_HOSTS).toBe("/daemons/hosts.json");
   });

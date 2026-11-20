@@ -1,4 +1,3 @@
-/** Per-session chunk staging; dispose also removes interrupted uploads. */
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,9 +48,6 @@ export function createSnapshotUploads() {
         return fail("out-of-order snapshot chunk");
       try {
         if (directory === null) {
-          // Normal disposal removes these immediately. SIGKILL cannot run a
-          // finalizer, so staging belongs to the OS temporary-file lifecycle,
-          // like runner workspaces, rather than a permanent object cache.
           const root = join(tmpdir(), "odu", "snapshots");
           mkdirSync(root, { recursive: true });
           directory = mkdtempSync(join(root, `upload-${process.pid}-`));

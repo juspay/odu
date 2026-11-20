@@ -1,13 +1,3 @@
-/**
- * A controllable in-process `oduSurface` served on a real unix socket — the
- * test harness for the MCP/agent face and the introspection commands. Mirrors
- * the coordinator's serve wiring (packages/execution/src/coordinator/run.ts) so consumers are
- * exercised over the same transport they hit in production; the test drives
- * node states and log appends directly. Not a test file (no `bun:test` import,
- * and the name misses the `*.test.ts` glob), so it isn't collected as a suite —
- * it's imported by the *.test.ts harnesses.
- */
-
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,36 +17,23 @@ export interface TestSurface {
   socketPath: string;
   setState: (state: PipelineState) => void;
   setHeader: (header: RunHeader) => void;
-  /** Feed one of a node's two logs. `stream` absent is the recipe's — the
-   *  log every consumer written before the push became a step means. */
   appendLog: (id: string, text: string, stream?: LogStream) => void;
   resetLog: (id: string, text: string, stream?: LogStream) => void;
   reruns: string[];
-  /** Node ids passed to `node.cancel` over the socket. */
   nodeCancels: string[];
-  /** Platforms passed to `lane.cancel` over the socket. */
   laneCancels: string[];
-  /** How many times `run.cancel` was called over the socket. */
   cancels: () => number;
   close: () => void;
 }
 
 export interface ServeTestOptions {
-  /** Pin the socket to a caller-owned path (the coordinator-restart regression
-   *  serves two surfaces at the same path in turn). Defaults to a fresh temp
-   *  socket the harness owns and removes on `close`. */
   socketPath?: string;
-  /** Invoked on a `run.cancel` call. The real coordinator tears down and exits
-   *  in response, so a test exercising `cancelRun`'s wait-for-gone closes the
-   *  listener here (via the passed `close`) to make the socket disappear. */
   onCancel?: (close: () => void) => void;
 }
 
 export async function serveTestSurface(
   initial: PipelineState,
   initialHeader: RunHeader = EMPTY_HEADER,
-  /** A bare string is the legacy pinned-socket-path arg; the object form adds
-   *  the `onCancel` teardown hook. */
   opts: string | ServeTestOptions = {},
 ): Promise<TestSurface> {
   const options: ServeTestOptions =
@@ -69,15 +46,10 @@ export async function serveTestSurface(
   const nodeCancels: string[] = [];
   const laneCancels: string[] = [];
   let cancels = 0;
-  // Forward declaration: the cancel handler can close the listener via the
-  // caller's hook, but `closeListener` is only bound after `serveSocket`.
   let closeListener: () => void = () => {};
 
   const runtime = implementSurface(oduSurface, {
     cells: { nodes: { store }, header: { store: headerStore } },
-    // Mirrors the coordinator's own wiring: the wire names the stream, the
-    // pump keys the two apart, and a consumer asking for a node's push log
-    // over this socket gets the push log.
     streams: {
       nodeLog: {
         source: ({ id, stream }) => tail.streamSource({ id: logStreamKey(id, stream) }),
@@ -115,14 +87,8 @@ export async function serveTestSurface(
   });
   const served = { group: runtime.group, handlers: runtime.handlers };
 
-  // A pinned path is caller-owned (the caller removes it); otherwise the harness
-  // owns a fresh temp dir + socket and removes them on `close`.
   const dir = pinnedSocketPath ? null : mkdtempSync(join(tmpdir(), "odu-mcp-test-"));
   const socketPath = pinnedSocketPath ?? join(dir as string, "odu.sock");
-  // Reuse the coordinator.s serve (mkdir + 0700 chmod + outcome handling) over
-  // the same typed { group, handlers } pair run.ts serves.
-  // A harness has no operator feed, so listener faults go to stderr — a socket
-  // that dies under a test is a bug in the thing under test, never noise.
   closeListener = await serveSocket(
     served,
     socketPath,
@@ -139,8 +105,6 @@ export async function serveTestSurface(
     nodeCancels,
     laneCancels,
     cancels: () => cancels,
-    // Close the listener AND, when the harness owns the dir, remove it so
-    // repeated runs don't leak `odu-mcp-test-*` dirs under the system tmpdir.
     close: () => {
       closeListener();
       if (dir !== null) rmSync(dir, { recursive: true, force: true });

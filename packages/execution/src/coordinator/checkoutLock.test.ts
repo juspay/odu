@@ -1,8 +1,3 @@
-/**
- * Checkout run-lock: exclusivity during the venue-lease wait (before
- * `.ci/odu.sock` serves). Concurrent starters must refuse rather than co-queue.
- */
-
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,8 +42,6 @@ describe("tryAcquireRunLock", () => {
 
   it("treats a stale lock file (dead pid) as free", () => {
     const path = tmpLock();
-    // PID 1 is init/launchd — usually not killable as "ours", but signal 0 on
-    // a definitely-dead high pid: use a pid that does not exist.
     writeFileSync(path, "2147483646\n");
     expect(liveRunLockPid(path)).toBeNull();
     const a = tryAcquireRunLock(path);
@@ -78,13 +71,10 @@ describe("ensureCheckoutFree — run-lock during lease wait", () => {
   });
 
   it("second starter fails while first holds the lock across a long lease wait", async () => {
-    // Models: starter A acquired the lock and is blocked in leaseLanes;
-    // starter B's ensureCheckoutFree must refuse immediately (not co-queue).
     const lockPath = tmpLock();
     const first = tryAcquireRunLock(lockPath);
     expect(first).not.toBeNull();
 
-    // Injected "long lease wait" — first still holds the lock.
     await new Promise((r) => setTimeout(r, 20));
 
     const second = tryAcquireRunLock(lockPath);
