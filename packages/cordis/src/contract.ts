@@ -1,26 +1,3 @@
-/**
- * A SURFACE'S FINGERPRINT, and the pin that holds a row's version to it.
- *
- * Every row versions its own surface (`Row.contract`), and the host versions its
- * own verbs and the admission cell. A version is only worth what enforces it: a
- * number nobody has to move when the surface moves is a promise that drifts. So
- * each row commits an append-only LEDGER — every version it published, each
- * with a hash of the surface it described — and a test that recomputes the hash
- * fails the moment the current version's line disagrees, naming the row and the
- * rule for the bump.
- *
- * A dependency bump that changes the JSON Schema Effect derives moves every
- * fingerprint with no surface change: that case re-pins the CURRENT line and
- * says why in its commit.
- *
- * **What is hashed.** The surface's SPEC, walked with sorted keys: every cell,
- * collection, stream and procedure, its verbs and defaults, and every schema as
- * the JSON Schema document Effect derives from it — which is what a reader
- * decodes against. Then the wire tags the spec mints, and the row's exposure
- * policy (what an agent may reach, and whether it mutates). A comment is not in
- * it; a description annotation is, because a reader sees it.
- */
-
 import { Schema } from "effect";
 
 function canonical(value: unknown): unknown {
@@ -74,15 +51,6 @@ export function surfaceTags(surface: {
   return [...surface.group.requests.keys()];
 }
 
-/**
- * ONE ROW'S SHAPE — its surface and exposure, less the members it SERVES but
- * does not own.
- *
- * `omit` exists for one member: the identity cell, which every deployed reader
- * dials on the runs' root surface but whose shape is the HOST's contract. It is
- * taken out of the runs' fingerprint (and its tags and exposure with it) and put
- * into the host's, so each fact is versioned exactly once.
- */
 export function rowShape(
   surface: {
     readonly spec: object;
@@ -109,16 +77,6 @@ export function rowShape(
   };
 }
 
-/**
- * A ROW'S LEDGER — every version it has published, in order, each with the
- * fingerprint of the surface that version described. APPEND-ONLY: a bump adds a
- * last line, and no existing line is ever edited. That is what makes the lie
- * visible: "fixing" a red test by rewriting the current fingerprint while
- * leaving the version alone shows in the diff as an edited historical line,
- * which a reviewer reads as a surface change shipped under an old number.
- *
- * Keys are `major.minor`, never integers, so the object keeps insertion order.
- */
 export type ContractLedger = Readonly<Record<string, string>>;
 
 function versionOrder(a: string, b: string): number {
@@ -128,21 +86,10 @@ function versionOrder(a: string, b: string): number {
 }
 
 /**
- * HOLD A VERSION TO ITS LEDGER — `null` when the current version is the
- * ledger's last line and its fingerprint is the surface's, or the sentence that
- * says what to do.
- *
- * The rule every row keeps: the MINOR moves when the surface only GROWS, the
- * MAJOR when something a reader already uses CHANGES.
- *
- * ONE HONEST REWRITE: a dependency bump that changes the JSON Schema Effect
- * derives moves every fingerprint with no surface change. Then re-pin the
- * CURRENT line — the only line that may ever be edited — and say why in the
- * commit.
+ * `null` when the current version is the ledger's last line and its fingerprint
+ * is the surface's, or the sentence that says what to do.
  */
 export function contractLedgerMismatch(
-  /** Who the version belongs to, as a sentence names it: "the cache row",
-   *  "the host". */
   subject: string,
   constant: string,
   current: { readonly version: string; readonly fingerprint: string },

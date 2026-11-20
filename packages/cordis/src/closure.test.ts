@@ -1,14 +1,3 @@
-/**
- * THE WALL, enforced — and this package's claim is the SHORTEST in the tree.
- *
- * `@odu/cordis` is the vocabulary `@odu/host` and its rows share, and the whole
- * reason it exists is that neither side may name the other: the host is the
- * registry (a row may not import it), and a row's own package cannot hold the
- * tags its siblings need. So this module names NO `@odu/*` package at all — a
- * single one would undo it in a line — and, being a module a BROWSER bundle and
- * a server both load, nothing from `node:` either.
- */
-
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -24,11 +13,6 @@ const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
 const EXPECTED_DEPENDENCIES = ["effect"];
 
-/** UI RUNTIMES, refused by name beside the `node:` rule. This package is the
- *  contract every server-side row and the host load; a reactive UI helper is
- *  not vocabulary they share, and putting one here put a UI runtime in every
- *  server's manifest (review 2 of PR 2.5). A face's shared helpers live in
- *  `@odu/face`. */
 const UI_RUNTIMES = new Set(["solid-js", "react", "react-dom", "preact", "vue", "svelte", "@solid-primitives"]);
 
 const HYDRATED = new Set<string>([
@@ -105,9 +89,6 @@ describe("@odu/cordis's import closure", () => {
   });
 
   it("names no @odu package at all", () => {
-    // THE CLAIM. A tag, a row record or a composition helper that imported one
-    // row's package would make this the thing a row cannot import — which is
-    // the whole design.
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
       for (const spec of specifiers) {
@@ -130,16 +111,11 @@ describe("@odu/cordis's import closure", () => {
       for (const spec of specifiers) {
         if (spec.startsWith(".")) continue;
         if (isTest && spec.startsWith("node:")) continue;
-        // A browser bundle loads this module; `node:` would be a blank page.
-        // (The suite itself reads the directory it polices, and is never
-        // bundled — the `@odu/web-ui` twin records that exception.)
         if (spec.startsWith("node:") && !isTest) {
           offenders.push(`${rel}: ${spec} (a node builtin)`);
           continue;
         }
         const pkg = packageOf(spec);
-        // The surface framework's Solid binding is a UI runtime too, under a
-        // hydrated package whose other doors this module may open.
         if (
           UI_RUNTIMES.has(pkg) ||
           UI_RUNTIMES.has(pkg.split("/")[0] ?? pkg) ||

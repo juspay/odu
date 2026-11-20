@@ -1,20 +1,3 @@
-/**
- * WHAT A ROW CONTRIBUTES TO `/metrics`, and how the host renders it.
- *
- * **A broker, not an offer.** Every service tag is single-provider, and metrics
- * have MANY contributors (the cache row's hit rates, the runs' durations) with
- * ONE consumer. That is the shape {@link HttpRoutes} already has: the host makes
- * the list, each row `add`s and holds the withdrawal, and the host reads the
- * list at each scrape. A row that fails to apply takes its numbers with it
- * rather than leaving a contributor pointing at a closed database.
- *
- * **Counters are process-local.** They start at zero when the daemon starts, and
- * Prometheus already understands that (`rate()` handles a reset). The durable
- * counts a restart must not lose — a bucket's lifetime reads — are GAUGES read
- * from SQL at scrape time, not counters kept in memory.
- */
-
-/** A sample's labels. Values are escaped on the way out. */
 export type MetricLabels = Readonly<Record<string, string>>;
 
 export interface MetricPoint {
@@ -23,17 +6,12 @@ export interface MetricPoint {
 }
 
 export interface MetricFamily {
-  /** The exposition name, `odu_`-prefixed and already suffixed (`_total` for a
-   *  counter, `_seconds` for a duration), because the name a dashboard query
-   *  spells must exist in exactly one place. */
   readonly name: string;
   readonly help: string;
   readonly points: readonly MetricPoint[];
 }
 
-/** One sample of a histogram: the observations that fell in each bound, those
- *  above the last one, and their sum. NOT cumulative — the renderer accumulates,
- *  so a contributor keeps the simple array it actually counts into. */
+/** NOT cumulative — the renderer accumulates. */
 export interface HistogramPoint {
   readonly labels?: MetricLabels;
   /** Same length and order as the family's `bounds`. */
@@ -57,19 +35,11 @@ export interface MetricsReading {
   readonly histograms?: readonly HistogramFamily[];
 }
 
-/** A row's registration. `name` labels the contributor's own health metric. */
 export interface MetricsContributor {
   readonly name: string;
   read(): MetricsReading | Promise<MetricsReading>;
 }
 
-/**
- * THE REGISTRY A ROW REGISTERS INTO — one per tenure, made by whoever owns the
- * tenure, exactly as the route mount is.
- *
- * `add` returns the WITHDRAWAL: a row whose apply fails after registering must
- * not leave a contributor that reads a database it has closed.
- */
 export interface MetricsSources {
   add(contributor: MetricsContributor): () => void;
   /** Every contributor registered so far, in registration order. Read once per
@@ -77,8 +47,6 @@ export interface MetricsSources {
   contributors(): readonly MetricsContributor[];
 }
 
-/** A registry with nothing registered. With no rows mounted a scrape is a valid
- *  empty exposition, not a refusal. */
 export function metricsBroker(): MetricsSources {
   const registered: MetricsContributor[] = [];
   return {
@@ -133,18 +101,12 @@ function mergeFamilies<F extends { name: string; help: string; points: readonly 
   return [...byName.values()];
 }
 
-/** One contributor's answer, or its silence. `null` reading means `read()` threw
- *  or rejected — the scrape still renders, and says so. */
+/** `null` reading means `read()` threw or rejected. */
 export interface ContributorReading {
   readonly contributor: string;
   readonly reading: MetricsReading | null;
 }
 
-/**
- * RENDER. Counters first, then gauges, then histograms, then the per-contributor
- * health gauge — so the one line that says a row went quiet is always present,
- * even when every reading failed.
- */
 export function renderExposition(readings: readonly ContributorReading[]): string {
   const lines: string[] = [];
   const simple = (
@@ -204,7 +166,6 @@ export function renderExposition(readings: readonly ContributorReading[]): strin
   return `${lines.join("\n")}\n`;
 }
 
-/** One contributor's failure is ONE zero in the exposition, never a 500. */
 export async function scrape(sources: MetricsSources): Promise<string> {
   const readings = await Promise.all(
     sources.contributors().map(async (contributor): Promise<ContributorReading> => {

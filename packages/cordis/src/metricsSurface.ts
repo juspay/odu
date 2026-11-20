@@ -1,45 +1,14 @@
-/**
- * THE CREDENTIAL A SCRAPER HOLDS, as verbs — the host's own fragment on the
- * composed wire.
- *
- * **Why the surface lives in `@odu/cordis`.** It is the host's vocabulary, and
- * the host is the one package a row may not import — while the faces that
- * project it (`odu surface`, the MCP bridge) are rows. This package belongs to
- * neither, which is exactly the case it exists for. The HANDLERS are the host's
- * (`@odu/host`'s `metricsFragment`); only the shape is here.
- *
- * Names are `metrics_token_<verb>`, the framework's own derivation from the key
- * this fragment is mounted at and the noun inside it — the same rule every row
- * follows, so an agent that knows `cache_token_mint` can guess this one.
- */
-
 import { Schema } from "effect";
 import { defineSurface } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
 import type { RowAgent, RowFacts } from "./services";
 
-/** The word this fragment is mounted and addressed under — on the wire
- *  (`surface/metrics/token/mint`), in a tool name (`metrics_token_mint`) and in
- *  a terminal (`odu surface metrics token_mint`). Declared once, here, because
- *  the host mounts it and three faces spell it. */
 export const METRICS_KEY = "metrics";
 
-/** WHERE THE NUMBERS ARE. The host serves it, the nginx module proxies it, and
- *  the reserved-path set admits it — one spelling for all three. */
 export const METRICS_PATH = "/metrics";
 
-/**
- * THIS FRAGMENT'S CONTRACT VERSION, `major.minor`, under the rule every row's
- * own version keeps: the MINOR moves when the surface only grows, the MAJOR when
- * something a caller already uses changes.
- *
- * 1.0: `token.mint`, `token.list`, `token.revoke`.
- */
 export const METRICS_CONTRACT_VERSION = "1.0";
 
-/** Why a metrics verb was refused. Its own tagged error rather than the runs'
- *  or the cache's: this fragment is the host's, and borrowing another row's
- *  error would tie its wire to that row's version. */
 export class MetricsRefused extends Schema.TaggedError<MetricsRefused>(
   "@odu/metrics/MetricsRefused",
 )("MetricsRefused", {
@@ -56,8 +25,7 @@ export class MetricsRefused extends Schema.TaggedError<MetricsRefused>(
 
 const REFUSES = MetricsRefused;
 
-/** A metrics token, less the secret. The plaintext exists exactly once, in
- *  `token.mint`'s answer; everything after that is this. */
+/** A metrics token, less the secret. */
 export const MetricsTokenSchema = Schema.Struct({
   /** What `token.revoke` names. Not a credential. */
   id: Schema.String,
@@ -85,7 +53,6 @@ const TokenListOutputSchema = Schema.Struct({ tokens: Schema.Array(MetricsTokenS
 const TokenRevokeInputSchema = Schema.Struct({ rootToken: Schema.String, id: Schema.String });
 const TokenRevokeOutputSchema = Schema.Struct({ id: Schema.String, revoked: Schema.Boolean });
 
-/** Minting, listing and revoking the scrape credential. */
 export const oduMetricsSurface = defineSurface({
   procedures: {
     token: {
@@ -98,8 +65,6 @@ export const oduMetricsSurface = defineSurface({
 
 export type OduMetricsSurface = typeof oduMetricsSurface;
 
-/** What an agent may reach. `mutates` spelled per entry, the framework's safety
- *  default being "assume it mutates". */
 export const ODU_METRICS_EXPOSE = {
   "token.mint": { tool: { mutates: true } },
   "token.list": { tool: { mutates: false } },
@@ -125,9 +90,6 @@ export const METRICS_AGENT: RowAgent = {
   instructions: ODU_METRICS_MCP_INSTRUCTIONS,
 };
 
-/** THIS FRAGMENT'S FACTS, in the shape every composed face reads a row's in.
- *  The host mounts it on every daemon — there is no configuration that turns
- *  metrics off — so unlike the door it is never conditionally absent. */
 export const METRICS_ROW: RowFacts = {
   name: METRICS_KEY,
   key: METRICS_KEY,

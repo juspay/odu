@@ -1,24 +1,3 @@
-/**
- * THE VOCABULARY THE HOST AND ITS ROWS SHARE, and the one place it can live.
- *
- * A row is a `definePlugin`: it declares what it NEEDS, the runtime holds its
- * fibre `PENDING` until something has provided it, and it unloads when the
- * provider leaves. So the host's job splits in two — it provides these, and it
- * mounts the rows — and no row reads an environment, a global, or a module the
- * host happens to have imported.
- *
- * **Why this is a package of its own.** `@odu/host` names every row and belongs
- * to none of them, and a row may not import it: a face that reached the host to
- * bootstrap would carry every row's server to reach the code that starts one. A
- * row's own package cannot hold the tags the OTHER rows need either. So the
- * vocabulary sits in a module that belongs to neither side, and both name it.
- *
- * The keys are minted with `serviceTag`, which is ONE declaration spoken in both
- * vocabularies: the string is what the row's `inject` names to Cordis and the
- * tag is what its `apply` yields to the compiler. `definePlugin` derives the
- * first from the second, so a row cannot name one without having the other.
- */
-
 import type { Logger } from "@kolu/surface-daemon";
 import type { Surface, SurfaceSpec } from "@kolu/surface/define";
 import type { ExposeMap } from "@kolu/surface/expose";
@@ -27,36 +6,21 @@ import type { ServeSurfaceAppOptions } from "@kolu/surface-app/serve";
 import { type Plugin, serviceTag } from "@olai/effect-cordis";
 import type { MetricsSources } from "./metrics";
 
-/** The per-user state root the catalog and the cache live under — read ONCE, by
- *  the host, because this is the one place in odu that reads an environment. */
 export const StateDir = serviceTag<string>("odu:stateDir");
 
 export const DaemonHome = serviceTag<string>("odu:daemonHome");
 
-/** Where this process is BOUND — the OS's answer, not the request. */
 export const BoundOrigin = serviceTag<string>("odu:boundOrigin");
 
-/** The address a bucket is reachable at from outside, when a proxy stands in
- *  front. `null` means "nothing is in front": the bound origin IS the public
- *  one. Only a substituter URL uses it. */
+/** `null` means the bound origin IS the public one. */
 export const PublicOrigin = serviceTag<string | null>("odu:publicOrigin");
 
-/** The operator's root token, or `null` when none is configured — in which case
- *  every administrative cache verb refuses with `no_root_token` while the
- *  substituter keeps serving. */
 export const RootToken = serviceTag<string | null>("odu:rootToken");
 
 /** The OLD store a cache migrates from — `$ODU_CACHE_STORE`, or `null` for the
- *  host's own `/nix/store`. Never where the cache keeps objects. */
+ *  host's own `/nix/store`. */
 export const NixStore = serviceTag<string | null>("odu:nixStore");
 
-/** WHICH APPLICATION this is, for the cell a client compares before it adopts a
- *  running daemon.
- *
- *  Spelled here rather than imported from `@odu/service-client` because this
- *  module names no row: the four fields are that contract's `ServiceBuild`, and
- *  a tag whose type came from a row would make this package the second thing a
- *  row cannot import. */
 export const Build = serviceTag<{
   readonly oduVersion: string;
   readonly commit: string | null;
@@ -64,60 +28,20 @@ export const Build = serviceTag<{
   readonly self: string | null;
 }>("odu:build");
 
-/**
- * EVERY MOUNTED ROW'S CONTRACT VERSION, by row name — the roster's `contract`
- * fields, gathered by the host and published on the identity cell's `rows`.
- *
- * The host COPIES these and reads none of them: each number is its row's own
- * constant, declared beside that row's surface, and what a major or a minor
- * means for it is the row's business. The judge that compares them against what
- * a client reads is `admitService`, which lives with the cell it reads.
- */
 export const RowContracts = serviceTag<Readonly<Record<string, string>>>("odu:rowContracts");
 
 export const Log = serviceTag<Logger>("odu:log");
 
-/** End the tenure — the frozen control fragment's `drain`, wired to this
- *  process's own stop. */
 export const Shutdown = serviceTag<() => void>("odu:shutdown");
 
-/**
- * THE COMPOSED BUNDLE a row joins — the runs' rooted runtime, provided by the
- * host once the row that owns it is up.
- *
- * A SIBLING mounts itself on this in its own `apply` and drops the mount in its
- * finalizer: the framework's transactional door walks the arriving surface,
- * proves the whole route set disjoint across root and siblings, and commits
- * nothing if it fails. Nothing outside a row ever mounts on it.
- */
 export const Bundle = serviceTag<RootedSurfacesRuntime<never>>("odu:bundle");
 
-/** WHERE THE HOST ANSWERS "do you have a door?" — one path, spoken by the
- *  listener that serves it and the page that asks before it draws.
- *
- *  Here rather than beside the door's row because the HOST serves it and the
- *  BROWSER asks it: a host package may not import a row, and the browser holds
- *  only the contracts. */
 export const SERVICE_DOOR_PATH = "/_odu/door";
 
-/**
- * WHICH SIBLING ROWS THIS DAEMON MOUNTS — the host's composition, as a fact a
- * client may read before it draws anything. The answer is the roster at boot:
- * rows are fixed for a tenure.
- */
 export const SERVICE_ROWS_PATH = "/_odu/rows";
 
 /**
- * ASK A DAEMON WHICH ROWS IT MOUNTS — the one spelling of that question, beside
- * {@link readDoor} and for the same reasons: a second copy is a second parse,
- * and the two readers (a page deciding whether to draw a control, a bridge
- * deciding whether to advertise a verb) must agree.
- *
- * `null` is UNKNOWN (the host did not answer), deliberately not `[]`: a caller
- * that treats an outage as "no rows" hides a control on a server that has it.
- * A caller that can only HIDE — the browser, before its first draw — may fold
- * `null` to `[]` on purpose; it must say so at the fold, and must not do it
- * where it could wait for the answer instead.
+ * `null` is UNKNOWN (the host did not answer), deliberately not `[]`.
  */
 export async function readRows(
   origin: string,
@@ -138,21 +62,8 @@ export async function readRows(
 }
 
 /**
- * ASK A DAEMON WHETHER IT HAS A DOOR — the ONE spelling of the question.
- *
- * Two faces ask it: the browser, before it draws anything, and the CLI's MCP
- * bridge, before it advertises the door's verbs. A second copy is a second
- * parse of the same body, and the two answers decide different things (a board
- * or a sign-in page; a tool list), so they must agree.
- *
  * `null` is UNKNOWN — the host did not answer — and it is deliberately not
- * `false`: a caller that treats an outage as "loopback" draws controls for a
- * server that is not there. The caller decides what an unknown answer means;
- * the answer itself says only what was read.
- *
- * The request is BOUNDED because this runs where a foreign process may hold the
- * socket: a program that accepts and says nothing would otherwise hold a
- * browser's first paint, or a bridge's whole startup, open.
+ * `false`. The request is BOUNDED.
  */
 export async function readDoor(
   origin: string,
@@ -171,15 +82,6 @@ export async function readDoor(
   }
 }
 
-/**
- * THE PARAGRAPHS AN AGENT IS TAUGHT, composed from the rows STANDING — core
- * first, then each sibling.
- *
- * One function because two doors teach it: the daemon's `/mcp` route and the
- * CLI's stdio bridge. They are the same vocabulary reached two ways, and a
- * bridge that composed its own list taught one sentence less the moment a row
- * was added (which is what happened to the door's paragraph).
- */
 export function agentInstructions(
   core: RowAgent | null,
   siblings: Readonly<Record<string, RowAgent>>,
@@ -192,16 +94,6 @@ export function agentInstructions(
 export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
 
 /**
- * A ROW'S ROUTES AND THE PATHS THEY CLAIM — one value, so a layer cannot be
- * registered without saying where it answers.
- *
- * The host's door gate must know, BEFORE it runs a request, whether a path is a
- * route or the shell (the middleware seam cannot rewrite an answer, only skip
- * it). A list of paths kept in the host was a second spelling of every row's
- * routes, and it drifted: the cache's push API (`/_odu/v1/…`) was not on it, so
- * an anonymous push met the sign-in page. The claim lives beside the
- * `HttpRouter.add` calls it describes instead, and the gate composes them.
- *
  * Each entry is exact, or ends in `*` for a WALK — one or more characters after
  * the prefix (`/cache/*` claims `/cache/b/x`, not `/cache/`).
  */
@@ -210,19 +102,6 @@ export interface ClaimedRoutes<Layer extends RowRoutes = RowRoutes> {
   readonly paths: ReadonlyArray<string>;
 }
 
-/**
- * THE HTTP ROUTER MOUNT — the one listener's app routes, which a row adds its
- * own layer to.
- *
- * A row with protocol routes (the cache's Nix API, the door's sign-in flow)
- * registers them where it activates, so the layer arrives with the row rather
- * than being collected by a host that has to know what the row is.
- *
- * `add` returns the WITHDRAWAL, and that is not bookkeeping: a row whose `apply`
- * fails after it registered its routes would otherwise leave them answering on a
- * listener whose row has gone — and, for the door, calling into a closed
- * database. The host applies the layers it is holding at each bind.
- */
 export interface HttpRoutes {
   /** Add a layer and its claim. The returned function removes THAT one and no
    *  other. */
@@ -233,45 +112,18 @@ export interface HttpRoutes {
   layers(): ReadonlyArray<ClaimedRoutes>;
 }
 
-/** ONE PER TENURE, made by whoever owns the tenure — `@odu/host`'s `web.ts`, and
- *  nothing else. The INTERFACE is the vocabulary a row needs (it is what a row
- *  registers into); the FACTORY is a bag of live state, and this package is a
- *  contract: twelve tags, four types and two pure helpers, with no state to
- *  outlive a call. */
 export const Routes = serviceTag<HttpRoutes>("odu:httpRoutes");
 
-/** THE SCRAPE'S CONTRIBUTORS — the same shape as {@link Routes} and for the
- *  same reason: many rows register, one host reads, and the registry is made
- *  once per tenure by whoever owns the tenure. */
 export const Metrics = serviceTag<MetricsSources>("odu:metrics");
 
-/**
- * WHAT WAS DELETED, FOR WHOEVER IS CACHING IT — the port a collection announces
- * through, and a CDN row answers on.
- *
- * **The direction is why this is a broker and not an offer.** The cache row
- * announces; the CDN row listens — and the CDN row is mounted AFTER the cache
- * (it reacts to the cache's domains), may fail, and on most deployments does
- * not exist at all. A row that had to `yield*` its listener's service would be
- * a cache that cannot collect without a CDN. The host makes ONE broker per
- * tenure, both rows name it, and with nobody registered `announce` is a no-op:
- * no CDN, no purge, no refusal.
- *
- * Single-owner, like the principal broker: the first purger installs, a second
- * is refused, and the withdrawal `register` returns removes only its own.
- */
 export interface CachePurge {
-  /** These URLs no longer exist. Fire-and-forget: a collection is not held up
-   *  by an edge, and a purge that fails is the purger's to log. */
   announce(urls: readonly string[]): void;
   /** Install the purger. Returns its withdrawal; throws
    *  {@link PurgeClaimRefused} when one is already installed. */
   register(purge: (urls: readonly string[]) => void): () => void;
-  /** Is anything fronting these URLs? A RUNNING fact. */
   listening(): boolean;
 }
 
-/** A second purger claimed the broker. */
 export class PurgeClaimRefused extends Error {
   readonly _tag = "PurgeClaimRefused";
   constructor() {
@@ -284,10 +136,7 @@ export class PurgeClaimRefused extends Error {
 
 export const CachePurge = serviceTag<CachePurge>("odu:cachePurge");
 
-/** A broker with no purger. ONE per daemon, made by whoever owns the tenure. */
 export function purgeBroker(): CachePurge {
-  // A CLAIM, not the function: two registrations of the same function are two
-  // claims, and a withdrawal that compared values could clear a successor's.
   let installed: { readonly purge: (urls: readonly string[]) => void } | null = null;
   return {
     announce(urls) {
@@ -306,23 +155,6 @@ export function purgeBroker(): CachePurge {
   };
 }
 
-/**
- * MAY THIS RUN PUSH TO THAT BUCKET, AND WITH WHAT — the port the `ci` row mints
- * a run's write token through, and the `cache` row answers on.
- *
- * It is a BROKER for the same reason {@link CachePurge} is, and the direction is
- * the mirror image: the runs' row asks, the cache row answers — and the runs'
- * row is mounted FIRST (it offers `Bundle`, which the cache is held pending on).
- * A row that had to `yield*` its answerer's service would be a deadlock, not a
- * dependency. The host makes one broker per tenure, both rows name it, and with
- * nobody registered every question answers "no such bucket here": a daemon
- * serving no cache runs exactly as it did before, and nothing is refused.
- *
- * **No principal crosses it.** The grant is not a surface verb and has no
- * caller to authorise, and the token it gets back is write-scoped to one bucket
- * and expires. Administrative cache verbs keep needing the root token; this is
- * not one of them.
- */
 export interface CacheGrants {
   /** IS A CACHE REGISTERED AT ALL. Not "at which origin": where a push goes is
    *  a property of the BUCKET, answered by {@link GrantedBucket}. */
@@ -330,13 +162,7 @@ export interface CacheGrants {
   /** The bucket this daemon serves AT THAT SUBSTITUTER URL, or `null`. See
    *  {@link GrantedBucket} for why the URL and never a probe. */
   bucketAt(substituter: string): GrantedBucket | null;
-  /**
-   * A WRITE TOKEN FOR ONE RUN AND ONE BUCKET.
-   *
-   * The RUN's id, not a lifetime and not a label.
-   *
-   * `null` when no cache is registered or the bucket is gone.
-   */
+  /** `null` when no cache is registered or the bucket is gone. */
   mint(request: { bucket: string; runId: string }): { id: string; token: string } | null;
   /** Let a minted token go, by id. Idempotent: an unknown id is not an error. */
   revoke(id: string): void;
@@ -345,13 +171,8 @@ export interface CacheGrants {
   register(grantor: CacheGrantor): () => void;
 }
 
-/**
- * ONE BUCKET THIS DAEMON SERVES, as a URL in somebody's `nix.conf` names it.
- *
- * **The answer is decided by the URL, never by a response body.** The daemon
- * already knows every URL it advertises for every bucket it serves; matching
- * against that set is the whole test.
- */
+/** One bucket this daemon serves, decided by the advertised URL, never by a
+ *  response body. */
 export interface GrantedBucket {
   readonly name: string;
   /** The key a consumer needs in `trusted-public-keys` to USE what is pushed. */
@@ -362,16 +183,12 @@ export interface GrantedBucket {
   readonly substituter: string;
 }
 
-/** What the cache row registers — the three questions, less the broker's own
- *  absent-answerer defaults. A registered grantor is itself the answer to
- *  `serves`. */
 export interface CacheGrantor {
   bucketAt(substituter: string): GrantedBucket | null;
   mint(request: { bucket: string; runId: string }): { id: string; token: string } | null;
   revoke(id: string): void;
 }
 
-/** A second grantor claimed the broker. */
 export class GrantClaimRefused extends Error {
   readonly _tag = "GrantClaimRefused";
   constructor() {
@@ -384,7 +201,6 @@ export class GrantClaimRefused extends Error {
 
 export const CacheGrants = serviceTag<CacheGrants>("odu:cacheGrants");
 
-/** A broker with no grantor. ONE per daemon, made by whoever owns the tenure. */
 export function grantsBroker(): CacheGrants {
   let installed: { readonly grantor: CacheGrantor } | null = null;
   return {
@@ -408,58 +224,26 @@ export interface BucketDomainFact {
   readonly domain: string;
 }
 
-/**
- * THE CACHE ROW'S DOMAINS, AS A FACT OTHER ROWS MAY REACT TO.
- *
- * The `cloudflare` row watches this to route a bucket's name; it must not import
- * the cache row's internals (the database, the surface's procedures) to learn a
- * fact the cache already knows. A service key is the safe import: the cache
- * offers it in its own activation, the cloudflare row declares it, and the two
- * never name each other's packages.
- *
- * `subscribe` returns the WITHDRAWAL, and the cache ends every listener when it
- * closes — the same lifetime its own `onChange` has.
- */
 export interface BucketDomains {
-  /** Every bucket that has a domain, now. */
   current(): readonly BucketDomainFact[];
   subscribe(listener: () => void): () => void;
-  /**
-   * THE PATHS THE CACHE ROW ANSWERS. A bucket domain forwards EVERY path of
-   * its name to this daemon, so the host's gate needs to know what belongs to
-   * the cache and what must never answer there: its claims are the whole list.
-   */
+  /** The paths the cache row answers: its claims are the whole list. */
   paths: ReadonlyArray<string>;
-  /**
-   * THE BUCKET A PATH NAMES, in either protocol spelling — or `null` when it
-   * names none. The grammar is the cache row's; the host's bucket-domain gate
-   * asks this rather than parsing `/cache/<name>` itself.
-   */
+  /** The bucket a path names, in either protocol spelling — or `null` when it
+   *  names none. */
   bucketOf(path: string): string | null;
 }
 
 export const BucketDomains = serviceTag<BucketDomains>("odu:bucketDomains");
 
-/** What an AGENT is told about one row: its surface, its own exposure policy,
- *  and the paragraph it wants taught at `initialize`. */
 export interface RowAgent {
   readonly surface: Surface<SurfaceSpec>;
   readonly expose: ExposeMap<SurfaceSpec>;
   readonly instructions: string;
 }
 
-/** WHAT A ROW IS, LESS ITS SERVER — browser-safe, so it lives beside the
- *  row's surface and every face that composes rows reads it there.
- *
- *  `key` is the word its surface is served under — the sibling segment on the
- *  wire, the subcommand in argv, and the word a browser folds its health under.
- *  `null` for the ROOT row, whose members keep the bare tags.
- *
- *  `contract` is the row's OWN version, `major.minor` — the constant its surface
- *  module declares beside the surface it versions. A row's surface changing is
- *  that row's bump and no other's: a client that reads only the runs is never
- *  refused because the cache moved. The host gathers these into
- *  {@link RowContracts} and knows nothing of what they mean. */
+/** `key` is the word its surface is served under; `null` for the ROOT row.
+ *  `contract` is the row's own version, `major.minor`. */
 export interface RowFacts {
   readonly name: string;
   readonly key: string | null;
@@ -467,12 +251,6 @@ export interface RowFacts {
   readonly contract: string;
 }
 
-/** ONE ROW, fixed at boot: its facts and the `definePlugin` it is mounted as.
- *
- *  EVERY row is a plugin, including the runs': a plugin can build a rooted
- *  bundle inside its own `apply` and `offer` it, so the runs' row owns its
- *  runtime and closes it. `key` null means "the wire's ROOT": the row that
- *  offers `Bundle`, which the siblings mount on. */
 export interface Row extends RowFacts {
   readonly plugin: Plugin;
 }

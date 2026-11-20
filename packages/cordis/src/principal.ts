@@ -1,40 +1,11 @@
-/**
- * WHO IS ON THIS CONNECTION — the host's question, in the vocabulary its rows
- * read.
- *
- * The host owns the listener, so it owns "who is on it"; a row owns sign-in,
- * sessions and tokens, because that is a feature with a surface, a server, a
- * CLI and a face. The two meet HERE: the host provides a `PrincipalBroker`, a
- * row that knows how to sign somebody in registers a RESOLVER on it, and every
- * verb reads the answer through `CurrentPrincipal`.
- *
- * **The absence behaviour is stated, not implied.** No resolver ⇒ every
- * connection is `local`, every Bearer is the local owner, and nothing refuses.
- * That is the loopback mode preserved by construction rather than by a flag,
- * and it is why the existing unit, CLI and browser suites need no edit.
- *
- * **A refused connection has no principal.** It is not a third role: the gate
- * in front of the served handlers refuses every member except the few that
- * must answer without a session (the daemon's identity, and the auth row's own
- * `whoami`). A verb that asks anyway dies, loudly, because reaching it means
- * the gate was bypassed.
- *
- * This module names no row and no `@odu/*` package — it is the shared
- * vocabulary, and both sides must be able to open it.
- */
-
 import { Context, Effect, Option, Schema } from "effect";
 import { serviceTag } from "@olai/effect-cordis";
 
-/** The three roles, and the order is the authority: an owner administers an
- *  admin's work. */
 export const RoleSchema = Schema.Literals(["owner", "admin", "member"]);
 export type Role = typeof RoleSchema.Type;
 
 const RANK: Record<Role, number> = { member: 0, admin: 1, owner: 2 };
 
-/** The machine's own owner — what a connection is when no identity provider is
- *  mounted. */
 export const LocalPrincipalSchema = Schema.Struct({ kind: Schema.Literal("local") });
 
 export const UserPrincipalSchema = Schema.Struct({
@@ -43,34 +14,19 @@ export const UserPrincipalSchema = Schema.Struct({
   role: RoleSchema,
 });
 
-/** WHO A VERB ACTS FOR. Discriminated on `kind`, so a `Schema.Union` and not a
- *  `Schema.TaggedUnion` — the wire spelling is fixed by the auth surface's
- *  `whoami` answer. */
 export const PrincipalSchema = Schema.Union([LocalPrincipalSchema, UserPrincipalSchema]);
 export type Principal = typeof PrincipalSchema.Type;
 
 export const LOCAL_OWNER: Principal = { kind: "local" };
 
-/**
- * MAY THIS PRINCIPAL DO SOMETHING THAT NEEDS `floor`?
- *
- * The local owner passes every floor: with no identity provider mounted there
- * is nobody else the daemon could be protecting itself from, and this is the
- * rule that keeps loopback mode byte-for-byte what it was. A signed-in person
- * must hold the role or better.
- */
 export function may(principal: Principal, floor: Role): boolean {
   return principal.kind === "local" || RANK[principal.role] >= RANK[floor];
 }
 
 /**
- * WHAT ONE CONNECTION IS, for as long as it lasts.
- *
  * `principal` is `null` when the upgrade carried no valid session and a
- * resolver is mounted — the gate refuses such a connection everything but the
- * identity reads. `live()` answers whether the session behind it still exists,
- * so a call placed after logout, expiry or revocation is refused rather than
- * served on a session that is gone. `ended` completes once, at that moment.
+ * resolver is mounted. `live()` answers whether the session behind it still
+ * exists. `ended` completes once, at that moment.
  */
 export interface Admission {
   /** Who this connection acts for, or `null` for a connection with no session. */
@@ -82,8 +38,6 @@ export interface Admission {
   readonly ended: Effect.Effect<void>;
 }
 
-/** The service a verb reads. Absent (a unit test, an in-process dispatch that
- *  has not provided one) means the loopback owner. */
 export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Admission>()(
   "odu/CurrentPrincipal",
 ) {}
@@ -100,8 +54,6 @@ export const NOBODY_ADMISSION: Admission = {
   ended: Effect.void,
 };
 
-/** Raised when a refused connection's verb ran anyway. A DEFECT, not a
- *  refusal. */
 export class NoPrincipal extends Error {
   readonly _tag = "NoPrincipal";
   constructor() {
@@ -112,13 +64,11 @@ export class NoPrincipal extends Error {
   }
 }
 
-/** The admission this call runs under. Absent context is the local owner. */
 export const admissionOf: Effect.Effect<Admission> = Effect.map(
   Effect.serviceOption(CurrentPrincipal),
   (held) => Option.getOrElse(held, () => LOCAL_ADMISSION),
 );
 
-/** Who this call acts for. Dies on a refused connection — see {@link NoPrincipal}. */
 export const principalOf: Effect.Effect<Principal> = Effect.flatMap(
   admissionOf,
   (admission) =>
@@ -127,15 +77,6 @@ export const principalOf: Effect.Effect<Principal> = Effect.flatMap(
       : Effect.succeed(admission.principal),
 );
 
-/**
- * ONE CONNECTION'S HOLD ON ONE SESSION.
- *
- * Acquired at the upgrade and released in the same step (the host wraps both in
- * `Effect.acquireRelease`), so an interrupted bind cannot leave a lease with no
- * owner. {@link Lease.watch} is how the connection learns that the session
- * ENDED — logout, expiry, revocation — and it is a push, never a poll: there is
- * no revocation list to look at.
- */
 export interface Lease {
   readonly principal: Principal;
   /** Follow this lease. `end` runs exactly once, at the end of the session or
@@ -146,8 +87,6 @@ export interface Lease {
   release(): void;
 }
 
-/** A lease and the resolver's handle on it: `end` is what the SESSION's owner
- *  calls when the session stops existing. */
 export function makeLease(
   principal: Principal,
   onRelease?: () => void,
@@ -185,7 +124,6 @@ export function makeLease(
   };
 }
 
-/** The admission a lease's connection runs under: live until the lease ends. */
 export function admissionFor(lease: Lease | null): Admission {
   if (lease === null) return NOBODY_ADMISSION;
   let live = true;
@@ -212,17 +150,7 @@ export function admissionFor(lease: Lease | null): Admission {
   };
 }
 
-// ── the broker ──────────────────────────────────────────────────────────────
-
-/**
- * What a row that knows how to sign somebody in implements.
- *
- * Both doors are here because they are one decision — "who does this credential
- * name" — read at two places: a websocket upgrade carries a session COOKIE and
- * gets a LEASE, and an HTTP request (the MCP door) carries a BEARER token and
- * gets a principal for that one request. A resolver answers `null` for a
- * credential it does not recognise, which is the gate's cue to refuse.
- */
+/** A resolver answers `null` for a credential it does not recognise. */
 export interface PrincipalResolver {
   /** The lease this websocket upgrade carries, or `null` for no session. */
   acquire(headers: Readonly<Record<string, string | undefined>>): Lease | null;
@@ -230,26 +158,9 @@ export interface PrincipalResolver {
   authorize(authorization: string | undefined): Principal | null;
 }
 
-/**
- * THE HOST'S BROKER, always present.
- *
- * A single-owner registration: the first resolver installs, a second is REFUSED
- * and installs nothing, and the withdrawal that `register` returns removes only
- * the resolver that installed it — so a row that unloads cannot clear a
- * successor's registration.
- *
- * ## The absence behaviour, stated (it is the whole safety of the switch)
- *
- * | this daemon | no resolver installed | what a caller is |
- * | --- | --- | --- |
- * | NO door configured | every connection | the LOCAL OWNER — loopback mode |
- * | a door configured (`ODU_GITHUB_CLIENT_ID` read at boot) | NOBODY | anonymous, and the gate refuses everything |
- *
- * The second row is the one that matters: a daemon whose identity row stops, or
- * is re-offering its bundle, must not fall back to "everyone is the owner". It
- * FAILS CLOSED. `door` is the host's boot-time fact and is passed to
- * {@link localBroker}; nothing else in this package needs to know what a door is.
- */
+/** A single-owner registration: the first resolver installs, a second is
+ *  REFUSED and installs nothing, and the withdrawal that `register` returns
+ *  removes only the resolver that installed it. */
 export interface PrincipalBroker {
   /** Install a resolver. Returns its withdrawal. Throws
    *  {@link PrincipalClaimRefused} if one is already installed. */
@@ -269,7 +180,6 @@ export interface PrincipalBroker {
   hasDoor(): boolean;
 }
 
-/** A second resolver claimed the broker. */
 export class PrincipalClaimRefused extends Error {
   readonly _tag = "PrincipalClaimRefused";
   constructor() {
@@ -280,16 +190,10 @@ export class PrincipalClaimRefused extends Error {
   }
 }
 
-/** The host's broker. ONE per daemon, made by whoever owns the tenure. */
 export const PrincipalBroker = serviceTag<PrincipalBroker>("odu:principal");
 
-/** A broker with no resolver. `door` decides what absence MEANS, and it is the
- *  host's boot-time fact — see {@link PrincipalBroker}. Made once per daemon. */
 export function localBroker(options: { readonly door?: boolean } = {}): PrincipalBroker {
   const door = options.door === true;
-  // A CLAIM, not the resolver: two registrations of the SAME resolver object
-  // are still two claims, and a withdrawal that compared values could clear a
-  // successor's slot. The token is what a withdrawal compares.
   let installed: { readonly resolver: PrincipalResolver } | null = null;
   return {
     register(next) {
@@ -313,8 +217,6 @@ export function localBroker(options: { readonly door?: boolean } = {}): Principa
   };
 }
 
-/** The admission a request-shaped call runs under — one it carries for its own
- *  duration and nothing longer. */
 export function requestAdmission(principal: Principal): Admission {
   return { principal, live: () => true, ended: Effect.never };
 }
