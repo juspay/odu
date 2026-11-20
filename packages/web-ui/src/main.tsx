@@ -7,14 +7,16 @@ import { readDoor, readRows } from "@odu/cordis/services";
 import { oduServiceSurface } from "@odu/service-client/surface";
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
-import { App, doorAfterAnswer, type DoorState } from "./app";
+import { App, doorAfterAnswer, doorStateOf, type DoorState } from "./app";
 
 const root = document.getElementById("odu");
 if (root === null) {
   throw new Error("odu: the shell has no #odu element to render into");
 }
 
-const [door, setDoor] = createSignal<DoorState>(await readDoor(window.location.origin));
+const [door, setDoor] = createSignal<DoorState>(
+  doorStateOf(await readDoor(window.location.origin)),
+);
 
 const rows = (await readRows(window.location.origin)) ?? [];
 
@@ -40,7 +42,7 @@ render(
         rows={rows}
         redialDoor={() => {
           void readDoor(window.location.origin).then((answer) => {
-            setDoor((known) => doorAfterAnswer(known, answer));
+            setDoor((known) => doorAfterAnswer(known, doorStateOf(answer)));
           });
         }}
         // The framework's readout is an accessor; read HERE, inside the render

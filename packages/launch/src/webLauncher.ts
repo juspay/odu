@@ -1,6 +1,4 @@
-import { readFileSync } from "node:fs";
 import { connect } from "node:net";
-import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   controlCoreSurface,
@@ -15,6 +13,7 @@ import {
 import { composeSurfaceContracts } from "@kolu/surface/define";
 import { unixSocketLink } from "@kolu/surface/links/unix-socket";
 import {
+  DIAL_READY_MS,
   dialService,
   readServiceCell,
   type ServiceConnection,
@@ -189,6 +188,14 @@ function gateFree(home: DaemonHomePaths): boolean {
   return readProcessIdentity(identity.pid) === undefined;
 }
 
+function buildMatches(running: ServiceBuild, baked: ServiceBuild): boolean {
+  return (
+    baked.buildId !== null &&
+    running.buildId !== null &&
+    running.buildId === baked.buildId
+  );
+}
+
 export async function ensureService(
   opts: EnsureOptions,
 ): Promise<EnsureOutcome> {
@@ -201,11 +208,7 @@ export async function ensureService(
   if (running !== null) {
     const verdict = contractVerdict(running, opts.origin, opts.needs);
     const compatible = verdict === null;
-    const mine = opts.baked;
-    const sameBuild =
-      mine.buildId !== null &&
-      running.build.buildId !== null &&
-      running.build.buildId === mine.buildId;
+    const sameBuild = buildMatches(running.build, opts.baked);
     if (!opts.upgrade || (compatible && sameBuild)) {
       if (!compatible) {
         return { ok: false, message: verdict };
@@ -336,7 +339,7 @@ async function spawnAndVerify(
     sleep,
   );
   if (cell === null) {
-    const said = daemonSaid(opts.home.dir);
+    const said = webStderrLog(opts.home.dir).tail();
     return {
       ok: false,
       message:
@@ -356,17 +359,6 @@ async function spawnAndVerify(
     build: cell.build,
     protocolVersion: cell.identity.protocolVersion,
   };
-}
-
-function daemonSaid(homeDir: string): string | null {
-  try {
-    const text = readFileSync(webStderrLog(homeDir), "utf-8")
-      .trimEnd()
-      .slice(-2_000);
-    return text === "" ? null : text;
-  } catch {
-    return null;
-  }
 }
 
 async function until(
@@ -454,7 +446,7 @@ async function dialExisting(
   }
 }
 
-const ABSENCE_PROBE_MS = 300;
+const ABSENCE_PROBE_MS = DIAL_READY_MS / 10;
 
 function dialGroup(group: RpcGroup.RpcGroup<Rpc.Any> | undefined): {
   group?: RpcGroup.RpcGroup<Rpc.Any>;

@@ -41,11 +41,16 @@ type Route =
   | { at: "profile" }
   | { at: "people" };
 
-export type DoorState = boolean | null;
+export type DoorState = "guarded" | "open" | "unknown";
+
+export function doorStateOf(answered: boolean | null): DoorState {
+  if (answered === null) return "unknown";
+  return answered ? "guarded" : "open";
+}
 
 export function principalOf(door: DoorState, who: Who | null): Principal | null {
-  if (door === false) return LOCAL_OWNER;
-  if (door === null) return null;
+  if (door === "open") return LOCAL_OWNER;
+  if (door === "unknown") return null;
   return who === null || who.kind === "anonymous" ? null : who;
 }
 
@@ -54,12 +59,12 @@ export function holds(principal: Principal | null, floor: Role): boolean {
 }
 
 export function doorAfterAnswer(known: DoorState, answer: DoorState): DoorState {
-  return answer === null ? known : answer;
+  return answer === "unknown" ? known : answer;
 }
 
 export function showsBoard(door: DoorState, who: Who | null): boolean {
-  if (door === false) return true;
-  if (door === null) return false;
+  if (door === "open") return true;
+  if (door === "unknown") return false;
   return who !== null && who.kind !== "anonymous";
 }
 
@@ -183,7 +188,7 @@ export function App(props: {
   );
 
   createEffect(() => {
-    if (props.door !== true || who() !== null) return;
+    if (props.door !== "guarded" || who() !== null) return;
     void Effect.runPromise(props.auth.procedures.user.whoami()).then(
       (answer) => setWho(answer.who),
       () => {},
@@ -223,7 +228,7 @@ export function App(props: {
     const here = route();
     return here.at === "cache" ? here.bucket : null;
   });
-  const anonymous = createMemo(() => props.door === true && who()?.kind === "anonymous");
+  const anonymous = createMemo(() => props.door === "guarded" && who()?.kind === "anonymous");
   const ciRoute = createMemo<CiRoute>(() => {
     const here = route();
     return here.at === "cache" || here.at === "tunnel" || here.at === "profile" || here.at === "people"
@@ -245,7 +250,7 @@ export function App(props: {
     return null;
   });
 
-  const RailRow = (rail: {
+  const StaticRailRow = (rail: {
     label: string;
     pressed: boolean;
     count?: { text: string; hue: string } | null;
@@ -276,31 +281,31 @@ export function App(props: {
           </Show>
           <Show when={boardShown()}>
             <nav class="nav" aria-label="board rows">
-              <RailRow
+              <StaticRailRow
                 label="Runs"
                 pressed={atRuns() && !atMachines()}
                 count={runsCount()}
                 onPick={() => go({ at: "board" })}
               />
-              <RailRow
+              <StaticRailRow
                 label="Cache"
                 pressed={atCache()}
                 onPick={() => go({ at: "cache", bucket: null })}
               />
-              <RailRow
+              <StaticRailRow
                 label="Machines"
                 pressed={atMachines()}
                 onPick={() => go({ at: "machines" })}
               />
               <Show when={tunnelRow()}>
-                <RailRow
+                <StaticRailRow
                   label="Tunnel"
                   pressed={atTunnel()}
                   onPick={() => go({ at: "tunnel" })}
                 />
               </Show>
               <Show when={canGrant()}>
-                <RailRow
+                <StaticRailRow
                   label="People"
                   pressed={atPeople()}
                   onPick={() => go({ at: "people" })}
@@ -315,10 +320,10 @@ export function App(props: {
                 <span class="avatar" aria-hidden="true">$</span>
                 <span class="whoami-who">
                   <span class="whoami-name account-name">
-                    {props.door === false ? "local owner" : "signing in…"}
+                    {props.door === "open" ? "local owner" : "signing in…"}
                   </span>
                   <span class="whoami-role">
-                    {props.door === false ? "this machine" : ""}
+                    {props.door === "open" ? "this machine" : ""}
                   </span>
                 </span>
               </div>
@@ -336,7 +341,7 @@ export function App(props: {
         </aside>
 
         <main class="main">
-          <Show when={props.door === true && who() === null}>
+          <Show when={props.door === "guarded" && who() === null}>
             <p class="hint">checking who you are…</p>
           </Show>
           <Show when={boardShown()}>

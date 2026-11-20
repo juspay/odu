@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { daemonHome } from "@kolu/surface-daemon";
 import { survivableSpawnDriver } from "@kolu/surface-daemon-supervisor";
@@ -97,15 +98,31 @@ export function webDaemonSpawnConfig(
     // Nobody holds a detached child's stderr, so a daemon that dies before it
     // can log has nowhere to say why. Under systemd the unit's own journal has
     // it and the driver ignores this.
-    stderrLog: webStderrLog(homeDir),
+    stderrLog: webStderrLog(homeDir).path,
   };
 }
 
-export function webStderrLog(homeDir: string): string {
-  return join(homeDir, "web-daemon.stderr.log");
+export interface StderrLog {
+  readonly path: string;
+  tail(): string | null;
 }
 
-const WEB_DAEMON_ENV_KEYS = [
+export function webStderrLog(homeDir: string): StderrLog {
+  const path = join(homeDir, "web-daemon.stderr.log");
+  return {
+    path,
+    tail: () => {
+      try {
+        const said = readFileSync(path, "utf-8").trimEnd().slice(-2_000);
+        return said === "" ? null : said;
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+const DAEMON_ONLY_ENV_KEYS = [
   "ODU_OSFACTS_BIN",
   "ODU_WEB_ORIGIN",
   "ODU_WEB_DIST",
@@ -122,5 +139,5 @@ const WEB_DAEMON_ENV_KEYS = [
 export function daemonEnv(
   source: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
-  return pickEnv(source, [...ODU_CHILD_ENV_KEYS, ...WEB_DAEMON_ENV_KEYS]);
+  return pickEnv(source, [...ODU_CHILD_ENV_KEYS, ...DAEMON_ONLY_ENV_KEYS]);
 }

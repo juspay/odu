@@ -1,6 +1,6 @@
 import {
   credentialsPath as sharedCredentialsPath,
-  normalizeOrigin,
+  trimTrailingSlashes,
   readCredentials as sharedReadCredentials,
   saveCredential as sharedSaveCredential,
 } from "@odu/credentials";
@@ -31,7 +31,7 @@ export async function readAuthToken(
   const fromEnv = env[TOKEN_ENV]?.trim();
   if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
   const entries = await readCredentials(env);
-  return entries[normalizeOrigin(origin)] ?? null;
+  return entries[trimTrailingSlashes(origin)] ?? null;
 }
 
 /** The headers a dial presents for an origin — empty when this machine holds no credential for it. */

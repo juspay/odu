@@ -15,7 +15,7 @@ export interface RouteRow {
   domain: string;
   bucket: string | null;
   zoneId: string;
-  recordId: string;
+  recordId: string | null;
   state: RouteState;
   reason: string | null;
   updated: number;
@@ -66,6 +66,10 @@ const maybeText = (row: Row, column: string): string | null => {
   const value = row[column];
   return value === null || value === undefined ? null : String(value);
 };
+const writtenText = (row: Row, column: string): string | null => {
+  const value = text(row, column);
+  return value === "" ? null : value;
+};
 const integer = (row: Row, column: string): number => Number(row[column]);
 
 const tunnelOf = (row: Row): TunnelRow => ({
@@ -80,7 +84,7 @@ const routeOf = (row: Row): RouteRow => ({
   domain: text(row, "domain"),
   bucket: maybeText(row, "bucket"),
   zoneId: text(row, "zone_id"),
-  recordId: text(row, "record_id"),
+  recordId: writtenText(row, "record_id"),
   state: text(row, "state") as RouteState,
   reason: maybeText(row, "reason"),
   updated: integer(row, "updated"),
@@ -166,7 +170,7 @@ export function openCloudflareRepo(path: string): CloudflareRepo {
           row.domain,
           row.bucket,
           row.zoneId,
-          row.recordId,
+          row.recordId ?? "",
           row.state,
           row.reason,
           row.updated,

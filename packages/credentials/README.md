@@ -10,7 +10,7 @@ Part of the odu repo — `"@odu/credentials": "workspace:*"`.
 
 | door | what it is | browser-safe |
 | --- | --- | --- |
-| `.` | `credentialsPath`, `readCredentials`, `saveCredential`, `normalizeOrigin` — `store` is the one word a row supplies | ❌ |
+| `.` | `credentialsPath`, `readCredentials`, `saveCredential`, `trimTrailingSlashes` — `store` is the one word a row supplies | ❌ |
 
 ## Why it is a package
 

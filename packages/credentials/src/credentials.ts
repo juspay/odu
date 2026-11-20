@@ -22,7 +22,7 @@ export function credentialsPath(env: CredentialEnv, store: string): string {
   return join(configBase(env), "odu", store, "credentials");
 }
 
-export function normalizeOrigin(origin: string): string {
+export function trimTrailingSlashes(origin: string): string {
   let end = origin.length;
   while (end > 0 && origin[end - 1] === "/") end--;
   return origin.slice(0, end);
@@ -55,7 +55,7 @@ export async function saveCredential(
 ): Promise<string> {
   const path = credentialsPath(env, store);
   const entries = await readCredentials(env, store);
-  entries[normalizeOrigin(origin)] = token;
+  entries[trimTrailingSlashes(origin)] = token;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(path, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
   // `writeFile`'s mode is only honoured on create; an existing file keeps

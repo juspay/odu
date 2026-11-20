@@ -10,7 +10,7 @@ import {
   describeCache,
   discoveryToken,
   savedCredentialFor,
-  normalizeOrigin,
+  trimTrailingSlashes,
   oduCachesOf,
   pushToCache,
   nixEvalFlakeConfig,
@@ -232,7 +232,7 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
     process.stderr.write(`odu: cache use needs a bucket name\n${CACHE_USAGE}`);
     return 1;
   }
-  const origin = normalizeOrigin(
+  const origin = trimTrailingSlashes(
     values.origin ?? process.env.ODU_WEB_ORIGIN?.trim() ?? "http://127.0.0.1:18440",
   );
   const personal = process.env.ODU_TOKEN?.trim() || process.env.ODU_CACHE_TOKEN?.trim() || null;

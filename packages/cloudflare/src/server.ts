@@ -109,6 +109,11 @@ const defaultProbe = async (url: string, signal?: AbortSignal): Promise<boolean>
 const messageOf = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
+interface RouteEpoch {
+  stale(): boolean;
+  put(row: RouteRow): void;
+}
+
 export function cloudflareServer(options: CloudflareServerOptions): CloudflareServer {
   const { config, domains, log } = options;
   const now = options.now ?? (() => Date.now());
@@ -231,13 +236,18 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     }
   }
 
-  function supersede(domain: string): number {
-    const next = (generations.get(domain) ?? 0) + 1;
-    generations.set(domain, next);
-    return next;
+  function supersede(domain: string): RouteEpoch {
+    const mine = (generations.get(domain) ?? 0) + 1;
+    generations.set(domain, mine);
+    const mineStill = (): boolean => (generations.get(domain) ?? 0) === mine;
+    return {
+      stale: () => !mineStill(),
+      put: (row) => {
+        if (!mineStill()) return;
+        putRoute(row);
+      },
+    };
   }
-
-  const current = (domain: string): number => generations.get(domain) ?? 0;
 
   function connect(tunnel: TunnelRow): void {
     if (closed) return;
@@ -301,7 +311,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     });
   }
 
-  async function stopConnector(): Promise<void> {
+  async function stopConnectorAndAwaitExit(): Promise<void> {
     const held = connector;
     if (held === null) {
       setTunnel({ state: "stopped", name: tunnelReading().name, id: tunnelReading().id, reason: null });
@@ -324,23 +334,22 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   }
 
   async function confirm(domain: string, bucket: string | null): Promise<void> {
-    const generation = supersede(domain);
+    const epoch = supersede(domain);
     const url = probeUrl(domain, bucket);
     for (let attempt = 0; attempt < attempts; attempt++) {
       await new Promise<void>((resolve) => setTimeout(resolve, interval));
-      if (closed || current(domain) !== generation) return;
+      if (closed || epoch.stale()) return;
       if (await probe(url, stopProbes.signal)) {
-        if (closed || current(domain) !== generation) return;
         const row = db().route(domain);
         if (row === null) return;
-        putRoute({ ...row, bucket, state: "live", reason: null, updated: now() });
+        epoch.put({ ...row, bucket, state: "live", reason: null, updated: now() });
         return;
       }
     }
-    if (closed || current(domain) !== generation) return;
+    if (closed) return;
     const row = db().route(domain);
     if (row === null) return;
-    putRoute({ ...row, state: "failed", reason: `${url} did not answer`, updated: now() });
+    epoch.put({ ...row, state: "failed", reason: `${url} did not answer`, updated: now() });
   }
 
   function startConfirm(domain: string, bucket: string | null): void {
@@ -352,7 +361,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
 
   async function unwire(row: RouteRow, tunnel: TunnelRow | null): Promise<void> {
     supersede(row.domain);
-    if (row.recordId !== "" && tunnel !== null) {
+    if (row.recordId !== null && tunnel !== null) {
       try {
         await api.deleteRecord(row.zoneId, row.recordId, tunnel.tunnelId);
       } catch (err) {
@@ -439,7 +448,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     if (closed) return;
 
     if (desired.size === 0) {
-      await stopConnector();
+      await stopConnectorAndAwaitExit();
       publish();
       return;
     }
@@ -469,7 +478,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     }
     if (closed) return;
     if (zones.size === 0) {
-      await stopConnector();
+      await stopConnectorAndAwaitExit();
       publish();
       return;
     }
@@ -527,7 +536,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
           zone.zoneId,
           domain,
           tunnel.tunnelId,
-          existing === null || existing.recordId === "" ? null : existing.recordId,
+          existing?.recordId ?? null,
         );
         putRoute({
           domain,
@@ -551,20 +560,20 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
         if (row.state === "wiring") startConfirm(row.domain, row.bucket);
       }
     } else {
-      await stopConnector();
+      await stopConnectorAndAwaitExit();
     }
     publish();
   }
 
   function fail(domain: string, bucket: string | null, reason: string): void {
     if (closed) return;
-    supersede(domain);
+    const epoch = supersede(domain);
     const existing = db().route(domain);
-    putRoute({
+    epoch.put({
       domain,
       bucket,
       zoneId: existing?.zoneId ?? "",
-      recordId: existing?.recordId ?? "",
+      recordId: existing?.recordId ?? null,
       state: "failed",
       reason,
       updated: now(),
@@ -679,7 +688,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
       stopProbes.abort();
       await work.catch(() => {});
       await Promise.allSettled([...confirmations]);
-      await stopConnector();
+      await stopConnectorAndAwaitExit();
       repo?.close();
       repo = null;
     },

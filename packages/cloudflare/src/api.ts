@@ -74,6 +74,15 @@ const messagesOf = (envelope: Envelope): string => {
 const tunnelUrl = (accountId: string, tunnelId: string): string =>
   `/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}`;
 
+function registrableCandidates(host: string): string[] {
+  const labels = host.toLowerCase().split(".").filter((label) => label !== "");
+  const candidates: string[] = [];
+  for (let at = 0; at + 2 <= labels.length; at++) {
+    candidates.push(labels.slice(at).join("."));
+  }
+  return candidates;
+}
+
 export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
   const base = (options.base ?? "https://api.cloudflare.com/client/v4").replace(/\/+$/, "");
   const ask = options.fetch ?? fetch;
@@ -134,9 +143,7 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
     },
 
     async zoneFor(host) {
-      const labels = host.toLowerCase().split(".").filter((label) => label !== "");
-      for (let at = 0; at <= labels.length - 2; at++) {
-        const candidate = labels.slice(at).join(".");
+      for (const candidate of registrableCandidates(host)) {
         const zones = await call<
           ReadonlyArray<{ id: string; name: string; account?: { id?: string } }>
         >("GET", `/zones?name=${encodeURIComponent(candidate)}&status=active`);

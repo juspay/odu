@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   credentialsPath as sharedCredentialsPath,
-  normalizeOrigin,
+  trimTrailingSlashes,
   readCredentials as sharedReadCredentials,
   saveCredential as sharedSaveCredential,
 } from "@odu/credentials";
@@ -53,7 +53,7 @@ const readCredentials = (env: PushEnv): Promise<Record<string, string>> =>
 export const saveCredential = (env: PushEnv, origin: string, token: string): Promise<string> =>
   sharedSaveCredential(env, STORE, origin, token);
 
-export { normalizeOrigin } from "@odu/credentials";
+export { trimTrailingSlashes } from "@odu/credentials";
 
 export { describeFailure } from "./failure";
 
@@ -77,14 +77,14 @@ export async function resolveBucket(
     const url = new URL(argument);
     const name = url.pathname.split("/").filter((part) => part !== "").pop() ?? "";
     if (name === "") return { error: `${argument} names no bucket` };
-    return { origin: normalizeOrigin(`${url.protocol}//${url.host}`), name };
+    return { origin: trimTrailingSlashes(`${url.protocol}//${url.host}`), name };
   }
   if (explicitOrigin !== undefined && explicitOrigin.trim() !== "") {
-    return { origin: normalizeOrigin(explicitOrigin.trim()), name: argument };
+    return { origin: trimTrailingSlashes(explicitOrigin.trim()), name: argument };
   }
   const loggedIn = Object.keys(await readCredentials(env));
   if (loggedIn.length === 1) {
-    return { origin: normalizeOrigin(loggedIn[0] as string), name: argument };
+    return { origin: trimTrailingSlashes(loggedIn[0] as string), name: argument };
   }
   if (loggedIn.length > 1) {
     return {
@@ -95,7 +95,7 @@ export async function resolveBucket(
   }
   const origin = env.ODU_WEB_ORIGIN?.trim();
   return {
-    origin: normalizeOrigin(
+    origin: trimTrailingSlashes(
       origin !== undefined && origin !== "" ? origin : "http://127.0.0.1:18440",
     ),
     name: argument,
@@ -178,7 +178,7 @@ export async function describeCache(
         `odu that serves it`,
     );
   }
-  return { origin: normalizeOrigin(origin), bucket };
+  return { origin: trimTrailingSlashes(origin), bucket };
 }
 
 export async function discoveryToken(
@@ -495,7 +495,7 @@ export async function savedCredentialFor(
   origin: string,
 ): Promise<string | null> {
   const entries = await readCredentials(env);
-  return entries[normalizeOrigin(origin)] ?? null;
+  return entries[trimTrailingSlashes(origin)] ?? null;
 }
 
 export type ClosureEntry = PathInfo;
