@@ -1,21 +1,3 @@
-/**
- * THE ROW'S OWN CLAIM — a refused second resolver leaves NOTHING behind.
- *
- * The broker's rule ("a second claimant installs nothing") is only half the
- * promise: the auth row acquires a database, a resolver, a mount and a route
- * layer in its `apply`, and a row that threw at the claim after three of those
- * would have installed three things and released none. That is what this test
- * stands in the middle of.
- *
- * The setup is the real one: a Cordis host with the services the row needs, a
- * bundle stub that COUNTS mounts, and a `HttpRoutes` stub that counts layers.
- * A sibling row claims the broker first; the auth row then mounts and must fail
- * with the claim's own sentence, leaving the mount count and the route count at
- * what they were — and its database closed (its WAL is checkpointed away when
- * the last connection goes, which is the one observable a closed SQLite file
- * gives from outside).
- */
-
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,7 +70,6 @@ describe("the door's row", () => {
     let mounts = 0;
 
     const broker = localBroker({ door: true });
-    // A sibling row claims the door first — what a second identity row would do.
     const squatter = definePlugin({
       name: "squatter",
       needs: [],
@@ -123,26 +104,22 @@ describe("the door's row", () => {
 
       const report = (await run(rowReport(host, ["auth"]))).get("auth");
       expect(report?.state).toBe("failed");
-      // The claim's own sentence, not a message-match on something else.
       expect(report?.state === "failed" ? (report.fault ?? "") : "").toContain(
         "exactly one row",
       );
 
-      // THE TWO STRUCTURAL FACTS: the refused row mounted nothing and registered
-      // no routes, because both acquisitions come after the claim.
       expect(mounts).toBe(0);
       expect(layers).toHaveLength(0);
 
-      // …AND ITS DATABASE IS CLOSED. A SQLite file's `-wal` is checkpointed away
-      // when its last connection closes, so a WAL still sitting there is a
-      // database the refused row left open.
+      // A SQLite file's `-wal` is checkpointed away when its last connection
+      // closes, so a WAL still sitting there is a database the refused row left
+      // open.
       const db = join(scratch, "auth", "auth.sqlite");
       expect(existsSync(db)).toBe(true);
       expect(existsSync(`${db}-wal`)).toBe(false);
 
       await run(closeHost(host));
     } finally {
-      // `standing()`'s scope is this test's; nothing to release by hand.
     }
   });
 });

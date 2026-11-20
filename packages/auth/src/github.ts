@@ -1,37 +1,6 @@
-/**
- * GITHUB, as little of it as this row needs — the GitHub APP's
- * authorisation-code flow, and the membership question an allow-list asks.
- *
- * **An App, not an OAuth App.** Same flow and same endpoints; what differs is
- * what a token can SEE. The App's permissions are the scope, so the
- * authorisation URL carries no `scope` parameter, and an old App asking for
- * `read:org` would be asking for something the organisation may refuse
- * separately. The App is installed on the org, which is what makes the
- * per-person membership reads on `/user/memberships/orgs/<org>` answer.
- *
- * **An expiring token is refused, not stored.** GitHub Apps can be configured
- * to expire user tokens after eight hours; this release does not store refresh
- * tokens, so holding one would be a session that dies in the middle of a work
- * day. The token response says so in `expires_in`/`refresh_token`, and the
- * sign-in is refused with a sentence naming the App setting to turn off.
- *
- * **Membership, in PR 2's shape.** The allow-list is checked with the
- * PERSON's token: `/user/memberships/orgs/<org>` for `org:`, and
- * `/orgs/<org>/teams/<slug>/memberships/<login>` for `team:`. That is what an
- * installed App with Organization → Members read can ask. PR 4 syncs
- * membership server-side from the installation token, so a removal in GitHub
- * becomes a removal in odu without waiting for the next sign-in.
- *
- * Everything network-shaped takes `fetch` as an argument: the e2e stub is a
- * tiny HTTP server pointed at with `ODU_GITHUB_ORIGIN`/`ODU_GITHUB_API`, and a
- * unit test is a fake.
- */
-
 import { readFileSync } from "node:fs";
 
-/** GITHUB LOGINS ARE CASE-INSENSITIVE, and this is the one place that says so:
- *  a grant typed `Srid` must find the grant written by a sign-in as `srid`, and
- *  a rule written `Srid` must admit `srid`. */
+/** GitHub logins are case-insensitive. */
 export function normalizeLogin(login: string): string {
   return login.trim().toLowerCase();
 }
@@ -39,21 +8,13 @@ export function normalizeLogin(login: string): string {
 export interface GithubConfig {
   readonly clientId: string;
   readonly clientSecret: string;
-  /** The operator's WORDS — kept verbatim so a sentence can quote them. */
   readonly allow: string;
-  /** The same list, PARSED ONCE at startup: a sign-in may not re-read the
-   *  grammar, and a malformed entry was refused before the row mounted. */
   readonly rules: ReadonlyArray<AllowRule>;
-  /** Where a person authorises: `https://github.com`, or an enterprise host. */
   readonly origin: string;
-  /** Where the API answers: `https://api.github.com`. */
   readonly api: string;
-  /** Where THIS daemon is reached from a browser — the callback's origin. */
   readonly publicOrigin: string;
 }
 
-/** What the environment came to: nothing (the row is not mounted), a config, or
- *  a refusal to state. */
 export type GithubConfigReading =
   | { readonly kind: "absent" }
   | { readonly kind: "config"; readonly config: GithubConfig }
@@ -70,15 +31,6 @@ const filled = (value: string | undefined): string | null => {
   return trimmed === undefined || trimmed === "" ? null : trimmed;
 };
 
-/**
- * READ THE ENVIRONMENT — the host's one environment read for this row.
- *
- * ABSENT means all three of client id, secret file and allow-list are unset:
- * that is the loopback deployment, and the row is not mounted. A PARTIAL set is
- * a refusal naming what is missing, because a daemon that silently stopped
- * asking for sign-in because one variable was misspelled would be a door that
- * looks shut and is not.
- */
 export function readGithubConfig(
   env: Record<string, string | undefined>,
   origins: { readonly publicOrigin: string | null; readonly boundOrigin: string },
@@ -137,26 +89,11 @@ export function readGithubConfig(
   };
 }
 
-// ── the allow-list ──────────────────────────────────────────────────────────
-
 export type AllowRule =
   | { readonly kind: "org"; readonly org: string }
   | { readonly kind: "team"; readonly org: string; readonly slug: string }
   | { readonly kind: "login"; readonly login: string };
 
-/**
- * `org:<name>`, `team:<org>/<slug>`, or a GitHub login, comma-separated
- * anywhere.
- *
- * THE GRAMMAR IS ENFORCED, and a malformed entry is a REFUSAL naming it rather
- * than a rule that quietly matches nobody. `team:juspay` (no slug), `org:`
- * (empty) and a typo for `org:juspay` would all otherwise become a login no
- * GitHub account will ever have — an allow-list that locks everybody out with
- * nothing in the log to say why.
- *
- * GitHub's own grammar is the check: an organisation or login is
- * `[A-Za-z0-9][A-Za-z0-9-]{0,38}`, a team slug adds dots and underscores.
- */
 export type AllowReading =
   | { readonly ok: true; readonly rules: ReadonlyArray<AllowRule> }
   | { readonly ok: false; readonly message: string };
@@ -210,7 +147,6 @@ export function readAllow(spec: string): AllowReading {
   return { ok: true, rules };
 }
 
-/** The same rules, for a sentence a person reads on a refused sign-in. */
 export function describeAllow(spec: string): string {
   return spec
     .split(",")
@@ -219,19 +155,13 @@ export function describeAllow(spec: string): string {
     .join(", ");
 }
 
-// ── the flow ────────────────────────────────────────────────────────────────
-
-/** Where the callback lands — the URL registered on the App. */
 export function callbackUrl(config: GithubConfig): string {
   return `${config.publicOrigin}/auth/github/callback`;
 }
 
 /**
- * WHERE A PERSON IS SENT TO AUTHORISE.
- *
  * NO `scope`: the App's permissions are the scope, and GitHub ignores a scope
- * it does not grant. `state` is the CSRF cookie's value, checked at the
- * callback.
+ * it does not grant.
  */
 export function authorizeUrl(config: GithubConfig, state: string): string {
   const url = new URL("/login/oauth/authorize", config.origin);
@@ -253,13 +183,6 @@ interface TokenResponse {
   refresh_token?: unknown;
 }
 
-/**
- * THE AUTHORISATION CODE, EXCHANGED FOR A USER TOKEN.
- *
- * Refuses an EXPIRING token with a sentence naming the App setting — the
- * `expires_in`/`refresh_token` pair is GitHub saying the App was configured
- * with token expiry on, and this release has nowhere to keep a refresh token.
- */
 export async function exchangeCode(
   config: GithubConfig,
   code: string,
@@ -319,7 +242,6 @@ export type UserReading =
   | { readonly ok: true; readonly login: string }
   | { readonly ok: false; readonly message: string };
 
-/** The person behind a token. */
 export async function fetchLogin(
   config: GithubConfig,
   token: string,
@@ -360,12 +282,6 @@ export type Membership =
   | { readonly ok: true; readonly rule: AllowRule }
   | { readonly ok: false; readonly message: string };
 
-/**
- * MAY THIS LOGIN ENTER, and by which rule?
- *
- * Rules are tried in the order written, and the first match answers. Any
- * campaign-length call is a per-sign-in cost, not a per-request one.
- */
 export async function membership(
   config: GithubConfig,
   token: string,
@@ -415,8 +331,6 @@ export async function membership(
   };
 }
 
-/** A membership probe's three outcomes: in, out, or GitHub said something we
- *  cannot read as either (and that is worth a sentence). */
 type Probe =
   | { readonly kind: "member" }
   | { readonly kind: "no" }

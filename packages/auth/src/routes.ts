@@ -1,27 +1,3 @@
-/**
- * THE DOOR'S THREE HTTP ROUTES — sign in, the callback GitHub sends a person
- * back to, and sign out.
- *
- * They are routes rather than surface verbs because two of them are a BROWSER
- * NAVIGATION: a link to GitHub is a GET, and GitHub's redirect lands in an
- * address bar. The session it writes is a cookie, and a cookie is only settable
- * on an ordinary HTTP response.
- *
- * ## The state cookie, and why it is signed
- *
- * `state` is CSRF protection: the value the browser carries to GitHub must come
- * back unchanged, and it must be one this daemon minted. The nonce travels in
- * the query and the HMAC (keyed by the App's client secret — server-held, never
- * on a page) travels in an HttpOnly cookie; the callback requires both to agree.
- * A forged callback has neither the secret nor a browser's cookie.
- *
- * ## What a refused sign-in sees
- *
- * A PAGE, with the reason in it. A person whose GitHub account is not in
- * `ODU_GITHUB_ALLOW`, or whose App issues expiring tokens, has to learn that
- * from the thing they clicked — not from a daemon log they cannot read.
- */
-
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -42,11 +18,8 @@ import {
   SIGN_IN_COPY,
 } from "./surface";
 
-/** The three paths, declared in the browser-safe contract because the sign-in
- *  page renders two of them. */
 export { AUTH_CALLBACK_PATH, AUTH_SIGN_IN_PATH, AUTH_SIGN_OUT_PATH } from "./surface";
 
-/** The CSRF nonce's cookie. HttpOnly, same-site, ten minutes. */
 export const STATE_COOKIE = "odu_oauth_state";
 
 const STATE_MINUTES = 10;
@@ -55,19 +28,10 @@ export interface AuthRoutesOptions {
   readonly config: GithubConfig;
   readonly server: AuthServer;
   readonly log: Pick<Logger, "warn">;
-  /** Injected by a test; the stub is reached through the config's origins. */
   readonly request?: typeof fetch;
   readonly now?: () => number;
 }
 
-/** `nonce.issuedAt.mac` — the nonce is the query value, and the MAC proves this
- *  daemon made it AND WHEN.
- *
- *  The timestamp is what makes a captured state/cookie pair stop working: the
- *  browser clears the cookie on success, but a REFUSAL page used to leave it in
- *  place, so a pair could be re-presented. Now it is good for
- *  {@link STATE_MINUTES} from the moment the sign-in started, whatever happened
- *  to the browser. */
 function signedState(secret: string, at: number): string {
   const nonce = randomBytes(24).toString("base64url");
   const mac = createHmac("sha256", secret).update(`${nonce}.${at}`).digest("base64url");
@@ -88,7 +52,6 @@ function stateIsOurs(secret: string, value: string, now: number): boolean {
   return offered.length === expected.length && timingSafeEqual(offered, expected);
 }
 
-/** The one HTML escape this file needs: a refusal quotes GitHub and a login. */
 function escapeHtml(text: string): string {
   return text
     .replaceAll("&", "&amp;")
@@ -98,8 +61,6 @@ function escapeHtml(text: string): string {
 }
 
 /**
- * NIGHT SHIFT, HARD-CODED — the one stylesheet these two pages cannot link.
- *
  * `@odu/face/theme.css` is in the BUNDLE, and the whole point of the two pages
  * below is that they are read with no bundle: `curl /` on a gated daemon, and
  * a browser that GitHub sent back to a refusal. So the palette is spelled out
@@ -154,20 +115,6 @@ const DOOR_STYLE = `
               font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       :focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }`;
 
-/**
- * THE SIGN-IN PAGE THE SERVER RENDERS — what `curl /` meets on a daemon with a
- * door and no session.
- *
- * It exists because a door has to be provable without a browser: the shell
- * bundle draws the same page (see `./face`), but the bundle is a script, and
- * `curl /` runs none. So the host's middleware answers a shell path with THIS,
- * and a browser arriving cold reads it before any JavaScript — the VM test's
- * `GET /` assertion is this function's output, not the bundle's.
- *
- * `<meta name="odu-door">` is the machine-readable half of the same claim: an
- * operator (or a test) can tell a gated daemon from a loopback one by one
- * tagged response, with no bundle and no cookie.
- */
 export function signInPageHtml(): string {
   return `<!doctype html>
 <html lang="en">
@@ -193,9 +140,6 @@ export function signInPageHtml(): string {
 `;
 }
 
-/** A refusal a person reads, with the way back to try again. The same face as
- *  the page they came from: a refusal that looks like a different server is a
- *  refusal people read as a bug. */
 function refusalPage(status: number, message: string): HttpServerResponse.HttpServerResponse {
   return HttpServerResponse.text(
     `<!doctype html>
@@ -222,8 +166,6 @@ function refusalPage(status: number, message: string): HttpServerResponse.HttpSe
   );
 }
 
-/** Set one cookie on a response, synchronously — the router's handlers answer
- *  with a response value. */
 function withCookie(
   response: HttpServerResponse.HttpServerResponse,
   name: string,
@@ -246,9 +188,6 @@ export function authRoutes(opts: AuthRoutesOptions): ClaimedRoutes {
   const request = opts.request ?? fetch;
   const now = opts.now ?? Date.now;
   const secure = config.publicOrigin.startsWith("https://");
-  /** The nonce is SPENT on every callback outcome — success, refusal, or a bad
-   *  state — so a captured `state`/cookie pair is good for one presentation and
-   *  only for {@link STATE_MINUTES}. */
   const spent = (response: HttpServerResponse.HttpServerResponse) =>
     withCookie(response, STATE_COOKIE, "", { secure, maxAge: "0 minutes" });
 
@@ -336,8 +275,6 @@ export function authRoutes(opts: AuthRoutesOptions): ClaimedRoutes {
 
   return {
     layer: Layer.merge(signIn, Layer.merge(callback, signOut)),
-    // The door's own flow, exactly: an anonymous person must reach it, and
-    // `/auth/` with nothing after it is a typo the shell answers.
     paths: [AUTH_SIGN_IN_PATH, AUTH_CALLBACK_PATH, AUTH_SIGN_OUT_PATH],
   };
 }

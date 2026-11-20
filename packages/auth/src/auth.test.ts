@@ -1,17 +1,3 @@
-/**
- * THE DOOR, HELD TO ITS PROMISES — config, GitHub, and the row's own rules.
- *
- * Three groups, and each is a claim the feature would be lying about otherwise:
- *
- *   - **the environment** is absent, complete, or REFUSED — never half set;
- *   - **GitHub** is asked with no `scope`, and an EXPIRING user token is refused
- *     with a sentence naming the App setting rather than stored;
- *   - **the row** mints a session that a cookie resolves to, refuses a `member`
- *     an owner's verb, ends a connection when its token is revoked or its
- *     session expires, and lets the ROOT TOKEN bootstrap the first owner and
- *     nothing else.
- */
-
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,7 +52,6 @@ afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-/** The row, with a real database under a temp root. */
 function row(over: { rootToken?: string | null; now?: () => number } = {}) {
   const repo = openAuthRepo(join(scratch, "auth.sqlite"));
   const server = authServer({
@@ -83,7 +68,6 @@ function row(over: { rootToken?: string | null; now?: () => number } = {}) {
   return { server, client, repo };
 }
 
-/** One call as a given admission. */
 function as<A>(
   effect: Effect.Effect<A, unknown>,
   admission: Admission,
@@ -107,12 +91,7 @@ const refusal = (error: unknown): AuthRefused => {
   throw new Error(`expected an AuthRefused, got ${String(error)}`);
 };
 
-// ── the environment ─────────────────────────────────────────────────────────
-
 describe("the authorization header", () => {
-  // THE PARSER DECIDES WHETHER A REQUEST IS SIGNED IN, so its edges are
-  // promises: the scheme is case-insensitive, the gap is one or more spaces
-  // (a proxy may re-fold them), and anything else is nobody.
   it("takes the token after the scheme, whatever the spacing", () => {
     expect(bearerValue("Bearer abc")).toBe("abc");
     expect(bearerValue("bearer abc")).toBe("abc");
@@ -183,7 +162,6 @@ describe("the door's configuration", () => {
     expect(reading.config.publicOrigin).toBe("https://odu.test");
     expect(reading.config.origin).toBe("https://github.com");
     expect(reading.config.api).toBe("https://api.github.com");
-    // PARSED ONCE, at startup: the config carries the rules a sign-in acts on.
     expect(reading.config.rules).toEqual([
       { kind: "org", org: "juspay" },
       { kind: "login", login: "srid" },
@@ -191,9 +169,6 @@ describe("the door's configuration", () => {
   });
 });
 
-// ── GitHub ──────────────────────────────────────────────────────────────────
-
-/** A GitHub that answers exactly one canned thing per URL. */
 function stubFetch(answer: (url: string) => { status?: number; body: unknown }) {
   return (async (input: string | URL | Request) => {
     const url = String(input);
@@ -270,8 +245,6 @@ describe("the GitHub App's flow", () => {
   });
 });
 
-// ── the row ─────────────────────────────────────────────────────────────────
-
 describe("the row's authority", () => {
   it("mints a session a cookie resolves to, and ends it on sign-out", () => {
     const { server } = row();
@@ -285,8 +258,6 @@ describe("the row's authority", () => {
     });
     expect(server.signOut(cookie)).toBe(true);
     expect(ended).toBe(1);
-    // The cookie is dead: a second connection carrying it is refused NOTHING,
-    // which is the gate's cue to serve it anonymously.
     expect(server.resolver.acquire({ cookie: `${SESSION_COOKIE}=${cookie}` })).toBeNull();
   });
 
@@ -362,7 +333,6 @@ describe("the row's authority", () => {
   it("refuses the ROOT TOKEN for anything but the first OWNER", async () => {
     const { client } = row({ rootToken: "operator" });
 
-    // A role that is not `owner`, before anybody owns the daemon.
     const admin = await as(
       client.surface.user.grant({ login: "alice", role: "admin", rootToken: "operator" }),
       admissionFor(null),
@@ -372,8 +342,6 @@ describe("the row's authority", () => {
     expect(refusal(admin.error).code).toBe("not_permitted");
     expect(refusal(admin.error).message).toContain("first OWNER");
 
-    // …and once an owner exists, the root token is spent — for an owner grant
-    // too, which is the second grant a bootstrap script is tempted to make.
     const first = await as(
       client.surface.user.grant({ login: "srid", role: "owner", rootToken: "operator" }),
       admissionFor(null),
@@ -387,7 +355,6 @@ describe("the row's authority", () => {
     if (again.ok) return;
     expect(refusal(again.error).message).toContain("already has an owner");
 
-    // An owner's session still grants, which is what the root token handed over.
     const byOwner = await as(
       client.surface.user.grant({ login: "alice", role: "admin", rootToken: "" }),
       admit("srid", "owner"),
@@ -418,7 +385,6 @@ describe("the row's authority", () => {
     if (!bootstrapped.ok) return;
     expect(bootstrapped.value).toEqual({ login: "srid", role: "owner" });
 
-    // …and the role is what the next connection arrives with.
     const { cookie } = server.signIn({ login: "srid", agent: null });
     const lease = server.resolver.acquire({ cookie: `${SESSION_COOKIE}=${cookie}` });
     expect(lease?.principal).toEqual({ kind: "user", login: "srid", role: "owner" });
@@ -442,8 +408,6 @@ describe("the row's authority", () => {
       client.surface.user.grant({ login: "alice", role: "admin", rootToken: "" }),
       admit("srid", "owner"),
     );
-    // Allowed in by GitHub, never granted: the person an owner opens the page
-    // to promote, and the reason this is not just the grant table.
     server.signIn({ login: "bob", agent: null });
     server.signIn({ login: "srid", agent: null });
 
@@ -465,8 +429,6 @@ describe("the row's authority", () => {
       client.surface.user.grant({ login: "srid", role: "owner", rootToken: "operator" }),
       admissionFor(null),
     );
-    // Allowed in, never granted, and then gone: exactly the person the page
-    // exists to promote. Sign-out deletes the SESSION row, not the person.
     const { cookie } = server.signIn({ login: "carol", agent: null });
     expect(server.signOut(cookie)).toBe(true);
 

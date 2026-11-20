@@ -1,31 +1,3 @@
-/**
- * THE DOOR'S FACE — the sign-in page, the signed-in header, and the profile.
- *
- * It is here rather than in `@odu/web-ui` for the reason `@odu/cache/face` is:
- * a row owns everything about itself, and what a sign-in looks like is one of
- * those things. The shell imports this and hands it the auth client; it holds
- * no run client and reaches no other row.
- *
- * ## Four pieces, and what each may assume
- *
- *   - **`SignIn`** is what an ANONYMOUS browser meets INSTEAD OF the whole app
- *     — no rail and no frame, because there is nothing yet to navigate. It is
- *     a link and nothing else: GitHub's authorisation page is the form, and the
- *     daemon's `/auth/github` route is what starts the flow.
- *   - **`SignedInHeader`** is the RAIL'S ACCOUNT CARD: the login, its role, the
- *     way to the profile, and sign-out. Sign-out is a real
- *     `<form method="post">`, so the cookie the browser cannot read is the one
- *     the server clears. The row switch BESIDE it is the shell's and not this
- *     file's — the way to the people page included.
- *   - **`ProfileFace`** is sessions and personal tokens: create (the token is
- *     shown once), revoke, and end a session. It reads them when it opens rather
- *     than subscribing — a token list is not a live fact, and `whoami` on the
- *     next call is what notices a revocation.
- *   - **`PeopleFace`** is the owner's page: who is in (`grant.list`) and the
- *     role each holds, with a control to grant or change one (`user.grant`).
- *     The shell DRAWS it for an owner; the row REFUSES everyone else on its own.
- */
-
 import { createControl } from "@odu/face/control";
 import { ago } from "@odu/cordis/format";
 import { refusalText } from "@odu/face/refusal";
@@ -61,33 +33,14 @@ import {
   type Who,
 } from "./surface";
 
-/** The caller's identity, re-exported so a shell that opens this door does not
- *  also reach for the contract module. */
 export type { Who } from "./surface";
 
 type AuthSpec = (typeof oduAuthSurface)["spec"];
 
-/** The auth row's client as a VIEW holds it. */
 export type AuthClient = SurfaceClient<AuthSpec>;
 
-/** HOW MANY CELLS the sign-in's field draws — eighteen columns of twelve at
- *  the artboard's size. The grid is `auto-fit`, so a narrower pane rewraps the
- *  same cells rather than being given a different number of them. */
 const SIGN_IN_CELLS = 216;
 
-/**
- * THE FIELD'S PATTERN, COMPUTED ONCE AND NEVER AGAIN.
- *
- * A pure function of the index rather than `Math.random`: a decoration that
- * reshuffles on every render is a page that FLICKERS, and a page that flickers
- * while somebody reads "this server answers only to people its operator has
- * allowed in" looks like it is deciding something about them. Hoisted to the
- * module so it is one array for the life of the tab.
- *
- * The mix is the artboard's — mostly green, a little amber, one red in
- * twenty-three — because that is what a healthy board looks like, and this is
- * a picture of a board.
- */
 const SIGN_IN_PATTERN: readonly string[] = Array.from(
   { length: SIGN_IN_CELLS },
   (_unused, index) => {
@@ -99,21 +52,9 @@ const SIGN_IN_PATTERN: readonly string[] = Array.from(
   },
 );
 
-/**
- * WHAT AN ANONYMOUS CONNECTION MEETS — the whole screen, not a panel in one.
- *
- * Two panes. The right one is the product's name, what this server is, and the
- * ONE control. The left one is decoration, and the only decoration this design
- * has: a field of LANE CELLS, the same eleven pixels the board spends on a
- * node, so the first thing a stranger sees is the shape of the thing they are
- * signing in to.
- */
 export function SignIn(): JSX.Element {
   return (
     <section class="signin" aria-label="sign in">
-      {/* `aria-hidden`: the field says nothing a reader needs, and two hundred
-          unnamed cells in the accessibility tree are two hundred things to
-          skip past before reaching the only control on the page. */}
       <div class="signin-art" aria-hidden="true">
         <div class="signin-grid">
           <For each={SIGN_IN_PATTERN}>{(hue) => <span class={`cell ${hue}`} />}</For>
@@ -126,17 +67,12 @@ export function SignIn(): JSX.Element {
             <h1 class="signin-title">{SIGN_IN_COPY.title}</h1>
             <p class="hint">{SIGN_IN_COPY.hint}</p>
           </div>
-          {/* A link, not a button: GitHub's authorisation page is the form, and
-              a person may want to open it in a new tab. */}
           <a class="signin-action" href={AUTH_SIGN_IN_PATH}>
             <svg aria-hidden="true" width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
               <path d="M8 .2a8 8 0 0 0-2.5 15.6c.4 0 .5-.2.5-.4v-1.5c-2.2.5-2.7-1-2.7-1-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.3 1.9.9 2.4.7 0-.5.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-4 0-.9.3-1.6.8-2.1-.1-.2-.4-1 .1-2.1 0 0 .7-.2 2.2.8a7.5 7.5 0 0 1 4 0c1.5-1 2.2-.8 2.2-.8.4 1.1.2 1.9.1 2.1.5.6.8 1.3.8 2.1 0 3.1-1.9 3.8-3.6 4 .3.3.6.8.6 1.5v2.2c0 .2.1.5.6.4A8 8 0 0 0 8 .2Z" />
             </svg>
             {SIGN_IN_COPY.action}
           </a>
-          {/* WHICH SERVER THIS IS. A person reaches a dozen of these by tailnet
-              name, and the origin is the only thing on the page that says which
-              one is asking them to sign in. */}
           <p class="signin-foot">{pageOrigin()}</p>
         </div>
       </div>
@@ -144,22 +80,12 @@ export function SignIn(): JSX.Element {
   );
 }
 
-/**
- * THE RAIL'S ACCOUNT CARD — who you are, what you hold, and the way out.
- *
- * It sits at the foot of the shell's sidebar, where an account lives in every
- * application a person has ever used. It draws the way to the PROFILE and
- * nothing else: the rows, People included, are the rail's own navigation, and
- * a second list of them down here was two things to keep in step.
- */
 export function SignedInHeader(props: {
   who: Who;
   atProfile: boolean;
   onProfile: () => void;
 }): JSX.Element {
   return (
-    // ANONYMOUS DRAWS NOTHING, rather than an empty card: a bordered box with
-    // no name in it reads as an account that failed to load.
     <Show when={props.who.kind !== "anonymous"}>
       <div class="whoami">
         <Switch>
@@ -180,8 +106,6 @@ export function SignedInHeader(props: {
                   </button>
                   <span class="whoami-role">{who().role}</span>
                 </span>
-                {/* A form POST: the session cookie is HttpOnly, so the only
-                    thing that can clear it is the server answering a request. */}
                 <form method="post" action={AUTH_SIGN_OUT_PATH} class="account-out">
                   <button type="submit" class="link">
                     Sign out
@@ -190,10 +114,6 @@ export function SignedInHeader(props: {
               </>
             )}
           </Match>
-          {/* NO DOOR, and the caller is the machine's owner. `$` rather than an
-              initial: there is no login to take one from, and a shell prompt is
-              what this principal actually is. There is no sign-out either —
-              nothing was signed in. */}
           <Match when={props.who.kind === "local"}>
             <span class="avatar" aria-hidden="true">
               $
@@ -218,7 +138,6 @@ type Readings =
   | { readonly ok: false; readonly message: string };
 
 
-/** How a token's life reads, in one phrase. */
 function tokenLife(token: AuthToken, now: number): string {
   if (token.revoked) return "revoked";
   const used = token.lastUsed === null ? "never used" : `last used ${ago(token.lastUsed, now)}`;
@@ -231,19 +150,16 @@ function tokenLife(token: AuthToken, now: number): string {
   return `${used} · ${expires} · created ${ago(token.created, now)}`;
 }
 
-/** How a session's life reads, in one phrase. */
 function sessionLife(session: AuthSession, now: number): string {
   return `signed in ${ago(session.created, now)} · last seen ${ago(session.lastSeen, now)}`;
 }
 
-/** Where this page is served — the origin a minted token is for. */
 function pageOrigin(): string {
   return typeof globalThis.location === "undefined" ? "<origin>" : globalThis.location.origin;
 }
 
 export interface ProfileFaceProps {
   client: AuthClient;
-  /** The UI edge, supplied by the shell — a click is where an `Effect` runs. */
   call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
   now: number;
   who: Who;
@@ -263,17 +179,12 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
     }
   });
 
-  /** The token just minted — the ONE time it can be read. */
   const [mintedId, setMintedId] = createSignal<string | null>(null);
   const [mintedToken, setMintedToken] = createSignal<string | null>(null);
   const [name, setName] = createSignal("");
-  // NINETY DAYS IS THE FORM'S DEFAULT and "never" is a visible choice; the
-  // row's absent-expiry rule is the API's, not a page's silent behaviour.
   const [expiry, setExpiry] = createSignal("90");
   const control = createControl(props.call);
 
-  /** The name is sent as typed: the ROW refuses an empty one in its own words
-   *  — a button that greys out says nothing about why. */
   const create = (): void => {
     control.run(
       props.client.procedures.token.create({
@@ -332,12 +243,6 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
       <p class="crumbs">
         <BackLink onClick={() => props.onClose()}>runs</BackLink>
       </p>
-      {/* THE LOGIN IS THE HEADING, in mono: it is the string the daemon knows
-          this person by, and the one a `--origin` call will name. A local owner
-          has no login and the page still exists for them — a token is how a
-          machine with no door hands a credential to an agent. The role and the
-          origin ride under it, because a token minted here is a credential FOR
-          THIS SERVER and nothing else. */}
       <PageHead
         title={props.who.kind === "user" ? props.who.login : "local owner"}
         mono
@@ -384,10 +289,6 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
         title="Personal access tokens"
         note="A token is shown once, when it is minted — the row keeps only a hash."
       >
-        {/* THE ONE SHOWING, at the top of the panel that minted it. A console
-            surface rather than a field: it is read, copied and never seen
-            again, and the copy control is beside it because nobody selects
-            forty characters of base64 by hand on a phone. */}
         <Show when={mintedToken()}>
           {(token) => (
             <div class="profile-minted panel-body">
@@ -408,9 +309,6 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
         <div class="panel-body">
           <div class="stack">
             <div class="profile-create control-row">
-              {/* The name is sent as typed and the button never greys out: the
-                  ROW refuses an empty one in its own words, and a disabled
-                  control says nothing about why. */}
               <label class="field-inline">
                 <span class="sr-only">token name</span>
                 <TextInput
@@ -454,10 +352,6 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
                         <Show when={token.id === mintedId()}>
                           <Pill hue="amber">just created</Pill>
                         </Show>
-                        {/* THE ID IS IN THE CONTROL'S NAME. Two tokens may both
-                            be called `laptop`, and "revoke" alone would be two
-                            controls with one name — to a screen reader and to
-                            the acceptance suite alike. */}
                         <Show when={!token.revoked}>
                           <button
                             type="button"
@@ -489,7 +383,6 @@ function isRole(value: string): value is RoleName {
   return (ROLES as readonly string[]).includes(value);
 }
 
-/** How a person's presence reads, in one phrase. */
 function personLife(person: AuthPerson, now: number): string {
   const role = person.granted ? "granted" : "default role";
   return person.lastSeen === null
@@ -518,14 +411,6 @@ export interface PeopleFaceProps {
   onClose: () => void;
 }
 
-/**
- * WHO IS IN, AND WHAT EACH MAY DO — the owner's page, and what
- * `odu surface auth grant_list` / `user_grant` answer, without a terminal.
- *
- * Read when it opens and after every grant, for the profile's reason: the role
- * table is not a live fact on the wire. A grant takes effect at the person's
- * NEXT connection (the row ends their open ones), so the page says so.
- */
 export function PeopleFace(props: PeopleFaceProps): JSX.Element {
   type People =
     | { readonly ok: true; readonly people: readonly AuthPerson[] }
@@ -543,15 +428,8 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
   const [role, setRole] = createSignal<RoleName>("member");
   const control = createControl(props.call);
 
-  /** One grant — from the form, or from a row's select. The login is sent as
-   *  typed, empty included: the ROW refuses it (and a demotion of the last
-   *  owner) in its own words, and that sentence is what the page shows. The
-   *  list is re-read on either answer, so a refused change does not leave a
-   *  select showing a role the daemon does not hold. */
   const grant = (who: string, to: RoleName): void => {
     control.run(
-      // `rootToken` is the bootstrap's and is ignored for a signed-in caller:
-      // this page is only ever an owner's session.
       props.client.procedures.user.grant({ login: who.trim(), role: to, rootToken: "" }),
       (answer) => {
         setLogin("");
@@ -617,9 +495,6 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
                 {control.busy() ? "granting…" : "Grant"}
               </Button>
             </div>
-            {/* THE ROW'S OWN SENTENCE, under the control that asked for it:
-                "a grant needs a GitHub login" is the daemon's answer, not a
-                validation message this page invented. */}
             <Show when={control.fault()}>{(message) => <p class="fault">{message()}</p>}</Show>
             <Show when={control.done()}>{(message) => <p class="hint done">{message()}</p>}</Show>
             <Show when={refusal()}>{(message) => <p class="fault">{message()}</p>}</Show>
@@ -649,15 +524,8 @@ export function PeopleFace(props: PeopleFaceProps): JSX.Element {
                         <code class="path">{person.login}</code>
                         <span class="fact-line bucket-facts">{personLife(person, props.now)}</span>
                       </span>
-                      {/* A ROLE IS A PROPERTY, not a verdict: a square grey tag
-                          and not a hued pill, because every colour this page
-                          owns already means something about a run. */}
                       <Tag>{person.role}</Tag>
                     </span>
-                    {/* CHANGING A ROLE IS A GRANT. The select shows the role
-                        held; choosing another one grants it at once, and the
-                        list is re-read so the row says what the daemon now
-                        holds. */}
                     <select
                       class="input"
                       aria-label={`role of ${person.login}`}

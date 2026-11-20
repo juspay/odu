@@ -1,28 +1,3 @@
-/**
- * `odu auth login` — the one thing about the door that needs a shell.
- *
- * A credential is a FILE ON THIS MACHINE'S DISK. The profile page mints a
- * personal access token, and this is how that token reaches every other `odu`
- * command on the machine that was given it: `@odu/cli`'s wire reads the entry
- * this writes (`./credentials`) and sends it on the websocket upgrade. There is
- * nothing here for a browser to do, and no verb that could do it from the other
- * end of a socket — the same argument that keeps `odu cache login`.
- *
- * THE REST OF THE DOOR'S VOCABULARY IS THE BOARD'S AND THE API'S. Who am I,
- * personal tokens, roles and the list of people are controls on the profile and
- * people pages, and verbs on the surface — `odu surface auth user_whoami`,
- * `auth token_create`, `auth token_list`, `auth token_revoke`,
- * `auth user_grant`, `auth grant_list` — which `odu mcp` serves an agent under
- * the same names. A fresh daemon's first owner is granted the same way, with
- * the operator's root token as a field of the input:
- *
- *   odu surface auth user_grant --json \
- *     --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","login":"srid","role":"owner"}'
- *
- * so the bootstrap needs no argv face of its own, and this module dials
- * nothing: it takes no port, and names neither a host nor a surface.
- */
-
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { saveAuthToken } from "./credentials";
@@ -78,9 +53,6 @@ async function loginCommand(rest: string[]): Promise<number> {
     return 1;
   }
   if (values.token !== undefined) {
-    // A token in argv is a token in the shell's history and in every `ps` on
-    // the machine. `--token` stays (a script may have nowhere else to put it),
-    // and it says so once.
     process.stderr.write(
       "odu: `--token` puts the token in your shell history — omit it and paste " +
         "the token on stdin instead\n",
@@ -96,7 +68,6 @@ async function loginCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
-/** One line from stdin, for a token typed by a person. */
 async function readSecret(): Promise<string> {
   if (process.stdin.isTTY !== true) {
     // A PIPE THAT HAS ALREADY FINISHED IS AT EOF BEFORE AN ASYNC ITERATOR

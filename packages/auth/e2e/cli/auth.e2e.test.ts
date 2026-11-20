@@ -1,24 +1,3 @@
-/**
- * THE DOOR, THROUGH THE COMMAND LINE AND AN AGENT — a black-box run.
- *
- * What only a process-level test can show, and a browser scenario cannot:
- *
- *   - `$ODU_TOKEN` (or a token `odu auth login` stored) is what makes
- *     `odu … --origin` work against a server with a door — the credential rides
- *     the websocket UPGRADE, so a face that forgot it would see an empty board
- *     rather than an error;
- *   - an anonymous `/mcp` POST is `401` at the HTTP door;
- *   - the stdio bridge `odu mcp` inherits the same refusal: with no token its
- *     tool calls fail, with `$ODU_TOKEN` they answer as the person;
- *   - and, with that token, `odu ci run --checkout … --sha …` starts a run on
- *     the SERVER's own checkout and the run records who started it (PLAN 4.4)
- *     — the pod's shape, driven from a shell that is not the pod's.
- *
- * The session itself (which needs a browser to complete) is the browser suite's
- * business; this file seeds one personal token directly into `auth.sqlite` —
- * the file the row documents — and tests the machine-facing half.
- */
-
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -42,7 +21,6 @@ import { openAuthRepo } from "../../src/db";
 
 const ROOT_TOKEN = "e2e-auth-root";
 const LOGIN = "srid";
-/** The App's credentials the stub does not check. */
 const CLIENT_ID = "e2e-client-id";
 const CLIENT_SECRET = "e2e-client-secret";
 
@@ -67,8 +45,6 @@ beforeAll(async () => {
     odu,
     {
       ODU_ROOT_TOKEN: ROOT_TOKEN,
-      // The terminator names the public origin: the callback URL is this
-      // daemon's own loopback address.
       ODU_PUBLIC_ORIGIN: origin,
       ODU_GITHUB_CLIENT_ID: CLIENT_ID,
       ODU_GITHUB_CLIENT_SECRET_FILE: secretFile,
@@ -79,9 +55,6 @@ beforeAll(async () => {
     port,
   );
 
-  // THE FIRST OWNER, and a personal token for them — the two facts a person
-  // obtains through the browser, written straight into the row's own file so
-  // this suite can test the machine-facing half without a browser.
   const state = world.env.ODU_STATE_DIR;
   if (state === undefined) throw new Error("e2e: the world has no ODU_STATE_DIR");
   const repo = openAuthRepo(join(state, "auth", "auth.sqlite"));
@@ -98,7 +71,7 @@ beforeAll(async () => {
     revoked: false,
   });
   repo.close();
-}, 900_000); // nix build, cold cache
+}, 900_000);
 
 afterAll(() => {
   world?.dispose();
@@ -106,7 +79,6 @@ afterAll(() => {
   if (secretDir !== undefined) rmSync(secretDir, { recursive: true, force: true });
 });
 
-/** `odu …` against the door's world, with whatever credential the caller names. */
 function cli(argv: string[], env: NodeJS.ProcessEnv = {}) {
   const answer = Bun.spawnSync([odu, ...argv], {
     env: { ...world.env, ...env } as Record<string, string>,
@@ -120,8 +92,6 @@ function cli(argv: string[], env: NodeJS.ProcessEnv = {}) {
   };
 }
 
-/** One API verb through `odu surface <row> <verb>`, with whatever credential
- *  the caller names. A refusal is JSON on stderr, exit 1. */
 function verb(row: string, name: string, input?: unknown, env: NodeJS.ProcessEnv = {}) {
   return cli(
     [
@@ -147,9 +117,6 @@ describe("$ODU_TOKEN drives a command against a server with a door", () => {
   });
 
   it("lets an owner administer the cache, which no token-less caller can", () => {
-    // An empty `rootToken`: a session is a ROLE authority and the operator's
-    // secret is not compared for it. With no session there is no authority at
-    // all, so the same call is refused.
     const denied = verb("cache", "bucket_list", { rootToken: "" });
     expect(denied.status).toBe(1);
 
@@ -160,9 +127,6 @@ describe("$ODU_TOKEN drives a command against a server with a door", () => {
 
   it("answers anonymous for a token this daemon never minted", () => {
     const answer = verb("auth", "user_whoami", undefined, { ODU_TOKEN: "odu_not_a_token" });
-    // ANONYMOUS is an ANSWER, not an error: the door says who you are, and this
-    // connection is nobody. The verb answers it — what the caller reads is
-    // `kind`, not the exit code.
     expect(answer.status).toBe(0);
     expect(JSON.parse(answer.stdout)).toEqual({ who: { kind: "anonymous" } });
   });
@@ -170,8 +134,6 @@ describe("$ODU_TOKEN drives a command against a server with a door", () => {
 
 describe("odu auth login stores the token, and --origin uses it", () => {
   it("writes a credential for the origin and reaches the server with it", () => {
-    // A PRIVATE config home, so the run cannot touch the developer's own
-    // `~/.config/odu/auth/credentials`.
     const configHome = mkdtempSync(join(tmpdir(), "odu-e2e-auth-home-"));
     const env = { ...world.env, XDG_CONFIG_HOME: configHome };
     try {
@@ -183,8 +145,6 @@ describe("odu auth login stores the token, and --origin uses it", () => {
       });
       expect(login.exitCode, login.stderr.toString()).toBe(0);
 
-      // NO `ODU_TOKEN`: the credential the login wrote is the only thing this
-      // call has, and `--origin` is what picks it.
       const whoami = Bun.spawnSync(
         [odu, "surface", "auth", "user_whoami", "--origin", world.origin, "--json"],
         { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe" },
@@ -201,10 +161,6 @@ describe("odu auth login stores the token, and --origin uses it", () => {
 
 describe("the door's HTTP legs", () => {
   it("answers an anonymous browser with the sign-in page on every shell path", async () => {
-    // THE SERVING LAYER owns "which requests are the shell" (a `GET /*`
-    // catch-all), so the gate no longer keeps its own two paths. What proves
-    // the door over HTTP is therefore every path the shell would answer —
-    // including the ones only the client's router knows (`/runs`) and a typo.
     for (const path of ["/", "/index.html", "/runs", "/cache/", "/no-such-page"]) {
       const response = await fetch(new URL(path, world.origin));
       expect(response.status, path).toBe(200);
@@ -216,8 +172,6 @@ describe("the door's HTTP legs", () => {
 
   it("still answers the cache's protocol paths as the protocol, not as the page", async () => {
     const response = await fetch(new URL("/cache/main/nix-cache-info", world.origin));
-    // No bucket `main` on this daemon: the DAEMON's empty 404, untouched by the
-    // door — the gate replaces an HTML 200 and nothing else.
     expect(response.status).toBe(404);
     expect(await response.text()).not.toContain("Sign in to odu");
   });
@@ -292,11 +246,6 @@ describe("odu mcp inherits the credential", () => {
   });
 
   it("advertises the door's eight verbs beside the shared ones", async () => {
-    // A DAEMON WITH A DOOR composes this row and the `/mcp` door advertises its
-    // expose map beside the runs' and the cache's. The bridge ASKS the daemon
-    // (`/_odu/door`) before it composes, so a loopback daemon's bridge does not
-    // offer these eight — which is why this assertion lives here, at the door,
-    // and not in the loopback suites.
     const client = await bridge({ ...world.env, ODU_TOKEN: token });
     try {
       const names = (await client.listTools()).tools.map((tool) => tool.name);
@@ -322,9 +271,6 @@ describe("odu mcp inherits the credential", () => {
         name: "run_list",
         arguments: {},
       })) as { isError?: boolean };
-      // The bridge itself connects (stdio), but the WIRE upgrade carries no
-      // session and the gate serves it nothing but the identity reads — so the
-      // call fails rather than answering with an empty board.
       expect(result.isError).toBe(true);
     } finally {
       await client.close();
@@ -332,20 +278,6 @@ describe("odu mcp inherits the credential", () => {
   });
 });
 
-/**
- * THE DOGFOOD COMMAND, FROM A SHELL THAT IS NOT THE SERVER'S (PLAN 4.4).
- *
- * Here because this is the only suite with a daemon behind a DOOR and a
- * personal token to open it, which is exactly the shape the pod has. What is
- * graded is the pair of facts a token alone never gave:
- *
- *   - `--checkout` + `--sha` name a checkout on the SERVICE's machine, and
- *     the run starts there rather than wherever the caller is standing;
- *   - the run records WHO started it, read back through `run_read`.
- *
- * And the refusal that makes the pair safe: a `--sha` the checkout is not on
- * is a refusal, never a quiet run of a different commit.
- */
 describe("odu ci run --checkout against a server with a door", () => {
   let fixture: string;
   let head: string;
@@ -362,8 +294,6 @@ describe("odu ci run --checkout against a server with a door", () => {
     if (fixture !== undefined) cleanup(fixture);
   });
 
-  /** `odu ci run` from a directory that is NOT the fixture — a laptop's cwd,
-   *  which is the whole point of naming the checkout. */
   function runThere(sha: string, extra: string[] = []) {
     return cli(
       [
@@ -388,8 +318,6 @@ describe("odu ci run --checkout against a server with a door", () => {
   it("refuses a commit the named checkout is not on", () => {
     const moved = runThere("0".repeat(40));
     expect(moved.status).not.toBe(0);
-    // The service's own sentence, about the service's own checkout — this
-    // side never read that directory and cannot have produced it.
     expect(`${moved.stdout}${moved.stderr}`).toContain("moved since you read it");
   });
 
@@ -399,16 +327,12 @@ describe("odu ci run --checkout against a server with a door", () => {
     const receipt = JSON.parse(started.stdout) as { runId: string; accepted: boolean };
     expect(receipt.accepted).toBe(true);
 
-    // The runs are the wire's ROOT, so `odu surface run_read` takes no row
-    // word — `verb` above is for a sibling row like `auth` or `cache`.
     const read = cli(
       ["surface", "run_read", "--input", JSON.stringify({ runId: receipt.runId }), "--json"],
       { ODU_TOKEN: token },
     );
     expect(read.status, read.stderr).toBe(0);
     const answer = JSON.parse(read.stdout) as { actor?: string };
-    // The token's person, resolved from the connection — nothing on the wire
-    // let the caller type this.
     expect(answer.actor).toBe(LOGIN);
   });
 });

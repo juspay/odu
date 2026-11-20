@@ -1,22 +1,3 @@
-/**
- * `auth.sqlite` — sessions, personal tokens, grants.
- *
- * The second database in the tree, with the first one's shape (`@odu/cache`'s
- * `db.ts`): SQLite in WAL mode, `bun:sqlite` because it is the runtime's own
- * binding, migrations by `PRAGMA user_version`, and a narrow repository
- * interface so PR 12's Postgres swap is one file.
- *
- * **What is stored, and what never is.** A session is stored by the SHA-256 of
- * its cookie value, and a token by the SHA-256 of its secret — so a copy of this
- * file is not a set of credentials. The cookie's own value is held only by the
- * browser that signed in.
- *
- * **Grants are the role table.** A login's role is one row; its absence means
- * {@link DEFAULT_ROLE}. GitHub decides who may enter; odu decides what a person
- * may do once in, and that decision is here rather than in GitHub because it is
- * this daemon's.
- */
-
 import { Database } from "bun:sqlite";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -24,7 +5,6 @@ import type { Role } from "@odu/cordis/principal";
 import { normalizeLogin } from "./github";
 
 export interface SessionRow {
-  /** sha256 of the session's cookie value, hex. */
   id: string;
   login: string;
   created: number;
@@ -35,7 +15,6 @@ export interface SessionRow {
 
 export interface TokenRow {
   id: string;
-  /** sha256 of the token, hex. Never the token. */
   hash: string;
   login: string;
   name: string;
@@ -57,11 +36,7 @@ export interface GrantRow {
   created: number;
 }
 
-/** The whole of what the row needs from storage. No SQL, no transaction, no
- *  `Database` in a signature. */
 export interface AuthRepo {
-  /** A live session by its hash, or null. Expiry is the caller's question —
-   *  this answers the row, not whether it is still valid. */
   session(id: string): SessionRow | null;
   putSession(row: SessionRow): void;
   touchSession(id: string, at: number): void;
@@ -78,19 +53,12 @@ export interface AuthRepo {
   grant(login: string): GrantRow | null;
   setGrant(row: GrantRow): void;
   grants(): GrantRow[];
-  /** WHO HAS COME IN, durably: a login is recorded at its first sign-in and
-   *  touched whenever a session or a personal token of theirs is used — and,
-   *  unlike a session row, never deleted by sign-out or expiry. A login allowed
-   *  by GitHub and never granted holds {@link DEFAULT_ROLE}, and an owner must
-   *  be able to see them to change that. */
   touchPerson(login: string, at: number): void;
   people(): PersonRow[];
 
   close(): void;
 }
 
-/** Schema changes, in order. `PRAGMA user_version` is the schema's own number
- *  and the only place it lives. */
 const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE session (
@@ -122,9 +90,6 @@ const MIGRATIONS: readonly string[] = [
     created INTEGER NOT NULL
   );
   `,
-  // 2 — WHO HAS SIGNED IN, kept. The session table holds LIVE sessions only
-  // (sign-out, session end and expiry delete from it), so it cannot answer the
-  // people page's question. Backfilled from whatever sessions survive.
   `
   CREATE TABLE person (
     login      TEXT PRIMARY KEY,
@@ -165,10 +130,6 @@ interface GrantDb {
 export function openAuthRepo(path: string): AuthRepo {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new Database(path, { create: true });
-  // WAL, and a busy timeout: the daemon serves a profile page and a session
-  // sweep from one connection, and a second `odu` process reading the same file
-  // (a CLI with `ODU_STATE_DIR` pointing at a live daemon's) must not see
-  // `database is locked` as a refusal.
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec("PRAGMA foreign_keys = ON");
@@ -189,11 +150,8 @@ export function openAuthRepo(path: string): AuthRepo {
   try {
     chmodSync(path, 0o600);
   } catch {
-    // The directory is 0700 and the WAL files inherit the file's mode; a
-    // filesystem that refuses the chmod is not a reason to refuse to serve.
   }
 
-  /** The one spelling lives in `./github`; this module only applies it. */
   const lower = normalizeLogin;
 
   const sessionOf = (row: SessionDb | null): SessionRow | null =>

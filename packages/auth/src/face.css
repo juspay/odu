@@ -1,26 +1,4 @@
-/*
- * THE DOOR'S OWN SCREENS, in Night shift.
- *
- * `@odu/face`'s `theme.css` carries the tokens, the primitives `./ui` renders
- * and the page shell. THIS file carries what only the door has: the sign-in
- * screen — the one page of this application that is not inside the frame — and
- * the console a freshly minted token is shown in once.
- *
- * It is here, beside the view that emits these class names, because a row owns
- * everything about itself. Loaded by `scripts/build-web-ui.ts`, which finds
- * every `face.css` under `packages/<row>/src/` and appends it to the design
- * system's sheet; every rule names its LAYER, because `theme.css` declares the
- * four and an unlayered rule would beat all of them.
- */
-
 @layer layout {
-  /* ── the sign-in screen ───────────────────────────────────────────────────
-   *
-   * Two panes: a field of lane cells that says what this server is for without
-   * a word, and the one control. The field is decorative and `aria-hidden`;
-   * it is the only decoration in this design, and it earns its place by being
-   * the product's own data structure rather than an illustration.
-   */
   .signin {
     display: flex;
     flex-wrap: wrap;
@@ -89,8 +67,6 @@
   .signin-action:hover { color: var(--brand-ink); background: color-mix(in srgb, var(--brand) 88%, var(--select)); }
   .signin-foot { margin: 0; color: var(--quiet); font: 0.75rem var(--mono); }
 
-  /* A TOKEN, SHOWN ONCE. The only secret this board ever prints, so it is a
-     console rather than a field: it is read, copied and never seen again. */
   .minted-token { border: 1px solid var(--line); border-radius: 12px; }
 
   @media (max-width: 46rem) {
