@@ -1,12 +1,6 @@
 /**
  * WHAT A ROW CONTRIBUTES TO `/metrics`, and how the host renders it.
  *
- * The host serves one `/metrics` route; the numbers in it belong to the rows.
- * A host that read them would have to open the cache's database and the
- * catalog, which is exactly the reach `@odu/cordis` exists to prevent. So a row
- * REGISTERS a contributor and keeps its own counters; the host collects, renders
- * and authorises, and names no row's internals.
- *
  * **A broker, not an offer.** Every service tag is single-provider, and metrics
  * have MANY contributors (the cache row's hit rates, the runs' durations) with
  * ONE consumer. That is the shape {@link HttpRoutes} already has: the host makes
@@ -18,22 +12,16 @@
  * Prometheus already understands that (`rate()` handles a reset). The durable
  * counts a restart must not lose — a bucket's lifetime reads — are GAUGES read
  * from SQL at scrape time, not counters kept in memory.
- *
- * The exposition is hand-written against the Prometheus text format
- * (`text/plain; version=0.0.4`): one `# HELP`/`# TYPE` per family, one line per
- * sample, label values escaped. It is forty lines and no dependency.
  */
 
-/** A sample's labels. Values are escaped on the way out; names are odu's own. */
+/** A sample's labels. Values are escaped on the way out. */
 export type MetricLabels = Readonly<Record<string, string>>;
 
-/** One sample of a counter or a gauge. */
 export interface MetricPoint {
   readonly labels?: MetricLabels;
   readonly value: number;
 }
 
-/** One named counter or gauge, with every sample a contributor has for it. */
 export interface MetricFamily {
   /** The exposition name, `odu_`-prefixed and already suffixed (`_total` for a
    *  counter, `_seconds` for a duration), because the name a dashboard query
@@ -55,7 +43,6 @@ export interface HistogramPoint {
   readonly sum: number;
 }
 
-/** One named histogram and the bounds every sample of it shares. */
 export interface HistogramFamily {
   readonly name: string;
   readonly help: string;
@@ -64,16 +51,13 @@ export interface HistogramFamily {
   readonly points: readonly HistogramPoint[];
 }
 
-/** WHAT ONE ROW ANSWERS AT A SCRAPE. Counters it has been keeping, gauges it
- *  reads now, and histograms of what it has finished. */
 export interface MetricsReading {
   readonly counters?: readonly MetricFamily[];
   readonly gauges?: readonly MetricFamily[];
   readonly histograms?: readonly HistogramFamily[];
 }
 
-/** A row's registration. `name` labels the contributor's own health metric, so
- *  a scrape says WHICH row went quiet rather than failing whole. */
+/** A row's registration. `name` labels the contributor's own health metric. */
 export interface MetricsContributor {
   readonly name: string;
   read(): MetricsReading | Promise<MetricsReading>;
@@ -109,16 +93,12 @@ export function metricsBroker(): MetricsSources {
   };
 }
 
-// ── the exposition ──────────────────────────────────────────────────────────
-
-/** The content type a Prometheus scrape expects. */
 export const EXPOSITION_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
 
 /** `\` and a newline, per the format. Help text may not carry a raw newline. */
 const escapeHelp = (text: string): string => text.replace(/\\/g, "\\\\").replace(/\n/g, "\\n");
 
-/** A label VALUE also escapes the quote that delimits it. Bucket names are
- *  `^[a-z0-9-]+$` already; a recipe name or a host is not, so this is real. */
+/** A label VALUE also escapes the quote that delimits it. */
 const escapeLabel = (value: string): string =>
   value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 
@@ -224,11 +204,7 @@ export function renderExposition(readings: readonly ContributorReading[]): strin
   return `${lines.join("\n")}\n`;
 }
 
-/**
- * COLLECT AND RENDER. One contributor's failure is ONE zero in the exposition,
- * never a 500: a scrape that goes away the moment a row is unhappy is a
- * monitoring surface that is absent when it is needed.
- */
+/** One contributor's failure is ONE zero in the exposition, never a 500. */
 export async function scrape(sources: MetricsSources): Promise<string> {
   const readings = await Promise.all(
     sources.contributors().map(async (contributor): Promise<ContributorReading> => {

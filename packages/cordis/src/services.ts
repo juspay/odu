@@ -27,17 +27,13 @@ import type { ServeSurfaceAppOptions } from "@kolu/surface-app/serve";
 import { type Plugin, serviceTag } from "@olai/effect-cordis";
 import type { MetricsSources } from "./metrics";
 
-// ── what the host provides ──────────────────────────────────────────────────
-
 /** The per-user state root the catalog and the cache live under — read ONCE, by
  *  the host, because this is the one place in odu that reads an environment. */
 export const StateDir = serviceTag<string>("odu:stateDir");
 
-/** The daemon's own home: the gate, the control socket, the crash log. */
 export const DaemonHome = serviceTag<string>("odu:daemonHome");
 
-/** Where this process is BOUND — the OS's answer, not the request, so a caller
- *  reading the identity cell learns the address that actually works. */
+/** Where this process is BOUND — the OS's answer, not the request. */
 export const BoundOrigin = serviceTag<string>("odu:boundOrigin");
 
 /** The address a bucket is reachable at from outside, when a proxy stands in
@@ -79,11 +75,10 @@ export const Build = serviceTag<{
  */
 export const RowContracts = serviceTag<Readonly<Record<string, string>>>("odu:rowContracts");
 
-/** Where a daemon narrates itself. */
 export const Log = serviceTag<Logger>("odu:log");
 
 /** End the tenure — the frozen control fragment's `drain`, wired to this
- *  process's own stop. A supervisor asks; the daemon decides how it ends. */
+ *  process's own stop. */
 export const Shutdown = serviceTag<() => void>("odu:shutdown");
 
 /**
@@ -107,12 +102,8 @@ export const SERVICE_DOOR_PATH = "/_odu/door";
 
 /**
  * WHICH SIBLING ROWS THIS DAEMON MOUNTS — the host's composition, as a fact a
- * client may read before it draws anything.
- *
- * The browser drew a Tunnel switch and opened a `routes` subscription on every
- * bucket page even on a daemon with no tunnel row; the bridge composed its MCP
- * siblings from a fixed list. Both now ask. The answer is the roster at boot:
- * rows are fixed for a tenure, and a row that leaves takes the daemon with it.
+ * client may read before it draws anything. The answer is the roster at boot:
+ * rows are fixed for a tenure.
  */
 export const SERVICE_ROWS_PATH = "/_odu/rows";
 
@@ -198,7 +189,6 @@ export function agentInstructions(
     .join("\n\n");
 }
 
-/** The route layer a row owns, typed as the seam that consumes it. */
 export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
 
 /**
@@ -252,18 +242,12 @@ export const Routes = serviceTag<HttpRoutes>("odu:httpRoutes");
 
 /** THE SCRAPE'S CONTRIBUTORS — the same shape as {@link Routes} and for the
  *  same reason: many rows register, one host reads, and the registry is made
- *  once per tenure by whoever owns the tenure. The numbers themselves are the
- *  rows'; see `./metrics`. */
+ *  once per tenure by whoever owns the tenure. */
 export const Metrics = serviceTag<MetricsSources>("odu:metrics");
 
 /**
  * WHAT WAS DELETED, FOR WHOEVER IS CACHING IT — the port a collection announces
  * through, and a CDN row answers on.
- *
- * A garbage collection removes narinfos and NARs that an edge may still be
- * holding, and an edge that keeps serving them is a client importing a path the
- * origin no longer has. So deletion ANNOUNCES the URLs it removed, and whoever
- * fronts those URLs purges them.
  *
  * **The direction is why this is a broker and not an offer.** The cache row
  * announces; the CDN row listens — and the CDN row is mounted AFTER the cache
@@ -283,14 +267,11 @@ export interface CachePurge {
   /** Install the purger. Returns its withdrawal; throws
    *  {@link PurgeClaimRefused} when one is already installed. */
   register(purge: (urls: readonly string[]) => void): () => void;
-  /** Is anything fronting these URLs? A RUNNING fact — what a collection logs
-   *  beside the count, so "purged nothing" and "nothing to purge" are
-   *  distinguishable. */
+  /** Is anything fronting these URLs? A RUNNING fact. */
   listening(): boolean;
 }
 
-/** A second purger claimed the broker. A distinct class so a row's `apply` can
- *  fail with a sentence rather than a message match. */
+/** A second purger claimed the broker. */
 export class PurgeClaimRefused extends Error {
   readonly _tag = "PurgeClaimRefused";
   constructor() {
@@ -338,17 +319,13 @@ export function purgeBroker(): CachePurge {
  * serving no cache runs exactly as it did before, and nothing is refused.
  *
  * **No principal crosses it.** The grant is not a surface verb and has no
- * caller to authorise: the ci row is in the same process as the cache row, the
- * run it mints for is one this daemon just accepted, and the token it gets back
- * is write-scoped to one bucket and expires. Administrative cache verbs keep
- * needing the root token; this is not one of them.
+ * caller to authorise, and the token it gets back is write-scoped to one bucket
+ * and expires. Administrative cache verbs keep needing the root token; this is
+ * not one of them.
  */
 export interface CacheGrants {
-  /** IS A CACHE REGISTERED AT ALL — the early exit that keeps a daemon serving
-   *  none from evaluating every repository's flake for a grant that can never
-   *  happen. Not "at which origin": where a push goes is a property of the
-   *  BUCKET, answered by {@link GrantedBucket}, and a second address here
-   *  would be one nobody reads. */
+  /** IS A CACHE REGISTERED AT ALL. Not "at which origin": where a push goes is
+   *  a property of the BUCKET, answered by {@link GrantedBucket}. */
   serves(): boolean;
   /** The bucket this daemon serves AT THAT SUBSTITUTER URL, or `null`. See
    *  {@link GrantedBucket} for why the URL and never a probe. */
@@ -356,18 +333,12 @@ export interface CacheGrants {
   /**
    * A WRITE TOKEN FOR ONE RUN AND ONE BUCKET.
    *
-   * The RUN's id, not a lifetime and not a label. How long a run's credential
-   * may outlive its run, and what the bucket page's Tokens list calls it, are
-   * the cache's own decisions — it is the row that writes `expires` and the
-   * row whose page shows the word, and an asker that supplied either would be
-   * one of two askers who could supply different ones.
+   * The RUN's id, not a lifetime and not a label.
    *
    * `null` when no cache is registered or the bucket is gone.
    */
   mint(request: { bucket: string; runId: string }): { id: string; token: string } | null;
-  /** Let a minted token go, by id. Idempotent: an unknown id is not an error,
-   *  because the caller revoking at finalize cannot know whether a restart
-   *  already did. */
+  /** Let a minted token go, by id. Idempotent: an unknown id is not an error. */
   revoke(id: string): void;
   /** Install the answerer. Returns its withdrawal; throws
    *  {@link GrantClaimRefused} when one is already installed. */
@@ -377,15 +348,9 @@ export interface CacheGrants {
 /**
  * ONE BUCKET THIS DAEMON SERVES, as a URL in somebody's `nix.conf` names it.
  *
- * **The answer is decided by the URL, never by a response body.** The first
- * shape of this asked each substituter for its `nix-cache-info` and believed
- * the `Odu-Origin` / `Odu-Bucket` lines it found there — which made the grant
- * a function of a server the REPOSITORY chose, so one line of `flake.nix`
- * pointing at an attacker's host could claim to be any bucket here and collect
- * a write token for it. The daemon already knows every URL it advertises for
- * every bucket it serves; matching against that set is the whole test. It
- * cannot be lied to, it works for a PRIVATE bucket (no anonymous read is
- * involved), and it dials nothing at all.
+ * **The answer is decided by the URL, never by a response body.** The daemon
+ * already knows every URL it advertises for every bucket it serves; matching
+ * against that set is the whole test.
  */
 export interface GrantedBucket {
   readonly name: string;
@@ -406,8 +371,7 @@ export interface CacheGrantor {
   revoke(id: string): void;
 }
 
-/** A second grantor claimed the broker. A distinct class so a row's `apply` can
- *  fail with a sentence rather than a message match. */
+/** A second grantor claimed the broker. */
 export class GrantClaimRefused extends Error {
   readonly _tag = "GrantClaimRefused";
   constructor() {
@@ -439,9 +403,6 @@ export function grantsBroker(): CacheGrants {
   };
 }
 
-// ── what a row publishes ────────────────────────────────────────────────────
-
-/** ONE BUCKET'S OWN NAME, as the cache row publishes it. */
 export interface BucketDomainFact {
   readonly bucket: string;
   readonly domain: string;
@@ -479,14 +440,8 @@ export interface BucketDomains {
 
 export const BucketDomains = serviceTag<BucketDomains>("odu:bucketDomains");
 
-// ── what a row is ───────────────────────────────────────────────────────────
-
 /** What an AGENT is told about one row: its surface, its own exposure policy,
- *  and the paragraph it wants taught at `initialize`.
- *
- *  A field of the row rather than something the transport looks up, because it
- *  is the row's vocabulary: the transport composes the records and knows what
- *  none of them mean. */
+ *  and the paragraph it wants taught at `initialize`. */
 export interface RowAgent {
   readonly surface: Surface<SurfaceSpec>;
   readonly expose: ExposeMap<SurfaceSpec>;

@@ -19,16 +19,10 @@
  * decodes against. Then the wire tags the spec mints, and the row's exposure
  * policy (what an agent may reach, and whether it mutates). A comment is not in
  * it; a description annotation is, because a reader sees it.
- *
- * Pure, and no `node:` builtin: this package is a contract the browser imports,
- * so the hash is FNV-1a over 64 bits in plain arithmetic. It need not resist an
- * adversary — it must only change when the surface does.
  */
 
 import { Schema } from "effect";
 
-/** Anything a surface spec holds, made canonical: sorted keys, schemas as JSON
- *  Schema documents, functions as a marker (a handler is not a contract). */
 function canonical(value: unknown): unknown {
   if (Schema.isSchema(value)) {
     return { schema: Schema.toJsonSchemaDocument(value as Schema.Top) };
@@ -45,7 +39,6 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
-/** FNV-1a, 64-bit, over the UTF-16 code units of `text`, as 16 hex digits. */
 function fnv1a64(text: string): string {
   let hash = 0xcbf29ce484222325n;
   const prime = 0x100000001b3n;
@@ -57,9 +50,6 @@ function fnv1a64(text: string): string {
   return hash.toString(16).padStart(16, "0");
 }
 
-/** What a fingerprint is taken over: a spec, the tags it mints, and the
- *  exposure policy. Structural, so the host can hash a fragment that is not one
- *  `defineSurface` (its control surface plus the identity cell). */
 export interface SurfaceShape {
   readonly spec: unknown;
   readonly tags: ReadonlyArray<string>;
@@ -78,7 +68,6 @@ export function surfaceFingerprint(shape: SurfaceShape): string {
   );
 }
 
-/** The tags a surface's group carries — the wire spelling of every member. */
 export function surfaceTags(surface: {
   readonly group: { readonly requests: ReadonlyMap<string, unknown> };
 }): ReadonlyArray<string> {

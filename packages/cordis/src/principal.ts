@@ -8,19 +8,6 @@
  * row that knows how to sign somebody in registers a RESOLVER on it, and every
  * verb reads the answer through `CurrentPrincipal`.
  *
- * ## Three values, and why they are three
- *
- *   - {@link Principal} is WHAT a verb acts for: the machine's own owner
- *     (`local`), or a signed-in person with a role.
- *   - {@link Admission} is WHAT A CONNECTION IS: a principal, or `null` when
- *     the connection carries no session, plus the fact that the session behind
- *     it may END. The lease is acquired at the upgrade, so the connection must
- *     be able to learn that it ended without asking anybody.
- *   - {@link PrincipalBroker} is the host's single-owner registration key: a
- *     resolver installs itself in `apply` and withdraws in its finalizer, and
- *     with none registered every connection is the local owner — which is
- *     exactly what loopback mode is today.
- *
  * **The absence behaviour is stated, not implied.** No resolver ⇒ every
  * connection is `local`, every Bearer is the local owner, and nothing refuses.
  * That is the loopback mode preserved by construction rather than by a flag,
@@ -39,22 +26,17 @@
 import { Context, Effect, Option, Schema } from "effect";
 import { serviceTag } from "@olai/effect-cordis";
 
-// ── the principal ───────────────────────────────────────────────────────────
-
 /** The three roles, and the order is the authority: an owner administers an
- *  admin's work. Carried as a TYPE here and nothing more — what a `member` may
- *  do is `ci`'s rule, what an `admin` may do is `cache`'s. */
+ *  admin's work. */
 export const RoleSchema = Schema.Literals(["owner", "admin", "member"]);
 export type Role = typeof RoleSchema.Type;
 
 const RANK: Record<Role, number> = { member: 0, admin: 1, owner: 2 };
 
 /** The machine's own owner — what a connection is when no identity provider is
- *  mounted. Not an administrator, and not "anonymous": this is the person who
- *  started the daemon on their own loopback. */
+ *  mounted. */
 export const LocalPrincipalSchema = Schema.Struct({ kind: Schema.Literal("local") });
 
-/** A signed-in person, with the role this daemon granted them. */
 export const UserPrincipalSchema = Schema.Struct({
   kind: Schema.Literal("user"),
   login: Schema.String,
@@ -67,7 +49,6 @@ export const UserPrincipalSchema = Schema.Struct({
 export const PrincipalSchema = Schema.Union([LocalPrincipalSchema, UserPrincipalSchema]);
 export type Principal = typeof PrincipalSchema.Type;
 
-/** The one principal that exists when nobody signed in. */
 export const LOCAL_OWNER: Principal = { kind: "local" };
 
 /**
@@ -82,8 +63,6 @@ export function may(principal: Principal, floor: Role): boolean {
   return principal.kind === "local" || RANK[principal.role] >= RANK[floor];
 }
 
-// ── the admission ───────────────────────────────────────────────────────────
-
 /**
  * WHAT ONE CONNECTION IS, for as long as it lasts.
  *
@@ -91,10 +70,7 @@ export function may(principal: Principal, floor: Role): boolean {
  * resolver is mounted — the gate refuses such a connection everything but the
  * identity reads. `live()` answers whether the session behind it still exists,
  * so a call placed after logout, expiry or revocation is refused rather than
- * served on a session that is gone. `ended` completes once, at that moment, and
- * is what a streaming member watches so a subscription stops pushing to a
- * connection whose session has ended — the socket itself is kolu's to hold,
- * and no public seam lets odu close it (see PLAN.md's correction).
+ * served on a session that is gone. `ended` completes once, at that moment.
  */
 export interface Admission {
   /** Who this connection acts for, or `null` for a connection with no session. */
@@ -112,15 +88,12 @@ export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Admissio
   "odu/CurrentPrincipal",
 ) {}
 
-/** What the LOCAL connection is: admitted as the owner, with nothing to end. */
 export const LOCAL_ADMISSION: Admission = {
   principal: LOCAL_OWNER,
   live: () => true,
   ended: Effect.never,
 };
 
-/** A connection that carried no session. The gate in front of the handlers is
- *  what makes this safe; this value only says what it is. */
 export const NOBODY_ADMISSION: Admission = {
   principal: null,
   live: () => false,
@@ -128,8 +101,7 @@ export const NOBODY_ADMISSION: Admission = {
 };
 
 /** Raised when a refused connection's verb ran anyway. A DEFECT, not a
- *  refusal: the gate exists so this is unreachable, and a sentence on the
- *  error channel would invite a caller to handle it. */
+ *  refusal. */
 export class NoPrincipal extends Error {
   readonly _tag = "NoPrincipal";
   constructor() {
@@ -154,8 +126,6 @@ export const principalOf: Effect.Effect<Principal> = Effect.flatMap(
       ? Effect.die(new NoPrincipal())
       : Effect.succeed(admission.principal),
 );
-
-// ── the lease ───────────────────────────────────────────────────────────────
 
 /**
  * ONE CONNECTION'S HOLD ON ONE SESSION.
@@ -299,8 +269,7 @@ export interface PrincipalBroker {
   hasDoor(): boolean;
 }
 
-/** A second resolver claimed the broker. A distinct class so a row's `apply`
- *  can fail with a sentence rather than a message match. */
+/** A second resolver claimed the broker. */
 export class PrincipalClaimRefused extends Error {
   readonly _tag = "PrincipalClaimRefused";
   constructor() {
@@ -345,8 +314,7 @@ export function localBroker(options: { readonly door?: boolean } = {}): Principa
 }
 
 /** The admission a request-shaped call runs under — one it carries for its own
- *  duration and nothing longer. The MCP door and a test's in-process dispatch
- *  both mean exactly this. */
+ *  duration and nothing longer. */
 export function requestAdmission(principal: Principal): Admission {
   return { principal, live: () => true, ended: Effect.never };
 }

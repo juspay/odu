@@ -1,9 +1,3 @@
-/**
- * A MOMENT, SAID BACKWARDS AND FORWARDS ON THE SAME LINES — "3d ago" for
- * when a path was wanted and "in 83d" for when it leaves sit in one table,
- * and a pair that rounded differently would put a day between them.
- */
-
 import { describe, expect, it } from "bun:test";
 import { ago, ahead } from "./format";
 

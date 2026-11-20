@@ -1,16 +1,3 @@
-/**
- * THE DOOR'S VOCABULARY, held to its two promises.
- *
- * One is the ABSENCE rule, which is what makes loopback mode a construction
- * rather than a flag: with no resolver registered every connection is the local
- * owner, and nothing refuses. The other is the single-owner claim: exactly one
- * row may decide who is on a connection, a second claim installs NOTHING, and a
- * withdrawal removes only the resolver that made it.
- *
- * The lease is the third: it is how a connection learns its session ended
- * without polling anything, and it fires exactly once.
- */
-
 import { describe, expect, it } from "bun:test";
 import { Effect, Exit } from "effect";
 import {
@@ -55,8 +42,6 @@ describe("the single-owner claim", () => {
       authorize: () => null,
     };
     expect(() => broker.register(second)).toThrow(PrincipalClaimRefused);
-    // NOTHING was installed by the refused claim: the first resolver still
-    // answers, so the refusal left no half-registration behind.
     expect(broker.authorize(undefined)).toEqual({ kind: "user", login: "srid", role: "admin" });
     expect(broker.acquire({})).not.toBeNull();
   });
@@ -66,7 +51,6 @@ describe("the single-owner claim", () => {
     const withdraw = broker.register(forever);
     withdraw();
     expect(broker.mounted()).toBe(false);
-    // The slot is free again, and a SECOND withdrawal cannot clear a successor.
     expect(() => broker.register(forever)).not.toThrow();
     withdraw();
     expect(broker.mounted()).toBe(true);
@@ -111,8 +95,6 @@ describe("a lease", () => {
     expect(admission.live()).toBe(true);
     end();
     expect(admission.live()).toBe(false);
-    // `ended` resolves rather than hanging — that is what a subscription
-    // watches, and a hang there would be a stream that never stops.
     const exit = await Effect.runPromise(Effect.exit(admission.ended));
     expect(Exit.isSuccess(exit)).toBe(true);
   });

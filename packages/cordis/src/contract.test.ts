@@ -1,7 +1,3 @@
-/**
- * THE LEDGER'S SENTENCES — one per way a version and its surface can disagree.
- */
-
 import { describe, expect, it } from "bun:test";
 import { contractLedgerMismatch } from "./contract";
 
@@ -23,7 +19,6 @@ describe("contractLedgerMismatch", () => {
 
   it("asks for a new last line when the version moved past the ledger", () => {
     expect(judge("3.1", "cccc")).toContain('APPEND "3.1": "cccc"');
-    // …and calls a bump with nothing to version what it is.
     expect(judge("3.1", "bbbb")).toContain("a bump with nothing to version is a lie");
   });
 

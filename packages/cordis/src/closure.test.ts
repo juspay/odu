@@ -7,9 +7,6 @@
  * tags its siblings need. So this module names NO `@odu/*` package at all — a
  * single one would undo it in a line — and, being a module a BROWSER bundle and
  * a server both load, nothing from `node:` either.
- *
- * Two claims, and both are about absence, which makes the non-vacuity floors
- * below the load-bearing part: a walker that found no files would pass both.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -25,7 +22,6 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned: one install, and no `@odu/*` at all. */
 const EXPECTED_DEPENDENCIES = ["effect"];
 
 /** UI RUNTIMES, refused by name beside the `node:` rule. This package is the
@@ -35,16 +31,13 @@ const EXPECTED_DEPENDENCIES = ["effect"];
  *  `@odu/face`. */
 const UI_RUNTIMES = new Set(["solid-js", "react", "react-dom", "preact", "vue", "svelte", "@solid-primitives"]);
 
-/** The `@kolu/*` sources hydrated from a Nix pin rather than installed. */
 const HYDRATED = new Set<string>([
   "@kolu/surface",
   "@kolu/surface-app",
-  // `Logger`, the type the `Log` tag carries.
   "@kolu/surface-daemon",
   "@olai/effect-cordis",
 ]);
 
-/** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
 function tsFilesUnder(dir: string): string[] {
@@ -90,7 +83,6 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
-/** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@")

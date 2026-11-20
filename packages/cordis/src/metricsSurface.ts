@@ -2,14 +2,6 @@
  * THE CREDENTIAL A SCRAPER HOLDS, as verbs — the host's own fragment on the
  * composed wire.
  *
- * `/metrics` is served by the HOST (no row owns the number of runs AND the
- * number of cached paths), and it is not anonymous: the deployment this is
- * written for is public through a Funnel, where "only the tailnet can reach it"
- * is not true. The operator's root token opens it, and so does a `metrics`
- * TOKEN — a read-only credential minted by the root token, shown once, kept as a
- * hash, and revocable without restarting the daemon or rotating the one
- * credential that administers everything else.
- *
  * **Why the surface lives in `@odu/cordis`.** It is the host's vocabulary, and
  * the host is the one package a row may not import — while the faces that
  * project it (`odu surface`, the MCP bridge) are rows. This package belongs to
@@ -80,8 +72,7 @@ export type MetricsTokenFacts = typeof MetricsTokenSchema.Type;
 
 const TokenMintInputSchema = Schema.Struct({
   rootToken: Schema.String,
-  /** Absent takes a default: a token nobody labelled is still revocable, and
-   *  refusing the mint over a missing word would help nobody. */
+  /** Absent takes a default. */
   label: Schema.optionalKey(Schema.String),
 });
 const TokenMintOutputSchema = Schema.Struct({
@@ -94,9 +85,7 @@ const TokenListOutputSchema = Schema.Struct({ tokens: Schema.Array(MetricsTokenS
 const TokenRevokeInputSchema = Schema.Struct({ rootToken: Schema.String, id: Schema.String });
 const TokenRevokeOutputSchema = Schema.Struct({ id: Schema.String, revoked: Schema.Boolean });
 
-/** Minting, listing and revoking the scrape credential. No cells and no
- *  collections: nothing subscribes to a token list, and a page that did would
- *  be a page that updates when somebody else revokes one. */
+/** Minting, listing and revoking the scrape credential. */
 export const oduMetricsSurface = defineSurface({
   procedures: {
     token: {

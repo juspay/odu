@@ -1,12 +1,3 @@
-/**
- * THE EXPOSITION, held to the format a scraper actually parses.
- *
- * Prometheus is unforgiving in two places and silent about both: a label value
- * that carries an unescaped quote or backslash makes the line unparseable, and
- * two `# HELP` lines for one metric name make the whole scrape an error. Neither
- * shows up in a unit that renders one tidy counter, so both are asserted here.
- */
-
 import { describe, expect, it } from "bun:test";
 import {
   metricsBroker,
@@ -15,7 +6,6 @@ import {
   type MetricsReading,
 } from "./metrics";
 
-/** The lines of a rendered exposition, blank tail dropped. */
 const linesOf = (text: string): string[] => text.split("\n").filter((line) => line !== "");
 
 describe("the Prometheus text exposition", () => {
@@ -67,7 +57,6 @@ describe("the Prometheus text exposition", () => {
     ]);
     expect(rendered).toContain("# HELP odu_lane_reachable A lane\\\\host, and a\\nsecond line.");
     expect(rendered).toContain('odu_lane_reachable{host="bu\\"ilder\\\\one",platform="x86_64-linux"} 1');
-    // The escaped forms, and no raw newline anywhere but at a line end.
     expect(rendered.split("\n").filter((line) => line.startsWith("second line"))).toEqual([]);
   });
 

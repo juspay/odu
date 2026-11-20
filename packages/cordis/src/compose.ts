@@ -28,7 +28,6 @@ import {
 import type { ExposeMap } from "@kolu/surface/expose";
 import type { Rpc, RpcGroup } from "effect/rpc";
 
-/** A sibling, as a root names it: the surface, and how an agent may reach it. */
 export interface SiblingSurface {
   readonly surface: Surface<any>;
   readonly expose?: ExposeMap<any>;
@@ -55,20 +54,15 @@ export function composedWire<S extends Record<string, Surface<any>>>(
   });
 }
 
-/** One scoped surface per sibling — what a client face is built over. */
 export function composedSurfaces<S extends Record<string, Surface<any>>>(
   siblings: S,
 ): { readonly [K in keyof S]: Surface<any> } {
   return composeSurfaceContracts(siblings).siblings;
 }
 
-/**
- * ONE TYPED CLIENT PER SIBLING, over a dispatch the caller already holds.
- *
- * The face kolu builds has the surface's OWN member names and the sibling's tag
- * prefix baked in, so a call addresses `surface/<key>/<member>/<verb>` without
- * the caller knowing the prefix.
- */
+/** The face kolu builds has the surface's OWN member names and the sibling's tag
+ *  prefix baked in, so a call addresses `surface/<key>/<member>/<verb>` without
+ *  the caller knowing the prefix. */
 export function composedClients<S extends Record<string, Surface<any>>>(
   siblings: S,
   dispatch: Parameters<typeof buildSurfaceFace>[1],
