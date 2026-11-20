@@ -1,3 +1,36 @@
+/**
+ * The WALL, enforced — what this package is allowed to import.
+ *
+ * Two ways to break a consumer that `tsc` cannot see from inside this repo,
+ * where odu's own node_modules resolves everything:
+ *
+ *   - an import that reaches back into odu's `src/` compiles here and is a
+ *     `TS2307` downstream, because only this directory was copied;
+ *   - an import of a package this manifest does not declare compiles here
+ *     (odu's root node_modules has it) and is a missing module downstream.
+ *
+ * THE WALK IS A PARSE, not a line scan, and the difference is the whole
+ * reliability of this file. A regex over lines catches the spellings this
+ * directory happens to use today and waves through the ones it does not: a
+ * multiline `import {\n  x\n} from "…"`, a `from` on its own line, a dynamic
+ * `import()`, an `import("mod").T` in type position. A guard that passes
+ * because of how the code is currently formatted is not a guard.
+ *
+ * TYPE-ONLY EDGES COUNT. This package ships raw TypeScript, so a consumer's
+ * `tsc` resolves an `import type` exactly as it resolves a value import and
+ * fails `TS2307` when it cannot. A runtime-only walk sees a package leave the
+ * manifest while staying in the program — which is how a dependency demoted on
+ * the strength of "every use is `import type`" passed kolu's own guard and
+ * broke the first out-of-repo consumer three type sites later
+ * (juspay/kolu#2216).
+ *
+ * `@kolu/*` is admitted by {@link HYDRATED} rather than by the manifest,
+ * because those sources are hydrated from a Nix pin and never installed — see
+ * the manifest's `//dependencies`. Pinning the exact set here is the point: a
+ * NEW `@kolu/*` import is a new directory every downstream must copy, and that
+ * is not a fact that may slip in silently.
+ */
+
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -15,17 +48,21 @@ const MANIFEST = JSON.parse(
 /** Declared in `package.json` and installed from the lockfile. */
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** What a consumer must install, pinned as a literal set. Growing it is a
- *  decision every downstream pays for. */
+/** What a consumer must install, pinned as a literal set — the number IS the
+ *  claim the README makes, and an unpinned "smaller than odu" would rot
+ *  quietly. Growing it is a decision every downstream pays for. */
 const EXPECTED_DEPENDENCIES = ["effect"];
 
-/** The @kolu/* sources a consumer must hydrate alongside this package. Kept
+/** The @kolu/* sources a consumer must hydrate alongside this package. Listed
+ *  here because a manifest cannot name them (see the module header), and kept
  *  MINIMAL: every entry is a directory the downstream's own `nix/consumer`
  *  wiring has to copy. */
 const HYDRATED = new Set(["@kolu/surface"]);
 
-/** Test-only imports — the harness, not the shipped closure. Admitted only
- *  from a test file. */
+/** Test-only imports — the harness, not the shipped closure. A consumer that
+ *  hydrates this package copies the `.test.ts` files too but never runs them,
+ *  so these are admitted only from a test file. `typescript` is the parser
+ *  this very walk uses; odu declares it, no downstream needs it. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
 function tsFilesUnder(dir: string): string[] {
@@ -43,14 +80,16 @@ function tsFilesUnder(dir: string): string[] {
 }
 
 /** Every module specifier a consumer's compiler would have to resolve: static
- *  imports and re-exports (`import type` included), `import x = require("…")`,
- *  dynamic `import()`, and `import("…").T` in type position. */
+ *  imports and re-exports (`import type` included — see the header), `import
+ *  x = require("…")`, dynamic `import()`, and `import("…").T` in type
+ *  position. Read off the parse tree, so a spelling this package does not use
+ *  today is covered the day someone writes it. */
 function specifiersIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    false,
+    /* setParentNodes */ false,
     ts.ScriptKind.TS,
   );
   const out: string[] = [];
@@ -80,13 +119,14 @@ function specifiersIn(source: string, fileName: string): string[] {
 }
 
 /** The modules a file imports for their EFFECT — a bare `import "x"`, no
- *  bindings. */
+ *  bindings. The specifier alone cannot say this, and it is the exact question
+ *  `sideEffects` in the manifest answers for a bundler. */
 function sideEffectImportsIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    false,
+    /* setParentNodes */ false,
     ts.ScriptKind.TS,
   );
   return parsed.statements
@@ -127,6 +167,8 @@ const sources: Scanned[] = tsFilesUnder(join(packageRoot, "src"))
       specifiers: specifiersIn(source, rel),
       sideEffectImports: sideEffectImportsIn(source, rel).map((spec) => {
         if (!spec.startsWith(".")) return spec;
+        // Local imports are extensionless by repo convention; `sideEffects` names
+        // files. Resolve to the one the manifest would have to list.
         const path = join(rel, "..", spec).split(sep).join("/");
         return `./${path.endsWith(".ts") ? path : `${path}.ts`}`;
       }),
@@ -136,6 +178,8 @@ const sources: Scanned[] = tsFilesUnder(join(packageRoot, "src"))
 describe("@odu/run-client's import closure", () => {
   it("has sources to police", () => {
     expect(sources.length).toBeGreaterThan(0);
+    // The walk itself must be load-bearing: a parser that silently returned
+    // nothing would make every assertion below vacuously true.
     expect(sources.flatMap((s) => s.specifiers).length).toBeGreaterThan(0);
   });
 
@@ -158,6 +202,8 @@ describe("@odu/run-client's import closure", () => {
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
       for (const spec of specifiers) {
+        // A relative import that climbs out of the package directory is the
+        // shape that compiles in-repo and vanishes downstream.
         if (!spec.startsWith(".")) continue;
         if (join(rel, "..", spec).startsWith("..")) {
           offenders.push(`${rel}: ${spec}`);
@@ -197,6 +243,12 @@ describe("@odu/run-client's import closure", () => {
   });
 
   it("never lets a bundler drop a module that exists for its effect", () => {
+    // `asyncConnectError` patches `Socket.prototype.connect`; `dial` imports it
+    // for that alone. A blanket `sideEffects: false` invites a bundler to drop
+    // both, and then the ENOENT dial this package answers `null` for THROWS
+    // instead — the one failure it promises never to surprise a face with.
+    // Read off the parse rather than remembered: a second shim is covered the
+    // day it is written.
     const listed = new Set(
       MANIFEST.sideEffects === false ? [] : (MANIFEST.sideEffects ?? []),
     );

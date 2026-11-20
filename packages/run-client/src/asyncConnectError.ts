@@ -5,13 +5,26 @@
  * Under Bun 1.3.10 a unix-path connect whose `connect(2)` fails outright
  * (ENOENT for "nothing is bound there") can emit `'error'` synchronously from
  * inside `Socket.prototype.connect` — observed under `bun test`, not under a
- * plain `bun` run. A synchronous emit lands before the caller's `'error'`
- * listener exists, and an EventEmitter with no `'error'` listener throws.
+ * plain `bun` run, so it is execution-context dependent rather than a clean
+ * either/or. That breaks every caller written to Node's semantics, which is
+ * all of them: the canonical shape is `const s = createConnection(path)`
+ * followed by `s.once("error", …)`, and a synchronous emit lands before that
+ * listener exists. An EventEmitter with no `'error'` listener throws, so the
+ * error escapes the caller entirely instead of resolving its promise.
  *
- * Only an emit that happened during the `connect()` call is deferred, and only
- * when the caller had no `'error'` listener of its own at that moment.
+ * The patch is deliberately narrow: it only defers an emit that happened
+ * *during* the `connect()` call, and only when the caller had no `'error'`
+ * listener of its own at that moment. A caller that attached one first has
+ * already handled the emit correctly, and re-emitting would deliver it twice.
+ * When the runtime behaves (the emit is already async) nothing is captured and
+ * this is a pass-through.
  *
- * Importing this module installs the patch; the side effect IS the export.
+ * Importing this module installs the patch — it is a runtime compat shim, so
+ * the side effect IS the export. `./dial` imports it, so a consumer that
+ * hydrates this package and dials a run is covered without knowing the shim
+ * exists. It is published as its own entry for the other caller: odu's
+ * coordinator, which SERVES a socket and reaches `probeSocket` without going
+ * through any dial, imports it by name.
  */
 
 import { Socket } from "node:net";
@@ -38,6 +51,9 @@ Socket.prototype.connect = function connect(
     this.off("error", capture);
     if (premature !== undefined) {
       const err = premature;
+      // A microtask lands after the caller's `createConnection(...)` statement
+      // returns, which is where it attaches its listener — the earliest point
+      // that honors the contract.
       queueMicrotask(() => {
         this.emit("error", err);
       });

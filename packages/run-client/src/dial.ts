@@ -5,11 +5,24 @@
  * `<checkout>/.ci/odu.sock`; this is the one way a client reaches it.
  *
  * THE CONTRACT A CALLER MUST KNOW: {@link dialRun} answers `null` when NOBODY
- * IS SERVING, and rejects for everything else. A live socket that failed for
- * some OTHER reason must never arrive as `null`.
+ * IS SERVING, and rejects for everything else. A run's socket exists only
+ * between `odu ci run` and settle, so absence is a checkout's ordinary steady
+ * state — a face polling on a timer gets `null` on nearly every tick, and needs
+ * an answer for it rather than an error path.
  *
- * {@link runSocketPath} is pure path algebra over a checkout root; a caller
- * must supply WHICH tree.
+ * The two halves of that sentence are load-bearing together. `null` is what a
+ * face turns into "no run" — the last durable verdict, a quiet chip, justci's
+ * one-line refusal — so a live socket that failed for some OTHER reason must
+ * never arrive as `null`, or the face reports "no run" about a run that is
+ * up. `unixSocketLink` exists to keep the two distinguishable (it rejects with
+ * the raw socket error precisely "so a probe can tell 'nobody is serving' from
+ * 'the server said no'"), and {@link ABSENT_CODES} is where this package spends
+ * that distinction rather than throwing it away in a bare `catch`.
+ *
+ * Be told the checkout; don't guess it. {@link runSocketPath} is pure path
+ * algebra over a checkout root, and there is nothing environmental to get
+ * wrong: a run's socket is a file inside the tree it is testing. What a caller
+ * must supply is WHICH tree.
  */
 
 import { join } from "node:path";
@@ -17,7 +30,10 @@ import { unixSocketLink } from "@kolu/surface/links/unix-socket";
 import "./asyncConnectError";
 import { type OduClient, oduClientOver, oduSurface } from "./surface";
 
-/** The run's rendezvous, relative to the checkout root. One run per checkout. */
+/** The run's rendezvous, relative to the checkout root. One run per checkout —
+ *  justci's `.ci/pc.sock` rule, kept: the path is checkout-scoped rather than
+ *  the library's per-user runtime-dir convention, so the socket sits beside the
+ *  logs of the run it belongs to. */
 export const SOCKET_PATH = ".ci/odu.sock";
 
 /** The socket a live run in `checkoutRoot` serves. Pure: it does not probe, and
@@ -27,18 +43,34 @@ export function runSocketPath(checkoutRoot: string): string {
 }
 
 /** The connect failures that MEAN "nobody is serving that path", and so are
- *  the ones {@link dialRun} answers `null` for. */
+ *  the ones {@link dialRun} answers `null` for.
+ *
+ *  ENOENT is the common one — no socket file, because no run. ECONNREFUSED is
+ *  the same fact one step later: the file outlived a coordinator that is gone.
+ *  Everything else is a live problem worth a stack trace — EACCES on a socket
+ *  somebody IS serving, ENOTSOCK on a path a broken checkout left behind, or a
+ *  connect that succeeded and then failed to speak the wire. None of those is
+ *  "no run in progress", and reporting them as one is how a face comes to say
+ *  a live run is not there. */
 const ABSENT_CODES = new Set(["ENOENT", "ECONNREFUSED"]);
 
 /** Is this dial failure the absence of a server, rather than a server that
- *  refused us? A rejection with no `code` is never absence. */
+ *  refused us? A rejection with no `code` is never absence: the link rejects
+ *  with the raw socket error, so anything else came from a connect that had
+ *  already succeeded.
+ *
+ *  EXPORTED because the distinction is about unix sockets rather than about
+ *  runs: `@odu/service-client/socket` dials the service over the same
+ *  `unixSocketLink` and owes its callers the same honest answer, and two copies
+ *  of "which errno means nobody is there" is two copies that can drift. */
 export function isNobodyServing(err: unknown): boolean {
   const code: unknown = (err as { code?: unknown } | null)?.code;
   return typeof code === "string" && ABSENT_CODES.has(code);
 }
 
-/** A dialled run: the typed face plus the link teardown. `close` must be
- *  awaited — the link owns fibers that otherwise leak. */
+/** A dialled run: the typed face plus the link teardown. `close` is genuinely
+ *  async — the link owns a `Scope` holding the protocol's dial/ping/response
+ *  fibers, so dropping it unawaited leaks them. */
 export interface DialedRun {
   client: OduClient;
   close: () => Promise<void>;
