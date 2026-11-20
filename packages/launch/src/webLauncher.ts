@@ -85,7 +85,7 @@ export async function readService(
   } catch {
     return null;
   } finally {
-    await connection.dispose();
+    await connection[Symbol.asyncDispose]();
   }
 }
 
@@ -100,7 +100,9 @@ export function contractVerdict(
   return verdict.kind === "adopt" ? null : verdict.message;
 }
 
-export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" | "dispose">>(
+export async function adoptOrRefuse<
+  C extends Pick<ServiceConnection, "client" | typeof Symbol.asyncDispose>,
+>(
   connection: C,
   origin: string,
   opts: {
@@ -118,7 +120,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
       { deadlineMs: handshakeMs },
     );
   } catch (err) {
-    await connection.dispose();
+    await connection[Symbol.asyncDispose]();
     throw new Error(
       err instanceof NoAnswerWithin
         ? `odu: ${handshakeTimedOut(origin, handshakeMs)}`
@@ -127,7 +129,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
     );
   }
   if (cell === undefined) {
-    await connection.dispose();
+    await connection[Symbol.asyncDispose]();
     throw new Error(
       `odu: something answered on ${origin} but published no service cell ` +
         "(the cell stream ended empty) — not an odu service this build can use",
@@ -135,7 +137,7 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
   }
   const refusal = contractVerdict(cell, origin, opts.needs);
   if (refusal !== null) {
-    await connection.dispose();
+    await connection[Symbol.asyncDispose]();
     throw new Error(refusal);
   }
   const note = skewNote(cell, origin, opts.needs);

@@ -4,7 +4,7 @@ import { refusalText } from "@odu/face/refusal";
 import { formatLogKey, parseLogKey } from "@odu/service-client/logKey";
 import { logHasMore, LOG_TAIL_BYTES } from "@odu/service-client/surface";
 import { type oduServiceSurface } from "@odu/service-client/surface";
-import { boardTally, checkoutRoots, newestFirst } from "@odu/service-client/board";
+import { boardOrder, boardTally } from "@odu/service-client/board";
 import type { Effect } from "effect";
 import {
   createEffect,
@@ -99,18 +99,19 @@ export interface CiAmbient {
 
 export function ciAmbient(client: CiClient): CiAmbient {
   const runs = client.collections.runs.use();
-  const rows = createMemo<RunRow[]>(() => {
+  const board = createMemo(() => {
     const out: RunRow[] = [];
     for (const key of runs.keys()) {
       const row = runs.byKey(key)?.();
       if (row !== undefined) out.push(row);
     }
-    return newestFirst(out);
+    return boardOrder(out);
   });
+  const rows = createMemo<RunRow[]>(() => board().rows);
 
   const checkoutSubs = createMemo(
     mapArray(
-      () => checkoutRoots(rows()),
+      () => board().roots,
       (repoRoot) => ({
         repoRoot,
         sub: client.streams.checkout.use(() => ({ repoRoot })),

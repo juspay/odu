@@ -13,7 +13,7 @@ import {
 } from "./surface";
 
 /** A dialled service. */
-export interface ServiceConnection {
+export interface ServiceConnection extends AsyncDisposable {
   client: OduServiceClient;
   /** The transport-neutral dispatch under {@link ServiceConnection.client}. */
   dispatch: SurfaceDispatch;
@@ -24,7 +24,6 @@ export interface ServiceConnection {
    * died, was upgraded, or dropped the socket.
    */
   onClose: (cb: () => void) => () => void;
-  dispose: () => Promise<void>;
 }
 
 type WebSocketCtor = new (
@@ -103,7 +102,7 @@ export async function dialService(
       link.wire.onStatus((status) => {
         if (status === "closed" || status === "retired") cb();
       }),
-    dispose: () => link.dispose(),
+    [Symbol.asyncDispose]: () => link.dispose(),
   };
 }
 

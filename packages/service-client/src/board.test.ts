@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
+  boardOrder,
   boardTally,
-  checkoutRoots,
   duration,
   isActive,
   isFailing,
@@ -143,12 +143,13 @@ describe("the board, narrowed", () => {
   });
 
   it("names the checkouts on the board, once each, in the rows' order", () => {
-    const rows = newestFirst([
+    const board = boardOrder([
       row({ runId: "here-old", createdAt: 1 }),
       row({ runId: "elsewhere", createdAt: 2, repoRoot: "/home/dev/other" }),
       row({ runId: "here-new", createdAt: 3 }),
     ]);
-    expect(checkoutRoots(rows)).toEqual(["/home/dev/kolu", "/home/dev/other"]);
+    expect(board.rows.map((r) => r.runId)).toEqual(["here-new", "elsewhere", "here-old"]);
+    expect(board.roots).toEqual(["/home/dev/kolu", "/home/dev/other"]);
   });
 
   it("counts the board's two buckets off the run each checkout stands for", () => {

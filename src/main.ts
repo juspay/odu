@@ -67,7 +67,15 @@ async function dispatch(argv: string[]): Promise<number> {
     case "cache": {
       const [sub, ...subRest] = rest;
       return cacheCommand(sub, subRest, {
-        connect: (origin) => connectOrStartSingleton(origin, { needs: CACHE_NEEDS }),
+        connect: async (origin) => {
+          const connection = await connectOrStartSingleton(origin, { needs: CACHE_NEEDS });
+          return {
+            dispatch: connection.dispatch,
+            dispose: async () => {
+              await connection[Symbol.asyncDispose]();
+            },
+          };
+        },
       });
     }
     case "auth": {

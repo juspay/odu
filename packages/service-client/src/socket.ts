@@ -69,13 +69,12 @@ export function serviceSocketPath(
 }
 
 /** A service dialled over its socket, addressed by PATH rather than by URL. */
-export interface ServiceSocketConnection {
+export interface ServiceSocketConnection extends AsyncDisposable {
   client: OduServiceClient;
   /** The transport-neutral dispatch under {@link ServiceSocketConnection.client}. */
   dispatch: SurfaceDispatch;
   /** The socket path that was dialled, for an error message that has to name it. */
   socketPath: string;
-  dispose: () => Promise<void>;
 }
 
 /**
@@ -141,6 +140,6 @@ export async function dialServiceSocket(
     socketPath,
     client,
     dispatch: link.dispatch,
-    dispose: () => link.dispose(),
+    [Symbol.asyncDispose]: () => link.dispose(),
   };
 }

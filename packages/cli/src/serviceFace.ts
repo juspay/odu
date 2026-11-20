@@ -58,11 +58,8 @@ export async function withService(
 ): Promise<number> {
   const dialled = await notice(dial(origin));
   if (typeof dialled === "number") return dialled;
-  try {
-    return await use(dialled.client);
-  } finally {
-    await dialled.dispose();
-  }
+  await using connection = dialled;
+  return await use(connection.client);
 }
 
 async function dial(

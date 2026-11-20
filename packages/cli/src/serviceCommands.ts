@@ -18,10 +18,8 @@ import type {
 import { ServiceRefused } from "@odu/service-client/surface";
 import { logHasMore } from "@odu/service-client/surface";
 import {
-  CI_LOG_STREAM_SINCE,
-  CI_ROW,
-  minorBehind,
-  rowSpeaks,
+  CI_LOG_STREAM_GATE,
+  rowBehindGate,
 } from "@odu/service-client/surface";
 import { readServiceCell } from "@odu/service-client/dial";
 import { serviceOrigin } from "@odu/service-client/endpoint";
@@ -392,11 +390,11 @@ export function pushStreamRefusal(
   cell: ServiceCell,
   where: string,
 ): string | null {
-  const speaks = rowSpeaks(cell.identity, CI_ROW);
-  if (!minorBehind(speaks, CI_LOG_STREAM_SINCE)) return null;
+  const speaks = rowBehindGate(cell.identity, CI_LOG_STREAM_GATE);
+  if (speaks === null) return null;
   return (
-    `odu: the service at ${where} serves the ci row at ${speaks as string} and ` +
-    `\`--stream push\` arrived in ci ${CI_LOG_STREAM_SINCE} — that daemon drops the flag ` +
+    `odu: the service at ${where} serves the ci row at ${speaks} and ` +
+    `\`--stream push\` arrived in ci ${CI_LOG_STREAM_GATE.since} — that daemon drops the flag ` +
     "and answers with the attempt's RECIPE log instead, so read that one without " +
     "`--stream`, or `odu web --upgrade` replaces the daemon."
   );

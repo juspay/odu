@@ -42,8 +42,8 @@ export type HereClient = Pick<OduServiceClient, "surface">;
 
 const NOTHING_TO_SHOW = new Set(["expired"]);
 
-function currentRun(newestFirst: readonly RunRow[]): RunRow | undefined {
-  const newest = newestFirst[0];
+function currentRun(rows: readonly RunRow[]): RunRow | undefined {
+  const newest = rows[0];
   return newest === undefined || NOTHING_TO_SHOW.has(newest.state)
     ? undefined
     : newest;

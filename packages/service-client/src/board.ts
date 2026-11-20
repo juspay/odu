@@ -223,13 +223,12 @@ export function newestFirst(rows: Iterable<RunRow>): RunRow[] {
   );
 }
 
-/**
- * WHICH CHECKOUTS ARE ON THE BOARD, in the order their newest run puts them.
- */
-export function checkoutRoots(rows: Iterable<RunRow>): string[] {
+/** The rows newest first, and the checkouts in the order that sort puts them. */
+export function boardOrder(rows: Iterable<RunRow>): { rows: RunRow[]; roots: string[] } {
+  const ordered = newestFirst(rows);
   const roots = new Set<string>();
-  for (const row of rows) roots.add(row.repoRoot);
-  return [...roots];
+  for (const row of ordered) roots.add(row.repoRoot);
+  return { rows: ordered, roots: [...roots] };
 }
 
 /** WHAT THE BOARD IS SAYING, at a glance — asked of the runs the checkouts

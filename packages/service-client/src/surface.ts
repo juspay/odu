@@ -49,6 +49,19 @@ export const CI_LOG_STREAM_SINCE = "2.6";
  *  under, a face's needs name them by, and the plugin's own name. */
 export const CI_ROW = "ci";
 
+export interface RowGate {
+  readonly row: string;
+  readonly since: string;
+}
+
+export const CI_LOG_STREAM_GATE: RowGate = { row: CI_ROW, since: CI_LOG_STREAM_SINCE };
+
+/** What the daemon speaks for a gated key's row when it is behind this build, else null. */
+export function rowBehindGate(identity: ServiceIdentity, gate: RowGate): string | null {
+  const speaks = rowSpeaks(identity, gate.row);
+  return minorBehind(speaks, gate.since) ? (speaks as string) : null;
+}
+
 /**
  * Why a call was refused, as data.
  *

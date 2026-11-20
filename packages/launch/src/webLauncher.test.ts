@@ -50,7 +50,7 @@ function scripted(get: () => unknown): {
     dispatch: null as unknown as ServiceConnection["dispatch"],
     url: "ws://127.0.0.1:3737/rpc/ws",
     onClose: () => () => {},
-    dispose: async () => {
+    [Symbol.asyncDispose]: async () => {
       disposes += 1;
     },
   };

@@ -95,7 +95,7 @@ export async function serveServiceMcpOverStdio(opts: {
       onClose: connection.onClose,
       dispose: () => {
         opened.delete(connection);
-        connection.dispose();
+        connection[Symbol.asyncDispose]();
       },
     };
   };
@@ -116,7 +116,7 @@ export async function serveServiceMcpOverStdio(opts: {
     served,
     close: async () => {
       await served.close();
-      for (const connection of opened) connection.dispose();
+      for (const connection of opened) connection[Symbol.asyncDispose]();
       opened.clear();
     },
   };

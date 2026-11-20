@@ -48,7 +48,9 @@ const endpoint: EndpointSeam<typeof endpointFlags> = {
             ) as unknown as SurfaceClientCallable,
             clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
           },
-          dispose: () => connection.dispose(),
+          dispose: async () => {
+            await connection[Symbol.asyncDispose]();
+          },
         };
       },
     }),
