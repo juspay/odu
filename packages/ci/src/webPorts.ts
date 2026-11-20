@@ -294,6 +294,23 @@ export function webPorts(
   return { ports };
 }
 
+interface AwaitTeardown {
+  readonly kind: "await-teardown";
+  readonly acked: boolean;
+}
+
+/** Every arm is returned with the dial already closed. */
+type CancelDispatch = CancelOutcome | AwaitTeardown;
+
+async function cancelThroughSocket(
+  request: CancelRequest,
+): Promise<CancelOutcome> {
+  const dispatched = await dispatchCancel(request);
+  return dispatched.kind === "await-teardown"
+    ? confirmTeardown(request.coordinator.endpoint, dispatched.acked)
+    : dispatched;
+}
+
 const TEARDOWN_CONFIRM_MS = 10_000;
 
 async function socketGone(endpoint: string): Promise<boolean> {

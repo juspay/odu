@@ -31,20 +31,8 @@ import {
 import { isUploadSession } from "./staging";
 import type { BucketRow, Scope } from "./db";
 import { isSafeNarFileName, isSafeStorePathHash } from "./narinfo";
-import {
-  actionsBlock,
-  FLAKE_CONFIG_NOTE,
-  flakeBlock,
-  MACHINE_CONFIG_NOTE,
-  MAX_NAR_PART_BYTES,
-  netrcBlock,
-  nixConfBlock,
-  nixOsBlock,
-  pushBlock,
-  useBlock,
-  useCommand,
-  type CacheBucketIdentity,
-} from "./surface";
+import { MAX_NAR_PART_BYTES, PLACEHOLDER_HOME, useBlock, useCommand } from "./surface";
+import { consumerPage, type ConsumerFacts } from "./consumerPage";
 
 
 function observedBody(

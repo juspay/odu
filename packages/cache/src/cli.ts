@@ -302,6 +302,32 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
     allowPositionals: true,
     options: { origin: originOption },
   });
+  const name = positionals[0];
+  if (name === undefined) {
+    process.stderr.write(`odu: cache use needs a bucket name\n${CACHE_USAGE}`);
+    return 1;
+  }
+  const origin = trimTrailingSlashes(
+    values.origin ?? process.env.ODU_WEB_ORIGIN?.trim() ?? "http://127.0.0.1:18440",
+  );
+  const answer = await bucketFacts({
+    origin,
+    name,
+    token: process.env.ODU_TOKEN?.trim() || process.env.ODU_CACHE_TOKEN?.trim() || null,
+    ports,
+    originFlag: values.origin,
+  });
+  switch (answer.kind) {
+    case "facts":
+      process.stdout.write(useBlock({ ...answer.facts, home: absoluteHome(process.env.HOME) }));
+      return 0;
+    case "needsSignIn":
+    case "offline":
+      process.stderr.write(`${answer.message}\n`);
+      return REFUSED;
+    case "unknown":
+      return reportFailure(answer.failure, false, REFUSED);
+  }
 }
 
 
