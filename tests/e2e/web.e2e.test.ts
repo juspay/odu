@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildOduBinary, cleanup, currentNixSystem, scratchDir } from "./harness";
+import { buildOduBinary, currentNixSystem, removeNow, scratchDir } from "./harness";
 import {
   daemonLog,
   headOf,
@@ -9,7 +9,6 @@ import {
   mcp,
   runSocketExists,
   SHARED_TOOLS,
-  suitePort,
   suitePortFor,
   startWebService,
   startWebServiceViaCommand,
@@ -53,7 +52,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   world?.dispose();
-  for (const dir of fixtures) cleanup(dir);
+  for (const dir of fixtures) removeNow(dir);
 });
 
 function fixture(justfile: string): string {
@@ -629,7 +628,7 @@ describe("the websocket door", () => {
 
 describe("`odu web` serves in this terminal", () => {
   it("serves until it is interrupted, and leaves the run it started going", async () => {
-    const origin = `http://127.0.0.1:${suitePort() + 2}`;
+    const origin = `http://127.0.0.1:${suitePortFor("foreground")}`;
     const env = { ...world.env, ODU_WEB_ORIGIN: origin };
     const server = Bun.spawn([odu, "web"], { env, stdout: "pipe", stderr: "pipe" });
     const at = { ...world, origin, env } as WebWorld;

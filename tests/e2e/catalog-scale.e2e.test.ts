@@ -13,7 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
   BIG,
   buildOduBinary,
-  cleanup,
+  removeNow,
   makeFixture,
   privateWorld,
   suitePortFor,
@@ -23,10 +23,11 @@ const CLONES = 1_000;
 const JOURNAL = 1_500;
 const BOUND_MS = 10_000;
 const TEST_MS = 3 * BOUND_MS;
+const SWEEP_MS = 120_000;
 
 let odu: string;
 const world = privateWorld(suitePortFor("catalogScale"));
-const catalog = join(world.env.ODU_STATE_DIR as string, "runs");
+const catalog = join(world.env.ODU_STATE_DIR, "runs");
 const fixtures: string[] = [];
 let seeded: { checkout: string; runId: string };
 
@@ -156,9 +157,9 @@ function stopDaemon(): void {
 
 afterAll(() => {
   stopDaemon();
-  cleanup(world.root);
-  for (const dir of fixtures) cleanup(dir);
-}, 120_000);
+  removeNow(world.root);
+  for (const dir of fixtures) removeNow(dir);
+}, SWEEP_MS);
 
 describe("a thousand-run catalog", () => {
   it("answers `odu ci status` in a checkout with no run", () => {

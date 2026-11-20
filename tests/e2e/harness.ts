@@ -20,11 +20,12 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { registerSuiteTeardown } from "./suiteTeardown";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const BIG = 256 * 1024 * 1024;
 
-const fixtures = new Set<string>();
+const sweepSet = new Set<string>();
 
 const startedAt = Date.now();
 
@@ -36,7 +37,7 @@ export function scratchDir(prefix: string): string {
   // — a sentence about the store's PARENT that reads like a test bug, three
   // levels below the call that caused it.
   const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
-  fixtures.add(dir);
+  sweepSet.add(dir);
   return dir;
 }
 
@@ -48,7 +49,7 @@ export function currentNixSystem(): string {
   ).trim();
 }
 
-export function suitePort(): number {
+function suitePort(): number {
   return 18500 + (process.pid % 900);
 }
 
@@ -90,12 +91,22 @@ export function hostsFile(root: string): string {
   return path;
 }
 
-export function privateWorld(port: number): {
+export interface WorldEnv extends NodeJS.ProcessEnv {
+  ODU_STATE_DIR: string;
+  ODU_HOSTS: string;
+  ODU_WEB_ORIGIN: string;
+}
+
+export interface World {
   root: string;
   origin: string;
-  env: NodeJS.ProcessEnv;
-} {
-  const root = scratchDir("odu-e2e-web-");
+  env: WorldEnv;
+}
+
+export function privateWorld(
+  port: number,
+  root: string = scratchDir("odu-e2e-web-"),
+): World {
   const state = join(root, "state");
   mkdirSync(state, { recursive: true });
   const origin = `http://127.0.0.1:${port}`;
@@ -153,19 +164,16 @@ function stopService(odu: string, origin?: string): string | null {
   }
 }
 
-function claimOrigin(odu: string): void {
+function evictOduFromEverySlot(odu: string): void {
   for (const slot of Object.keys(PORT_SLOT) as (keyof typeof PORT_SLOT)[]) {
-    claimPort(odu, suitePortFor(slot));
+    evictOduOnPort(odu, suitePortFor(slot));
   }
 }
 
-function claimPort(odu: string, port: number): void {
-  if (!portIsOpen(port)) return;
+function evictOduOnPort(odu: string, port: number): void {
+  if (!tcpAccepts(port)) return;
   const home = stopService(odu, `http://127.0.0.1:${port}`);
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline && portIsOpen(port)) {
-    spawnSync("sleep", ["0.1"]);
-  }
+  awaitPortFree(port, 15_000);
   if (home === null) return;
   try {
     rmSync(home, { recursive: true, force: true });
@@ -173,7 +181,14 @@ function claimPort(odu: string, port: number): void {
   }
 }
 
-function portIsOpen(port: number): boolean {
+function awaitPortFree(port: number, timeoutMs: number): void {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && tcpAccepts(port)) {
+    spawnSync("sleep", ["0.1"]);
+  }
+}
+
+function tcpAccepts(port: number): boolean {
   const probe = spawnSync(
     "bash",
     ["-c", `exec 3<>/dev/tcp/127.0.0.1/${port}`],
@@ -187,7 +202,7 @@ function sweepUp(): void {
   if (sweptUp) return;
   sweptUp = true;
   const home = driven === null ? null : stopService(driven);
-  for (const dir of [...fixtures, blackBox.root, ...(home === null ? [] : [home])]) {
+  for (const dir of [...sweepSet, blackBox.root, ...(home === null ? [] : [home])]) {
     try {
       rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -228,7 +243,7 @@ function alive(pid: number): boolean {
   }
 }
 
-(globalThis as { ODU_TEST_TEARDOWN?: () => void }).ODU_TEST_TEARDOWN = sweepUp;
+registerSuiteTeardown(sweepUp);
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(signal, () => {
     sweepUp();
@@ -259,36 +274,36 @@ export interface RunResult {
   stderr: string;
 }
 
-export function buildOduBinary(): string {
-  const build = (attr: string): string =>
-    execFileSync(
-      "nix",
-      [
-        "build",
-        attr,
-        "--no-link",
-        "--print-out-paths",
-        "--accept-flake-config",
-      ],
-      { cwd: repoRoot, encoding: "utf-8", maxBuffer: BIG },
-    ).trim();
+function nixBuild(attr: string): string {
+  return execFileSync(
+    "nix",
+    ["build", attr, "--no-link", "--print-out-paths", "--accept-flake-config"],
+    { cwd: repoRoot, encoding: "utf-8", maxBuffer: BIG },
+  ).trim();
+}
 
-  const oduOut = build(".#odu");
-  build(".#odu-runner");
-  const bin = join(oduOut, "bin", "odu");
+function warmRunnerStorePath(): void {
+  nixBuild(".#odu-runner");
+}
+
+export function buildOduBinary(): string {
+  const bin = join(nixBuild(".#odu"), "bin", "odu");
+  warmRunnerStorePath();
   driven = bin;
-  claimOrigin(bin);
+  evictOduFromEverySlot(bin);
   return bin;
 }
 
-export function makeFixture(name: string): string {
-  const dir = scratchDir(`odu-e2e-${name}-`);
-  cpSync(join(here, "fixtures", name), dir, { recursive: true });
-
+export function commitFixture(
+  dir: string,
+  options: { branch?: string; message?: string } = {},
+): void {
+  const { branch, message = "fixture" } = options;
   const git = (...args: string[]): void => {
     execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
   };
   git("init", "-q");
+  if (branch !== undefined) git("checkout", "-q", "-B", branch);
   git("add", "-A");
   git(
     "-c",
@@ -298,8 +313,14 @@ export function makeFixture(name: string): string {
     "commit",
     "-q",
     "-m",
-    "fixture",
+    message,
   );
+}
+
+export function makeFixture(name: string): string {
+  const dir = scratchDir(`odu-e2e-${name}-`);
+  cpSync(join(here, "fixtures", name), dir, { recursive: true });
+  commitFixture(dir);
   return dir;
 }
 
@@ -331,7 +352,7 @@ export function terminalStatuses(
   return new Map(events.map((e) => [e.recipe, e]));
 }
 
-export function cleanup(dir: string): void {
+export function removeNow(dir: string): void {
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch (err) {
@@ -353,26 +374,35 @@ export function oduCli(
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-export function oduRunBackground(
+export interface BackgroundRun {
+  child: ChildProcess;
+  exited: Promise<void>;
+}
+
+export async function oduRunBackground(
   oduBin: string,
   dir: string,
   argv: string[],
-): { child: ChildProcess; exited: Promise<void> } {
+): Promise<BackgroundRun> {
   const child = spawn(oduBin, ["ci", "run", ...argv], {
     cwd: dir,
     env: hermeticEnv,
     stdio: "ignore",
   });
-  const exited = new Promise<void>((resolve) => {
-    child.on("exit", () => resolve());
-  });
+  const ending = Promise.withResolvers<void>();
+  child.on("exit", () => ending.resolve());
+  const exited = ending.promise;
+  try {
+    await awaitRunSocket(dir);
+  } catch (err) {
+    child.kill("SIGKILL");
+    await exited;
+    throw err;
+  }
   return { child, exited };
 }
 
-export async function awaitRunSocket(
-  dir: string,
-  timeoutMs = 120_000,
-): Promise<void> {
+async function awaitRunSocket(dir: string, timeoutMs = 120_000): Promise<void> {
   const sock = join(dir, ".ci", "odu.sock");
   const deadline = Date.now() + timeoutMs;
   while (!existsSync(sock)) {

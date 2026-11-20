@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
   buildOduBinary,
-  cleanup,
+  removeNow,
   currentNixSystem,
   hermeticEnv,
   makeFixture,
@@ -28,7 +28,7 @@ afterEach(() => {
   for (const child of live.splice(0)) {
     if (child.exitCode === null) child.kill("SIGKILL");
   }
-  for (const dir of created.splice(0)) cleanup(dir);
+  for (const dir of created.splice(0)) removeNow(dir);
 });
 
 function fixture(name: string): string {

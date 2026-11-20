@@ -13,7 +13,7 @@ import type { AttentionAnswer, RunRow } from "@odu/service-client/surface";
 import {
   BIG,
   buildOduBinary,
-  cleanup,
+  removeNow,
   currentNixSystem,
   makeFixture,
   privateWorld,
@@ -55,9 +55,9 @@ afterAll(() => {
       } catch {
       }
     }
-    cleanup(world.root);
+    removeNow(world.root);
   }
-  for (const dir of fixtures) cleanup(dir);
+  for (const dir of fixtures) removeNow(dir);
 });
 
 it("pins edits locally and over stdio, changes red to green, then proves cache reuse for unchanged content", () => {

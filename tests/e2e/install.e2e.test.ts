@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
   BIG,
   buildOduBinary,
-  cleanup,
+  removeNow,
   hermeticEnv,
   repoRoot,
   scratchDir,
@@ -76,6 +76,10 @@ function installPlugin(): string {
   return dir;
 }
 
+function withoutShim(command: string): string[] {
+  return ['export PATH="$ODU_E2E_REAL_PATH"', command];
+}
+
 function writeNixShim(dir: string): void {
   const path = join(dir, "nix");
   writeFileSync(
@@ -90,10 +94,7 @@ function writeNixShim(dir: string): void {
       "  exit 97",
       "fi",
       "shift 5",
-      '# The shim is out of the way from here on: the service this becomes',
-      '# starts coordinators that shell out to the REAL nix.',
-      'export PATH="$ODU_E2E_REAL_PATH"',
-      'exec "$ODU_E2E_BIN" mcp "$@"',
+      ...withoutShim('exec "$ODU_E2E_BIN" mcp "$@"'),
       "",
     ].join("\n"),
     { mode: 0o755 },
@@ -242,7 +243,7 @@ describe("a client loading odu's Agent Plugin", () => {
       expect(page.text.length).toBeGreaterThan(0);
     } finally {
       await client.close().catch(() => {});
-      cleanup(dir);
+      removeNow(dir);
       const offending = join(shimDir, "nix.argv");
       if (existsSync(offending)) {
         throw new Error(

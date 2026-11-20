@@ -2,6 +2,7 @@ import { afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runSuiteTeardown } from "../tests/e2e/suiteTeardown";
 
 if (
   process.env.ODU_STATE_DIR === undefined ||
@@ -28,16 +29,14 @@ if (
   // and takes the shared service with it while ten files still need it.
   //
   // Which is why this is also where a suite hands in its own teardown. See
-  // `ODU_TEST_TEARDOWN`.
+  // `registerSuiteTeardown`.
   //
   // With a budget of its own: the e2e teardown asks the service for its pid (a
   // process start), stops it, and removes every fixture and world the suite
   // made — a thousand-run catalog among them — and bun's 5 s hook default
   // failed the last file of a green run for taking longer than that.
   afterAll(() => {
-    const theirs = (globalThis as { ODU_TEST_TEARDOWN?: () => void })
-      .ODU_TEST_TEARDOWN;
-    if (theirs !== undefined) theirs();
+    runSuiteTeardown();
     dispose();
   }, 120_000);
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {

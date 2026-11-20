@@ -6,8 +6,9 @@ import { formatLogKey } from "@odu/service-client/logKey";
 import {
   BIG,
   buildOduBinary,
-  cleanup,
+  commitFixture,
   currentNixSystem,
+  removeNow,
   scratchDir,
   suitePortFor,
 } from "./harness";
@@ -120,21 +121,7 @@ build:
     readlink -f result
 `,
   );
-  const git = (...args: string[]): void => {
-    execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
-  };
-  git("init", "-q");
-  git("add", "-A");
-  git(
-    "-c",
-    "user.email=e2e@odu.test",
-    "-c",
-    "user.name=odu e2e",
-    "commit",
-    "-q",
-    "-m",
-    "fixture",
-  );
+  commitFixture(dir);
   return dir;
 }
 
@@ -155,20 +142,7 @@ build:
 `,
   );
   writeFileSync(join(dir, "justfile"), "mod ci 'tooling/mod.just'\n");
-  const git = (...args: string[]): void => {
-    execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
-  };
-  git("add", "-A");
-  git(
-    "-c",
-    "user.email=e2e@odu.test",
-    "-c",
-    "user.name=odu e2e",
-    "commit",
-    "-q",
-    "-m",
-    "module",
-  );
+  commitFixture(dir, { message: "module" });
   return dir;
 }
 
@@ -192,22 +166,12 @@ build:
     readlink -f result
 `,
   );
-  const git = (...args: string[]): void => {
-    execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
-  };
-  git("remote", "add", "origin", `https://github.com/${PIN_REPO}.git`);
-  git("checkout", "-q", "-B", PIN_REF);
-  git("add", "-A");
-  git(
-    "-c",
-    "user.email=e2e@odu.test",
-    "-c",
-    "user.name=odu e2e",
-    "commit",
-    "-q",
-    "-m",
-    "pinned",
+  execFileSync(
+    "git",
+    ["remote", "add", "origin", `https://github.com/${PIN_REPO}.git`],
+    { cwd: dir, encoding: "utf-8" },
   );
+  commitFixture(dir, { branch: PIN_REF, message: "pinned" });
   return dir;
 }
 
@@ -265,7 +229,7 @@ beforeAll(async () => {
 afterAll(() => {
   home?.dispose();
   foreign?.dispose();
-  for (const dir of dirs.splice(0)) cleanup(dir);
+  for (const dir of dirs.splice(0)) removeNow(dir);
 });
 
 describe("a run whose repository reads from this daemon's cache", () => {

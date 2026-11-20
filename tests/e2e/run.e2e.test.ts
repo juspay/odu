@@ -5,7 +5,7 @@ import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
   BIG,
   buildOduBinary,
-  cleanup,
+  removeNow,
   hermeticEnv,
   makeFixture,
   oduRun,
@@ -23,7 +23,7 @@ beforeAll(() => {
 
 const created: string[] = [];
 afterEach(() => {
-  for (const dir of created.splice(0)) cleanup(dir);
+  for (const dir of created.splice(0)) removeNow(dir);
 });
 
 function fixture(name: string): string {

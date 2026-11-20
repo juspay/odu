@@ -3,14 +3,13 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
-  awaitRunSocket,
   buildOduBinary,
-  cleanup,
   currentNixSystem,
   makeFixture,
   oduCli,
   oduRun,
   oduRunBackground,
+  removeNow,
 } from "./harness";
 
 let oduBin: string;
@@ -23,7 +22,7 @@ beforeAll(() => {
 
 const created: string[] = [];
 afterEach(() => {
-  for (const dir of created.splice(0)) cleanup(dir);
+  for (const dir of created.splice(0)) removeNow(dir);
 });
 
 function fixture(name: string): string {
@@ -74,14 +73,13 @@ describe("durable node logs", () => {
 describe("a settled run's log", () => {
   it("is whole the moment the run reports itself settled", async () => {
     const dir = fixture("noisy");
-    const { exited } = oduRunBackground(oduBin, dir, [
+    const { exited } = await oduRunBackground(oduBin, dir, [
       "--no-strict",
       "--linger",
       "--progress",
       "json",
     ]);
     try {
-      await awaitRunSocket(dir);
       const wait = oduCli(oduBin, dir, [
         "ci",
         "wait",

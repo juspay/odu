@@ -1,13 +1,12 @@
 import { rmSync } from "node:fs";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
-  awaitRunSocket,
   buildOduBinary,
-  cleanup,
   makeFixture,
   oduCli,
   oduRun,
   oduRunBackground,
+  removeNow,
 } from "./harness";
 
 let oduBin: string;
@@ -23,7 +22,7 @@ afterEach(async () => {
     run.kill();
     await run.exited;
   }
-  for (const dir of created.splice(0)) cleanup(dir);
+  for (const dir of created.splice(0)) removeNow(dir);
 });
 
 function fixture(name: string): string {
@@ -91,9 +90,8 @@ function logJson(dir: string, key: string, extra: string[] = []): LogPage {
 describe("a bounded wait answers before the slow lane finishes", () => {
   it("returns the red lane's diagnostics while its 120s sibling is still running", async () => {
     const dir = fixture("fast-red");
-    const bg = oduRunBackground(oduBin, dir, ["--no-strict", "--progress", "json"]);
+    const bg = await oduRunBackground(oduBin, dir, ["--no-strict", "--progress", "json"]);
     running.push({ kill: () => bg.child.kill("SIGTERM"), exited: bg.exited });
-    await awaitRunSocket(dir);
 
     const started = Date.now();
     const { status, attention } = waitJson(dir, [
@@ -121,9 +119,8 @@ describe("a bounded wait answers before the slow lane finishes", () => {
 
   it("gives two callers their own cursor, and keeps the red for both", async () => {
     const dir = fixture("fast-red");
-    const bg = oduRunBackground(oduBin, dir, ["--no-strict", "--progress", "json"]);
+    const bg = await oduRunBackground(oduBin, dir, ["--no-strict", "--progress", "json"]);
     running.push({ kill: () => bg.child.kill("SIGTERM"), exited: bg.exited });
-    await awaitRunSocket(dir);
 
     const first = waitJson(dir, ["--run", "latest", "--deadline-ms", "60000"]);
     const runId = first.attention.runId;
@@ -157,9 +154,8 @@ describe("a bounded wait answers before the slow lane finishes", () => {
 describe("the wait's exits are a contract", () => {
   it("says still-going, no-such-run and refused-cursor with three different codes", async () => {
     const dir = fixture("sleep");
-    const bg = oduRunBackground(oduBin, dir, ["--no-strict", "--progress", "json"]);
+    const bg = await oduRunBackground(oduBin, dir, ["--no-strict", "--progress", "json"]);
     running.push({ kill: () => bg.child.kill("SIGTERM"), exited: bg.exited });
-    await awaitRunSocket(dir);
 
     const pending = waitJson(dir, ["--run", "latest", "--deadline-ms", "1500"]);
     expect(pending.status).toBe(2);

@@ -12,22 +12,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BIG,
+  commitFixture,
   currentNixSystem,
   hostsFile,
   PORT_SLOT,
   privateWorld,
   scratchDir,
-  suitePort,
   suitePortFor,
 } from "./harness";
 
-export { hostsFile, PORT_SLOT, privateWorld, suitePort, suitePortFor };
+export { hostsFile, PORT_SLOT, privateWorld, suitePortFor };
 
 export interface WebWorld {
   odu: string;
   origin: string;
   env: NodeJS.ProcessEnv;
   daemon: ChildProcess | null;
+  daemonPid: number | null;
   logPath: string;
   root: string;
   daemonHome?: string;
@@ -150,11 +151,9 @@ export async function startWebService(
     daemon,
     logPath,
     root,
+    daemonPid: daemon.pid ?? null,
     dispose: () => {
-      try {
-        if (daemon.pid !== undefined) process.kill(-daemon.pid, "SIGTERM");
-      } catch {
-      }
+      if (daemon.pid !== undefined) killDaemon(daemon.pid);
       void sink.end();
       for (const dir of [root, world.daemonHome]) {
         if (dir === undefined) continue;
@@ -192,9 +191,10 @@ export async function startWebServiceViaCommand(
   oduBin: string,
   port: number = suitePortFor("commandDaemon"),
   envOver: NodeJS.ProcessEnv = {},
+  root?: string,
 ): Promise<WebWorld> {
-  const { root, origin, env: worldEnv } = privateWorld(port);
-  const env = { ...worldEnv, ...envOver };
+  const world = privateWorld(port, root);
+  const env = { ...world.env, ...envOver };
   const started = spawnSync(oduBin, ["web", "--background"], {
     env,
     encoding: "utf-8",
@@ -223,20 +223,16 @@ export async function startWebServiceViaCommand(
   });
   return {
     odu: oduBin,
-    origin,
+    origin: world.origin,
     env,
     daemon: null,
+    daemonPid: cell.identity.pid,
     logPath: join(cell.identity.home, "web-daemon.stderr.log"),
-    root,
+    root: world.root,
     daemonHome: cell.identity.home,
     dispose: () => {
-      for (const target of [-cell.identity.pid, cell.identity.pid]) {
-        try {
-          process.kill(target, "SIGTERM");
-        } catch {
-        }
-      }
-      for (const dir of [root, cell.identity.home]) {
+      killDaemon(cell.identity.pid);
+      for (const dir of [world.root, cell.identity.home]) {
         try {
           rmSync(dir, { recursive: true, force: true });
         } catch (err) {
@@ -303,21 +299,7 @@ export function makeWebFixture(justfile: string): string {
   const dir = realpathSync(scratchDir("odu-e2e-webrepo-"));
   writeFileSync(join(dir, ".gitignore"), ".ci/\n");
   writeFileSync(join(dir, "justfile"), justfile);
-  const git = (...args: string[]): void => {
-    execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
-  };
-  git("init", "-q");
-  git("add", "-A");
-  git(
-    "-c",
-    "user.email=e2e@odu.test",
-    "-c",
-    "user.name=odu e2e",
-    "commit",
-    "-q",
-    "-m",
-    "fixture",
-  );
+  commitFixture(dir);
   return dir;
 }
 

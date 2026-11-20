@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { BIG, buildOduBinary, cleanup } from "./harness";
+import { BIG, buildOduBinary, removeNow } from "./harness";
 import {
   headOf,
   killDaemon,
@@ -30,9 +30,19 @@ beforeAll(() => {
   oduBin = buildOduBinary();
 }, 600_000);
 
-const trash: (() => void)[] = [];
+const chores: (() => void)[] = [];
+const trash = {
+  push(chore: () => void): () => void {
+    chores.push(chore);
+    return chore;
+  },
+  pushBefore(other: () => void, chore: () => void): void {
+    const at = chores.indexOf(other);
+    chores.splice(at < 0 ? chores.length : at, 0, chore);
+  },
+};
 afterAll(() => {
-  for (const drop of trash.reverse()) {
+  for (const drop of chores) {
     try {
       drop();
     } catch (err) {
@@ -92,15 +102,15 @@ describe("a client that walks away mid-wait", () => {
     world = await startWebServiceViaCommand(oduBin, suitePortFor("disconnect"));
     dir = makeWebFixture(SLOW);
     runId = await startRunning(world, dir, "disconnect-1");
-    trash.push(() => cleanup(dir));
-    trash.push(() => world.dispose());
-    trash.push(() => {
+    const dispose = trash.push(() => world.dispose());
+    trash.pushBefore(dispose, () => {
       verb(world, "run_cancel", {
         runId,
         scope: { kind: "run" },
         requestId: "disconnect-cleanup",
       });
     });
+    trash.push(() => removeNow(dir));
   }, 900_000);
 
   it("leaves the endpoint answering, and the run running", async () => {
@@ -240,7 +250,7 @@ describe("a daemon that died between accepting a start and recording it", () => 
     const stateDir = world.env.ODU_STATE_DIR as string;
     const home = world.daemonHome as string;
     const dir = makeWebFixture(SLOW);
-    trash.push(() => cleanup(dir));
+    trash.push(() => removeNow(dir));
     const requestId = "crash-window-1";
     const input = {
       checkout: dir,
@@ -323,7 +333,7 @@ describe("a daemon restarted under live runs", () => {
     const stage = restartableWorld(suitePortFor("restartUnderRuns"));
     const before = await stage.bringUp();
     const dirs = [makeWebFixture(SLOW), makeWebFixture(SLOW)];
-    for (const dir of dirs) trash.push(() => cleanup(dir));
+    for (const dir of dirs) trash.push(() => removeNow(dir));
     const runs = [
       await startRunning(before, dirs[0] as string, "restart-a"),
       await startRunning(before, dirs[1] as string, "restart-b"),
@@ -385,76 +395,23 @@ function restartableWorld(port: number): {
   bringUp: () => Promise<WebWorld>;
   killIt: () => Promise<void>;
 } {
-  const { root, origin, env } = privateWorld(port);
-  let home: string | undefined;
-  let pid: number | null = null;
-  const world: WebWorld = {
-    odu: oduBin,
-    origin,
-    env,
-    daemon: null,
-    logPath: "",
-    root,
-    dispose: () => {},
-  };
-  const stop = async (): Promise<void> => {
-    if (pid !== null) killDaemon(pid, "SIGKILL");
-    pid = null;
-    await until(
-      "the killed daemon to stop answering",
-      async () => ((await tcpListening(origin)) ? null : true),
-      60_000,
-    );
-  };
-  trash.push(() => {
-    if (pid !== null) killDaemon(pid, "SIGKILL");
-    for (const dir of [root, home]) {
-      if (dir === undefined) continue;
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch (err) {
-        process.stderr.write(`e2e: failed to remove ${dir}: ${String(err)}\n`);
-      }
-    }
-  });
+  let world: WebWorld | null = null;
+  let root: string | undefined;
+  trash.push(() => world?.dispose());
   return {
-    killIt: stop,
-    bringUp: async () => {
-      const started = spawnSync(oduBin, ["web", "--background"], {
-        env,
-        encoding: "utf-8",
-        maxBuffer: BIG,
-      });
-      if (started.status !== 0) {
-        throw new Error(
-          `e2e: \`odu web --background\` on ${origin} exited ${started.status}\n${started.stderr}${started.stdout}`,
-        );
-      }
-      const cell = await until(
-        `a ready service at ${origin}`,
-        () => {
-          const answer = spawnSync(oduBin, ["surface", "get", "service"], {
-            env,
-            encoding: "utf-8",
-            maxBuffer: BIG,
-          });
-          if (answer.status !== 0) return null;
-          try {
-            const value = JSON.parse(answer.stdout) as {
-              identity: { home: string; pid: number };
-              readiness: { state: string };
-            };
-            return value.readiness.state === "ready" ? value : null;
-          } catch {
-            return null;
-          }
-        },
-        120_000,
+    killIt: async () => {
+      const live = world;
+      if (live === null) return;
+      if (live.daemonPid !== null) killDaemon(live.daemonPid, "SIGKILL");
+      await until(
+        "the killed daemon to stop answering",
+        async () => ((await tcpListening(live.origin)) ? null : true),
+        60_000,
       );
-      pid = cell.identity.pid;
-      home = cell.identity.home;
-      world.daemonHome = home;
-      world.logPath = join(home, "web-daemon.stderr.log");
+    },
+    bringUp: async () => {
+      world = await startWebServiceViaCommand(oduBin, port, {}, root);
+      root = world.root;
       return world;
     },
   };

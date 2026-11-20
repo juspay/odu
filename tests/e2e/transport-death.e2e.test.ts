@@ -2,7 +2,7 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { buildOduBinary, cleanup, hermeticEnv, makeFixture } from "./harness";
+import { buildOduBinary, hermeticEnv, makeFixture, removeNow } from "./harness";
 
 let oduBin: string;
 const env = hermeticEnv;
@@ -17,7 +17,7 @@ afterEach(() => {
   for (const child of live.splice(0)) {
     if (child.exitCode === null) child.kill("SIGKILL");
   }
-  for (const dir of created.splice(0)) cleanup(dir);
+  for (const dir of created.splice(0)) removeNow(dir);
 });
 
 const sleep = (ms: number): Promise<void> =>
@@ -112,13 +112,58 @@ function killIfAlive(pid: number): void {
   }
 }
 
-function whenClosed(
+interface LaneRun {
+  child: ChildProcess;
+  stdout: () => string;
+  stderr: () => string;
+  exited: Promise<number>;
+  closed: Promise<void>;
+}
+
+function streamClosed(
   stream: NodeJS.ReadableStream | null | undefined,
 ): Promise<void> {
   if (stream === null || stream === undefined) return Promise.resolve();
-  return new Promise((resolve) => {
-    stream.on("close", () => resolve());
+  const done = Promise.withResolvers<void>();
+  stream.on("close", () => done.resolve());
+  return done.promise;
+}
+
+function startCiRun(
+  dir: string,
+  argv: string[],
+  runEnv: NodeJS.ProcessEnv,
+): LaneRun {
+  const child = spawn(oduBin, ["ci", "run", ...argv], {
+    cwd: dir,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: runEnv,
   });
+  live.push(child);
+  let out = "";
+  let err = "";
+  child.stdout?.setEncoding("utf-8");
+  child.stderr?.setEncoding("utf-8");
+  child.stdout?.on("data", (c: string) => {
+    out += c;
+  });
+  child.stderr?.on("data", (c: string) => {
+    err += c;
+  });
+  const closed = Promise.all([
+    streamClosed(child.stdout),
+    streamClosed(child.stderr),
+  ]).then(() => undefined);
+  const ending = Promise.withResolvers<number>();
+  child.on("exit", (code) => ending.resolve(code ?? -1));
+  child.on("error", () => ending.resolve(-1));
+  return {
+    child,
+    stdout: () => out,
+    stderr: () => err,
+    exited: ending.promise,
+    closed,
+  };
 }
 
 function jsonEvents(stdout: string): { recipe: string; status: string }[] {
@@ -164,33 +209,12 @@ describe("odu lane transport death (black-box)", () => {
     async () => {
       const dir = makeFixture("fast-slow");
       created.push(dir);
-
-      const child = spawn(oduBin, ["ci", "run", "--no-strict", "--progress", "json"], {
-        cwd: dir,
-        stdio: ["ignore", "pipe", "pipe"],
-        env,
-      });
-      live.push(child);
-
-      let stdout = "";
-      let stderr = "";
-      child.stdout?.setEncoding("utf-8");
-      child.stderr?.setEncoding("utf-8");
-      child.stdout?.on("data", (c: string) => {
-        stdout += c;
-      });
-      child.stderr?.on("data", (c: string) => {
-        stderr += c;
-      });
-      const exited = new Promise<number>((resolve) => {
-        child.on("exit", (code) => resolve(code ?? -1));
-        child.on("error", () => resolve(-1));
-      });
+      const run = startCiRun(dir, ["--no-strict", "--progress", "json"], env);
 
       const finished = ["a", "b", "c", "d", "e", "f", "g", "h"];
       await waitUntil(
         () => {
-          const ev = jsonEvents(stdout);
+          const ev = jsonEvents(run.stdout());
           return (
             finished.every((r) =>
               ev.some((e) => e.recipe === r && e.status === "success"),
@@ -201,19 +225,21 @@ describe("odu lane transport death (black-box)", () => {
         "eight recipes to succeed while slow is still running",
       );
 
-      const runnerPid = findRunnerPid(runIdOf(stderr));
+      const runnerPid = findRunnerPid(runIdOf(run.stderr()));
       const recipeTree = descendants(runnerPid);
       killIfAlive(runnerPid);
 
-      const code = await exited;
+      const code = await run.exited;
       for (const p of recipeTree) killIfAlive(p.pid);
       killIfAlive(runnerPid);
 
       expect(code).toBeGreaterThan(0);
-      expect(stderr).not.toContain("after its log ended");
-      expect(stderr).toContain("ci run summary");
+      expect(run.stderr()).not.toContain("after its log ended");
+      expect(run.stderr()).toContain("ci run summary");
       expect(
-        jsonEvents(stdout).some((e) => e.recipe === "slow" && e.status === "errored"),
+        jsonEvents(run.stdout()).some(
+          (e) => e.recipe === "slow" && e.status === "errored",
+        ),
       ).toBe(true);
 
       const ci = join(dir, ".ci");
@@ -245,47 +271,25 @@ describe("odu lane transport death (black-box)", () => {
         ODU_LINGER_IDLE_MS: "30000",
       };
 
-      const child = spawn(
-        oduBin,
-        ["ci", "run", "--no-strict", "--linger", "--progress", "json"],
-        {
-          cwd: dir,
-          stdio: ["ignore", "pipe", "pipe"],
-          env: lingerEnv,
-        },
+      const run = startCiRun(
+        dir,
+        ["--no-strict", "--linger", "--progress", "json"],
+        lingerEnv,
       );
-      live.push(child);
-
-      let stdout = "";
-      let stderr = "";
-      child.stdout?.setEncoding("utf-8");
-      child.stderr?.setEncoding("utf-8");
-      child.stdout?.on("data", (c: string) => {
-        stdout += c;
-      });
-      child.stderr?.on("data", (c: string) => {
-        stderr += c;
-      });
-      const stdoutClosed = whenClosed(child.stdout);
-      const stderrClosed = whenClosed(child.stderr);
-      const exited = new Promise<number>((resolve) => {
-        child.on("exit", (code) => resolve(code ?? -1));
-        child.on("error", () => resolve(-1));
-      });
 
       const recipes = ["_ci-setup", "alpha", "beta"];
       await waitUntil(
-        () => recipes.every((r) => lastStatuses(stdout).get(r) === "success"),
+        () => recipes.every((r) => lastStatuses(run.stdout()).get(r) === "success"),
         600_000,
         "every recipe of the pass fixture to succeed",
       );
 
-      const runnerPid = findRunnerPid(runIdOf(stderr));
+      const runnerPid = findRunnerPid(runIdOf(run.stderr()));
       const recipeTree = descendants(runnerPid);
       killIfAlive(runnerPid);
 
-      const code = await exited;
-      await Promise.all([stdoutClosed, stderrClosed]);
+      const code = await run.exited;
+      await run.closed;
       for (const p of recipeTree) killIfAlive(p.pid);
       killIfAlive(runnerPid);
 
@@ -298,10 +302,10 @@ describe("odu lane transport death (black-box)", () => {
         "the coordinator to record the lane's death",
       );
       expect(code).toBe(0);
-      expect(stderr).not.toContain("write EPIPE");
-      expect(stderr).not.toContain("after its log ended");
+      expect(run.stderr()).not.toContain("write EPIPE");
+      expect(run.stderr()).not.toContain("after its log ended");
       expect(
-        jsonEvents(stdout).some((e) => e.status === "errored"),
+        jsonEvents(run.stdout()).some((e) => e.status === "errored"),
       ).toBe(false);
     },
     900_000,

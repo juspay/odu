@@ -15,7 +15,7 @@ import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
   BIG,
   buildOduBinary,
-  cleanup,
+  removeNow,
   hermeticEnv,
   makeFixture,
   scratchDir,
@@ -32,7 +32,7 @@ beforeAll(() => {
 
 const created: string[] = [];
 afterEach(() => {
-  for (const dir of created.splice(0)) cleanup(dir);
+  for (const dir of created.splice(0)) removeNow(dir);
 });
 
 function fixture(name: string): string {
@@ -166,6 +166,18 @@ const RULES_ON_MASTER = FIXTURE_RULESET.rules.map((rule) => ({
   ruleset_id: FIXTURE_RULESET.id,
 }));
 
+function fakeGh(callLog: string, cases: [string, string][]): string {
+  return [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" >> '${callLog}'`,
+    'case "$*" in',
+    ...cases.map(([pattern, handler]) => `  ${pattern}) ${handler} ;;`),
+    `  *) printf 'fake gh: unexpected call: %s\\n' "$*" >&2; exit 1 ;;`,
+    "esac",
+    "",
+  ].join("\n");
+}
+
 function oduProtectWrite(opts: {
   branchRules: unknown;
   ruleset?: unknown;
@@ -188,18 +200,18 @@ function oduProtectWrite(opts: {
   writeFileSync(at("ruleset.json"), JSON.stringify(opts.ruleset ?? {}));
   writeFileSync(at("calls.txt"), "");
 
-  const script = `#!/bin/sh
-printf '%s\\n' "$*" >> '${at("calls.txt")}'
-case "$*" in
-  *"--method PUT"*) cat > '${at("put-body.json")}'; printf '{}\\n' ;;
-  *"--method POST"*) cat > '${at("post-body.json")}'; printf '{"id":777,"name":"odu: required checks","target":"branch","enforcement":"active"}\\n' ;;
-  *"--jq .default_branch"*) printf 'master\\n' ;;
-  *"/rules/branches/"*) cat '${at("branch-rules.json")}' ;;
-  *"/rulesets/"*) cat '${at("ruleset.json")}' ;;
-  *) printf 'fake gh: unexpected call: %s\\n' "$*" >&2; exit 1 ;;
-esac
-`;
-  useGh(script);
+  useGh(
+    fakeGh(at("calls.txt"), [
+      ['*"--method PUT"*', `cat > '${at("put-body.json")}'; printf '{}\\n'`],
+      [
+        '*"--method POST"*',
+        `cat > '${at("post-body.json")}'; printf '{"id":777,"name":"odu: required checks","target":"branch","enforcement":"active"}\\n'`,
+      ],
+      ['*"--jq .default_branch"*', `printf 'master\\n'`],
+      ['*"/rules/branches/"*', `cat '${at("branch-rules.json")}'`],
+      ['*"/rulesets/"*', `cat '${at("ruleset.json")}'`],
+    ]),
+  );
 
   const res = spawnSync(
     oduBin,

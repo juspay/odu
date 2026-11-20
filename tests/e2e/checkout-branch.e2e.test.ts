@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { buildOduBinary, cleanup, scratchDir, suitePortFor } from "./harness";
+import { buildOduBinary, removeNow, scratchDir, suitePortFor } from "./harness";
 import { daemonLog, startWebService, until, verb, type WebWorld } from "./webHarness";
 
 const PASS = `[metadata("ci")]
@@ -23,7 +23,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   world?.dispose();
-  for (const dir of dirs) cleanup(dir);
+  for (const dir of dirs) removeNow(dir);
 });
 
 function git(cwd: string, ...args: string[]): string {

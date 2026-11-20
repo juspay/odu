@@ -7,8 +7,8 @@ import { type Gateway, startGateway } from "@odu/objects/testing";
 import {
   BIG,
   buildOduBinary,
-  cleanup,
   currentNixSystem,
+  removeNow,
   scratchDir,
   suitePortFor,
 } from "../../../../tests/e2e/harness";
@@ -119,7 +119,7 @@ afterAll(async () => {
   world?.dispose();
   storeProxy?.stop();
   await gateway?.stop();
-  for (const dir of dirs.splice(0)) cleanup(dir);
+  for (const dir of dirs.splice(0)) removeNow(dir);
 });
 
 function storeFile(name: string, bytes: number): string {

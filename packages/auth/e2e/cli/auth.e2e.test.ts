@@ -8,8 +8,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   buildOduBinary,
-  cleanup,
   makeFixture,
+  removeNow,
   suitePortFor,
 } from "../../../../tests/e2e/harness";
 import {
@@ -291,7 +291,7 @@ describe("odu ci run --checkout against a server with a door", () => {
   });
 
   afterAll(() => {
-    if (fixture !== undefined) cleanup(fixture);
+    if (fixture !== undefined) removeNow(fixture);
   });
 
   function runThere(sha: string, extra: string[] = []) {

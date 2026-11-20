@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
   buildOduBinary,
-  cleanup,
+  removeNow,
   hermeticEnv,
   scratchDir,
 } from "./harness";
@@ -223,7 +223,7 @@ describe("odu mcp — the shared-service bridge", () => {
         await close();
       }
     } finally {
-      cleanup(dir);
+      removeNow(dir);
     }
   }, 300_000);
 
@@ -244,7 +244,6 @@ describe("odu mcp — the shared-service bridge", () => {
 describe("odu mcp — cold bootstrap", () => {
   it("starts the service itself when nothing is serving", async () => {
     const world = coldWorld("cold", suitePortFor("coldBootstrap"));
-    let daemonHome: string | null = null;
     try {
       expect(
         await tcpListening(world.origin),
@@ -256,8 +255,7 @@ describe("odu mcp — cold bootstrap", () => {
         const cell = await readServiceCell(client);
         expect(cell.identity.origin).toBe(world.origin);
         expect(cell.readiness.state).toBe("ready");
-        world.adopt(cell.identity.pid);
-        daemonHome = cell.identity.home;
+        world.adopt(cell.identity.pid, cell.identity.home);
       } finally {
         await close();
       }
@@ -267,13 +265,12 @@ describe("odu mcp — cold bootstrap", () => {
         "the service did not outlive the bridge that started it",
       ).toBe(true);
     } finally {
-      world.dispose(daemonHome);
+      world.dispose();
     }
   }, 300_000);
 
   it("two cold faces racing for one daemon converge on it", async () => {
     const world = coldWorld("race", suitePortFor("coldRace"));
-    let daemonHome: string | null = null;
     try {
       expect(
         await tcpListening(world.origin),
@@ -323,12 +320,11 @@ describe("odu mcp — cold bootstrap", () => {
         `four cold faces reached ${pids.size} different services`,
       ).toHaveLength(1);
       const winner = answers[0] as ServiceFacts;
-      world.adopt(winner.pid);
-      daemonHome = winner.home;
+      world.adopt(winner.pid, winner.home);
 
       expect((await viaTerminal()).pid).toBe(winner.pid);
     } finally {
-      world.dispose(daemonHome);
+      world.dispose();
     }
   }, 300_000);
 });
@@ -372,7 +368,7 @@ describe("odu mcp — a port that belongs to something else", () => {
       }
     } finally {
       squatter.stop(true);
-      world.dispose(null);
+      world.dispose();
     }
   }, 300_000);
 });
@@ -380,7 +376,6 @@ describe("odu mcp — a port that belongs to something else", () => {
 describe("odu mcp — the bridge redials", () => {
   it("answers again after the daemon it was talking to is killed", async () => {
     const world = coldWorld("redial", suitePortFor("bridgeRedial"));
-    let daemonHome: string | null = null;
     try {
       const { client, close } = await connectBridge(world.env);
       try {
@@ -388,8 +383,7 @@ describe("odu mcp — the bridge redials", () => {
         expect(JSON.parse(payload(first, "run_list"))).toHaveProperty("rows");
 
         const cell = await readServiceCell(client);
-        world.adopt(cell.identity.pid);
-        daemonHome = cell.identity.home;
+        world.adopt(cell.identity.pid, cell.identity.home);
         killDaemon(cell.identity.pid);
         await until(
           "the killed daemon's port to close",
@@ -420,12 +414,12 @@ describe("odu mcp — the bridge redials", () => {
         expect(answered).toHaveProperty("rows");
 
         const replacement = await readServiceCell(client);
-        world.adopt(replacement.identity.pid);
+        world.adopt(replacement.identity.pid, replacement.identity.home);
       } finally {
         await close();
       }
     } finally {
-      world.dispose(daemonHome);
+      world.dispose();
     }
   }, 300_000);
 });
@@ -436,14 +430,14 @@ function coldWorld(
 ): {
   origin: string;
   env: NodeJS.ProcessEnv;
-  adopt: (pid: number) => void;
-  dispose: (daemonHome: string | null) => void;
+  adopt: (pid: number, home: string) => void;
+  dispose: () => void;
 } {
   const root = scratchDir(`odu-e2e-${name}-`);
   const state = join(root, "state");
   mkdirSync(state, { recursive: true });
   const origin = `http://127.0.0.1:${port}`;
-  let pid: number | null = null;
+  let adopted: { pid: number; home: string } | null = null;
   return {
     origin,
     env: {
@@ -451,13 +445,13 @@ function coldWorld(
       ODU_STATE_DIR: state,
       ODU_WEB_ORIGIN: origin,
     } as NodeJS.ProcessEnv,
-    adopt: (value) => {
-      pid = value;
+    adopt: (pid, home) => {
+      adopted = { pid, home };
     },
-    dispose: (daemonHome) => {
-      if (pid !== null) killDaemon(pid);
-      for (const dir of [root, daemonHome]) {
-        if (dir === null) continue;
+    dispose: () => {
+      const owned: { pid: number; home: string } | null = adopted;
+      if (owned !== null) killDaemon(owned.pid);
+      for (const dir of [root, ...(owned === null ? [] : [owned.home])]) {
         try {
           rmSync(dir, { recursive: true, force: true });
         } catch (err) {
