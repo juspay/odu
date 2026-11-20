@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { fleetLine, venueNote, venueSource } from "./ops";
-import type { VenueRow } from "./types";
+import { fleetLine, fleetOf, venueNote, venueSource } from "./ops";
+import type { VenueReading, VenueRow } from "./types";
 
 const NOW = 1_700_000_000_000;
 
@@ -16,6 +16,8 @@ function machine(over: Partial<VenueRow> = {}): VenueRow {
     ...over,
   };
 }
+
+const lineFor = (reading: VenueReading | undefined): string | undefined => fleetLine(fleetOf(reading));
 
 describe("an unreachable machine's row", () => {
   it("carries ssh's own sentence, which no column could hold", () => {
@@ -53,7 +55,7 @@ describe("the hosts file in the toolbar", () => {
 
 describe("the fleet line", () => {
   it("counts only the machines work cannot land on as down", () => {
-    const line = fleetLine({
+    const line = lineFor({
       at: NOW - 60_000,
       platforms: [],
       source: "/etc/odu/hosts.json",
@@ -68,7 +70,7 @@ describe("the fleet line", () => {
   });
 
   it("says what a probe is still waiting on, and how many", () => {
-    const line = fleetLine({
+    const line = lineFor({
       at: NOW,
       platforms: [],
       source: "/etc/odu/hosts.json",
@@ -83,7 +85,7 @@ describe("the fleet line", () => {
   });
 
   it("counts one host singular, because a sentence is read not parsed", () => {
-    const line = fleetLine({
+    const line = lineFor({
       at: NOW,
       platforms: [],
       source: null,
@@ -94,7 +96,7 @@ describe("the fleet line", () => {
   });
 
   it("keeps the slice clause while it is still probing", () => {
-    const line = fleetLine({
+    const line = lineFor({
       at: NOW,
       platforms: ["aarch64-darwin"],
       source: null,
@@ -106,7 +108,7 @@ describe("the fleet line", () => {
   });
 
   it("says a narrowed reading is a SLICE, so its count is not read as the fleet", () => {
-    const line = fleetLine({
+    const line = lineFor({
       at: NOW,
       platforms: ["aarch64-darwin"],
       source: "/etc/odu/hosts.json",
@@ -118,7 +120,7 @@ describe("the fleet line", () => {
   });
 
   it("says nothing about WHEN — the age is the toolbar's and each row's", () => {
-    const line = fleetLine({
+    const line = lineFor({
       at: NOW - 60_000,
       platforms: [],
       source: null,
@@ -129,6 +131,6 @@ describe("the fleet line", () => {
   });
 
   it("draws no line at all when nothing has probed", () => {
-    expect(fleetLine(null)).toBeUndefined();
+    expect(lineFor(null)).toBeUndefined();
   });
 });

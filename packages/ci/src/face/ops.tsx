@@ -68,8 +68,24 @@ export function venueSource(source: string | null): { label: string; title: stri
   return { label: last, title: source };
 }
 
-export function fleetLine(reading: VenueReading | undefined): string | undefined {
-  if (reading === undefined || reading === null) return undefined;
+export type FleetReading =
+  | { readonly kind: "unasked" }
+  | { readonly kind: "never-probed" }
+  | { readonly kind: "probed"; readonly reading: NonNullable<VenueReading> };
+
+export const fleetOf = (value: VenueReading | undefined): FleetReading =>
+  value === undefined
+    ? { kind: "unasked" }
+    : value === null
+      ? { kind: "never-probed" }
+      : { kind: "probed", reading: value };
+
+const probed = (fleet: FleetReading): NonNullable<VenueReading> | undefined =>
+  fleet.kind === "probed" ? fleet.reading : undefined;
+
+export function fleetLine(fleet: FleetReading): string | undefined {
+  if (fleet.kind !== "probed") return undefined;
+  const reading = fleet.reading;
   const slice =
     reading.platforms.length === 0
       ? ""
@@ -131,13 +147,14 @@ export function Machines(props: {
     );
   };
   let askedOnOpen = false;
+  const fleet = createMemo(() => fleetOf(reading.value()));
   createEffect(() => {
-    const answer = reading.value();
-    if (answer === undefined || askedOnOpen) return;
+    const current = fleet();
+    if (current.kind === "unasked" || askedOnOpen) return;
     askedOnOpen = true;
-    if (answer === null) probeFor([]);
+    if (current.kind === "never-probed") probeFor([]);
   });
-  const upLine = createMemo(() => fleetLine(reading.value()));
+  const upLine = createMemo(() => fleetLine(fleet()));
 
   const [checkout, setCheckout] = createSignal("");
   const [holding, setHolding] = createSignal(false);
@@ -194,7 +211,7 @@ export function Machines(props: {
         <Button disabled={probing.busy()} onClick={() => probeFor(tokens(platforms()))}>
           {probing.busy() ? "Probing…" : "Probe machines"}
         </Button>
-        <Show when={reading.value()}>
+        <Show when={probed(fleet())}>
           {(answer) => (
             <span class="venue-age">
               {`Probed ${ago(answer().at, props.now)}`}

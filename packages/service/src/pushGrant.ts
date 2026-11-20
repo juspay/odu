@@ -6,8 +6,12 @@ export type PreparedPush =
       readonly push: LaunchPush | null;
       readonly skipped: string | null;
       readonly keyWarning: string | null;
+      /** Gives the minted token back; a no-op when nothing was minted, and idempotent. */
+      readonly release: () => void;
     }
   | { readonly kind: "ambiguous"; readonly substituters: readonly string[] };
+
+const nothingMinted = (): void => {};
 
 export async function preparePush(
   port: PushPort,
@@ -19,7 +23,13 @@ export async function preparePush(
     return { kind: "ambiguous", substituters: resolved.substituters };
   }
   if (resolved.kind === "skipped") {
-    return { kind: "prepared", push: null, skipped: resolved.reason, keyWarning: null };
+    return {
+      kind: "prepared",
+      push: null,
+      skipped: resolved.reason,
+      keyWarning: null,
+      release: nothingMinted,
+    };
   }
   const target = resolved.target;
   const granted = port.grant({ bucket: target.bucket, runId });
@@ -29,8 +39,10 @@ export async function preparePush(
       push: null,
       skipped: `the bucket "${target.bucket}" is no longer served here`,
       keyWarning: null,
+      release: nothingMinted,
     };
   }
+  let given = false;
   return {
     kind: "prepared",
     push: {
@@ -42,5 +54,10 @@ export async function preparePush(
     },
     skipped: null,
     keyWarning: target.keyWarning,
+    release: () => {
+      if (given) return;
+      given = true;
+      port.revoke(granted.tokenId);
+    },
   };
 }

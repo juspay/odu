@@ -72,33 +72,57 @@ interface Accumulated {
   readonly runs: Map<string, number>;
   readonly runDurations: TallyBook;
   readonly nodeDurations: TallyBook;
-  readonly progress: Map<string, RunProgress>;
+  readonly cursor: TerminalCursor;
 }
 
-interface RunProgress {
-  maxSeqFolded: number;
-  counted: number;
+class TerminalCursor {
+  private readonly folded = new Map<string, { seq: number; ends: number }>();
+
+  /** Journal seq already folded into the node histogram; 0 for an unseen run. */
+  since(runId: string): number {
+    return this.folded.get(runId)?.seq ?? 0;
+  }
+
+  /** Record this pass's watermark and answer whether one run end is owed now. */
+  track(runId: string, lastSeq: number, finalized: number | null): boolean {
+    const prev = this.folded.get(runId);
+    if (finalized === null) {
+      this.folded.set(runId, { seq: lastSeq, ends: prev?.ends ?? 0 });
+      return false;
+    }
+    const ends = Math.max(1, finalized);
+    const counted = prev === undefined ? ends - 1 : prev.ends;
+    const owed = ends > counted;
+    this.folded.set(runId, { seq: lastSeq, ends: owed ? counted + 1 : counted });
+    return owed;
+  }
+
+  /** Forget runs that rolled out of the catalog window. */
+  retain(present: ReadonlySet<string>): void {
+    for (const runId of this.folded.keys()) {
+      if (!present.has(runId)) this.folded.delete(runId);
+    }
+  }
 }
 
 const emptyAccumulated = (): Accumulated => ({
   runs: new Map(RUN_OUTCOMES.map((outcome) => [outcome, 0])),
   runDurations: new Map(),
   nodeDurations: new Map(),
-  progress: new Map(),
+  cursor: new TerminalCursor(),
 });
 
 function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
   const present = new Set<string>();
+  const cursor = state.cursor;
 
   for (const row of listRuns({ root: catalog, limit })) {
     present.add(row.runId);
-    const fresh = !state.progress.has(row.runId);
-    const progress = state.progress.get(row.runId) ?? { maxSeqFolded: 0, counted: 0 };
-    state.progress.set(row.runId, progress);
+    const since = cursor.since(row.runId);
     const handle = handleFor(row.runId, { root: catalog });
 
     const entries = readJournal(handle).entries;
-    for (const entry of entries.filter((one) => one.seq > progress.maxSeqFolded)) {
+    for (const entry of entries.filter((one) => one.seq > since)) {
       const event = entry.event;
       if (event.kind !== "node_status") continue;
       if (event.durationMs === null) continue;
@@ -109,14 +133,14 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
       };
       observe(tallyFor(state.nodeDurations, labels), event.durationMs / 1000);
     }
-    progress.maxSeqFolded = entries.at(-1)?.seq ?? progress.maxSeqFolded;
 
     const verdict = row.verdict;
-    if (verdict === null) continue;
-    const ends = Math.max(1, entries.filter((one) => one.event.kind === "finalized").length);
-    if (fresh) progress.counted = ends - 1;
-    if (ends <= progress.counted) continue;
-    progress.counted += 1;
+    const owed = cursor.track(
+      row.runId,
+      entries.at(-1)?.seq ?? since,
+      verdict === null ? null : entries.filter((one) => one.event.kind === "finalized").length,
+    );
+    if (verdict === null || !owed) continue;
     state.runs.set(verdict.outcome, (state.runs.get(verdict.outcome) ?? 0) + 1);
     observe(
       tallyFor(state.runDurations, { outcome: verdict.outcome }),
@@ -124,9 +148,7 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
     );
   }
 
-  for (const runId of state.progress.keys()) {
-    if (!present.has(runId)) state.progress.delete(runId);
-  }
+  cursor.retain(present);
 }
 
 /**

@@ -258,8 +258,7 @@ export function webPorts(
             pushSkipped: prepared.skipped,
             pushKeyWarning: prepared.keyWarning,
           });
-    const minted = prepared.kind === "prepared" ? prepared.push : null;
-    if (!launched.ok && minted !== null) push.revoke(minted.tokenId);
+    if (!launched.ok && prepared.kind === "prepared") prepared.release();
     return launched;
   };
   const ports: ServicePorts = {
@@ -304,20 +303,19 @@ async function socketGone(endpoint: string): Promise<boolean> {
   return false;
 }
 
-async function cancelThroughSocket(
-  request: CancelRequest,
+async function confirmTeardown(
+  endpoint: string,
+  acked: boolean,
 ): Promise<CancelOutcome> {
-  const dispatched = await dispatchCancel(request);
-  if (dispatched.kind !== "await-teardown") return dispatched;
   const deadline = Date.now() + TEARDOWN_CONFIRM_MS;
   for (;;) {
-    if (await socketGone(request.endpoint)) {
+    if (await socketGone(endpoint)) {
       return { kind: "cancelled", detail: null };
     }
     if (Date.now() >= deadline) break;
     await new Promise((r) => setTimeout(r, 200));
   }
-  return dispatched.acked
+  return acked
     ? {
         kind: "cancelled",
         detail: "the coordinator accepted the cancel and is still shutting down",
@@ -335,9 +333,7 @@ async function dispatchCancel({
   runId,
   expect,
   scope,
-}: CancelRequest): Promise<
-  CancelOutcome | { kind: "await-teardown"; acked: boolean }
-> {
+}: CancelRequest): Promise<CancelDispatch> {
   const dialed = await dialRun(endpoint);
   if (dialed === null) {
     return { kind: "declined", detail: "nothing is serving this run's socket" };

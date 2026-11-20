@@ -468,7 +468,7 @@ async function start(
     checkoutMoved: movedNote,
   });
   if (!launched.ok) {
-    if (push !== null) deps.push.revoke(push.tokenId);
+    prepared.release();
     return refuseAndRecord(
       deps,
       input.requestId,
