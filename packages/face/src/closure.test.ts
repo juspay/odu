@@ -1,12 +1,3 @@
-/**
- * THE WALL for what every row's face shares — and it is about absence.
- *
- * `@odu/face` is imported by two or more rows' faces and owned by none, so it
- * names NO `@odu/*` package (one would let a face reach another row through
- * it), nothing from `node:` (a browser bundle loads it), and costs exactly the
- * two installs a control needs.
- */
-
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -20,14 +11,10 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned: the control's signals and the type of what it runs. */
 const EXPECTED_DEPENDENCIES = ["effect", "solid-js"];
 
-/** Nothing hydrated: a control needs no surface framework, only an `Effect`
- *  to run through the shell's edge. */
 const HYDRATED = new Set<string>([]);
 
-/** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
 function tsFilesUnder(dir: string): string[] {
@@ -49,7 +36,7 @@ function specifiersIn(source: string, fileName: string): string[] {
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
+    false,
     fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const out: string[] = [];
@@ -73,7 +60,6 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
-/** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@")
@@ -96,8 +82,6 @@ describe("@odu/face's import closure", () => {
   });
 
   it("names no @odu package at all", () => {
-    // THE CLAIM: a helper that named one row would let every face that imports
-    // it reach that row.
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
       for (const spec of specifiers) {
@@ -119,9 +103,6 @@ describe("@odu/face's import closure", () => {
       for (const spec of specifiers) {
         if (spec.startsWith(".")) continue;
         if (isTest && spec.startsWith("node:")) continue;
-        // A browser bundle loads this module; `node:` would be a blank page.
-        // (The suite itself reads the directory it polices, and is never
-        // bundled — the `@odu/web-ui` twin records that exception.)
         if (spec.startsWith("node:") && !isTest) {
           offenders.push(`${rel}: ${spec} (a node builtin)`);
           continue;
