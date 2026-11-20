@@ -11,7 +11,6 @@ export const SERVICE_WS_PATH = "/rpc/ws";
 
 export const SERVICE_MCP_PATH = "/mcp";
 
-/** Drop trailing slashes from an origin. */
 function withoutTrailingSlashes(origin: string): string {
   let end = origin.length;
   while (end > 0 && origin.charCodeAt(end - 1) === 47) end -= 1;
@@ -27,8 +26,7 @@ export function namedOrigin(
 }
 
 /** The origin this process should use, from the environment or the default.
- *  Trailing slashes are trimmed so `origin + path` is never `//rpc/ws` — a
- *  path the listener compares for EQUALITY and would silently destroy. */
+ *  Trailing slashes are trimmed. */
 export function serviceOrigin(
   env: Record<string, string | undefined> = process.env,
 ): string {

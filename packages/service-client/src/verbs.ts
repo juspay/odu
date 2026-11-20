@@ -3,12 +3,7 @@ import type { oduServiceSurface } from "./surface";
 
 type ServiceSpec = (typeof oduServiceSurface)["spec"];
 
-/** The default-deny allowlist every projecting face applies.
- *
- *  **`mutates` is a safety default, not a label.** The framework treats an
- *  unannotated procedure as MUTATING, because `readOnlyHint: true` lets an MCP
- *  host auto-execute a call without confirming it. Every entry below carries the
- *  flag explicitly even so. */
+/** The default-deny allowlist every projecting face applies. */
 export const ODU_SERVICE_EXPOSE = {
   service: "resource",
   venues: "resource",

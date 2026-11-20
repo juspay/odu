@@ -19,9 +19,6 @@ const HYDRATED = new Set<string>([
   "@kolu/surface-daemon",
 ]);
 
-/**
- * The NODE-ONLY modules — the platform half, which a browser must never reach.
- */
 const NODE_ONLY = new Set(["src/socket.ts"]);
 
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
@@ -165,9 +162,6 @@ describe("@odu/service-client's import closure", () => {
   });
 
   it("reaches run-history's portable half, plus the state root from the node-only module", () => {
-    // `./paths` is `node:path`/`node:os`, so it is allowed from exactly one
-    // module: the declared node-only one, where the daemon's home and the
-    // client's dial have to agree about `$ODU_STATE_DIR`.
     const portable = new Set(["@odu/run-history/schema", "@odu/run-history/ids"]);
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {

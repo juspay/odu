@@ -1,12 +1,3 @@
-/**
- * WHY THE PACKAGE'S BROWSER-SAFE CLAIM SURVIVES IT. This module is `node:`
- * through and through (`node:crypto` for the namespace digest, the socket
- * link, the daemon-home algebra), and it is DECLARED as the one node-only
- * module in `./closure.test.ts` rather than left to be discovered: every other
- * module here must stay importable by a browser tab, and no module outside that
- * declared set may reach this one.
- */
-
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { SurfaceDispatch } from "@kolu/surface/link";
@@ -35,11 +26,7 @@ import {
   type ServiceRefusal,
 } from "./surface";
 
-/** ONE GATE PER ADDRESS — the namespace a daemon home is derived from.
- *
- *  The socket a local client dials is inside this home, so the client and the
- *  daemon must derive the name from the same function or a client will dial a
- *  path nobody bound. */
+/** ONE GATE PER ADDRESS — the namespace a daemon home is derived from. */
 export function webAppNamespace(origin: string): string {
   if (origin === DEFAULT_SERVICE_ORIGIN) return SERVICE_APP;
   const digest = createHash("sha256").update(origin).digest("hex").slice(0, 12);
@@ -49,8 +36,6 @@ export function webAppNamespace(origin: string): string {
 /**
  * WHERE THE DAEMON'S HOME IS — the one answer, for the daemon and for every
  * client that has to dial it.
- *
- * `$XDG_STATE_HOME` is deliberately NOT honoured here.
  */
 export function webHomeOptions(
   origin: string,
@@ -76,16 +61,13 @@ export function serviceSocketPath(
   return resolveDaemonHome(webHomeOptions(origin, env)).socketPath;
 }
 
-/** A service dialled over its socket: the same face and the same teardown
- *  obligation as a websocket connection, addressed by PATH rather than by URL. */
+/** A service dialled over its socket, addressed by PATH rather than by URL. */
 export interface ServiceSocketConnection {
   client: OduServiceClient;
   /** The transport-neutral dispatch under {@link ServiceSocketConnection.client}. */
   dispatch: SurfaceDispatch;
   /** The socket path that was dialled, for an error message that has to name it. */
   socketPath: string;
-  /** Not optional bookkeeping: the link holds the dial, ping and response
-   *  fibers, and dropping it leaks all three. */
   dispose: () => Promise<void>;
 }
 

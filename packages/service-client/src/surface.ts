@@ -1,10 +1,3 @@
-/**
- * The zod→Effect Schema laws this repo already keeps apply here verbatim:
- * `.optional()` is `Schema.optionalKey` (absent means ABSENT), never
- * `Schema.optional`, which would round-trip an explicit `undefined` through
- * `null` and put a `null` where a key used to be missing.
- */
-
 import {
   defineSurface,
   type SurfaceTypes,
@@ -34,28 +27,6 @@ export { type LogStream, LOG_STREAMS } from "@odu/run-client/nodeId";
 /**
  * THE HOST'S CONTRACT VERSION, `major.minor` — its own verbs (the frozen control
  * fragment), the identity cell below, and the rule a client is admitted by.
- *
- * {@link admitService} is the one judge, and its rule is ADDITIVE, for
- * this number and for every row's:
- *
- *   - **the MINOR moves when the surface only GROWS** — a new verb, a new row
- *     member, a new optional input key, a new output field a reader may
- *     ignore. Every reader on the same major is adopted, in BOTH directions: an
- *     older reader never names the new member, and a newer reader that calls
- *     one an older daemon lacks is refused at that one control (an unknown
- *     tag), not stranded at the handshake.
- *   - **the MAJOR moves when something a reader already uses CHANGES** — a verb
- *     removed or renamed, a required input added, an output field removed or
- *     retyped, a refusal code a reader branches on taken away. A different
- *     major is refused, with a sentence.
- *
- * **EACH ROW VERSIONS ITS OWN SURFACE.** The runs are
- * {@link CI_CONTRACT_VERSION}, the cache, the door and
- * the tunnel each declare theirs beside their surface, the host publishes every
- * mounted row's version on the identity cell (`rows`), and a client is admitted
- * against the rows it NEEDS. Each version is pinned to a fingerprint of the
- * surface it describes (`contract.test.ts` beside each), so a surface cannot
- * move without its number.
  */
 export const HOST_CONTRACT_VERSION = "2.5";
 
@@ -70,12 +41,7 @@ export const HOST_CONTRACT_VERSION = "2.5";
 export const CI_CONTRACT_VERSION = "2.7";
 
 /**
- * THE RUNS' VERSION THAT INTRODUCED `log_read`'s `stream`, named because one
- * caller must read it BEFORE it calls.
- *
- * A face that means `stream: "push"` compares
- * this against what the daemon publishes for {@link CI_ROW}
- * ({@link rowSpeaks}) and refuses when it is behind.
+ * THE RUNS' VERSION THAT INTRODUCED `log_read`'s `stream`.
  */
 export const CI_LOG_STREAM_SINCE = "2.6";
 
@@ -88,7 +54,7 @@ export const CI_ROW = "ci";
  *
  * `code` is what a caller branches on; `message` is the sentence a person
  * reads. `resync` and `suggestion` carry the recovery where there is one —
- * `suggestion` as ARGV, never a string anything evals.
+ * `suggestion` as ARGV.
  */
 export const RefusalCodeSchema = Schema.Literals([
   /** The caller's input could not have meant anything — a malformed run id, a
@@ -207,10 +173,7 @@ export const ServiceBuildSchema = Schema.Struct({
 });
 export type ServiceBuild = typeof ServiceBuildSchema.Type;
 
-/** Whether the service is answering, and about what.
- *
- *  `starting` is a real state and not a gap: the service reconciles surviving
- *  coordinators and terminal records before it claims to know the board. */
+/** Whether the service is answering, and about what. */
 export const ServiceReadinessSchema = Schema.Struct({
   state: Schema.Literals(["starting", "ready", "draining"]),
   /** `Date.now()` when the service entered this state. */
@@ -331,13 +294,6 @@ const UPGRADE = "upgrade the daemon (`odu web --upgrade`) or this build.";
 
 /** Read a daemon's own greeting and say whether this build may adopt it.
  *
- *  THE ADDITIVE RULE (see {@link HOST_CONTRACT_VERSION}), applied twice: the
- *  host's MAJOR must match, and so must every NEEDED row's — whatever the
- *  minors. A row this build does not name is not consulted, which is the whole
- *  point: a runs-only reader passes {@link CI_NEEDS} and is never refused
- *  because the cache moved. A needed row the daemon does not mount is refused
- *  with that fact (unless it was asked for {@link ifMounted}).
- *
  *  A malformed or empty version is refused. */
 export function admitService(
   cell: ServiceCell,
@@ -393,10 +349,8 @@ export function admitService(
   return { kind: "adopt", identity };
 }
 
-/** THE ONE COST OF THE ADDITIVE RULE: a daemon ADOPTED on the same major
- *  whose minor is behind this build lacks the verbs added since. PER ROW: it
- *  names every needed row (and the host) that is behind, and is `null` when
- *  none is. */
+/** Names every needed row (and the host) whose minor is behind this build, and
+ *  is `null` when none is. */
 export function skewNote(
   cell: ServiceCell,
   where: string,
@@ -460,14 +414,6 @@ export const RunOutcomeSchema = Schema.Literals([
 /**
  * WHERE A RUN PUSHED, as every reader of a run is told it (PLAN 4.1) — the
  * target, and the two sentences a setup log owed about it.
- *
- * ONE declaration for the board row and for `run_read`'s answer, because they
- * are one fact about one run and a second spelling is where two readers of the
- * same record learn to disagree.
- *
- * The token's ID is deliberately ABSENT from both. It is on the MANIFEST,
- * because the service revokes by it; it is a revocation handle, and a board
- * row is read by every client that can list runs.
  */
 const PushedToSchema = Schema.Struct({
   target: Schema.NullOr(
@@ -508,9 +454,7 @@ export const RunRowSchema = Schema.Struct({
   seq: Schema.NullOr(Schema.Int),
   pipeline: Schema.String,
   createdAt: Schema.Number,
-  /** When the run STOPPED, from its own verdict — null while it has not. Read
-   *  it through `runElapsedMs` (`@odu/service-client/board`), which is the one
-   *  rule that turns this pair into a duration. */
+  /** When the run STOPPED, from its own verdict — null while it has not. */
   finishedAt: Schema.NullOr(Schema.Number),
   state: RunBoardStateSchema,
   settled: Schema.Boolean,
@@ -552,10 +496,6 @@ export const RunRowSchema = Schema.Struct({
    * with a target, `note` carries the `trusted-public-keys` warning when there
    * is one. `optionalKey`, so a run recorded before this is a row without it
    * rather than a row claiming it pushed nowhere.
-   *
-   * The token's ID is deliberately ABSENT. It is on the MANIFEST, because the
-   * service revokes by it; it is a revocation handle, and a board row is read
-   * by every client that can list runs.
    */
   push: Schema.optionalKey(PushedToSchema),
 });
@@ -563,9 +503,6 @@ export type RunRow = typeof RunRowSchema.Type;
 
 /**
  * One node of a run, as the board's detail view draws it.
- *
- * **No `needs`.** The journal records the roster's ORDER, not its edges. The
- * order IS the schedule, and it is what a reader can act on.
  */
 export const RunNodeSchema = Schema.Struct({
   id: NodeIdSchema,
@@ -923,9 +860,7 @@ export type ListInput = typeof ListInputSchema.Encoded;
  * A commit PREFIX as `run.list` takes it: at least 7 hex digits.
  *
  * One rule, stated on the contract both sides import — the procedure refuses a
- * `sha` that fails it, and the CLI's `<sha7>#<seq>` grammar declines to ask.
- * Two copies of the regex would be two answers to "is this a commit", kept in
- * step by nothing.
+ * `sha` that fails it.
  */
 export const isCommitPrefix = (s: string): boolean => /^[0-9a-fA-F]{7,}$/.test(s);
 
@@ -1101,11 +1036,6 @@ export type RetryReceipt = typeof RetryReceiptSchema.Type;
 
 /**
  * What to cancel, spelled as one of three explicit scopes.
- *
- * A tagged union rather than three optional fields, because a request that
- * named both a node and a lane would have to be resolved by precedence — and a
- * precedence rule is exactly how a caller who meant to stop one node stops the
- * whole run.
  */
 const CancelScopeSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("run") }),
@@ -1235,10 +1165,7 @@ const CatalogPruneReportSchema = Schema.Struct({
 });
 export type CatalogPruneReport = typeof CatalogPruneReportSchema.Type;
 
-/** One recipe in a checkout's CI DAG, as the resolved pipeline sees it.
- *
- *  The engine's spec is the AUTHORITY; this is its projection onto the wire,
- *  and the service's own implementation is what proves the two agree. */
+/** One recipe in a checkout's CI DAG, as the resolved pipeline sees it. */
 export const TaskRowSchema = Schema.Struct({
   id: NodeIdSchema,
   /** The `[name(...)]` label, when the recipe carries one. */
@@ -1262,8 +1189,7 @@ const PipelineSchema = Schema.Struct({
   checkout: Schema.String,
   name: Schema.String,
   tasks: Schema.Array(TaskRowSchema),
-  /** The DAG as Mermaid. Rendered ONCE, here, because `odu ci graph` and a
-   *  browser drawing the same pipeline must not be two renderers that drift. */
+  /** The DAG as Mermaid. */
   mermaid: Schema.String,
 });
 export type Pipeline = typeof PipelineSchema.Type;
@@ -1323,13 +1249,8 @@ const VenueProbeOutputSchema = Schema.Struct({
 });
 
 /**
- * THE LAST PROBE, as a FACT — what the Machines page reads on open.
- * The service keeps the answer of the most
- * recent `venue.probe` of ITS OWN fleet — a probe with no caller `hostsFile`;
- * one naming a caller's file is that person's machines and is answered but not
- * kept — on this cell, with WHEN and FOR WHICH platforms.
- * `null` until the first probe since the daemon
- * started. Read-only on the wire: the service is its one writer.
+ * THE LAST PROBE, as a FACT — what the Machines page reads on open. `null`
+ * until the first probe since the daemon started.
  */
 export const VenueReadingSchema = Schema.NullOr(
   Schema.Struct({

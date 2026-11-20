@@ -1,10 +1,3 @@
-/**
- * NOTHING HERE COMPUTES A VERDICT. Every field is the service's own row; these
- * functions sort and pick the word a row already carries. A fold that
- * re-derived "is this run red" from anything but `unresolvedFailures` would be a
- * second authority on the question the catalog exists to answer.
- */
-
 import { STATUS_META, type StatusHue } from "@odu/run-client/surface";
 
 export type { StatusHue };
@@ -16,12 +9,7 @@ import type {
 } from "./surface";
 
 /** What a run's own status cell says — the ONE fold both of this package's
- *  faces and every downstream board reads.
- *
- *  The precedence is load-bearing, not cosmetic: a run that was cancelled or
- *  whose coordinator was interrupted settles with `passed: false` and
- *  `outcome: "incomplete"`, and a reader that skipped the outcome would call it
- *  `failed` and send an operator looking for a test that broke. */
+ *  faces and every downstream board reads. */
 export function runStatus(run: Pick<RunRow, "state" | "outcome">): {
   label: string;
   hue: StatusHue;
@@ -93,16 +81,13 @@ export interface LaneSpan {
   left: number;
   /** Fraction of the run this attempt occupied. */
   width: number;
-  /** `left` in milliseconds — clamped identically, so a caller spelling it
-   *  cannot disagree with where the bar is drawn. */
+  /** `left` in milliseconds. */
   startedAfterMs: number;
   /** `width` in milliseconds, clamped the same way. */
   tookMs: number;
 }
 
-/** One lane's bar, or `null` where there is no span to know.
- *
- *  EVERYTHING IS CLAMPED ONCE, in milliseconds, before anything is divided. */
+/** One lane's bar, or `null` where there is no span to know. */
 export function laneSpan(
   lane: Pick<RunNode, "status" | "startedAt" | "durationMs">,
   run: Pick<RunRow, "createdAt" | "finishedAt">,
@@ -139,9 +124,6 @@ export function pushSpan(
   if (recipe === null) return null;
   const scale = runElapsedMs(run, now);
   const startedAfterMs = clampMs(recipe.startedAfterMs + recipe.tookMs, scale);
-  // What is left of the track after the recipe — the ceiling every arm below
-  // is clamped into, computed once so "to the end" and "its own duration"
-  // cannot disagree about where the end is.
   const room = scale - startedAfterMs;
   if (room <= 0) return null;
   const tookMs =
@@ -172,8 +154,6 @@ function laneStop(
     : { kind: "settled", endedAt: run.finishedAt };
 }
 
-/** Into `[0, ceiling]` — the ONE clamp, and it works in MILLISECONDS, before
- *  anything is divided. */
 function clampMs(value: number, ceiling: number): number {
   return value > 0 ? Math.min(value, ceiling) : 0;
 }
@@ -205,11 +185,6 @@ type ScopeShape = Pick<
   "selectors" | "platforms" | "root" | "noDeps"
 >;
 
-/**
- * A scope's parts, in the order a reader meets them — the ONE place the
- * vocabulary is spelled, so the two renderings below cannot disagree about what
- * a `--root` or a `--no-deps` is called.
- */
 function scopeParts(scope: ScopeShape): string[] {
   return [
     scope.root === undefined ? "" : `under ${scope.root}`,
@@ -239,10 +214,7 @@ export function scopeLabel(scope: ScopeShape): string {
 }
 
 /** Rows NEWEST `createdAt` first. `runId` breaks a `createdAt` tie, so the order
- *  is TOTAL.
- *
- *  The tiebreak runs the SAME WAY the catalog's own id order does — later id
- *  first — because a run id leads with its start instant. */
+ *  is TOTAL. */
 export function newestFirst(rows: Iterable<RunRow>): RunRow[] {
   return [...rows].sort(
     (a, b) => b.createdAt - a.createdAt || (a.runId > b.runId ? -1 : 1),
@@ -251,11 +223,6 @@ export function newestFirst(rows: Iterable<RunRow>): RunRow[] {
 
 /**
  * WHICH CHECKOUTS ARE ON THE BOARD, in the order their newest run puts them.
- *
- * Keyed by `repoRoot` and not by project: two worktrees of one repo share a
- * last path segment and are two different checkouts. `rows` is expected newest
- * first ({@link newestFirst}), and a `Set` keeps insertion order — so the
- * checkout whose newest run is newest comes first.
  */
 export function checkoutRoots(rows: Iterable<RunRow>): string[] {
   const roots = new Set<string>();

@@ -8,9 +8,6 @@ export interface LogKey {
   attempt: number;
 }
 
-/** The separator. `/` because the encoded node key cannot contain one (that is
- *  what `encodeNodeKey` guarantees — the encoding exists so the key is a legal
- *  single path segment). */
 const SEP = "/";
 
 export function formatLogKey(key: LogKey): string {

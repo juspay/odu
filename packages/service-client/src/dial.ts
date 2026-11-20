@@ -12,10 +12,7 @@ import {
   type ServiceCell,
 } from "./surface";
 
-/** A dialled service, and the one thing a caller owes it. `dispose` is not
- *  optional bookkeeping: the link holds the dial, ping and response fibers, and
- *  dropping it leaks all three — which in a CLI loop is a process that never
- *  exits. */
+/** A dialled service. */
 export interface ServiceConnection {
   client: OduServiceClient;
   /** The transport-neutral dispatch under {@link ServiceConnection.client}. */
@@ -24,9 +21,7 @@ export interface ServiceConnection {
   url: string;
   /**
    * Subscribe to this connection's transport LEAVING `open` — a daemon that
-   * died, was upgraded, or dropped the socket. The link RECONNECTS on its
-   * own, and that is the face's business — the announcement says only that
-   * what this connection WAS is gone.
+   * died, was upgraded, or dropped the socket.
    */
   onClose: (cb: () => void) => () => void;
   dispose: () => Promise<void>;
@@ -60,8 +55,6 @@ function withHeaders(
 /**
  * How long a dial waits for the socket to actually open before reporting that
  * nothing is serving.
- *
- * The FIRST open is bounded here and every subsequent re-dial is not.
  */
 export const DIAL_READY_MS = 3_000;
 
