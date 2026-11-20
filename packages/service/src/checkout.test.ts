@@ -197,6 +197,9 @@ describe("the checkout stream", () => {
           Effect.sync(() => {
             frames.push(frame);
             if (frames.length === 1) {
+              // The SECOND run is started once the first frame has been seen, so
+              // the swap happens under a subscription that is already open — the
+              // case a consumer-side fold had to detect for itself.
               const second = registerFixtureRun(w, {
                 repoRoot: "/code/app",
                 sha: "d".repeat(40),

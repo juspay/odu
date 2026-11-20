@@ -106,6 +106,7 @@ describe("the nodes stream", () => {
       poll: () => {
         polls += 1;
         if (polls === 2) {
+          // The node lands between the first frame and the second.
           writeNode(w, fixture.handle, fixture.token, {
             id: "unit@x86_64-linux",
             status: "failed",
@@ -199,6 +200,8 @@ describe("the nodes stream", () => {
           });
         }
         if (polls === 3) {
+          // The run settles on the third pass, so the stream has a terminal and
+          // this test has an end.
           finalizeRun(fixture.handle, fixture.token, "incomplete");
         }
         registry.refresh();

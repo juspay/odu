@@ -189,6 +189,13 @@ describe("a run's write token at the end of the run", () => {
       cancelled: [],
       unposted: [],
     });
+    // A dying coordinator moves no file. That is the premise of the whole
+    // registry: it stops writing, and its heartbeat ages where it lies. So
+    // this case must not write one either — a rewritten `owner.json` moves
+    // the fingerprint and brings the row back into the question for the
+    // wrong reason. Instead the owner record names a REAL process with an
+    // already stale heartbeat (alive by `kill(pid, 0)`, which is the second
+    // half of the fence), and that process is killed between the refreshes.
     const coordinator = spawn("sleep", ["120"], { stdio: "ignore" });
     crashOwner(run.handle, {
       heartbeatAt: Date.now() - 600_000,
@@ -198,8 +205,12 @@ describe("a run's write token at the end of the run", () => {
     const ports = recordingPorts();
     const { refresh, close } = project(world, ports);
     try {
+      // FIRST PROJECTION: settled, still served, and its coordinator is
+      // there. The token stays, which is what `--linger` is for.
       expect(ports.pushRevokes).toEqual([]);
 
+      // NOTHING ON DISK MOVED. The only thing that changed is the answer to
+      // `kill(pid, 0)` — and the token goes back.
       coordinator.kill("SIGKILL");
       await once(coordinator, "exit");
       refresh();

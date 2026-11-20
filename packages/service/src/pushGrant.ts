@@ -5,6 +5,8 @@ export type PreparedPush =
       readonly kind: "prepared";
       readonly push: LaunchPush | null;
       readonly skipped: string | null;
+      /** Never set at the same time as `skipped`: they describe opposite
+       *  states, which is why they are two fields. */
       readonly keyWarning: string | null;
     }
   | { readonly kind: "ambiguous"; readonly substituters: readonly string[] };

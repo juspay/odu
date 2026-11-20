@@ -244,8 +244,13 @@ describe("run.start", () => {
   });
 
   it("marks the dispatch BEFORE the launcher is entered", async () => {
+    // From that marker on, "my reply went missing" and "nothing happened" stop
+    // being the same thing.
     const w = open();
     const store = requestStore({ root: w.requestsRoot });
+    // An ARRAY rather than a reassigned binding: TypeScript's control-flow
+    // analysis cannot see that the launcher's closure ran, so a `let` assigned
+    // only in there narrows to `never` at the assertion below.
     const seen: (ReceiptRecord | null)[] = [];
     const ports = recordingPorts({
       launch: (request) => {
@@ -403,6 +408,8 @@ describe("run.start, moving a checkout onto a branch", () => {
     expect(result.success.accepted).toBe(true);
     expect(ports.cancels[0]?.runId).toBe(existing.runId);
     expect(ports.cancels[0]?.scope).toEqual({ kind: "run" });
+    // THE ORDERING, as the only thing that can state it: the cancel had
+    // already been answered when the mover was entered.
     expect(cancelsWhenMoved).toEqual([1]);
   });
 
@@ -464,6 +471,7 @@ describe("run.start, moving a checkout onto a branch", () => {
     const d = deps(w, ports);
     const names = ["", "a b", "feat/..x", "x@{0}", "main.lock", ".hidden", "a//b"];
     for (const [index, branch] of names.entries()) {
+      // A fresh id per name: a receipt replays, and these are seven requests.
       const result = await d.run({ branch, requestId: `bad-name-${index}` });
       expect(result._tag, branch).toBe("Failure");
       if (result._tag !== "Failure") continue;

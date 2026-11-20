@@ -11,6 +11,9 @@ import { sameNodes } from "./nodes";
 import type { RunRegistry } from "./registry";
 import { abortableSleep } from "./sleep";
 
+/** How often a checkout is re-read. It is `./nodes`' cadence, because the two
+ *  answer about the same run and a subscriber watching both must not see them
+ *  disagree for a quarter of a second at a time. */
 export const CHECKOUT_POLL_MS = 250;
 
 export interface CheckoutDeps {
@@ -75,7 +78,9 @@ function readCheckout(
     latest:
       latest === undefined
         ? null
-        : { run: latest, nodes: registry.nodes(latest.runId) ?? [] },
+        : // From the SAME pass the row came from, so a frame is one reading of
+          // one catalog rather than two that can straddle a poll.
+          { run: latest, nodes: registry.nodes(latest.runId) ?? [] },
     recent: rows,
     total,
   };

@@ -1,3 +1,21 @@
+/**
+ * **The endpoint comes from the ownership record, never from the manifest.**
+ * `.ci/odu.sock` is scoped to a CHECKOUT, and a checkout serves one run after
+ * another — so dialling the address a finished run registered under would
+ * cancel whatever is serving that path NOW, while answering with the id of the
+ * run the caller named. The manifest's `registeredBy` is stamped once and never
+ * cleared; `owner.json` is the copy a heartbeat refreshes and a clean exit
+ * clears, so it is the one that can say "nothing is serving this".
+ *
+ * **And an endpoint is still not an identity.** `owner.json` is refreshed by a
+ * heartbeat, so a coordinator that CRASHED keeps its recorded endpoint for the
+ * length of the ownership grace — during which a new run can start in that same
+ * checkout and bind that same socket. Dialling it then reaches a live stranger.
+ * So the run's `<sha>#<seq>` travels with the request and the adapter compares
+ * it against what the coordinator publishes BEFORE it mutates anything; the
+ * same rule, and for the same reason, as the retry policy's live path.
+ */
+
 import { currentOwner, ownerProvablyAlive } from "@odu/run-history/owner";
 import { type CatalogOptions, handleFor, readExpiry, readManifest } from "@odu/run-history/store";
 import {
@@ -43,6 +61,12 @@ export function cancelRun(
   );
 }
 
+/**
+ * It is this module's and not `start.ts`'s because both rules it keeps are
+ * stated here — the endpoint comes off the ownership record, and the run's
+ * `<sha>#<seq>` travels with the request so a crashed run's recycled socket
+ * address cannot be used to tear down a live stranger.
+ */
 export async function stopLiveRun(
   runId: string,
   deps: { cancel: RunCanceller; catalog?: CatalogOptions; now: () => number },
@@ -112,6 +136,11 @@ async function run(
     requestId: input.requestId,
     kind: "cancel",
     digest,
+    // A cancel never creates a run, so there is nothing to pre-mint. The field
+    // is required by the receipt record (a retry's whole reconciliation rests
+    // on it), and the empty string is what "this request could never have
+    // produced a run" looks like — which is also what stops a reconciler
+    // looking for one.
     plannedRunId: "",
     now: deps.now(),
   });
@@ -134,6 +163,10 @@ async function run(
       ),
     };
   }
+  // An in-flight cancel whose answer was lost. Unlike a start, re-issuing is
+  // SAFE — cancelling twice cancels once — so the honest move is to fall
+  // through and ask again rather than to refuse a caller who is trying to
+  // stop something.
   if (claim.kind === "replay" || claim.kind === "in_flight") {
     const replayed = replayOf(claim.receipt.result, input.requestId);
     if (replayed !== null) return { result: replayed };
@@ -162,10 +195,16 @@ async function run(
   const outcome = await deps.cancel({
     endpoint: owner.endpoint,
     runId: input.runId,
+    // WHO the socket must be serving. Read from the durable record, which is
+    // the only copy that cannot have been overwritten by whatever took the
+    // checkout next.
     expect: { sha: manifest.sha, seq: manifest.seq },
     scope: input.scope,
   });
   if (outcome.kind === "unresolved") {
+    // NOT completed. The receipt stays in flight so a repeat asks again —
+    // which is safe, because cancelling twice cancels once, and is the only
+    // honest thing to record about a mutation whose effect is unknown.
     return {
       refusal: refuse(
         "request_unresolved",

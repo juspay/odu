@@ -101,6 +101,8 @@ describe("log.read as a follow", () => {
         pollMs: 10,
       }),
     );
+    // The rule that keeps a follow of a large finished log fast: `waitMs` is a
+    // deadline for an EMPTY page, never a delay applied to a full one.
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(page._tag).toBe("Success");
     if (page._tag !== "Success") return;
@@ -133,6 +135,8 @@ describe("log.read as a follow", () => {
     clearTimeout(later);
     expect(second._tag).toBe("Success");
     if (second._tag !== "Success") return;
+    // The page picks up exactly where the last one stopped — no gap, no
+    // re-delivery — which is the whole of the cursor's contract.
     expect(second.success.offset).toBe(first.success.nextOffset);
     expect(second.success.text).toBe("boom\n");
     expect(second.success.open).toBe(true);

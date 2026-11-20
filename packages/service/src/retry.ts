@@ -1,3 +1,19 @@
+/**
+ * `run.retry` — a live attempt or a linked replay, and odu decides which.
+ *
+ * The decision is NOT this module's and NOT the caller's: whether "run that
+ * again" means resetting a node on a coordinator that is still up or starting a
+ * fresh run from the recorded inputs is a fact about the run, and a caller that
+ * chose would choose wrongly. So the policy lives behind a port (`./ports`'s
+ * `RunRetrier`).
+ *
+ * A caller that asked about run A and got a receipt for run B — because A had
+ * finalized and the retry started a linked replay — must watch B from here on.
+ * `effectiveRun` is that answer, and `parentRun` is what it replays. A caller
+ * that kept its old cursor is holding a token for A, which is exactly the case
+ * `run.wait`'s cursor refusal exists to catch.
+ */
+
 import type { CatalogOptions } from "@odu/run-history/store";
 import {
   type RetryInput,
@@ -13,6 +29,16 @@ export interface RetryDeps {
   catalog?: CatalogOptions;
 }
 
+/**
+ * The port's refusal code, in this surface's vocabulary.
+ *
+ * A total `Record`, so a code added to the port is a compile error here rather
+ * than a silent fall-through to something plausible. Every arm but one is the
+ * same word on both sides; `partial` is the one the wire has no name for — a
+ * retry that acted on some of its roots and was declined for the rest is a bad
+ * request in the sense that matters to a caller (it did not do what it was
+ * asked), and the message carries which roots.
+ */
 const REFUSAL_OF: Record<RetryRefusal, ServiceRefused["code"]> = {
   bad_input: "bad_input",
   unknown_run: "unknown_run",

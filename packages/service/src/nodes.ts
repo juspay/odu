@@ -45,6 +45,9 @@ export function sameNodes(
   return true;
 }
 
+/** Two candidate lists, element by element. Not a join-and-compare: a host
+ *  address containing whatever separator was chosen would make two different
+ *  pools compare equal, which is the quiet half of a coalesced frame. */
 function samePool(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
@@ -124,6 +127,8 @@ export function nodesSource(
           };
           return;
         }
+        // From the SAME registry entry the nodes came from, so a frame is one
+        // reading of one journal rather than two that can straddle a poll.
         const env = deps.registry.env(runId) ?? UNKNOWN_ENV;
         const done = terminal(row.state);
         if (

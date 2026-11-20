@@ -1,3 +1,26 @@
+/**
+ * `run.read` and `run.wait` — attention on one run, with and without the wait.
+ *
+ * TWO VERBS, ONE ANSWER. "What is this run's state" has a single answer shape,
+ * and the difference between the two is entirely whether the service holds the
+ * call open: they share the resolution (which run, and does this cursor belong
+ * to it), the fold, and the re-shaping below. A second shape for the
+ * non-blocking case would be a second thing to keep true, and it would go wrong
+ * for the caller that alternates between them.
+ *
+ * This module does NOT compute a second fold. The acceptance gate says the same
+ * run must look the same through every face, and the only way that is true is
+ * if there is one fold under all of them. A service that re-derived
+ * `actionable` would eventually disagree with `odu ci wait --run` about
+ * whether a run had something to act on.
+ *
+ * **A red CI answer is a SUCCESS.** `reason: "failure"` travels on the output
+ * channel, exits 0 through the CLI, and is a normal tool result to an agent.
+ * Only a refusal — a cursor from another run, a run that does not exist — is a
+ * declared error. Confusing the two is how "your tests failed" becomes "the
+ * tool is broken".
+ */
+
 import { EXCERPT_BUDGET_BYTES } from "@odu/run-history/attention";
 import {
   DEFAULT_ATTENTION_DEADLINE_MS,
@@ -28,6 +51,19 @@ export interface ReadDeps {
 }
 
 export interface WaitDeps extends ReadDeps {
+  /**
+   * A SECOND route out of the poll, for a caller holding one.
+   *
+   * Cancelling ends the OBSERVATION and nothing else: the run keeps going,
+   * because watching a run and running it are different acts and only one of
+   * them was cancelled.
+   *
+   * **In production nothing passes this, and that is correct rather than an
+   * oversight.** A real caller's disconnect arrives as an INTERRUPT of the
+   * fiber this Effect is running on, and the poll's own finalizer turns that
+   * into the abort below. Wiring a signal in as well would be a second path to
+   * the same teardown, and the one that could disagree.
+   */
   signal?: AbortSignal;
 }
 
@@ -98,12 +134,30 @@ export function answerOf(attention: Attention): AttentionAnswer {
   };
 }
 
+/**
+ * The one word a caller branches on.
+ *
+ * `owner_lost` is kept as its own reason rather than folded into `failure`,
+ * because the recovery differs: a failure is something to fix and retry, a lost
+ * owner is a coordinator that is provably gone and never finalized, and the
+ * only move is a fresh run. Collapsing them sends an agent looking for a broken
+ * test that does not exist.
+ */
 function reasonOf(attention: Attention): AttentionAnswer["reason"] {
   if (attention.state === "owner_lost") return "owner_lost";
   if (attention.settled) return "settled";
   return attention.actionable ? "failure" : "still_running";
 }
 
+/**
+ * THE SHARED CORE of both reads: which run, from where, and can this caller's
+ * cursor be used on it.
+ *
+ * Every refusal `run.read` and `run.wait` can produce is decided here, once.
+ * Two copies of these three checks would be two chances to disagree about
+ * whether a cursor belongs to a run — and the pair they would disagree on is
+ * exactly the pair a caller alternates between: read to see, wait to follow.
+ */
 type Resolution =
   | { ok: true; handle: RunHandle; cursor: Cursor | null }
   | { ok: false; refusal: ServiceRefused };
@@ -161,7 +215,16 @@ function queryOf(
   };
 }
 
-/** `run.read` — the same question as `run.wait`, asked without waiting. */
+/**
+ * `run.read` — the same question as `run.wait`, asked without waiting.
+ *
+ * ONE ANSWER SHAPE, deliberately: this returns the identical
+ * `AttentionAnswer`, because "what is this run's state" has one answer and a
+ * second shape for the non-blocking case would be a second thing to keep true.
+ * The difference between the two verbs is entirely whether the service holds
+ * the call open — the resolution, the fold and the re-shaping are shared, so
+ * a run cannot look one way to a reader and another to a follower.
+ */
 export function readRun(
   input: ReadInput,
   deps: ReadDeps = {},
@@ -177,6 +240,17 @@ export function readRun(
   });
 }
 
+/**
+ * `run.wait` — the read above, held open until the run has something to say.
+ *
+ * The LOOP itself is `waitForAttention`'s, not a second one written here: it is
+ * the same `readAttention` this module's one-shot calls, re-run behind a size
+ * fingerprint until the answer is worth returning or the deadline lands. A
+ * deadline loop spelled at this layer would be a second policy about what
+ * "worth returning" means, and the two would diverge on the case that matters —
+ * a caller with a cursor, which wakes for new events rather than for the red it
+ * has already been shown.
+ */
 export function waitForRun(
   input: WaitInput,
   deps: WaitDeps = {},
@@ -186,6 +260,14 @@ export function waitForRun(
     if (!resolved.ok) return Effect.fail(resolved.refusal);
     const query = queryOf(resolved.cursor, input.limit);
     return Effect.map(
+      // `Effect.callback`, not `Effect.promise`: a promise is UNINTERRUPTIBLE,
+      // so a caller that walked away — an HTTP client that disconnected, an MCP
+      // request that was cancelled, a browser tab that closed — left this poll
+      // running to its full deadline with nobody to answer. Interruption is the
+      // signal here, and the finalizer turns it into the abort the poll already
+      // knows how to take. The RUN is untouched either way: ending an
+      // observation and stopping CI are different acts, and only one of them
+      // was asked for.
       Effect.callback<Attention>((resume) => {
         const controller = new AbortController();
         const stop = (): void => controller.abort();

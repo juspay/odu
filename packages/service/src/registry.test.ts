@@ -369,6 +369,7 @@ describe("the run environment", () => {
     registry.refresh();
     const env = registry.env(run.runId);
     expect(env?.phase).toBe("lanes");
+    // Platform order, so two reads of one journal paint the same matrix.
     expect(env?.lanes).toEqual([
       { state: "claiming", platform: "aarch64-darwin", pool: ["mac-1"] },
       { state: "leased", platform: "x86_64-linux", host: "builder-1" },
@@ -486,6 +487,8 @@ describe("the run environment", () => {
     finalizeRun(run.handle, run.token, "passed", [], at + 60_000);
     registry.refresh(at + 90_000);
 
+    // Settled. A settled run's age must not be a function of when somebody
+    // looked at it, so this is the same number a week from now.
     expect(registry.env(run.runId, at + 90_000)?.elapsedMs).toBe(60_000);
     expect(registry.env(run.runId, at + 9_000_000)?.elapsedMs).toBe(60_000);
   });

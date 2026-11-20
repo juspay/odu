@@ -83,7 +83,7 @@ export interface StartDeps {
   launch: RunLauncher;
   probeCheckout: CheckoutProbe;
   /** Put the service's own clone on the branch and commit a `branch` start
-   *  named. */
+   *  named. Only reached by such a start; every other one never moves a file. */
   moveCheckout: CheckoutMover;
   /** Stop the run already in that clone before moving it, when the caller
    *  said `supersede`. The coordinator's own cancel-then-claim is too late:
@@ -96,6 +96,8 @@ export interface StartDeps {
   now: () => number;
 }
 
+/** The scope a start asks for, in the catalog's own vocabulary. Built once so
+ *  the receipt, the launch request and the answer all describe one selection. */
 function scopeOf(input: StartInput): RunScope {
   return {
     selectors: [...(input.selectors ?? [])],
@@ -108,29 +110,64 @@ function scopeOf(input: StartInput): RunScope {
 /**
  * WHAT A REQUEST IS, as one string.
  *
- * Every field the caller sent, and nothing the world can move.
+ * Every field the caller sent, and nothing the world can move. In particular
+ * the checkout's actual HEAD is NOT in here: it was, and it made the digest a
+ * function of the clock — the same request repeated after a `git pull` hashed
+ * differently, so a caller retrying a lost reply got `request_conflict` for a
+ * request it had not changed. `expectedSha` is in here instead, which is the
+ * caller's own claim about the commit and is exactly as stable as the rest of
+ * the request.
  */
 export function digestOfRequest(input: StartInput, scope: RunScope): string {
   return digestOf([
     input.checkout,
     input.expectedSha,
+    // THE BRANCH, which changes what the request DOES — it licenses moving
+    // the checkout — so a start repeated under one id with and without it is
+    // two requests. `optionalPart` because absent ("refuse a checkout that
+    // moved") and a named branch are different asks, not one with a default.
     optionalPart(input.branch),
     scope.selectors.join(","),
     scope.platforms.join(","),
     scope.root ?? "",
     scope.noDeps,
     (input.hostPins ?? []).join(","),
+    // THE FLEET those pins are names in. Pins say WHICH BOX; the inventory says
+    // which fleet that name resolves in, so a start repeated under one id
+    // against a different inventory is a request to run somewhere else — a
+    // conflict to be told about, not a replay of the first fleet's run.
+    // `optionalPart` rather than `?? ""` because absent (use the daemon's
+    // `$ODU_HOSTS`) and `""` (the caller's shell had none) reach the
+    // coordinator as different environments.
     optionalPart(input.hostsFile),
     input.noStrict ?? false,
     input.noSnapshot ?? false,
     input.noPost ?? false,
+    // `supersede` changes what the request DOES — it evicts a run — so two
+    // requests that differ only in it are two requests, and repeating one under
+    // the other's id is a conflict rather than a replay.
     input.supersede ?? false,
+    // WHERE THE RUN PUSHES IS DELIBERATELY ABSENT (PLAN 4.1). It is not
+    // something the caller sent — it is read out of the checkout's `flake.nix`
+    // and off a substituter — so putting it here would make the digest a
+    // function of the world again, which is the exact fault `expectedSha`
+    // replaced a HEAD read to avoid. A replayed `requestId` re-resolves.
   ]);
 }
 
-/** WHY THIS IS NOT A BRANCH NAME, or `null` when it is one. */
+/**
+ * WHY THIS IS NOT A BRANCH NAME, or `null` when it is one.
+ *
+ * `git check-ref-format --branch` states the same rules, and calling it would
+ * mean handing the very string this exists to distrust to a git process — the
+ * option-injection it is here to stop. So the rules are written out: git's
+ * `refs/heads/<name>` grammar, plus the leading `-` that makes a name an
+ * option rather than a ref.
+ */
 function branchNameProblem(name: string): string | null {
   if (name === "") return "it is empty";
+  // THE ONE THAT MATTERS. Everything below is git's own ref grammar; this is
+  // the rule about git's command line.
   if (name.startsWith("-")) return "git reads a leading dash as an option";
   if (/[\x00-\x20\x7f~^:?*[\\]/.test(name)) {
     return "it holds a character git refuses in a ref (space, control, or one of ~^:?*[\\)";
@@ -150,7 +187,16 @@ function branchNameProblem(name: string): string | null {
   return null;
 }
 
-/** What a finished request recorded, as a value with a tag. */
+/**
+ * What a finished request recorded, as a value with a tag.
+ *
+ * A refusal is an ANSWER: the request was understood, it will not be performed,
+ * and repeating it must produce the same sentence rather than a fresh attempt
+ * against a world that has since changed. Storing only the successes made
+ * `launch_failed` replay as "this build cannot read what it recorded", which is
+ * the one thing the receipt was there to prevent — so both arms are written,
+ * and the tag is what tells a reader which it is holding.
+ */
 export type Recorded =
   | { outcome: "receipt"; receipt: StartReceipt }
   | {
@@ -161,11 +207,14 @@ export type Recorded =
       runId?: string;
     };
 
-/** Wrap an answer for storage. */
+/** Wrap an answer for storage. Exported so startup reconciliation writes the
+ *  same envelope this module reads — one shape, one place it is spelled. */
 export function recordedStart(receipt: StartReceipt): Recorded {
   return { outcome: "receipt", receipt };
 }
 
+/** Rebuild the answer from a run that exists — the reconciliation path, and
+ *  the replay path once a receipt has been completed. */
 function receiptOfRun(
   runId: string,
   requestId: string,
@@ -211,6 +260,8 @@ const refuse = (
   refusal: new ServiceRefused({ code, message, ...extra }),
 });
 
+/** Refuse, and write the refusal to the receipt so the next identical ask
+ *  replays it rather than trying again against a world that has moved. */
 function refuseAndRecord(
   deps: StartDeps,
   requestId: string,
@@ -229,6 +280,7 @@ function refuseAndRecord(
   return refuse(code, message, extra);
 }
 
+/** Answer, and write the answer to the receipt. */
 function answerAndRecord(
   deps: StartDeps,
   requestId: string,
@@ -253,6 +305,11 @@ async function start(
     );
   }
 
+  // ── the request id, claimed BEFORE anything mutable is consulted ──
+  //
+  // This is the ordering the whole module turns on. A repeat is answered from
+  // what was recorded, and nothing about the checkout can change that answer;
+  // only a request that has never been answered goes on to look at the world.
   const scope = scopeOf(input);
   const plannedRunId = mintRunId(deps.now());
   const claim = claimReceipt(deps.requests, {
@@ -278,6 +335,9 @@ async function start(
   if (claim.kind === "replay") {
     const replayed = replayOf(claim.receipt.result, input.requestId);
     if (replayed !== null) return replayed;
+    // A recorded outcome this build cannot read. Reported as itself rather
+    // than re-run: a repeat that could not be understood is not a licence to
+    // start a second coordinator.
     return refuse(
       "request_unresolved",
       `odu: request "${input.requestId}" was used before, but this build ` +
@@ -299,6 +359,10 @@ async function start(
       if (rebuilt !== null) return answerAndRecord(deps, input.requestId, rebuilt);
     }
     if (reconciled.kind === "nothing_happened") {
+      // The claimant is provably gone and never dispatched, so nothing was
+      // started. Still not re-run under this id — the receipt is the record
+      // that this id was used, and re-using it would make the two attempts
+      // indistinguishable in the very file that exists to tell them apart.
       return refuse(
         "request_unresolved",
         `odu: request "${input.requestId}" was accepted by a process that is ` +
@@ -315,6 +379,13 @@ async function start(
     );
   }
 
+  // ── freshly claimed: this is NEW work, so now the world matters ──
+  //
+  // ABSOLUTE FIRST, and explicitly, rather than leaning on `probeCheckout` to
+  // fail. A relative path resolves against the DAEMON's cwd — which is
+  // wherever the shell that first started it happened to be, possibly months
+  // ago and possibly deleted since. The message already tells callers this
+  // path is absolute; this is the check that makes the sentence true.
   if (!isAbsolute(input.checkout)) {
     return refuseAndRecord(
       deps,
@@ -325,6 +396,13 @@ async function start(
         "the daemon's working directory, which is not yours.",
     );
   }
+  // The same rule, for the same reason, one field over. `hostsFile` is read by
+  // the COORDINATOR — a child of the daemon, whose cwd is the checkout — so a
+  // relative one would name a file inside the repository being tested rather
+  // than the one the caller's shell meant. That is a config a run could ship
+  // its own copy of, which is the one shape this must never allow.
+  // `""` is exempt because it is not a path: it is a caller saying its shell
+  // has no `$ODU_HOSTS`, which is exactly what `loadHosts` reads it as.
   if (
     input.hostsFile !== undefined &&
     input.hostsFile !== "" &&
@@ -339,6 +417,17 @@ async function start(
         "directory does not exist. Point $ODU_HOSTS at an absolute path.",
     );
   }
+  // ── THE TWO FIELDS THAT REACH GIT'S ARGV, CHECKED BEFORE THEY DO ──
+  //
+  // `expectedSha` and `branch` are the only caller strings a start can put in
+  // front of git (`git fetch origin -- <branch>`, `git checkout -B <branch>
+  // <sha>`). `execFile` takes the shell out of it and takes nothing out of
+  // GIT'S OWN option parsing: `branch: "--upload-pack=<cmd>"` is a command
+  // run on this machine by anyone who may start a run. So both are held to
+  // their grammars HERE, with nothing of them having been spelled to a
+  // subprocess — `git check-ref-format` would itself be a place to send
+  // `--upload-pack=…`, which is why the rule below is code rather than a
+  // call.
   if (!/^[0-9a-fA-F]{7,40}$/.test(input.expectedSha)) {
     return refuseAndRecord(
       deps,
@@ -380,9 +469,21 @@ async function start(
         "commit for a run to be about",
     );
   }
+  // A PREFIX match, so a caller may name the sha the length its own tooling
+  // prints. ONE reading of it, because the two rules below are the two sides
+  // of this one fact and a second spelling could disagree with the first.
   const wanted = input.expectedSha.toLowerCase();
   const onWanted = facts.head.toLowerCase().startsWith(wanted);
+  /** What the checkout is on, which the move below can change. */
   let head = facts.head;
+  // WITHOUT `branch`, a checkout that is not on that commit is refused rather
+  // than substituted: the whole promise of `expectedSha` is that a checkout
+  // which moved on gets an answer, not a different run. That is every start
+  // from a checkout the caller is standing in, byte for byte as it was.
+  //
+  // WITH `branch`, the caller is naming a clone the SERVICE keeps and saying
+  // where it should be — so this refusal is deferred until after the live-run
+  // rule below, which decides whether that tree may be touched at all.
   if (!onWanted && input.branch === undefined) {
     return refuseAndRecord(
       deps,
@@ -394,6 +495,7 @@ async function start(
     );
   }
 
+  // ── an existing run in that checkout is an ANSWER ──
   if (facts.liveRunId !== null && input.supersede !== true) {
     const existing = readManifest(handleFor(facts.liveRunId, catalog));
     return answerAndRecord(deps, input.requestId, {
@@ -412,6 +514,15 @@ async function start(
     });
   }
 
+  // ── THE CLONE IS NOT ON THAT COMMIT, AND THE CALLER NAMED A BRANCH ──
+  //
+  // AFTER the live-run rule, which is the ordering this block turns on. A run
+  // already in that clone is still answered with itself and nothing is
+  // touched; reaching here with one means the caller said `supersede`, and
+  // then the incumbent is stopped AND CONFIRMED STOPPED before the tree
+  // moves. The coordinator's own cancel-then-claim cannot do it: that happens
+  // after the launch, by which time this would already have moved the files
+  // under a process still reading them.
   let movedNote: string | null = null;
   if (input.branch !== undefined && !onWanted) {
     if (facts.liveRunId !== null) {
@@ -459,6 +570,8 @@ async function start(
       );
     }
     if (outcome.kind === "not_on_branch") {
+      // BOTH SHAS, because the two mistakes behind this are opposite ones: a
+      // commit that is on another branch, and one that was force-pushed away.
       return refuseAndRecord(
         deps,
         input.requestId,
@@ -477,6 +590,15 @@ async function start(
           `${input.expectedSha} — ${outcome.detail}`,
       );
     }
+    // RE-PROBED rather than trusted: the port says what it did, and this says
+    // what the checkout now IS. They agree in every ordinary case, and the
+    // case they do not is somebody else moving that tree in between — which
+    // must not reach a launch as the commit this start asked for.
+    //
+    // A READING OF ITS OWN, not a second value of `facts`: everything the
+    // probe answered before the move has already been used, and a name that
+    // meant the clone-before here and the clone-after there would be one
+    // `liveRunId` standing for two different moments.
     const after = deps.probeCheckout(input.checkout);
     if (after.head === null || !after.head.toLowerCase().startsWith(wanted)) {
       return refuseAndRecord(
@@ -494,8 +616,17 @@ async function start(
   }
 
   const runId = claim.receipt.plannedRunId;
+  // ── WHERE THIS RUN PUSHES (PLAN 4.1) ──
+  //
+  // After the receipt and after the checkout, because it is the most expensive
+  // question asked here — it evaluates somebody else's `flake.nix` — and every
+  // cheaper refusal above it must answer first. Its result is NOT part of the
+  // request digest: see the module header.
   const prepared = await preparePush(deps.push, input.checkout, runId);
   if (prepared.kind === "ambiguous") {
+    // A START IS REFUSED, where a replay is not: this caller is being asked to
+    // begin work for a repository that declares two caches, and choosing one
+    // would be the service inventing a policy nobody wrote down.
     return refuseAndRecord(
       deps,
       input.requestId,
@@ -507,6 +638,11 @@ async function start(
   }
   const push = prepared.push;
 
+  // A LAUNCH IS A DISPATCH. Marked before the launcher is entered, because from
+  // here on "my reply went missing" and "nothing happened" stop being the same
+  // thing — a launcher that is still running has not published a manifest yet,
+  // and reading that absence as proof of no spawn is how one request becomes
+  // two coordinators.
   markDispatched(deps.requests, input.requestId, scope.selectors, deps.now());
   const launched = await deps.launch({
     checkout: input.checkout,
@@ -520,7 +656,12 @@ async function start(
     noSnapshot: input.noSnapshot ?? false,
     noPost: input.noPost ?? false,
     hostPins: [...(input.hostPins ?? [])],
+    // Absent on the wire means the CALLER had no `$ODU_HOSTS` — which is a
+    // fact to carry, not a gap to fill from this process. Filling it is how
+    // the daemon's shell came to decide where other people's runs execute.
     caller: callerOf(input, principal),
+    // The caller's explicit "take this checkout". The coordinator does the
+    // cancel-then-confirm; this only has to not lose the word.
     supersede: input.supersede ?? false,
     linger: input.linger ?? false,
     push,
@@ -529,6 +670,9 @@ async function start(
     checkoutMoved: movedNote,
   });
   if (!launched.ok) {
+    // THE TOKEN GOES BACK. Nothing ever reached a lane, so a credential left
+    // live for a day would be a grant with no run behind it. The FILE the
+    // launcher wrote is the launcher's to remove, and it does.
     if (push !== null) deps.push.revoke(push.tokenId);
     return refuseAndRecord(
       deps,
@@ -538,6 +682,8 @@ async function start(
       { runId },
     );
   }
+  // Read back what the child published, so the receipt describes the run that
+  // EXISTS rather than the one that was asked for.
   const registered = readManifest(handleFor(runId, catalog));
   return answerAndRecord(deps, input.requestId, {
     accepted: true,
@@ -552,6 +698,10 @@ async function start(
   });
 }
 
+/** Rebuild a recorded outcome — an answer or a refusal, told apart by its tag.
+ *  A stored value this build cannot recognise yields `null` rather than being
+ *  cast: handing a caller an object shaped like a receipt with nothing in it is
+ *  worse than saying so. */
 function replayOf(stored: unknown, requestId: string): Outcome | null {
   if (stored === null || typeof stored !== "object") return null;
   const value = stored as Partial<Recorded>;
