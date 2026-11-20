@@ -164,8 +164,6 @@
     grid-template-columns: 1fr;
     gap: 0;
   }
-  /* The page first, the list of pages after it, reached from a link above
-     the title. */
   .docs-content { order: 1; }
   .docs-nav {
     order: 2;

@@ -1,16 +1,5 @@
-// The docs lint: the [lint] rules of the writing standard
-// (dev/skills/docs-writing/SKILL.md), over every page under
-// src/content/docs, recursively. One test per page, named by its slug
-// (`your-repository`, `cache/push`), so a single page runs with
-// `node --test --test-name-pattern='<slug>' test/docs-lint.test.mjs`.
-//
 // There is no exemption list and no per-page override: every page is held to
 // every limit.
-//
-// Pages are read with the parsers the build uses, resolved through astro:
-// its frontmatter parser (@astrojs/internal-helpers), and satteri's
-// `markdownToMdast` (through @astrojs/markdown-satteri), so a table, a list
-// item or a raw HTML tag is exactly what the build sees.
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -48,7 +37,6 @@ const contentDir = fileURLToPath(new URL("../src/content/docs/", import.meta.url
 
 const sentences = new Intl.Segmenter("en", { granularity: "sentence" });
 
-/** Every `.md` under `dir`, as paths relative to it, sorted. */
 function pagesUnder(dir) {
   return readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith(".md"))
@@ -56,11 +44,6 @@ function pagesUnder(dir) {
     .sort();
 }
 
-// Inline code stands in as one neutral token per word, so its words count but
-// its punctuation (`--flag`, `a.b`, `;`) never reads as a dash, a semicolon or
-// a sentence end. The token is capitalized so a sentence that opens with code
-// still starts a new sentence. Raw HTML (an anchor span, a `<kbd>` tag) is not
-// running text, but the text between a `<kbd>` pair is.
 function plain(node) {
   if (node.type === "inlineCode")
     return node.value
@@ -78,9 +61,6 @@ function plain(node) {
 const words = (text) =>
   text.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
 
-// "odu" is written lower case even at the start of a sentence (house style),
-// which the segmenter would read as a continuation, so it segments a copy with
-// the word capitalized. Word counts are unaffected.
 function sentencesOf(text) {
   const flat = text
     .replace(/\s+/g, " ")
@@ -140,8 +120,6 @@ function lintPage(source) {
   };
 
   let pageWords = 0;
-  // The running text under the current heading (any depth). Tables and code
-  // do not count toward it.
   let section = {
     title: "(opening, before the first heading)",
     node: null,
@@ -154,9 +132,6 @@ function lintPage(source) {
       );
   };
 
-  // A block is a paragraph, or one list item: the item's own paragraphs, read
-  // as one. Everything else inside an item (a nested list, a table, a code
-  // block) is walked as content of its own.
   const block = (node, text) => {
     const n = words(text);
     pageWords += n;
