@@ -80,13 +80,7 @@ function claimantGone(
   isAlive: (pid: number) => boolean,
 ): ClaimantProbe {
   if (now - receipt.acceptedAt < RETRY_DISPATCH_GRACE_MS) {
-    return {
-      gone: false,
-      reason:
-        "it was accepted moments ago and has not reached the wire yet — the " +
-        "caller that claimed it may still be dispatching it, and two callers " +
-        "acting on one id is the duplicate this receipt exists to prevent",
-    };
+    return { gone: false, reason: CLAIM_STILL_DISPATCHING };
   }
   const claimant = receipt.claimant;
   if (claimant === undefined) {
@@ -175,6 +169,12 @@ function evidenceFor(
 
 /** The floor below which an undispatched claim is not even asked about. */
 export const RETRY_DISPATCH_GRACE_MS = 120_000;
+
+/** Why a claim this fresh is not yet anybody's to reconcile. */
+export const CLAIM_STILL_DISPATCHING =
+  "it was accepted moments ago and has not reached the wire yet — the " +
+  "caller that claimed it may still be dispatching it, and two callers " +
+  "acting on one id is the duplicate this receipt exists to prevent";
 
 export type Reconciled =
   | { kind: "replay"; receipt: RetryReceipt }
@@ -272,7 +272,7 @@ function reconcileLive(
       attempts: [],
       scope: manifest.scope,
       sha: manifest.sha,
-      cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
+      cursor: formatCursor(journal.cursor),
     },
   };
 }

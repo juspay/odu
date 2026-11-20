@@ -105,7 +105,7 @@ describe("the layout under the state root", () => {
   });
 
   it("composes an attempt directory as <run>/attempts/<encoded node>/<n>", () => {
-    expect(attemptDir("/state/runs/12345678-abcd", "ci~3A~3Ae2e~40linux", 2)).toBe(
+    expect(attemptDir("/state/runs/12345678-abcd", "ci::e2e@linux", 2)).toBe(
       "/state/runs/12345678-abcd/attempts/ci~3A~3Ae2e~40linux/2",
     );
     expect(attemptDir("/run", "k", 1)).toBe(

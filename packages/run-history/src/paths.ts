@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { LogStream } from "@odu/run-client/nodeId";
+import { encodeNodeKey } from "./ids";
 
 export interface StateEnv {
   readonly ODU_STATE_DIR?: string | undefined;
@@ -76,14 +77,19 @@ export const RUN_IDENTITY = [
   RUN_FILES.expiry,
 ] as const;
 
-/** One attempt's directory: `attempts/<ENCODED_NODE_KEY>/<N>/`. The encoding
+/** One node's evidence directory: `attempts/<ENCODED_NODE_KEY>/`. The encoding
  *  is what makes the node id a single safe segment — see `./ids`. */
+export function nodeDir(dir: string, node: string): string {
+  return join(dir, RUN_FILES.attempts, encodeNodeKey(node));
+}
+
+/** One attempt's directory: `attempts/<ENCODED_NODE_KEY>/<N>/`. */
 export function attemptDir(
   dir: string,
-  encodedNode: string,
+  node: string,
   attempt: number,
 ): string {
-  return join(dir, RUN_FILES.attempts, encodedNode, String(attempt));
+  return join(nodeDir(dir, node), String(attempt));
 }
 
 export const ATTEMPT_FILES = {

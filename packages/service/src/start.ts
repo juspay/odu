@@ -21,6 +21,7 @@ import type {
 import { stopLiveRun } from "./cancel";
 import { preparePush } from "./pushGrant";
 import {
+  CLAIMANT_STILL_STARTING,
   claimReceipt,
   completeReceipt,
   digestOf,
@@ -221,6 +222,16 @@ async function start(
       "request_unresolved",
       `odu: request "${input.requestId}" was used before, but this build ` +
         "cannot read what it recorded",
+    );
+  }
+  if (claim.kind === "held_unreadable") {
+    return refuse(
+      "request_unresolved",
+      `odu: request "${input.requestId}" was accepted and its outcome is ` +
+        `UNKNOWN — ${CLAIMANT_STILL_STARTING}. ` +
+        "Do not repeat it with a fresh id until you have checked whether it " +
+        "took effect: a second start would be a second run.",
+      { suggestion: ["odu", "ci", "history", "list"] },
     );
   }
   if (claim.kind === "in_flight") {

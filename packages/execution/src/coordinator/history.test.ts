@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { encodeNodeKey, isRunId } from "@odu/run-history/ids";
+import { isRunId } from "@odu/run-history/ids";
 import { claimOwnership, OWNERSHIP_GRACE_MS } from "@odu/run-history/owner";
 import { ATTEMPT_FILES, attemptDir } from "@odu/run-history/paths";
 import {
@@ -101,7 +101,7 @@ function logText(handle: RunHandle, node: string, attempt: number): string | und
 
 function logMode(handle: RunHandle, node: string, attempt: number): number {
   const path = join(
-    attemptDir(handle.dir, encodeNodeKey(node), attempt),
+    attemptDir(handle.dir, node, attempt),
     ATTEMPT_FILES.log,
   );
   return statSync(path).mode & 0o777;

@@ -46,6 +46,10 @@ function claimantLives(
   return isAlive(claimant.pid);
 }
 
+/** Why a live claimant's unfinished start is nobody else's to resolve. */
+export const CLAIMANT_STILL_STARTING =
+  "the process that accepted it is still running and may be starting the run now";
+
 export function reconcileStart(
   receipt: ReceiptRecord,
   opts: {
@@ -68,7 +72,7 @@ export function reconcileStart(
       reason:
         alive === null
           ? "the process that accepted it cannot be identified from here"
-          : "the process that accepted it is still running and may be starting the run now",
+          : CLAIMANT_STILL_STARTING,
     };
   }
   const waited = opts.now - receipt.dispatchedAt;
@@ -148,7 +152,11 @@ export async function onceOnly<T>(
       return { ok: true, value: recorded as T, replayed: true };
     }
   }
-  if (claim.kind === "in_flight" || claim.kind === "replay") {
+  if (
+    claim.kind === "in_flight" ||
+    claim.kind === "replay" ||
+    claim.kind === "held_unreadable"
+  ) {
     return {
       ok: false,
       refusal: new ServiceRefused({

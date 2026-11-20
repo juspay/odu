@@ -1,6 +1,7 @@
 import { EXCERPT_BUDGET_BYTES } from "@odu/run-history/attention";
 import {
   DEFAULT_ATTENTION_DEADLINE_MS,
+  intentOf,
   readAttention,
   resolveCursor,
   waitForAttention,
@@ -181,14 +182,14 @@ export function waitForRun(
   return Effect.suspend(() => {
     const resolved = resolve(input.runId, input.after, deps.catalog ?? {});
     if (!resolved.ok) return Effect.fail(resolved.refusal);
-    const query = queryOf(resolved.cursor, input.limit);
     return Effect.map(
       interruptiblePoll<Attention>(
         (signal) =>
           waitForAttention(resolved.handle, {
-            ...query,
+            intent: intentOf(resolved.cursor, input.settle ?? false),
+            excerptBytes: EXCERPT_BUDGET_BYTES,
+            ...(input.limit === undefined ? {} : { limit: input.limit }),
             deadlineMs: input.deadlineMs ?? DEFAULT_ATTENTION_DEADLINE_MS,
-            settle: input.settle ?? false,
             signal,
           }),
         deps.signal,

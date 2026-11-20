@@ -308,7 +308,7 @@ describe("a retry on a run that is still live", () => {
       { node: LINT, attempt: 1 },
     ]);
     expect(out.receipt.sha).toBe(SHA);
-    expect(readJournal(handle).highestSeq).toBe(2);
+    expect(readJournal(handle).cursor.seq).toBe(2);
     expect(out.receipt.cursor).toBe(`${PARENT_RUN}@2`);
 
     expect(launcher.calls).toEqual([]);

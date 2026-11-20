@@ -18,7 +18,11 @@ export {
   reconcile,
   type RetryReceipt,
 } from "@odu/run-history/reconcile";
-import { reconcile, type RetryReceipt } from "@odu/run-history/reconcile";
+import {
+  CLAIM_STILL_DISPATCHING,
+  reconcile,
+  type RetryReceipt,
+} from "@odu/run-history/reconcile";
 import { currentOwner } from "@odu/run-history/owner";
 import {
   attemptsFor,
@@ -162,6 +166,17 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
     }
     if (claim.kind === "replay") {
       return replayOf(claim.receipt.result);
+    }
+    if (claim.kind === "held_unreadable") {
+      return {
+        ok: false,
+        code: "request_unresolved",
+        message:
+          `odu: request "${input.requestId}" was accepted and its outcome is UNKNOWN — ` +
+          `${CLAIM_STILL_DISPATCHING}. Do not repeat it with a fresh id until you have ` +
+          "checked whether it took effect: a second retry would be a second mutation.",
+        suggestion: ["odu", "ci", "history", "show", "--run", input.runId],
+      };
     }
     if (claim.kind === "in_flight") {
       const reconciled = reconcile(
@@ -384,10 +399,7 @@ async function tryLive(
         })),
         scope: manifest.scope,
         sha: manifest.sha,
-        cursor: formatCursor({
-          runId: handle.runId,
-          seq: readJournal(handle).highestSeq,
-        }),
+        cursor: formatCursor(readJournal(handle).cursor),
       },
     };
   } finally {

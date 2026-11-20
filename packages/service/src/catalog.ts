@@ -52,7 +52,7 @@ const refuse = (
 const RECEIPT_KIND = "catalog" as const;
 
 type Claimed =
-  | { ok: true; claim: ClaimOutcome; replayable: boolean }
+  | { ok: true; recorded: unknown; replayable: boolean }
   | { ok: false; refusal: ServiceRefused };
 
 function claim(
@@ -85,11 +85,8 @@ function claim(
       ),
     };
   }
-  return {
-    ok: true,
-    claim: outcome,
-    replayable: outcome.kind === "replay" || outcome.kind === "in_flight",
-  };
+  const replayable = outcome.kind === "replay" || outcome.kind === "in_flight";
+  return { ok: true, recorded: replayable ? outcome.receipt.result : null, replayable };
 }
 
 export function importCatalog(
@@ -140,7 +137,7 @@ function runImport(
   );
   if (!claimed.ok) return { refusal: claimed.refusal };
   if (claimed.replayable) {
-    const replayed = replayOf(claimed.claim.receipt.result, isImportReport);
+    const replayed = replayOf(claimed.recorded, isImportReport);
     if (replayed !== null) return replayed;
   }
 
@@ -234,7 +231,7 @@ function runPrune(
   );
   if (!claimed.ok) return { refusal: claimed.refusal };
   if (claimed.replayable) {
-    const replayed = replayOf(claimed.claim.receipt.result, isPruneReport);
+    const replayed = replayOf(claimed.recorded, isPruneReport);
     if (replayed !== null) return replayed;
   }
 

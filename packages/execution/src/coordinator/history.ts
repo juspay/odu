@@ -11,7 +11,7 @@ import {
 import { isResumptionEvent } from "@odu/run-history/schema";
 import type { Placement, RunEvent, RunScope } from "@odu/run-history/schema";
 import {
-  appendAttemptLog,
+  type AttemptLogSink,
   locateAttempt,
   readAttemptLog,
   type JournalWriter,
@@ -21,7 +21,6 @@ import {
   registerRun,
   sealAttempt,
   startAttempt,
-  writeAttemptLog,
   writeVerdict,
 } from "@odu/run-history/store";
 
@@ -169,6 +168,7 @@ interface OpenAttempt {
   placement: Placement;
   outcome?: { status: NodeStatus; exitCode: number | null };
   log?: { complete: boolean; reason: string | null };
+  sink: AttemptLogSink;
 }
 
 export function openRunHistory(init: RunHistoryInit): RunHistory {
@@ -290,22 +290,20 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     if (open.has(node)) return;
     const attempt = (highest.get(node) ?? 0) + 1;
     const placement = placementOf(node, host);
+    let sink: AttemptLogSink | null;
     try {
-      if (
-        !startAttempt(handle, token, {
-          node,
-          attempt,
-          placement,
-          startedAt: now(),
-        })
-      ) {
-        return;
-      }
+      sink = startAttempt(handle, token, {
+        node,
+        attempt,
+        placement,
+        startedAt: now(),
+      });
     } catch {
       return;
     }
+    if (sink === null) return;
     highest.set(node, attempt);
-    open.set(node, { attempt, placement });
+    open.set(node, { attempt, placement, sink });
     emit({ kind: "attempt_started", node, attempt, placement });
   };
 
@@ -379,9 +377,9 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     log: (node, text, host = null, stream = "recipe") => {
       if (fenced) return;
       if (!open.has(node)) beginAttempt(node, host);
-      const attempt = open.get(node)?.attempt;
-      if (attempt === undefined) return;
-      appendAttemptLog(handle, node, attempt, text, stream);
+      const current = open.get(node);
+      if (current === undefined) return;
+      current.sink.append(text, stream);
     },
     logFinalized: (node, complete, reason) => {
       const current = open.get(node);
@@ -399,22 +397,17 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     replaceLog: (node, text, host = null, stream = "recipe") => {
       if (fenced) return;
       if (!open.has(node)) beginAttempt(node, host);
-      const attempt = open.get(node)?.attempt;
-      if (attempt === undefined) return;
-      const held = readAttemptLog(handle, node, attempt, {}, stream)?.text ?? "";
+      const current = open.get(node);
+      if (current === undefined) return;
+      const held =
+        readAttemptLog(handle, node, current.attempt, {}, stream)?.text ?? "";
       const reconciled = reconcileSnapshot(held, text);
       if (reconciled.kind === "held") return;
       if (reconciled.kind === "append") {
-        appendAttemptLog(handle, node, attempt, reconciled.text, stream);
+        current.sink.append(reconciled.text, stream);
         return;
       }
-      writeAttemptLog(
-        handle,
-        node,
-        attempt,
-        TRUNCATION_NOTICE + reconciled.text,
-        stream,
-      );
+      current.sink.replace(TRUNCATION_NOTICE + reconciled.text, stream);
     },
     resetNode: (node, reason) => {
       const current = open.get(node);

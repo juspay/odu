@@ -74,25 +74,31 @@ function readPublishedOwner(dir: string): Owner | null {
   return readOwnerFile(join(dir, RUN_FILES.owner));
 }
 
+export interface OwnershipReading {
+  /** The highest epoch across `owner.json` and the claim files. */
+  readonly owner: Owner | null;
+  /** The highest epoch any claim FILE names, readable or not. */
+  readonly epochFloor: number;
+}
+
+/** What one scan of a run's directory says about who owns it. */
+export function readOwnership(dir: string): OwnershipReading {
+  let owner = readPublishedOwner(dir);
+  let epochFloor = 0;
+  for (const { epoch } of listClaims(dir)) {
+    epochFloor = Math.max(epochFloor, epoch);
+    if (owner !== null && epoch <= owner.epoch) continue;
+    const claimed = readOwnerFile(claimPath(dir, epoch));
+    if (claimed !== null) owner = claimed;
+  }
+  return { owner, epochFloor };
+}
+
 /**
  * The run's current owner, or `null` when nobody has ever claimed it.
  */
 export function currentOwner(dir: string): Owner | null {
-  let highest = readPublishedOwner(dir);
-  for (const { epoch } of listClaims(dir)) {
-    if (highest !== null && epoch <= highest.epoch) continue;
-    const claimed = readOwnerFile(claimPath(dir, epoch));
-    if (claimed !== null) highest = claimed;
-  }
-  return highest;
-}
-
-function nextEpochFloorFromClaimFiles(dir: string): number {
-  let highest = 0;
-  for (const entry of listClaims(dir)) {
-    highest = Math.max(highest, entry.epoch);
-  }
-  return highest;
+  return readOwnership(dir).owner;
 }
 
 function listClaims(dir: string): { epoch: number }[] {
@@ -167,7 +173,8 @@ export function claimOwnership(input: ClaimInput): ClaimResult {
   const isAlive = input.isAlive ?? pidAlive;
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const incumbent = currentOwner(input.dir);
+    const reading = readOwnership(input.dir);
+    const incumbent = reading.owner;
     if (incumbent !== null) {
       const verdict = ownershipProvablyLost(incumbent, now, host, isAlive);
       if (!verdict.lost) {
@@ -177,8 +184,7 @@ export function claimOwnership(input: ClaimInput): ClaimResult {
         };
       }
     }
-    const epoch =
-      Math.max(incumbent?.epoch ?? 0, nextEpochFloorFromClaimFiles(input.dir)) + 1;
+    const epoch = Math.max(incumbent?.epoch ?? 0, reading.epochFloor) + 1;
     const owner: Owner = {
       epoch,
       pid,

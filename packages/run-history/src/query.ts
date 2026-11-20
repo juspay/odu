@@ -8,7 +8,6 @@ import {
 } from "./attention";
 import {
   type Cursor,
-  encodeNodeKey,
   isRunId,
   parseCursor,
   parseRunSelector,
@@ -173,14 +172,26 @@ export function readAttention(
   );
 }
 
-export interface WaitOptions extends AttentionQuery {
+export type WaitIntent =
+  /** No cursor: a red already on the record answers. */
+  | { kind: "first_red" }
+  /** Resumed from a cursor: wake only for what it has not seen. */
+  | { kind: "since_cursor"; after: Cursor }
+  /** Only a settled run answers. */
+  | { kind: "settle"; after: Cursor | null };
+
+export function intentOf(after: Cursor | null, settle: boolean): WaitIntent {
+  if (settle) return { kind: "settle", after };
+  return after === null ? { kind: "first_red" } : { kind: "since_cursor", after };
+}
+
+export interface WaitOptions extends Omit<AttentionQuery, "after"> {
+  /** What would answer this wait. */
+  intent?: WaitIntent;
   /** Bounded observation deadline. Reaching it is `still_running`. */
   deadlineMs?: number;
   /** How often to look. */
   pollMs?: number;
-  /** Return only when the run has fully settled, rather than on the first
-   *  actionable red. */
-  settle?: boolean;
   signal?: AbortSignal;
   now?: () => number;
 }
@@ -199,6 +210,13 @@ export async function waitForAttention(
   const now = opts.now ?? Date.now;
   const deadline = now() + (opts.deadlineMs ?? DEFAULT_ATTENTION_DEADLINE_MS);
   const pollMs = Math.max(10, opts.pollMs ?? 150);
+  const intent: WaitIntent = opts.intent ?? { kind: "first_red" };
+  const query: AttentionQuery = {
+    after: intent.kind === "first_red" ? null : intent.after,
+    limit: opts.limit,
+    budgetBytes: opts.budgetBytes,
+    excerptBytes: opts.excerptBytes,
+  };
   const eventsPath = join(handle.dir, RUN_FILES.events);
   let lastSize: number | null = null;
   let looked = false;
@@ -207,24 +225,24 @@ export async function waitForAttention(
     if (!looked || size !== lastSize) {
       looked = true;
       lastSize = size;
-      const attention = readAttention(handle, opts, now());
-      if (isAnswer(attention, opts)) return attention;
+      const attention = readAttention(handle, query, now());
+      if (isAnswer(attention, intent)) return attention;
     }
     if (opts.signal?.aborted === true || now() >= deadline) {
-      return readAttention(handle, opts, now());
+      return readAttention(handle, query, now());
     }
     await sleep(Math.min(pollMs, Math.max(1, deadline - now())), opts.signal);
   }
 }
 
-function isAnswer(attention: Attention, opts: WaitOptions): boolean {
+function isAnswer(attention: Attention, intent: WaitIntent): boolean {
   if (attention.state === "expired" || attention.state === "unknown_run") {
     return true;
   }
   if (attention.state === "owner_lost") return true;
   if (attention.settled) return true;
-  if (opts.settle === true) return false;
-  if (opts.after != null) return attention.events.length > 0;
+  if (intent.kind === "settle") return false;
+  if (intent.kind === "since_cursor") return attention.events.length > 0;
   return attention.actionable;
 }
 
@@ -264,7 +282,7 @@ export async function waitForLogGrowth(
   const deadline = now() + (opts.deadlineMs ?? DEFAULT_ATTENTION_DEADLINE_MS);
   const pollMs = Math.max(10, opts.pollMs ?? 150);
   const logPath = join(
-    attemptDir(handle.dir, encodeNodeKey(node), attempt),
+    attemptDir(handle.dir, node, attempt),
     attemptLogFile(opts.stream),
   );
   for (;;) {

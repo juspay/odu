@@ -5,14 +5,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { formatCursor, mintRunId } from "./ids";
 import type { Placement, RunManifest } from "./schema";
 import {
-  appendAttemptLog,
+  type AttemptLogSink,
   appendEvent,
   handleFor,
   type RunHandle,
   registerRun,
   sealAttempt,
   startAttempt,
-  writeAttemptLog,
   writeVerdict,
 } from "./store";
 import type { OwnershipToken } from "./owner";
@@ -83,13 +82,13 @@ function failOneNode(run: Registered, text: string): void {
     attempt: 1,
     placement: LINUX,
   });
-  startAttempt(run.handle, run.token, {
+  const sink = startAttempt(run.handle, run.token, {
     node: NODE,
     attempt: 1,
     placement: LINUX,
     startedAt: 1_000,
   });
-  appendAttemptLog(run.handle, NODE, 1, text);
+  sink?.append(text);
   appendEvent(run.handle, run.token, {
     kind: "node_status",
     node: NODE,
@@ -292,6 +291,8 @@ describe("readAttention over a real run", () => {
 });
 
 describe("waitForLogGrowth", () => {
+  let logSink: AttemptLogSink | null = null;
+
   function startNode(run: Registered, text = ""): number {
     appendEvent(run.handle, run.token, {
       kind: "attempt_started",
@@ -299,13 +300,13 @@ describe("waitForLogGrowth", () => {
       attempt: 1,
       placement: LINUX,
     });
-    startAttempt(run.handle, run.token, {
+    logSink = startAttempt(run.handle, run.token, {
       node: NODE,
       attempt: 1,
       placement: LINUX,
       startedAt: 1_000,
     });
-    appendAttemptLog(run.handle, NODE, 1, text);
+    logSink?.append(text);
     return Buffer.byteLength(text);
   }
 
@@ -314,7 +315,7 @@ describe("waitForLogGrowth", () => {
     const run = register(root);
     const from = startNode(run, "compiling…\n");
     const later = setTimeout(() => {
-      appendAttemptLog(run.handle, NODE, 1, "boom\n");
+      logSink?.append("boom\n");
     }, 30);
 
     const growth = await waitForLogGrowth(run.handle, NODE, 1, {
@@ -330,7 +331,7 @@ describe("waitForLogGrowth", () => {
     const root = catalog();
     const run = register(root);
     startNode(run, "0123456789");
-    writeAttemptLog(run.handle, NODE, 1, "short\n");
+    logSink?.replace("short\n");
 
     const growth = await waitForLogGrowth(run.handle, NODE, 1, {
       from: 10,
@@ -464,7 +465,7 @@ describe("waitForAttention", () => {
     const answer = await waitForAttention(run.handle, {
       deadlineMs: 200,
       pollMs: 10,
-      settle: true,
+      intent: { kind: "settle", after: null },
     });
     expect(Date.now() - started).toBeGreaterThanOrEqual(150);
     expect(answer.actionable).toBe(true);

@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { logPathFor } from "@odu/run-client/nodeId";
 import { writeAtomic } from "./atomic";
 import { shortSha } from "@odu/run-client/nodeId";
-import { encodeNodeKey } from "./ids";
 import { readLedger } from "./legacy/ledger";
 import type { RunRecord } from "./legacy/record";
 import { ATTEMPT_FILES, attemptDir, RUN_FILES } from "./paths";
@@ -175,7 +174,7 @@ function importOne(
 
   for (const node of record.nodes) {
     const source = join(opts.repoRoot, logPathFor(sha7, node.id));
-    const dir = attemptDir(handle.dir, encodeNodeKey(node.id), 1);
+    const dir = attemptDir(handle.dir, node.id, 1);
     mkdirSync(dir, { recursive: true });
     let bytes = 0;
     if (existsSync(source)) {

@@ -2,15 +2,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { Effect, Fiber } from "effect";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { encodeNodeKey } from "@odu/run-history/ids";
 import { attemptDir, attemptLogFile } from "@odu/run-history/paths";
 import { formatLogKey } from "@odu/service-client/logKey";
 import type { ServiceRefused } from "@odu/service-client/surface";
 import {
-  appendAttemptLog,
+  type AttemptLogSink,
   sealAttempt,
   startAttempt,
-  writeAttemptLog,
   writeVerdict,
 } from "@odu/run-history/store";
 import type { RunHandle } from "@odu/run-history/store";
@@ -45,22 +43,24 @@ interface Fixture {
   token: OwnershipToken;
   runId: string;
   key: string;
+  sink: AttemptLogSink | null;
   catalog: { root: string };
 }
 
 function writing(w: World, text = ""): Fixture {
   const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
   writeRoster(fixture.handle, fixture.token, [NODE]);
-  startAttempt(fixture.handle, fixture.token, {
+  const sink = startAttempt(fixture.handle, fixture.token, {
     node: NODE,
     attempt: 1,
     placement: PLACEMENT,
     startedAt: Date.now(),
   });
-  writeAttemptLog(fixture.handle, NODE, 1, text);
+  sink?.replace(text);
   return {
     ...fixture,
     key: formatLogKey({ runId: fixture.runId, node: NODE, attempt: 1 }),
+    sink,
     catalog: { root: w.catalogRoot },
   };
 }
@@ -122,7 +122,7 @@ describe("log.read as a follow", () => {
     expect(first.success.open).toBe(true);
 
     const later = setTimeout(() => {
-      appendAttemptLog(fixture.handle, NODE, 1, "boom\n");
+      fixture.sink?.append("boom\n");
     }, 50);
     const second = await run(
       readLog(
@@ -204,7 +204,7 @@ describe("log.read as a follow", () => {
     const w = open();
     const fixture = writing(w, "0123456789abcdefghij");
     const held = 20;
-    writeAttemptLog(fixture.handle, NODE, 1, "resync\n");
+    fixture.sink?.replace("resync\n");
 
     const page = await run(
       readLog({ key: fixture.key, offset: held, waitMs: 200 }, {
@@ -266,7 +266,7 @@ describe("log.read on the push stream", () => {
   it("answers the push's bytes, and a bare key still answers the recipe's", async () => {
     const w = open();
     const fixture = writing(w, "cargo test … ok\n");
-    writeAttemptLog(fixture.handle, NODE, 1, "pushing 3 paths\n", "push");
+    fixture.sink?.replace("pushing 3 paths\n", "push");
 
     const pushed = await run(
       readLog({ key: fixture.key, stream: "push" }, { catalog: fixture.catalog }),
@@ -289,7 +289,7 @@ describe("log.read on the push stream", () => {
   it("follows the push log's own growth, from the cursor it handed back", async () => {
     const w = open();
     const fixture = writing(w, "cargo test … ok\n");
-    writeAttemptLog(fixture.handle, NODE, 1, "querying what is missing\n", "push");
+    fixture.sink?.replace("querying what is missing\n", "push");
 
     const first = await run(
       readLog({ key: fixture.key, stream: "push" }, {
@@ -303,10 +303,10 @@ describe("log.read on the push stream", () => {
     expect(first.success.open).toBe(true);
 
     const noise = setTimeout(() => {
-      appendAttemptLog(fixture.handle, NODE, 1, "and more test output\n");
+      fixture.sink?.append("and more test output\n");
     }, 20);
     const later = setTimeout(() => {
-      appendAttemptLog(fixture.handle, NODE, 1, "4 paths, 1.2 MiB\n", "push");
+      fixture.sink?.append("4 paths, 1.2 MiB\n", "push");
     }, 50);
     const second = await run(
       readLog(
@@ -332,7 +332,7 @@ describe("log.read on the push stream", () => {
     const fixture = writing(w, "cargo test … ok\n");
     rmSync(
       join(
-        attemptDir(fixture.handle.dir, encodeNodeKey(NODE), 1),
+        attemptDir(fixture.handle.dir, NODE, 1),
         attemptLogFile("push"),
       ),
     );

@@ -97,6 +97,8 @@ export type ClaimOutcome =
   | { kind: "replay"; receipt: ReceiptRecord }
   /** Somebody claimed it and has not finished. */
   | { kind: "in_flight"; receipt: ReceiptRecord }
+  /** The id is taken, and its receipt did not decode. */
+  | { kind: "held_unreadable" }
   /** The same id, different input. */
   | { kind: "conflict"; receipt: ReceiptRecord };
 
@@ -131,12 +133,7 @@ export function claimReceipt(
     return { kind: "claimed", receipt };
   }
   const existing = readReceipt(store, input.requestId);
-  if (existing === null) {
-    return {
-      kind: "in_flight",
-      receipt: { ...receipt, plannedRunId: "" },
-    };
-  }
+  if (existing === null) return { kind: "held_unreadable" };
   if (existing.digest !== input.digest) {
     return { kind: "conflict", receipt: existing };
   }

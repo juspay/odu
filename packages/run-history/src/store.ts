@@ -15,8 +15,8 @@ import { join } from "node:path";
 import { Result, Schema } from "effect";
 import { writeAtomic } from "./atomic";
 import {
+  type Cursor,
   decodeNodeKey,
-  encodeNodeKey,
   isAttemptOrdinal,
   isRunId,
   runIdStartedAt,
@@ -27,6 +27,7 @@ import {
   attemptLogFile,
   type LogStream,
   catalogRoot,
+  nodeDir,
   RUN_EVIDENCE,
   RUN_FILES,
   runDir,
@@ -143,12 +144,6 @@ export function readManifest(handle: RunHandle): RunManifest | null {
   return readJson(join(handle.dir, RUN_FILES.manifest), decodeManifest);
 }
 
-/** The next sequence number for a run — one past the highest line already on
- *  disk. */
-function nextSeq(handle: RunHandle): number {
-  return readJournal(handle).highestSeq + 1;
-}
-
 /** A run's journal, held open by its owner. */
 export interface JournalWriter {
   append: (event: RunEvent, now?: number) => JournalEntry | null;
@@ -160,7 +155,7 @@ export function openJournal(
   handle: RunHandle,
   token: OwnershipToken,
 ): JournalWriter {
-  let next = nextSeq(handle);
+  let next = readJournal(handle).nextSeq;
   return {
     append: (event, now) => {
       const entry = appendAt(handle, token, next, event, now ?? Date.now());
@@ -177,7 +172,7 @@ export function appendEvent(
   event: RunEvent,
   now: number = Date.now(),
 ): JournalEntry | null {
-  return appendAt(handle, token, nextSeq(handle), event, now);
+  return appendAt(handle, token, readJournal(handle).nextSeq, event, now);
 }
 
 /**
@@ -211,8 +206,10 @@ export interface JournalRead {
   /** Lines that did not parse — a torn tail, or a record from a newer
    *  writer. */
   unreadable: number;
-  /** The highest ordinal ANY line claims, readable or not. */
-  highestSeq: number;
+  /** One past the highest ordinal ANY line claims, readable or not. */
+  nextSeq: number;
+  /** The run's position at that highest ordinal. */
+  cursor: Cursor;
 }
 
 /** Every journal line for a run, in order. An unparseable line is counted and
@@ -222,7 +219,7 @@ export function readJournal(handle: RunHandle): JournalRead {
   try {
     text = readFileSync(join(handle.dir, RUN_FILES.events), "utf-8");
   } catch {
-    return { entries: [], unreadable: 0, highestSeq: 0 };
+    return journalRead(handle, [], 0, 0);
   }
   const entries: JournalEntry[] = [];
   let unreadable = 0;
@@ -245,12 +242,26 @@ export function readJournal(handle: RunHandle): JournalRead {
     else unreadable += 1;
   }
   entries.sort((a, b) => a.seq - b.seq);
-  return { entries, unreadable, highestSeq };
+  return journalRead(handle, entries, unreadable, highestSeq);
+}
+
+function journalRead(
+  handle: RunHandle,
+  entries: JournalEntry[],
+  unreadable: number,
+  highestSeq: number,
+): JournalRead {
+  return {
+    entries,
+    unreadable,
+    nextSeq: highestSeq + 1,
+    cursor: { runId: handle.runId, seq: highestSeq },
+  };
 }
 
 /** Every attempt ordinal recorded for a node, ascending. */
 export function attemptsFor(handle: RunHandle, node: string): number[] {
-  const dir = join(handle.dir, RUN_FILES.attempts, encodeNodeKey(node));
+  const dir = nodeDir(handle.dir, node);
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -280,6 +291,13 @@ export function nodesWithEvidence(handle: RunHandle): string[] {
     .sort();
 }
 
+/** The one way to write an attempt's log: minted by the fenced start that
+ *  allocated it. */
+export interface AttemptLogSink {
+  append: (text: string, stream?: LogStream) => void;
+  replace: (text: string, stream?: LogStream) => void;
+}
+
 /** Open (or re-open) an attempt's log for writing, and stamp its sidecar. */
 export function startAttempt(
   handle: RunHandle,
@@ -295,13 +313,9 @@ export function startAttempt(
     | "logComplete"
     | "logTruncationReason"
   >,
-): boolean {
-  if (!stillOwner(token)) return false;
-  const dir = attemptDir(
-    handle.dir,
-    encodeNodeKey(record.node),
-    record.attempt,
-  );
+): AttemptLogSink | null {
+  if (!stillOwner(token)) return null;
+  const dir = attemptDir(handle.dir, record.node, record.attempt);
   mkdirSync(dir, { recursive: true });
   const full: AttemptRecord = {
     ...record,
@@ -320,45 +334,20 @@ export function startAttempt(
   );
   writeAtomic(join(dir, ATTEMPT_FILES.log), "");
   writeAtomic(join(dir, ATTEMPT_FILES.pushLog), "");
-  return true;
-}
-
-/** REPLACE an attempt's log with `text`. */
-export function writeAttemptLog(
-  handle: RunHandle,
-  node: string,
-  attempt: number,
-  text: string,
-  stream: LogStream = "recipe",
-): void {
-  try {
-    writeAtomic(
-      join(
-        attemptDir(handle.dir, encodeNodeKey(node), attempt),
-        attemptLogFile(stream),
-      ),
-      text,
-    );
-  } catch {
-  }
-}
-
-/** Append raw bytes to an attempt's log. */
-export function appendAttemptLog(
-  handle: RunHandle,
-  node: string,
-  attempt: number,
-  text: string,
-  stream: LogStream = "recipe",
-): void {
-  const path = join(
-    attemptDir(handle.dir, encodeNodeKey(node), attempt),
-    attemptLogFile(stream),
-  );
-  try {
-    appendFileSync(path, text);
-  } catch {
-  }
+  return {
+    append: (text, stream = "recipe") => {
+      try {
+        appendFileSync(join(dir, attemptLogFile(stream)), text);
+      } catch {
+      }
+    },
+    replace: (text, stream = "recipe") => {
+      try {
+        writeAtomic(join(dir, attemptLogFile(stream)), text);
+      } catch {
+      }
+    },
+  };
 }
 
 /** Close an attempt: record how it ended, stamp the log's completeness, and
@@ -374,7 +363,7 @@ export function sealAttempt(
   >,
 ): boolean {
   if (!stillOwner(token)) return false;
-  const dir = attemptDir(handle.dir, encodeNodeKey(node), attempt);
+  const dir = attemptDir(handle.dir, node, attempt);
   const existing = readJson(join(dir, ATTEMPT_FILES.record), decodeAttempt);
   if (existing === null) return false;
   const logPath = join(dir, ATTEMPT_FILES.log);
@@ -405,7 +394,7 @@ export function locateAttempt(
   placement: AttemptRecord["placement"],
 ): boolean {
   if (!stillOwner(token)) return false;
-  const path = join(attemptDir(handle.dir, encodeNodeKey(node), attempt), ATTEMPT_FILES.record);
+  const path = join(attemptDir(handle.dir, node, attempt), ATTEMPT_FILES.record);
   const existing = readJson(path, decodeAttempt);
   if (existing === null || existing.placement.host !== null || placement.host === null) return false;
   writeAtomic(path, `${JSON.stringify({ ...existing, placement }, null, 2)}\n`);
@@ -419,7 +408,7 @@ export function readAttemptRecord(
 ): AttemptRecord | null {
   return readJson(
     join(
-      attemptDir(handle.dir, encodeNodeKey(node), attempt),
+      attemptDir(handle.dir, node, attempt),
       ATTEMPT_FILES.record,
     ),
     decodeAttempt,
@@ -494,7 +483,7 @@ export function readAttemptLog(
 ): LogSlice | null {
   return readFileSlice(
     join(
-      attemptDir(handle.dir, encodeNodeKey(node), attempt),
+      attemptDir(handle.dir, node, attempt),
       attemptLogFile(stream),
     ),
     range,

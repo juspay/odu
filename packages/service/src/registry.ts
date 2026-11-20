@@ -240,7 +240,7 @@ function project(
     endpoint: attention.endpoint,
     parentRunId: manifest.parentRunId,
     ...(manifest.actor === undefined ? {} : { actor: manifest.actor }),
-    cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
+    cursor: formatCursor(journal.cursor),
     ...(attention.push === undefined
       ? {}
       : {

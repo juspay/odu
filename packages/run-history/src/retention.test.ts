@@ -8,7 +8,6 @@ import type { Placement, RunManifest, RunVerdict } from "./schema";
 import type { OwnershipToken } from "./owner";
 import { pruneCatalog } from "./retention";
 import {
-  appendAttemptLog,
   appendEvent,
   readExpiry,
   readJournal,
@@ -81,8 +80,7 @@ function register(
     attempt: 1,
     placement: LINUX,
     startedAt,
-  });
-  appendAttemptLog(result.handle, NODE, 1, "the only account of what happened\n");
+  })?.append("the only account of what happened\n");
   return { handle: result.handle, token: result.token, runId };
 }
 

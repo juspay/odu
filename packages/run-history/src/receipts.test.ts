@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+  type ClaimOutcome,
   claimReceipt,
   completeReceipt,
   digestOf,
   isRequestId,
   listReceipts,
   readReceipt,
+  type ReceiptRecord,
 } from "./receipts";
 import { RUN_RECORD_FORMAT, type RunManifest } from "./schema";
 import { registerRun, type RunHandle } from "./store";
@@ -65,20 +67,24 @@ function receiptFile(handle: RunHandle, requestId: string): string {
   return join(handle.dir, "receipts", `${requestId}.json`);
 }
 
+function receiptOf(outcome: ClaimOutcome | null | undefined): ReceiptRecord | null {
+  return outcome != null && "receipt" in outcome ? outcome.receipt : null;
+}
+
 describe("claiming a request id", () => {
   it("hands the id to exactly one caller and tells the loser to wait", () => {
     const handle = aRun();
 
     const first = claim(handle);
     expect(first?.kind).toBe("claimed");
-    expect(first?.receipt.state).toBe("accepted");
-    expect(first?.receipt.plannedRunId).toBe(PLANNED);
-    expect(first?.receipt.result).toBeNull();
-    expect(first?.receipt.version).toBe(RUN_RECORD_FORMAT);
+    expect(receiptOf(first)?.state).toBe("accepted");
+    expect(receiptOf(first)?.plannedRunId).toBe(PLANNED);
+    expect(receiptOf(first)?.result).toBeNull();
+    expect(receiptOf(first)?.version).toBe(RUN_RECORD_FORMAT);
 
     const second = claim(handle);
     expect(second?.kind).toBe("in_flight");
-    expect(second?.receipt.plannedRunId).toBe(PLANNED);
+    expect(receiptOf(second)?.plannedRunId).toBe(PLANNED);
   });
 
   it("replays the recorded result once the work is known to have happened", () => {
@@ -88,9 +94,9 @@ describe("claiming a request id", () => {
 
     const again = claim(handle);
     expect(again?.kind).toBe("replay");
-    expect(again?.receipt.state).toBe("completed");
-    expect(again?.receipt.completedAt).toBe(T0 + 5);
-    expect(again?.receipt.result).toEqual({ mode: "relaunched", run: PLANNED });
+    expect(receiptOf(again)?.state).toBe("completed");
+    expect(receiptOf(again)?.completedAt).toBe(T0 + 5);
+    expect(receiptOf(again)?.result).toEqual({ mode: "relaunched", run: PLANNED });
   });
 
   it("refuses the same id carrying different input", () => {
@@ -99,7 +105,7 @@ describe("claiming a request id", () => {
 
     const other = claim(handle, { digest: digestOf([RUN_ID, "e2e"]) });
     expect(other?.kind).toBe("conflict");
-    expect(other?.receipt.digest).toBe(digestOf([RUN_ID, "unit"]));
+    expect(receiptOf(other)?.digest).toBe(digestOf([RUN_ID, "unit"]));
   });
 
   it("treats a receipt it cannot read as taken, never as free", () => {
@@ -109,9 +115,7 @@ describe("claiming a request id", () => {
 
     expect(readReceipt(handle, "req-1")).toBeNull();
 
-    const outcome = claim(handle);
-    expect(outcome?.kind).toBe("in_flight");
-    expect(outcome?.receipt.plannedRunId).toBe("");
+    expect(claim(handle)?.kind).toBe("held_unreadable");
   });
 
   it("returns null and writes nothing for an id it will not put on a disk", () => {

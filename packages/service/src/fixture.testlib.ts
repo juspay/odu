@@ -18,7 +18,6 @@ import {
   type RunHandle,
   sealAttempt,
   startAttempt,
-  writeAttemptLog,
   writeVerdict,
 } from "@odu/run-history/store";
 import type { OwnershipToken } from "@odu/run-history/owner";
@@ -154,9 +153,14 @@ export function writeNode(
   const placement = { platform, host: node.host ?? "localhost" };
   const journal = openJournal(handle, token);
   journal.append({ kind: "attempt_started", node: node.id, attempt, placement }, at);
-  startAttempt(handle, token, { node: node.id, attempt, placement, startedAt: at });
+  const sink = startAttempt(handle, token, {
+    node: node.id,
+    attempt,
+    placement,
+    startedAt: at,
+  });
   const text = node.log ?? "";
-  writeAttemptLog(handle, node.id, attempt, text);
+  sink?.replace(text);
   journal.append(
     {
       kind: "node_status",
@@ -240,7 +244,7 @@ export function writeBulkJournal(
   lines: number,
   at: number = Date.now(),
 ): void {
-  const from = readJournal(handle).highestSeq + 1;
+  const from = readJournal(handle).nextSeq;
   const out: string[] = [];
   for (let seq = from; seq < from + lines; seq += 1) {
     out.push(JSON.stringify({ seq, at, event: { kind: "phase", phase: "lanes" } }));

@@ -10,7 +10,6 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { encodeNodeKey } from "./ids";
 import { claimOwnership, OWNERSHIP_GRACE_MS } from "./owner";
 import {
   ATTEMPT_FILES,
@@ -20,7 +19,6 @@ import {
 } from "./paths";
 import { RUN_RECORD_FORMAT, type RunManifest } from "./schema";
 import {
-  appendAttemptLog,
   appendEvent,
   attemptsFor,
   expireRun,
@@ -216,7 +214,12 @@ describe("the journal", () => {
     const root = tmpCatalog();
     const { handle } = register(root);
     rmSync(join(handle.dir, RUN_FILES.events));
-    expect(readJournal(handle)).toEqual({ entries: [], unreadable: 0, highestSeq: 0 });
+    expect(readJournal(handle)).toEqual({
+      entries: [],
+      unreadable: 0,
+      nextSeq: 1,
+      cursor: { runId: handle.runId, seq: 0 },
+    });
   });
 });
 
@@ -227,16 +230,15 @@ describe("attempt evidence", () => {
     const root = tmpCatalog();
     const { handle, token } = register(root);
 
-    expect(
-      startAttempt(handle, token, {
-        node: NODE,
-        attempt: 1,
-        placement,
-        startedAt: T0 + 10,
-      }),
-    ).toBe(true);
-    appendAttemptLog(handle, NODE, 1, "compiling…\n");
-    appendAttemptLog(handle, NODE, 1, "boom\n");
+    const sink = startAttempt(handle, token, {
+      node: NODE,
+      attempt: 1,
+      placement,
+      startedAt: T0 + 10,
+    });
+    expect(sink).not.toBeNull();
+    sink?.append("compiling…\n");
+    sink?.append("boom\n");
     const text = "compiling…\nboom\n";
 
     expect(
@@ -264,7 +266,7 @@ describe("attempt evidence", () => {
     expect(slice?.eof).toBe(true);
 
     const logPath = join(
-      attemptDir(handle.dir, encodeNodeKey(NODE), 1),
+      attemptDir(handle.dir, NODE, 1),
       ATTEMPT_FILES.log,
     );
     expect(statSync(logPath).mode & 0o777).toBe(0o444);
@@ -274,8 +276,8 @@ describe("attempt evidence", () => {
     const root = tmpCatalog();
     const { handle, token } = register(root);
 
-    startAttempt(handle, token, { node: NODE, attempt: 1, placement, startedAt: T0 + 10 });
-    appendAttemptLog(handle, NODE, 1, "first go\n");
+    const first = startAttempt(handle, token, { node: NODE, attempt: 1, placement, startedAt: T0 + 10 });
+    first?.append("first go\n");
     sealAttempt(handle, token, NODE, 1, {
       endedAt: T0 + 20,
       status: "failed",
@@ -285,8 +287,8 @@ describe("attempt evidence", () => {
       logTruncationReason: null,
     });
 
-    startAttempt(handle, token, { node: NODE, attempt: 2, placement, startedAt: T0 + 30 });
-    appendAttemptLog(handle, NODE, 2, "second go\n");
+    const second = startAttempt(handle, token, { node: NODE, attempt: 2, placement, startedAt: T0 + 30 });
+    second?.append("second go\n");
 
     expect(readAttemptLog(handle, NODE, 1)?.text).toBe("first go\n");
     expect(readAttemptRecord(handle, NODE, 1)?.exitCode).toBe(2);
@@ -304,7 +306,7 @@ describe("attempt evidence", () => {
 
     expect(
       startAttempt(handle, token, { node: NODE, attempt: 2, placement, startedAt: T0 + 40 }),
-    ).toBe(false);
+    ).toBeNull();
     expect(
       sealAttempt(handle, token, NODE, 1, {
         endedAt: T0 + 50,
@@ -349,8 +351,8 @@ describe("readAttemptLog byte ranges", () => {
 
   function withLog(root: string) {
     const { handle, token } = register(root);
-    startAttempt(handle, token, { node: NODE, attempt: 1, placement, startedAt: T0 });
-    appendAttemptLog(handle, NODE, 1, "0123456789");
+    const sink = startAttempt(handle, token, { node: NODE, attempt: 1, placement, startedAt: T0 });
+    sink?.append("0123456789");
     return handle;
   }
 
@@ -533,8 +535,7 @@ describe("expireRun", () => {
       attempt: 1,
       placement: { platform: "x86_64-linux", host: "builder-1" },
       startedAt: T0 + 2,
-    });
-    appendAttemptLog(handle, NODE, 1, "bytes that will age out\n");
+    })?.append("bytes that will age out\n");
     sealAttempt(handle, token, NODE, 1, {
       endedAt: T0 + 3,
       status: "failed",
@@ -558,7 +559,12 @@ describe("expireRun", () => {
 
     expect(existsSync(join(handle.dir, RUN_FILES.events))).toBe(false);
     expect(existsSync(join(handle.dir, RUN_FILES.attempts))).toBe(false);
-    expect(readJournal(handle)).toEqual({ entries: [], unreadable: 0, highestSeq: 0 });
+    expect(readJournal(handle)).toEqual({
+      entries: [],
+      unreadable: 0,
+      nextSeq: 1,
+      cursor: { runId: handle.runId, seq: 0 },
+    });
     expect(attemptsFor(handle, NODE)).toEqual([]);
     expect(readAttemptLog(handle, NODE, 1)).toBeNull();
 
@@ -587,8 +593,9 @@ it("fills only unknown attempt placement, preserves output, and respects ownersh
   const root = tmpCatalog();
   const { handle, token } = register(root);
   const placement = { platform: "x86_64-linux", host: null };
-  startAttempt(handle, token, { node: NODE, attempt: 1, placement, startedAt: T0 });
-  appendAttemptLog(handle, NODE, 1, "original output");
+  startAttempt(handle, token, { node: NODE, attempt: 1, placement, startedAt: T0 })?.append(
+    "original output",
+  );
   expect(locateAttempt(handle, token, NODE, 1, { ...placement, host: "burst-two" })).toBe(true);
   expect(locateAttempt(handle, token, NODE, 1, { ...placement, host: "primary" })).toBe(false);
   expect(readAttemptRecord(handle, NODE, 1)?.placement.host).toBe("burst-two");
