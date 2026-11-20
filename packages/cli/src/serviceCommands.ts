@@ -1,48 +1,3 @@
-/**
- * THE RUN COMMANDS, AS CLIENTS — `odu ci run`, `wait`, `rerun`, `cancel`, `logs`,
- * `history list|show|import|prune`.
- *
- * Every one of these used to hold authority of its own. `odu ci run` called
- * `runCommand` and WAS the coordinator. `odu ci rerun --run` bound
- * `packagedLauncher()` and made its own retry decision. `odu ci wait --run`,
- * `odu ci logs --run` and `odu ci history list` read and wrote the catalog
- * directly. `odu ci cancel` dialled `.ci/odu.sock`. Six commands, and between
- * them a second complete implementation of everything the shared service does
- * — reachable from a terminal, invisible to the board, and free to disagree
- * with the browser and the agent about what had just happened to a run.
- *
- * There is one authority now, and this module is how a terminal reaches it.
- * Nothing below decides anything: it resolves what the caller meant, makes one
- * call, renders the answer, and exits. The whole file is argument grammar,
- * rendering and exits, which is all a face ever was entitled to add.
- *
- * ## What a client is still allowed to know
- *
- * Two things, and both are about the CALLER rather than about a run:
- *
- *   - **which checkout the person is standing in** — `git rev-parse` in the
- *     cwd. The service addresses runs globally and takes `checkout` as an
- *     explicit absolute path precisely so that no face has to guess; resolving
- *     "here" into that path is this side's job and cannot be anywhere else.
- *   - **which commit they mean** — `HEAD`, sent as `expectedSha` so the service
- *     can REFUSE a checkout that has moved on rather than quietly running a
- *     different commit.
- *
- * Both are reads of the caller's own working directory through `git` itself.
- * Neither is run authority, and the import-boundary test (`authority.test.ts`)
- * is what keeps that distinction honest: nothing here may import the engine,
- * the catalog store, or the coordinator dial.
- *
- * ## Ctrl-C ends an OBSERVATION
- *
- * `odu ci run` starts a run and then watches it. Interrupting the watch stops the
- * watching: the coordinator is a detached process group of its own, its
- * evidence is in the catalog rather than in this process, and the run appears
- * on the board and in every other face exactly as it did a moment before.
- * Stopping CI is `odu ci cancel`, which is a different verb because it is a
- * different act.
- */
-
 import { subscribe } from "@odu/execution/common/effectEdge";
 import { progressEvent } from "@odu/execution/common/presentation";
 import { exitCode } from "@odu/execution/common/verdict";
@@ -98,8 +53,6 @@ import {
   withService,
 } from "./serviceFace";
 
-// ── odu ci run ──────────────────────────────────────────────────────────────
-
 export interface RunOpts {
   selectors: readonly string[];
   platforms: readonly string[];
@@ -110,94 +63,28 @@ export interface RunOpts {
   noSnapshot: boolean;
   noPost: boolean;
   supersede: boolean;
-  /** Park the coordinator at settle instead of tearing down, so its socket
-   *  stays answerable after the verdict. */
   linger: boolean;
-  /** Start it and return, rather than watching it settle. */
   noWait: boolean;
-  /** Emit one NDJSON `ProgressEvent` per node transition on stdout. A FROZEN
-   *  contract that `/do` and kolu's CI parse — see
-   *  `@odu/execution/common/presentation`. */
   progressJson?: boolean;
   requestId?: string;
   json: boolean;
   origin?: string;
   cwd?: string;
-  /** A checkout on the SERVICE's machine, sent verbatim — the pod's
-   *  `/data/checkouts/<repo>` rather than anything under this shell. Requires
-   *  {@link RunOpts.sha} and a named service; see `runTarget`. */
   checkout?: string;
-  /** The commit the caller believes {@link RunOpts.checkout} is on, sent as
-   *  `expectedSha`. Only meaningful beside a `checkout`. */
   sha?: string;
-  /** The branch the SERVICE's clone should be on for {@link RunOpts.sha}.
-   *  Only meaningful beside a `checkout`; see `runTarget`. */
   branch?: string;
 }
 
-/**
- * WHAT `odu ci run` ASKS FOR — the whole of the mutation, as one value.
- *
- * Pure and exported so the two claims it carries can be stated rather than
- * inferred from a live service: the target travels VERBATIM (whatever
- * `runTarget` resolved, this does not touch), and `$ODU_HOSTS` travels on all
- * three of its readings — a path always, `""` only when this shell IS the
- * run's world.
- */
 export function startInputOf(at: RunTarget, opts: RunOpts) {
-  // ONE read of this shell's variable, resolved once — see the long note on
-  // the field below for which of its three readings travels when.
   const shellHosts = hostsFileHere(opts.cwd);
   return {
     checkout: at.checkout,
     expectedSha: at.sha,
-    // THE LICENCE TO MOVE THAT CLONE, when the caller gave one. Absent is the
-    // older and stricter rule — a checkout that is not on the commit is
-    // refused — and that is what every run in this shell's own checkout
-    // sends, because odu does not move a tree somebody is standing in.
     ...(at.branch === undefined ? {} : { branch: at.branch }),
     requestId: requestId(opts.requestId),
     selectors: opts.selectors,
     platforms: opts.platforms,
     hostPins: opts.hostPins,
-    // THIS shell's `$ODU_HOSTS`, because this is the shell the person
-    // typed in. The service is a singleton somebody else may have
-    // started, and `loadHosts` runs in the coordinator it spawns — so a
-    // variable that is not carried here is a variable that stopped
-    // working the moment `odu ci run` became a client.
-    // Made absolute HERE, against the caller's cwd, because that is the
-    // only place the relative form has a meaning. `$ODU_HOSTS=hosts.json`
-    // has always meant "in the directory I am standing in".
-    //
-    // ALWAYS sent, including as `""`. A terminal knows the answer either
-    // way, and saying nothing would mean "use the service's own" — right
-    // for an agent, wrong for the person who just unset the variable.
-    //
-    // `--checkout` DOES NOT CHANGE THAT FOR A PATH. An earlier revision
-    // dropped the variable outright there, which was a face deciding,
-    // silently, that a person's fleet did not apply to their own run — and
-    // the flag does not even imply a different machine: a service named as
-    // `http://127.0.0.1:18440` is this one. It is also unnecessary. A path
-    // that does not exist on the service is SKIPPED by `loadHosts`
-    // (`existsSync` → next candidate), so a laptop's `$ODU_HOSTS` naming a
-    // file the pod has not got falls through to the service's own
-    // `~/.config/odu/hosts.json`.
-    //
-    // IT DOES CHANGE IT FOR `""`, and that pair is the whole rule. `""` is
-    // not silence: `callerOf` keeps it (`caller.ts:50-56`) and
-    // `coordinatorEnv` ASSIGNS it, so the coordinator runs with
-    // `ODU_HOSTS=""` and the SERVICE's own variable is blanked — on a pod
-    // whose Deployment sets `$ODU_HOSTS`, that bypasses the only fleet
-    // there is and `fanoutPools` refuses. `""` means "MY shell has none",
-    // which is an answer about a world the run is not happening in; the
-    // honest reading there is the third one, ABSENT — "I have no shell in
-    // this world" — which is the only one that leaves the daemon's
-    // configuration standing.
-    //
-    // Read off `at.mine`, never off `opts.checkout`: the flag was a PROXY
-    // for "is this shell the run's world", `runTarget` is where that is
-    // decided, and the proxy is wrong for `--checkout $PWD` against this
-    // same daemon. One fact, one source.
     ...(at.mine || shellHosts !== "" ? { hostsFile: shellHosts } : {}),
     ...(opts.root === undefined ? {} : { root: opts.root }),
     noDeps: opts.noDeps,
@@ -209,22 +96,6 @@ export function startInputOf(at: RunTarget, opts: RunOpts) {
   };
 }
 
-/**
- * `odu ci run` — start a run through the service, then watch it.
- *
- * The command a person types most, and the one whose re-pointing carries the
- * whole consolidation: it no longer runs CI, it asks the service to. What it
- * still does is everything a person actually wanted from it — pick the
- * checkout, name the commit, start the work, and stay attached until there is
- * something to say.
- *
- * **Starting and observing are two acts, and the seam between them is where
- * Ctrl-C lands.** `run_start` returns a receipt with a cursor before a single
- * node has moved; everything after that is `run_wait` in a loop, feeding back
- * the cursor. Interrupting the loop leaves the run exactly where it was — which
- * is the same asymmetry `odu web` keeps, and the reason a person can close a
- * laptop without killing their CI.
- */
 export async function runViaService(opts: RunOpts): Promise<number> {
   const at = runTarget(opts);
   return withService(opts.origin, async (client) => {
@@ -253,23 +124,10 @@ export async function runViaService(opts: RunOpts): Promise<number> {
   });
 }
 
-/**
- * What a start says to a person: which run this is, and where to see it.
- *
- * The address is MINTED, never typed. `runHash` is the board's own spelling of
- * where a run lives, and `parseRunHash` on the other side is what reads it
- * back; a second spelling here is how this line came to print a bare
- * `runs/<id>` pathname under the origin — which the board answers with its run
- * LIST, so every link a person clicked out of a CI log landed on the board
- * instead of on their run.
- */
 export function renderStart(receipt: StartReceipt, origin: string | undefined): string {
   const where = origin ?? serviceOrigin();
   const lines: string[] = [];
   if (!receipt.accepted && receipt.existing !== undefined) {
-    // An ANSWER, not a refusal: a run is already going in this checkout, and
-    // the one the caller is being pointed at is almost certainly the one they
-    // wanted. Superseding it is a thing to ask for, never a thing to assume.
     lines.push(
       `odu · a run is already going in this checkout — ${receipt.existing.runId}`,
       "odu ·   watching it instead; `odu ci run --supersede` replaces it",
@@ -283,10 +141,6 @@ export function renderStart(receipt: StartReceipt, origin: string | undefined): 
   return `${lines.join("\n")}\n`;
 }
 
-/** Watch one run to a verdict, carrying the cursor. Bounded per call and
- *  resumed, rather than one unbounded wait: a deadline that is reached is a
- *  FACT (`still_running`), and a loop that treats it as one can report progress
- *  and be interrupted cleanly. */
 async function observe(
   client: OduServiceClient,
   runId: string,
@@ -310,34 +164,12 @@ async function observe(
       emitJson(answer);
       return waitExitFor(answer);
     }
-    // TWO ANSWERS, ON TWO STREAMS, because they are for two readers.
-    //
-    // The verdict grid on stderr is what `odu ci run` has always ended with: every
-    // node, its status and its duration — which is the only thing that says
-    // what a green actually COVERED. It came from the coordinator's own face
-    // and was lost when the coordinator became a detached process writing to a
-    // log nobody reads.
-    //
-    // The attention block on stdout is what this command gained: the run id
-    // (the address every other verb now takes) and, per failure, the host, the
-    // attempt and the log key to read next.
     await verdictOf(client, runId, answer.sha);
     process.stdout.write(renderAttention(answer));
     return waitExitFor(answer);
   }
 }
 
-/**
- * Print the run's verdict grid, from one read of its final frame.
- *
- * A read rather than a fold of what `observe` already saw: `run.wait` answers
- * about ATTENTION — what a caller must act on — and deliberately carries only
- * the failures. The grid is about every node, including the ones that went
- * green, which is the half a person needs to know what the green covered.
- *
- * Best-effort. A verdict that cannot be drawn must not change the exit code of
- * the run it is describing.
- */
 async function verdictOf(
   client: OduServiceClient,
   runId: string,
@@ -355,19 +187,14 @@ async function verdictOf(
   });
 }
 
-// ── odu ci wait ─────────────────────────────────────────────────────────────
-
 export interface WaitOpts {
   run: string;
   after?: string;
   deadlineMs?: number;
-  /** Refuse unless the run is about this commit. The guard `odu ci wait` has
-   *  always had: a script that waited on "the run here" after a rebase was
-   *  waiting on the wrong commit and could not tell. */
   expectedSha?: string;
   settle: boolean;
   json: boolean;
-  origin?: string;  /** Where the caller is standing — the checkout `--run latest` is about. */
+  origin?: string;
   cwd?: string;
 }
 
@@ -386,10 +213,6 @@ export async function waitViaService(opts: WaitOpts): Promise<number> {
         ? reportLost(answered.error, opts.json)
         : reportRefusal(answered.refusal, opts.json);
     }
-    // THE COMMIT GUARD, checked here because only here are both halves known:
-    // the caller's claim about which commit it is waiting on, and the run's
-    // own. A script that waited on "the run in this checkout" across a rebase
-    // was waiting on the previous commit's run and had no way to tell.
     const answer = answered.value;
     if (
       opts.expectedSha !== undefined &&
@@ -408,27 +231,15 @@ export async function waitViaService(opts: WaitOpts): Promise<number> {
         opts.json,
       );
     }
-    // WHERE STDOUT POINTS PICKS THE MEDIUM — odu's own rule, and the reason
-    // `odu ci wait` is not free to be prose by default. It wrote one JSON object
-    // on stdout unconditionally before this rewrite, and it is the command
-    // scripts and agents parse; making that opt-in silently fed them a
-    // paragraph. A person at a terminal still gets the readable block, because
-    // for them it is the better answer and no script is watching.
     if (opts.json || process.stdout.isTTY !== true) emitJson(answer);
     else process.stdout.write(renderAttention(answer));
     return waitExitFor(answer);
   });
 }
 
-/** The human rendering of an attention answer. Deliberately short: the failures
- *  and how to read more, not a transcript. Someone who wants the transcript has
- *  `--after` and `-o json`. */
 export function renderAttention(a: AttentionAnswer): string {
   const lines: string[] = [];
   const sha7 = a.sha === null ? "" : `  ${a.sha.slice(0, 7)}${a.contentSha === undefined ? "" : `+dirty→${a.contentSha.slice(0, 7)}`}`;
-  // The run's own word, not a re-derivation of it: `passed: false` covers a red
-  // run AND one that never finished, and telling an operator "failed" for the
-  // second sends them looking for a broken test that does not exist.
   lines.push(
     `${a.runId}${sha7}  ${a.reason}${a.outcome === null ? "" : ` · ${a.outcome}`}`,
   );
@@ -458,27 +269,16 @@ export function renderAttention(a: AttentionAnswer): string {
   return `${lines.join("\n")}\n`;
 }
 
-// ── odu ci rerun ────────────────────────────────────────────────────────────
-
 export interface RetryOpts {
   run: string;
   selector: string;
   requestId?: string;
   expectAttempt?: { node: string; attempt: number };
   json: boolean;
-  origin?: string;  /** Where the caller is standing — the checkout `--run latest` is about. */
+  origin?: string;
   cwd?: string;
 }
 
-/**
- * `odu ci rerun` — retry, and let odu decide what retrying means.
- *
- * The policy is the service's, and the caller does not choose it: a coordinator
- * still up gets a new attempt on the same run, one that is gone gets a fresh
- * linked replay. Which applies is a fact about the run, and a caller that chose
- * would choose wrongly — so `mode` is on the receipt and `effectiveRun` is what
- * to watch next.
- */
 export async function retryViaService(opts: RetryOpts): Promise<number> {
   return withRunAt(opts, async (client, runId) => {
     const done = await call(
@@ -520,14 +320,12 @@ export function renderRetry(r: RetryReceipt): string {
   return `${lines.join("\n")}\n`;
 }
 
-// ── odu ci cancel ───────────────────────────────────────────────────────────
-
 export interface CancelOpts {
   run: string;
   scope: { kind: "run" } | { kind: "node"; node: string } | { kind: "lane"; platform: string };
   requestId?: string;
   json: boolean;
-  origin?: string;  /** Where the caller is standing — the checkout `--run latest` is about. */
+  origin?: string;
   cwd?: string;
 }
 
@@ -549,69 +347,40 @@ export async function cancelViaService(opts: CancelOpts): Promise<number> {
     if (opts.json) {
       emitJson(result);
     } else {
-      // `effective: "nothing"` is an ANSWER with a reason, never a cheerful ok:
-      // a caller asking to cancel a lane on a run whose coordinator has already
-      // gone is entitled to know nothing happened.
-      // The sentence `odu ci cancel` has always printed, with the run named. It
-      // read "odu: run cancelled" before this command was addressed by run id;
-      // the id is genuinely new information and the words around it are not
-      // this rewrite's to change, since a script grepping them is a script that
-      // was working.
       process.stdout.write(
         result.effective === "nothing"
           ? `odu: nothing cancelled on ${result.runId} — ${result.detail ?? "no reason given"}\n`
           : `odu: run cancelled — ${result.runId} (${result.effective})\n`,
       );
     }
-    // Exit 0 either way: the CALL was answered. "Nothing was cancelled because
-    // the run had already finished" is not a failure of the request.
     return 0;
   });
 }
-
-// ── odu ci logs ─────────────────────────────────────────────────────────────
 
 export interface LogsOpts {
   key: string;
   offset?: number;
   limit?: number;
-  /** Keep reading until the log can grow no further. */
   follow?: boolean;
-  /** How long one followed read may wait for growth before answering empty. */
   waitMs?: number;
-  /** WHICH of the attempt's logs — absent is the recipe's own output, which
-   *  is what a bare key has always meant and must keep meaning. `"push"` is
-   *  the same attempt's push step, a separate file with its own end. */
   stream?: LogStream;
   json: boolean;
   origin?: string;
 }
 
-/** The follow's per-call deadline, matching `run.wait`'s. Deliberately not
- *  longer: a followed read holds an HTTP request open on the `/mcp` door for
- *  its whole duration, exactly as `run_wait` already does, and a proxy with a
- *  shorter idle timeout cuts anything that outlasts it. Bounded and re-issued
- *  beats one long call, which is the same shape the attention loop settled on. */
+/** A followed read holds an HTTP request open on the `/mcp` door for its whole
+ *  duration, exactly as `run_wait` already does, and a proxy with a shorter
+ *  idle timeout cuts anything that outlasts it. */
 export const FOLLOW_WAIT_MS = 30_000;
 
 /**
- * WOULD THIS DAEMON ANSWER `--stream push` WITH THE PUSH LOG — or with the
- * recipe's, wearing the push's name?
- *
  * `stream` is an optional INPUT key, added to `log_read` in
- * {@link CI_LOG_STREAM_SINCE}. The additive rule's usual cost is an answer a
- * caller can read ("unknown verb"), but an optional input has no such answer:
- * a daemon from before the key DROPS it as an excess property and serves the
- * request it understood, so `odu ci logs --stream push` came back with the
- * recipe's bytes and nothing in the page said so. Silently answering a
- * different question is the one skew a caller must not be left to discover
- * from the answer, so this is read BEFORE the call and refused instead.
- *
- * The reading is the surface's own ({@link rowSpeaks}, {@link minorBehind}),
- * never a second spelling of `rows?.ci ?? protocolVersion` — the fallback for
- * a pre-2.5 daemon is the half that is easy to forget. A row this daemon does
- * not mount is not refused here: `CI_NEEDS` already made that the dial's
- * refusal, with its own sentence.
+ * {@link CI_LOG_STREAM_SINCE}. A daemon from before the key DROPS it as an
+ * excess property and serves the request it understood, so `odu ci logs
+ * --stream push` came back with the recipe's bytes and nothing in the page
+ * said so. Silently answering a different question is the one skew a caller
+ * must not be left to discover from the answer, so this is read BEFORE the
+ * call and refused instead.
  */
 export function pushStreamRefusal(
   cell: ServiceCell,
@@ -627,21 +396,9 @@ export function pushStreamRefusal(
   );
 }
 
-/**
- * `odu ci logs <key>` — one attempt's bytes, addressed by the key a failure
- * handed you.
- *
- * The key is ECHOED, never reassembled: `run/node/attempt` is a shape this face
- * has no business knowing, and a caller that rebuilt it would be a second
- * spelling of an address the service already published.
- */
 export async function logsViaService(opts: LogsOpts): Promise<number> {
   const where = opts.origin ?? serviceOrigin();
   return withService(opts.origin, async (client) => {
-    // ASKED ONLY WHEN THE ANSWER COULD BE WRONG. A bare read and `--stream
-    // recipe` are the same request on every daemon alive, so neither pays for
-    // a cell read; `push` is the one word an older daemon would answer with
-    // the wrong file. See {@link pushStreamRefusal}.
     if (opts.stream === "push") {
       const cell = await call(readServiceCell(client));
       if (!cell.ok) {
@@ -651,10 +408,6 @@ export async function logsViaService(opts: LogsOpts): Promise<number> {
       }
       const refusal = pushStreamRefusal(cell.value, where);
       if (refusal !== null) {
-        // The shape a refusal has everywhere else on this face: the sentence
-        // on stderr, a coded object under `-o json`, and exit 5 — the
-        // published code for "the request itself was refused", which is what
-        // this is even though no daemon got to say so.
         if (opts.json) emitJson({ error: "stream_unsupported", message: refusal });
         else process.stderr.write(`${refusal}\n`);
         return WAIT_EXITS.refused;
@@ -665,9 +418,6 @@ export async function logsViaService(opts: LogsOpts): Promise<number> {
   });
 }
 
-/** One page of an attempt's log, rendered — the non-following arm of
- *  {@link logsViaService}, kept apart so the guard above it reads as one
- *  decision rather than as a branch inside a renderer. */
 async function readOnePage(
   client: Pick<OduServiceClient, "surface">,
   opts: LogsOpts,
@@ -691,10 +441,6 @@ async function readOnePage(
     return 0;
   }
   process.stdout.write(page.text);
-  // Distinct from `eof`, which is only about this read: a log that is
-  // complete-false and has been read to its end is a TRUNCATED log, and
-  // saying so is the difference between "the recipe was quiet" and "the
-  // evidence is gone".
   if (page.eof && !page.complete) {
     process.stderr.write(
       "\nodu: this log never got its producer's last word — it is truncated\n",
@@ -708,10 +454,7 @@ async function readOnePage(
   return 0;
 }
 
-// ── odu ci history list ─────────────────────────────────────────────────────
-
 export interface ListOpts {
-  /** Every run this user has, rather than the ones from this checkout. */
   all: boolean;
   limit?: number;
   json: boolean;
@@ -720,11 +463,6 @@ export interface ListOpts {
 }
 
 export async function listViaService(opts: ListOpts): Promise<number> {
-  // WHICH checkout is resolved here, because "this checkout" is a fact about
-  // the caller; it travels to the service as an explicit absolute path, and the
-  // filtering, ordering and cut happen where the rows are — one round trip
-  // whatever the catalog holds. Outside a repository there is no "this", and
-  // the listing is every run, as it always was.
   const mine = opts.all
     ? null
     : git(["rev-parse", "--show-toplevel"], opts.cwd ?? process.cwd());
@@ -753,14 +491,6 @@ export async function listViaService(opts: ListOpts): Promise<number> {
   );
 }
 
-/** One line per run, in the order the service sent them.
- *
- *  Two clocks, and they answer different questions: how long the run TOOK
- *  (`runElapsedMs`, which stops at the verdict and ticks while it has not) and
- *  how long ago it started. A settled row's duration is the same number
- *  tomorrow; its age is not. Both readings are `@odu/service-client`'s own, so
- *  this listing and the browser board cannot print two different durations for
- *  one run. */
 export function renderRows(rows: readonly RunRow[], now: number): string {
   if (rows.length === 0) return "no runs\n";
   const lines = rows.map((r) => {
@@ -768,40 +498,20 @@ export function renderRows(rows: readonly RunRow[], now: number): string {
     const verdict =
       r.state === "settled" ? (r.outcome ?? (r.passed ? "passed" : "failed")) : r.state;
     const debt = r.reportingDebt > 0 ? `  ⇐${r.reportingDebt}` : "";
-    // WHO STARTED IT (PLAN 4.4), when the record says. Appended rather than
-    // columned, and omitted entirely for a run recorded before the field: a
-    // dash here would be a claim that nobody did.
     const by = r.actor === undefined ? "" : `  started by ${r.actor}`;
     return `${r.runId}  ${ref}${r.dirty ? "+dirty" : ""}${r.contentSha === undefined ? "" : `→${r.contentSha.slice(0, 7)}`}  ${r.branch ?? "-"}  ${verdict}  ${duration(runElapsedMs(r, now))}  ${formatAgo(now - r.createdAt)} ago${debt}${by}`;
   });
   return `${lines.join("\n")}\n`;
 }
 
-// ── odu ci history show ─────────────────────────────────────────────────────
-
 export interface ShowOpts {
   run: string;
   after?: string;
   json: boolean;
-  origin?: string;  /** Where the caller is standing — the checkout `--run latest` is about. */
+  origin?: string;
   cwd?: string;
 }
 
-/**
- * `odu ci history show --run R` — one run's attention payload, without waiting.
- *
- * The same answer `odu ci wait` gives, asked of a run that may have finished last
- * week. It used to open the catalog in the caller's own process — `resolveRun`,
- * `resolveCursor`, `readAttention` — which put a second reader beside the
- * daemon that was reading and writing the same directories, and made "what does
- * this run's evidence say" a question with two implementations that could
- * disagree about a run mid-write.
- *
- * `run.read` and `run.wait` return the IDENTICAL payload, deliberately: "what
- * is this run's state" has one answer, and a second shape for the non-blocking
- * case would be a second thing to keep true. The only difference is whether the
- * service holds the call open.
- */
 export async function showViaService(opts: ShowOpts): Promise<number> {
   return withRunAt(opts, async (client, runId) => {
     const answered = await call(
@@ -818,8 +528,6 @@ export async function showViaService(opts: ShowOpts): Promise<number> {
   });
 }
 
-// ── odu ci history import / prune ───────────────────────────────────────────
-
 export interface ImportOpts {
   dryRun: boolean;
   json: boolean;
@@ -827,19 +535,6 @@ export interface ImportOpts {
   cwd?: string;
 }
 
-/**
- * `odu ci history import` — bring this checkout's legacy `.ci` records into the
- * catalog.
- *
- * Through the service because the catalog is the SERVICE's store. Importing
- * from the caller's process meant two writers on one set of directories, and
- * the fact that it mostly worked is not the same as it being safe: a record
- * being written while the daemon walked the same tree is a race with no owner.
- *
- * The checkout is resolved here and sent as an absolute path — the same rule
- * `run.start` keeps, and for the same reason: an agent's cwd is not a fact
- * about what anybody meant.
- */
 export async function importViaService(opts: ImportOpts): Promise<number> {
   const checkout = checkoutHere(opts.cwd);
   return withService(opts.origin, async (client) => {
@@ -864,9 +559,6 @@ export async function importViaService(opts: ImportOpts): Promise<number> {
 function renderImport(report: CatalogImportReport): string {
   const lines: string[] = [];
   for (const row of report.imported) lines.push(`imported  ${row.ref}  ${row.runId}`);
-  // A SKIP IS AN OUTCOME. A record already in the catalog and one that could
-  // not be read are both "not imported", and only the second is a problem —
-  // reporting them together as a count is how the second goes unnoticed.
   for (const row of report.skipped) {
     lines.push(`skipped   ${row.ref}  ${row.reason ?? "already in the catalog"}`);
   }
@@ -886,7 +578,6 @@ export interface PruneOpts {
   origin?: string;
 }
 
-/** `odu ci history prune` — expire finished runs past the retention window. */
 export async function pruneViaService(opts: PruneOpts): Promise<number> {
   return withService(opts.origin, async (client) => {
     const done = await call(
@@ -911,9 +602,6 @@ export async function pruneViaService(opts: PruneOpts): Promise<number> {
 
 function renderPrune(report: CatalogPruneReport): string {
   const lines = report.expired.map((runId) => `expired  ${runId}`);
-  // Why a run SURVIVED is the useful half of a prune's output: "still inside
-  // the window" and "its coordinator is still running" call for different
-  // reactions, and a bare count of what went says neither.
   for (const kept of report.kept) lines.push(`kept     ${kept.runId}  ${kept.reason}`);
   if (lines.length === 0) lines.push("nothing to prune");
   lines.push(
@@ -922,28 +610,6 @@ function renderPrune(report: CatalogPruneReport): string {
   return `${lines.join("\n")}\n`;
 }
 
-/**
- * `odu ci logs <key> --follow` — every byte, until there can be no more.
- *
- * **The cursor is the caller's, and that is the design.** Each call asks for
- * bytes at an offset and answers with `nextOffset`; nothing on the service side
- * remembers this follower. So a follow that dies — the daemon restarted, the
- * laptop slept, the process was killed — is RESUMED by re-issuing with the
- * offset it reached, rather than by a server-side session that has to be
- * garbage-collected and can be lost anyway. That is why this is a loop over a
- * paged read rather than a subscription.
- *
- * It stops on `open: false`, which is a fact the page carries rather than one
- * inferred from `eof` and `complete`. The case that forces it: a writer that
- * was KILLED leaves a log which is at EOF, not complete, and will never grow —
- * indistinguishable, from those two fields alone, from a slow recipe. A
- * follower that guessed would hang on precisely the run somebody is waiting to
- * hear about.
- *
- * Split from the dial so it can be tested with a scripted client: the loop is
- * what has a contract, and a contract wants a test that can end the feed on
- * purpose.
- */
 export async function followLog(
   client: Pick<OduServiceClient, "surface">,
   opts: Pick<
@@ -951,9 +617,6 @@ export async function followLog(
     "key" | "offset" | "limit" | "waitMs" | "stream" | "json"
   >,
 ): Promise<number> {
-  // Negative only on the FIRST call — `--offset=-4096` means "start from the
-  // last 4 KiB". After that the cursor is an absolute position, because
-  // `nextOffset` always is.
   let cursor = opts.offset;
   let resynced = false;
   for (;;) {
@@ -962,26 +625,13 @@ export async function followLog(
         key: opts.key,
         ...(cursor === undefined ? {} : { offset: cursor }),
         ...(opts.limit === undefined ? {} : { limit: opts.limit }),
-        // EVERY call of the follow, not just the first. The cursor advances
-        // within ONE stream; a cursored read that dropped the stream would
-        // resume at this offset in the recipe's log and splice two files
-        // together as though they were one.
         ...(opts.stream === undefined ? {} : { stream: opts.stream }),
         waitMs: opts.waitMs ?? FOLLOW_WAIT_MS,
       }),
     );
-    // A DEAD LINK MID-FOLLOW IS NOT A COMPLETE LOG. Exiting 0 here would hand
-    // back a log that stops mid-line as though it were whole, which is the one
-    // forbidden outcome this repo already spent two issues on.
     if (!read.ok) return reportFailure(read, opts.json);
     const page = read.value;
 
-    // THE ATTEMPT WAS RE-RUN UNDER US. A rerun rewrites an attempt's log in
-    // place, so the file can be SHORTER than the cursor we hold; the read
-    // clamps, and `offset < what we asked for` is the only signal of it. Said
-    // out loud exactly once, then restarted from the beginning — silently
-    // resuming would print the tail of a different attempt as a continuation of
-    // this one.
     if (cursor !== undefined && cursor > 0 && page.offset < cursor) {
       if (!resynced) {
         process.stderr.write(
@@ -995,31 +645,13 @@ export async function followLog(
     }
 
     if (opts.json) {
-      // One complete page per LINE — `emitJsonLine`, not `emitJson`. The
-      // pretty-printer spans many lines per page, so an agent reading this
-      // stream line by line got fragments that do not parse, from a branch
-      // whose whole promise is NDJSON.
       if (page.text !== "" || !page.open) emitJsonLine(page);
     } else if (page.text !== "") {
       process.stdout.write(page.text);
     }
     cursor = page.nextOffset;
 
-    // KEEP GOING while there is more to come OR more already there. A page is
-    // bounded by `limit` (12 KiB by default), so a log that is ALREADY closed
-    // comes back `eof: false, open: false` on its first page — and stopping on
-    // `open` alone printed those twelve kilobytes and exited 0, silently
-    // dropping the rest of a fifty-kilobyte failure while the usage text
-    // promised "the whole log". The same loss hit a live follow the moment its
-    // run finalized: the page that first reports `open: false` is also the one
-    // carrying unread bytes.
-    //
-    // This cannot spin. With `offset < size` and a positive limit the store
-    // always returns at least one byte, so `nextOffset` strictly advances until
-    // `eof` — and once `eof` is true with `open` false, the loop ends below.
     if (logHasMore(page)) continue;
-    // Closed, and drained. `complete` is what says whether we have the whole
-    // thing.
     if (!page.complete) {
       process.stderr.write(
         "\nodu: this log never got its producer's last word — it is truncated\n",
@@ -1030,42 +662,12 @@ export async function followLog(
   }
 }
 
-/**
- * `odu ci run --progress json` — one NDJSON line per node transition.
- *
- * A FROZEN contract: `/do` and kolu's CI parse these bytes, and
- * `@odu/execution/common/presentation` owns the projection so this face and the
- * coordinator's own emit byte-identical events rather than each hand-rolling
- * one. That shared projection is the fix for juspay/odu#4 and it is not going to
- * be re-derived here.
- *
- * **It was lost, and losing it was the sharpest regression in this whole
- * change.** `--progress json` used to be the coordinator's flag, because
- * `odu ci run` WAS the coordinator; when the public verb became a service client
- * the flag went with the coordinator to `run-coordinator` and nothing put it
- * back. `parseArgs` throws on an unknown option, so every caller passing it —
- * which is every e2e test that drives a run, plus every consumer — got an
- * immediate exit 1 and no output at all. The failure did not read as "that flag
- * is gone": on one platform it read as four assertion failures about missing
- * events, and on another as a ten-minute timeout waiting for a socket that was
- * never going to be served.
- *
- * The events come off `streams.nodes` now rather than the coordinator's own
- * face, which is what makes them available to a client at all — and means a
- * second `odu ci run --progress json` watching the same run sees the same stream.
- */
 async function progressStream(
   client: Pick<OduServiceClient, "surface">,
   runId: string,
   sha7: string,
 ): Promise<number> {
-  // Only TRANSITIONS are events. A frame arrives whenever anything moved,
-  // including a lane landing on a box, so emitting per frame would repeat a
-  // node's line for a reason the contract has no word for.
   const seen = new Map<string, string>();
-  // `watchNodes` re-subscribes if the stream ends without a verdict, and the
-  // dedupe above is what makes that free: a fresh subscription opens with a
-  // snapshot, and a node whose status this has already reported emits nothing.
   const final = await watchNodes(client, runId, (frame) => {
     for (const node of frame.nodes) {
       if (seen.get(node.id) === node.status) continue;
@@ -1080,19 +682,10 @@ async function progressStream(
         startedAt: node.startedAt,
         durationMs: node.durationMs,
       });
-      // `null` for a status that emits nothing — `pending`, whose progress
-      // mapping is deliberately absent. The caller skips it; it is not a gap.
       if (event !== null) process.stdout.write(`${JSON.stringify(event)}\n`);
     }
   });
   if (final === undefined) return 3;
-  // THE VERDICT BLOCK, on stderr, after the NDJSON. Both halves of the
-  // `--progress json` contract: the stream is the machine's and the summary is
-  // the person's, and a pipeline that emits the first without the second gives
-  // whoever is watching the terminal a wall of JSON and no answer. It used to
-  // come from the coordinator's own face; the coordinator is detached now and
-  // writes to a log nobody is reading, so the client prints it — the same
-  // `printVerdict`, from the same state.
   printVerdict({
     state: verdictStateOf(final, sha7),
     sha7,
@@ -1102,10 +695,5 @@ async function progressStream(
   });
   if (final.state === "owner_lost") return WAIT_EXITS.ownerLost;
   if (!final.done) return WAIT_EXITS.stillRunning;
-  // INCOMPLETE IS NOT A PASS, and "no red node" cannot see the difference: a
-  // CANCELLED node is not red, so a run whose only lane was cancelled reported
-  // success. `exitCode` is the rule this command shipped with — done and not
-  // clean is 1 — and it is the same fold the verdict block above just printed,
-  // so the number and the summary cannot disagree.
   return exitCode(verdictStateOf(final, sha7));
 }

@@ -3,12 +3,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import { ANSI16, LogView } from "./logView";
 
-/** Feed raw bytes the way the live view does when a surface frame lands: a
- *  `snapshot` frame resets the buffer first, an `append` just writes.
- *
- *  Lines here end with a BARE `\n`, because that is what a captured child
- *  process actually emits — the tty translation to `\n` never happens on a
- *  pipe. Fixtures that used `\n` hid the cursor-column bug entirely. */
 async function feed(view: LogView, text: string, kind: "snapshot" | "append" = "append") {
   if (kind === "snapshot") view.reset();
   await view.write(text);
@@ -20,13 +14,10 @@ const visible = (view: LogView): string[] =>
 describe("LogView — a terminal, not a string buffer", () => {
   it("overwrites in place on a carriage return instead of piling up lines", async () => {
     const view = new LogView(60, 6);
-    // What `nix build` actually emits: one progress line, redrawn.
     for (let pct = 0; pct <= 100; pct += 10) {
       await feed(view, `\rbuilding [${"#".repeat(pct / 10).padEnd(10)}] ${pct}%`);
     }
     const rows = visible(view);
-    // The old renderer split on \n and showed eleven lines of stale progress;
-    // the emulator collapses them to the one line the producer intended.
     expect(rows).toHaveLength(1);
     expect(rows[0]).toContain("100%");
     view.dispose();
@@ -35,8 +26,6 @@ describe("LogView — a terminal, not a string buffer", () => {
   it("measures a wide glyph as two cells (the code-point count was wrong)", async () => {
     const view = new LogView(10, 4);
     await feed(view, "東京東京東京\n");
-    // Six double-width glyphs in ten columns wrap after five — a code-point
-    // count would have said they all fit.
     expect(view.total).toBeGreaterThan(1);
     view.dispose();
   });
@@ -63,12 +52,6 @@ describe("LogView — a terminal, not a string buffer", () => {
 
 describe("LogView — disposal", () => {
   it("a write in flight when the view is disposed touches nothing", async () => {
-    // xterm defers its write callback, and a focus change disposes the old view
-    // synchronously — so the continuation lands after dispose() and reads a
-    // disposed buffer. xterm reports that by printing a stack trace, which is
-    // raw library chatter on the operator's terminal: the exact failure this
-    // view exists to prevent. Note it goes through console.error, NOT
-    // process.stderr.write — a stderr spy sees nothing and passes either way.
     const shouted: string[] = [];
     const realError = console.error;
     const realWarn = console.warn;
@@ -78,7 +61,7 @@ describe("LogView — disposal", () => {
       const view = new LogView(60, 6);
       const inFlight: Promise<void>[] = [];
       for (let i = 0; i < 200; i++) inFlight.push(view.write(`line ${i}\n`));
-      view.dispose(); // focus moved on while those were still in flight
+      view.dispose();
       await Promise.allSettled(inFlight);
       await new Promise((r) => setTimeout(r, 40));
     } finally {
@@ -91,11 +74,6 @@ describe("LogView — disposal", () => {
 
 describe("LogView — reflow", () => {
   it("still shows the log after the pane is widened", async () => {
-    // Widening rejoins wrapped lines, so the written extent SHRINKS. A
-    // high-water mark that survives the reflow points the window past the end
-    // of the content and the pane paints blank — on a settled node it never
-    // self-heals, because no further write pushes the extent back up. That is
-    // exactly the node an operator widens their terminal to read.
     const view = new LogView(20, 5);
     for (let i = 0; i < 4; i++) await feed(view, `line ${i} with enough text to wrap at twenty columns\n`);
     expect(visible(view).length).toBeGreaterThan(0);
@@ -108,16 +86,12 @@ describe("LogView — reflow", () => {
 
 describe("LogView — line endings", () => {
   it("starts each line at column 0, even after a bare newline", async () => {
-    // odu captures a child's stdout through a PIPE, so the tty never
-    // translated \n to \n. A terminal moves down and keeps the column, which
-    // made every line after a progress bar start where the previous one ended.
     const view = new LogView(60, 6);
     await feed(view, "building [####] 100%");
     await feed(view, "\n  ✓ done\n");
     const rows = view.rows().map((r) => r.text).filter((t) => t !== "");
     const done = rows.find((t) => t.includes("done"));
     expect(done).toBeDefined();
-    // Two leading spaces from the producer, not thirty from the cursor.
     expect(done?.startsWith("  ✓")).toBe(true);
     view.dispose();
   });
@@ -125,8 +99,6 @@ describe("LogView — line endings", () => {
 
 describe("LogView — colour", () => {
   it("carries the producer's own colours out of the emulator", async () => {
-    // translateToString flattens attributes away, which rendered every node's
-    // output in one foreground. A failing test's red is information.
     const view = new LogView(60, 4);
     await feed(view, "\u001b[31mFAILED\u001b[0m plain \u001b[32mok\u001b[0m\n");
     const row = view.rows().find((r) => r.text.includes("FAILED"));
@@ -135,7 +107,6 @@ describe("LogView — colour", () => {
     expect(coloured.length).toBeGreaterThanOrEqual(2);
     expect(coloured.map((sp) => sp.text.trim())).toContain("FAILED");
     expect(coloured.map((sp) => sp.text.trim())).toContain("ok");
-    // The two differ — red and green did not collapse to one colour.
     const hues = new Set(coloured.map((sp) => sp.fg));
     expect(hues.size).toBeGreaterThanOrEqual(2);
     view.dispose();
@@ -186,7 +157,7 @@ describe("LogView — anchoring", () => {
     const view = await scrolled();
     await feed(view, "newest\n");
     expect(visible(view).join("\n")).toContain("newest");
-    view.toggleFollow(); // pin
+    view.toggleFollow();
     await feed(view, "after-pin\n");
     expect(visible(view).join("\n")).not.toContain("after-pin");
     view.dispose();
@@ -216,10 +187,6 @@ describe("LogView — search", () => {
   });
 
   it("recounts after a \\r redraw that leaves the line count alone", async () => {
-    // The memo used to be keyed on the line count, which is precisely the one
-    // key a VT invalidates without changing: `\r`/cursor-up redraws rewrite the
-    // text in place, and the status bar reported a stale count for the rest of
-    // the search.
     const view = new LogView(40, 4);
     await feed(view, "needle\n");
     view.setQuery("needle");
@@ -248,19 +215,6 @@ describe("LogView — search", () => {
   });
 });
 
-/**
- * ONE PALETTE, TWO FACES.
- *
- * The browser's log pane is a `<pre>` with `--ansi-0..15` tokens rather than an
- * emulator (see `packages/ci/src/face/ansi.ts` for why), so the sixteen colours
- * above exist a second time, in CSS, in a package that cannot import this one.
- * That agreement was a comment at each end — and this file is the only place
- * that can hold it, because the CLI is node-side and may read the stylesheet
- * while the browser may not read anything.
- *
- * A recipe that prints a red FAIL prints the same red whether a person is
- * reading it through `odu ci attach` or through the board, or this fails.
- */
 describe("the browser draws this view's sixteen colours", () => {
   const css = readFileSync(
     join(import.meta.dirname, "..", "..", "ci", "src", "face", "face.css"),

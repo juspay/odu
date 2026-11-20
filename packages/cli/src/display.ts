@@ -1,29 +1,3 @@
-/**
- * `odu ci run`'s face — three renderings of the same fan-in state, picked by
- * where stdout points:
- *
- *   - `json`  (`--progress json`): one NDJSON line per node transition — the
- *     machine contract `/do` consumes; byte-stable, never styled.
- *   - `plain` (stdout is a pipe/file): one line per transition with glyph +
- *     duration, plus a 60-second heartbeat naming the still-running nodes so
- *     a captured log never *looks* hung between transitions.
- *   - `live`  (stdout is a TTY): a recipes × lanes matrix with spinners,
- *     ticking elapsed times, an events lane, and the focused node's log pane —
- *     drawn on the ALTERNATE screen for the session's lifetime, so nothing it
- *     paints ever enters the operator's scrollback. Failures land in the events
- *     lane inside the frame; the older renderer printed them above the matrix
- *     instead, which is what made the view scroll.
- *
- * The `live` face is the ONE interactive view, shared by `odu ci run` and `odu
- * ci attach` through the source-agnostic `LiveOpts` seam re-exported below. What
- * the frame draws, which keys it binds, and the mount-ordering invariants that
- * hold it together all live in `packages/cli/src/liveView.ts` — restating them here
- * would be a second copy to keep in sync, which is what this file used to be.
- *
- * Verdict-on-exit is the HOST's policy, not the view's — `run` prints its own
- * `printVerdict`, `attach` prints `verdictLine(state)` from `cli/render`.
- */
-
 import type { LiveOpts, LiveView } from "./liveView";
 import {
   claimingText,
@@ -34,7 +8,6 @@ import {
 import { errorMessage } from "@odu/execution/common/effectEdge";
 import { formatGoDuration } from "@odu/execution/common/duration";
 
-/** Re-exported from `./render`, where the cross-face projections live. */
 export { commitLabel };
 import type {
   Display,
@@ -50,15 +23,9 @@ import {
   STATUS_META,
 } from "@odu/run-client/surface";
 
-/** The port this file implements, and the event it emits, both re-exported so
- *  a face's consumers keep naming one module. What they ARE lives in
- *  `packages/execution/src/common/presentation.ts` — the engine speaks that vocabulary and must
- *  not reach in here to learn it. */
 export type { Display, ProgressEvent };
 export { progressEvent };
 
-/** The live face's host seam, declared beside the view that consumes it — one
- *  declaration, so a member added to it cannot reach only half the seam. */
 export type { LiveOpts };
 
 export type DisplayMode = "json" | "plain" | "live";
@@ -72,12 +39,8 @@ export function createDisplay(mode: DisplayMode, live?: LiveOpts): Display {
   return new LiveDisplay(live);
 }
 
-// ── json ────────────────────────────────────────────────────────────────────
-
 class JsonDisplay implements Display {
   start(): void {}
-  // The NDJSON contract is one line per node transition; the run environment
-  // never appears in it, so a new header changes nothing to emit.
   setHeader(): void {}
   update(): void {}
   transition(event: ProgressEvent): void {
@@ -89,25 +52,16 @@ class JsonDisplay implements Display {
   stop(): void {}
 }
 
-// ── plain ───────────────────────────────────────────────────────────────────
-
 const HEARTBEAT_MS = 60_000;
 
 class PlainDisplay implements Display {
   private state: PipelineState | undefined;
   private timer: NodeJS.Timeout | undefined;
   private lastWrite = Date.now();
-  /** The header itself, not its rendering — one value, not a formatted shadow
-   *  copy of it. */
   private header: RunHeader = EMPTY_HEADER;
   private started = false;
 
   start(state: PipelineState): void {
-    // Commit identity (pipeline name + sha) comes from state; `run` carries
-    // lanes + a hosts source on the header, so the banner shows both; an
-    // observer (`attach`) has neither, so those clauses drop out and the
-    // banner is just `odu · <pipeline> @ <sha>`. A run that hasn't claimed a
-    // machine yet has no lanes to show and says what it is claiming instead.
     this.started = true;
     const parts = [`odu · ${state.name} @ ${commitLabel(state)}`];
     const lanes = laneText(this.header);
@@ -124,18 +78,6 @@ class PlainDisplay implements Display {
     this.timer.unref?.();
   }
 
-  /** Announce on a PHASE change, not on a lane-string diff. The string rule
-   *  said two things at once — "nothing changed" and "an empty lane map is
-   *  never worth announcing" — and the second half swallowed the claim-failure
-   *  republish, so a captured CI log got no line marking the end of
-   *  provisioning. The phase rule fires exactly once when provisioning ends,
-   *  whichever way it ends. Nothing is said before `start`: there is no banner
-   *  to revise yet, and the banner itself renders this header.
-   *
-   *  In this face's own words, never the phase enum: `RunPhase` is the JSON
-   *  contract's vocabulary (`runEnvJson`), and printing `odu · no_lanes` at an
-   *  operator both leaks a wire identifier into a CI log and couples that
-   *  contract to human text. */
   setHeader(header: RunHeader): void {
     const before = this.header;
     this.header = header;
@@ -177,9 +119,6 @@ class PlainDisplay implements Display {
     if (this.timer !== undefined) clearInterval(this.timer);
   }
 
-  /** Between transitions a captured log goes silent for however long the
-   *  slowest node takes (darwin e2e: ~30 min) — name the laggards once a
-   *  minute so the log reads as alive. */
   private heartbeat(): void {
     if (this.state === undefined) return;
     if (Date.now() - this.lastWrite < HEARTBEAT_MS) return;
@@ -197,36 +136,15 @@ class PlainDisplay implements Display {
   }
 }
 
-// ── live ────────────────────────────────────────────────────────────────────
-
-/** The interactive face, delegated to the opentui view.
- *
- *  The view is imported LAZILY. `cli/main.ts` reaches this module for every
- *  command, and a static import of `liveView` drags in @opentui/core's native
- *  library and @xterm/headless — about 125ms, roughly half the wall time of an
- *  `odu runs` or `odu ci status` that never draws a frame.
- *
- *  This class also keeps `Display`'s synchronous contract over a view whose
- *  construction is now async: state is recorded regardless, and every entry
- *  point tolerates running before the view exists. See `packages/cli/src/liveView.ts`. */
 class LiveDisplay implements Display {
   private view: LiveView | undefined;
-  /** The state `start()` was called with, held until the lazily-imported view
-   *  exists to be started with it. `undefined` means `start()` has not been
-   *  called yet — pre-view `info()`/`transition()` then go straight to stdout,
-   *  exactly as the view itself would do pre-mount. */
   private pending: PipelineState | undefined;
-  /** The current run environment, wherever in the lifecycle it arrived. One
-   *  field, one writer: `setHeader` is the only way a header gets here, so
-   *  "which of these two headers is newer" is a question nobody can ask. */
   private header: RunHeader = EMPTY_HEADER;
 
   constructor(private readonly opts: LiveOpts) {}
 
   start(state: PipelineState): void {
     this.pending = state;
-    // Caught, not floating: an unhandled rejection here would pick odu's exit
-    // code, and odu owns that. Same reasoning as the view's own mount guard.
     void this.load().catch((err: unknown) => {
       process.stderr.write(
         `odu: live view unavailable (${errorMessage(err)}) — continuing without it\n`,
@@ -245,11 +163,6 @@ class LiveDisplay implements Display {
 
   private stopped = false;
 
-  /** Reaches the view once it exists; before that it is simply the header
-   *  `load()` will start the view with — so a header published during the venue
-   *  claim (while the opentui import is still in flight), or before `start()`
-   *  has run at all (`attach` opens its header follow-loop before the first
-   *  `nodes` frame arrives), is never lost. */
   setHeader(header: RunHeader): void {
     this.header = header;
     this.view?.setHeader(header);
@@ -260,10 +173,6 @@ class LiveDisplay implements Display {
     this.view?.update(state);
   }
 
-  /** `progressEvent` is the only construction site of a `ProgressEvent` and it
-   *  always sets `log` from `logPathFor`, so the old `event.log !== ""`
-   *  fallback was unreachable — and the mirrored `sha7` field existed only to
-   *  feed it, giving "where does a node's log live" two callers in one file. */
   transition(event: ProgressEvent, node: NodeState): void {
     if (this.view !== undefined) {
       this.view.transition(node, event.log);

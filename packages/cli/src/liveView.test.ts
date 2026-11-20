@@ -1,12 +1,3 @@
-/**
- * Frame-level tests for the live view. These assert what the terminal actually
- * shows — opentui's test renderer gives us the rendered cells as text — rather
- * than the shape of a string the old renderer happened to build. That is the
- * point: the defects being fixed here (a frame that outgrew its region, a log
- * pane pinned to twelve rows, a resize that smeared) were all invisible to
- * string-equality tests and obvious in a captured frame.
- */
-
 import { Stream } from "effect";
 import { describe, expect, it } from "bun:test";
 import { createTestRenderer } from "@opentui/core/testing";
@@ -75,9 +66,6 @@ const header: RunHeader = {
   startedAt: 940_000,
 };
 
-/** A one-frame log stream — the shape `openLog` hands the view now that both
- *  its producers (the runner.s in-memory tail, a socket `nodeLog.get`) return a
- *  lazy `Stream`. */
 function snapshot(text: string): Stream.Stream<NodeLogFrame> {
   return Stream.make({ kind: "snapshot" as const, text });
 }
@@ -88,9 +76,6 @@ interface Mounted {
   frame: () => string;
 }
 
-/** Mount the view against opentui's test renderer at a given terminal size.
- *  `on` overrides the state to start from — `run` starts all-pending, which is
- *  the case the focus rules are actually about. */
 async function mount(
   width: number,
   height: number,
@@ -100,18 +85,10 @@ async function mount(
   const setup = await createTestRenderer({ width, height });
   const view = new LiveView(makeOpts({ setup, ...rest }));
   view.start(on ?? state, header);
-  // start() is synchronous and mounts in the background.
   await settle(setup);
   return { view, setup, frame: () => setup.captureCharFrame() };
 }
 
-/** Wait for a condition, flushing as we go — never for a fixed duration.
- *
- *  The mount is async, log frames arrive on their own schedule, and repaints
- *  are coalesced into a 100ms tick, so "sleep a bit then assert" encodes an
- *  assumption about how fast the machine is. It held here and failed on a
- *  loaded CI runner. Polling costs nothing when the condition is already true
- *  and simply waits longer when it is not. */
 async function until(
   setup: TestRendererSetup,
   predicate: () => boolean,
@@ -126,7 +103,6 @@ async function until(
   }
 }
 
-/** The frame has been painted at least once — the mount landed and a tick ran. */
 async function settle(setup: TestRendererSetup): Promise<void> {
   await until(
     setup,
@@ -158,7 +134,6 @@ describe("LiveView — the frame", () => {
     const f = frame();
     expect(f).toContain("x86_64-linux");
     expect(f).toContain("aarch64-darwin");
-    // `ci::` is stripped in the matrix — the columns carry the platform.
     expect(f).toMatch(/^\s*›?\s*install\s/m);
     expect(f).toMatch(/^\s*›?\s*e2e\s/m);
     view.stop();
@@ -185,10 +160,6 @@ describe("LiveView — the frame", () => {
   });
 
   it("keeps the commit URL out of the header text", async () => {
-    // The link was once embedded as an OSC 8 escape inside the content string.
-    // opentui's cell buffer has no escape parser, so the URL was painted as
-    // literal characters: the header showed a 40-char sha and wrapped onto a
-    // second row. The URL now rides on the chunk, not in the text.
     const withUrl: RunHeader = {
       ...header,
       commitUrl: "https://github.com/juspay/odu/commit/1c787fbdeadbeef0123456789abcdef012345678",
@@ -220,10 +191,6 @@ describe("LiveView — the frame", () => {
   });
 
   it("keeps the chrome on screen on a small terminal", async () => {
-    // Asserting rows <= height would be vacuous: captureCharFrame decodes a
-    // width x height cell buffer, so an overflowing frame is clipped before the
-    // assertion sees it. What overflow actually destroys is the chrome — the
-    // status bar is the last thing drawn, so it is the first thing lost.
     const { view, setup } = await mount(80, 24);
     const rows = setup.captureCharFrame().split("\n").filter((r) => r.trim() !== "");
     expect(rows[rows.length - 1]).toContain("hjkl move");
@@ -232,7 +199,6 @@ describe("LiveView — the frame", () => {
 });
 
 describe("LiveView — the log pane takes the terminal's height", () => {
-  /** Rows between the pane's top border and the status bar. */
   const paneRows = (f: string): number => {
     const lines = f.split("\n");
     const top = lines.findIndex((l) => l.includes("ci::"));
@@ -253,20 +219,14 @@ describe("LiveView — the log pane takes the terminal's height", () => {
   });
 
   it("wraps the log at the pane's own inner width, not a guessed inset", async () => {
-    // The emulator's column count and the width opentui actually draws into
-    // must be the same number. They were derived independently
-    // (`terminalWidth - 4` against a bordered box's real inner width), so long
-    // lines broke mid-word two columns early — visible in a real run as ragged
-    // continuation lines.
     const { view, frame } = await mount(96, 30, { log: `${"z".repeat(240)}\n` });
     const lines = frame().split("\n");
     const border = lines.find((l) => l.includes("┌")) ?? "";
-    const inner = border.trimEnd().length - 2; // the box's own left/right border
+    const inner = border.trimEnd().length - 2;
     const zRows = lines
       .filter((l) => l.includes("z"))
       .map((l) => (l.match(/z/g) ?? []).length);
     expect(inner).toBeGreaterThan(0);
-    // Every row but the last is a full-width wrap.
     expect(zRows.slice(0, -1)).toEqual(zRows.slice(0, -1).map(() => inner));
     view.stop();
   });
@@ -305,7 +265,6 @@ describe("LiveView — keys", () => {
     await settle(setup);
     setup.mockInput.pressKey("r");
     await until(setup, () => reran.length > 0, "the rerun callback");
-    // Focus auto-follows the run, so `r` targets the running node.
     expect(reran).toEqual(["ci::e2e@aarch64-darwin"]);
     view.stop();
   });
@@ -323,13 +282,7 @@ describe("LiveView — keys", () => {
 });
 
 describe("LiveView — mount ordering", () => {
-  // Display.start() is synchronous while opentui's mount is async, so every
-  // other entry point can run before the renderer exists. These pin the two
-  // orderings that broke when that was only half-handled.
-
   it("a renderer that fails to open degrades instead of killing the run", async () => {
-    // An unhandled rejection out of the fire-and-forget mount would pick odu's
-    // exit code, and odu owns that.
     const errs: string[] = [];
     const original = process.stderr.write.bind(process.stderr);
     process.stderr.write = ((c: string | Uint8Array) => {
@@ -361,17 +314,11 @@ describe("LiveView — mount ordering", () => {
   });
 
   it("sizes the log pane to the real terminal, not the pre-mount fallback", async () => {
-    // Focus (and the emulator) is seeded before the mount, when paneCols() can
-    // only answer with the 80x24 fallback. If the mount doesn't push the real
-    // geometry, the pane wraps at 76 columns forever on a wide terminal.
     const { view, setup, frame } = await mount(160, 30, {
       log: `${"y".repeat(150)}\n`,
     });
     await until(setup, () => frame().includes("yyy"), "the wide log line");
     const wide = frame().split("\n").find((l) => l.includes("yyy")) ?? "";
-    // The line is 150 chars. On a terminal this wide the matrix sits beside
-    // the pane, so the pane is not the full 150 — but it is far past the
-    // fallback's 76 columns, which is the whole point of the assertion.
     expect(wide.replace(/[^y]/g, "").length).toBeGreaterThan(100);
     view.stop();
   });
@@ -379,13 +326,6 @@ describe("LiveView — mount ordering", () => {
 
 describe("LiveView — the terminal comes back even when nothing else runs", () => {
   it("destroys the renderer even when stop() lands in start()'s own turn", async () => {
-    // `attach` onto a settled run does start() → see done → stop() with no
-    // await between, then `process.exit()` — which abandons pending
-    // microtasks. In production the window is closed structurally: the renderer
-    // is constructed synchronously and only `setupTerminal()` is awaited, so
-    // `this.renderer` is assigned before any escape reaches the terminal. Here
-    // the test seam is necessarily async, so this pins the other half — that
-    // the teardown completes and destroys, whichever side gets there first.
     const setup = await createTestRenderer({ width: 96, height: 30 });
     let destroyed = 0;
     const realDestroy = setup.renderer.destroy.bind(setup.renderer);
@@ -395,15 +335,12 @@ describe("LiveView — the terminal comes back even when nothing else runs", () 
     };
     const view = new LiveView(makeOpts({ setup }));
     view.start(state, header);
-    view.stop(state); // same synchronous turn
+    view.stop(state);
     await until(setup, () => destroyed > 0, "the renderer to be destroyed");
     expect(destroyed).toBeGreaterThan(0);
   });
 
   it("replays a diagnostic that scrolled out of the two-row events lane", async () => {
-    // The events lane is a 2-row display ring, so a fatal line followed by any
-    // two others has already been shifted out by teardown. Replaying the ring
-    // could therefore never surface the message the replay exists for.
     const setup = await createTestRenderer({ width: 96, height: 30 });
     const errs: string[] = [];
     const original = process.stderr.write.bind(process.stderr);
@@ -411,7 +348,6 @@ describe("LiveView — the terminal comes back even when nothing else runs", () 
       errs.push(typeof c === "string" ? c : Buffer.from(c).toString());
       return true;
     }) as typeof process.stderr.write;
-    // Constructed inside the capture: the view binds its writers up front.
     const view = new LiveView(makeOpts({ setup }));
     try {
       view.start(state, header);
@@ -419,7 +355,6 @@ describe("LiveView — the terminal comes back even when nothing else runs", () 
       view.info("FATAL: venue lock lost");
       view.info("noise one");
       view.info("noise two");
-      // A run that did not end clean — the case the replay is for.
       view.stop(state);
     } finally {
       process.stderr.write = original;
@@ -466,8 +401,6 @@ describe("LiveView — the terminal comes back even when nothing else runs", () 
       createRenderer: () => Promise.reject(new Error("no tty")),
     });
     view.start(state, header);
-    // The mount must have settled (and failed) before stop(), or this asserts
-    // the wrong branch.
     const settled = Date.now() + 4000;
     while (process.listenerCount("exit") === before) {
       if (Date.now() > settled) break;
@@ -479,14 +412,11 @@ describe("LiveView — the terminal comes back even when nothing else runs", () 
       if (Date.now() > gone) break;
       await new Promise((r) => setTimeout(r, 10));
     }
-    // stop() after a settled-but-failed mount must complete the teardown; the
-    // listener is only removed there.
     expect(process.listenerCount("exit")).toBe(before);
   });
 });
 
 describe("LiveView — focus and the log subscription", () => {
-  /** What `odu ci run` actually starts from: nothing has been scheduled yet. */
   const allPending: PipelineState = {
     ...state,
     nodes: Object.fromEntries(
@@ -494,7 +424,6 @@ describe("LiveView — focus and the log subscription", () => {
     ),
   };
 
-  /** …and what it looks like once a lane picks a node up. */
   const oneRunning: PipelineState = {
     ...allPending,
     nodes: {
@@ -509,9 +438,6 @@ describe("LiveView — focus and the log subscription", () => {
   };
 
   it("auto-follows focus onto the running node as lanes go live", async () => {
-    // `run` start()s on an all-pending snapshot and update()s as lanes come up,
-    // so focus must walk off the startup node onto the running one. The pane
-    // title is the readout: it names the focused node.
     const { view, setup, frame } = await mount(96, 30, { on: allPending });
     expect(frame()).toContain("ci::install@x86_64-linux");
     expect(frame()).not.toContain("ci::e2e@aarch64-darwin");
@@ -526,10 +452,8 @@ describe("LiveView — focus and the log subscription", () => {
   });
 
   it("stops auto-following once a key picks a node by hand", async () => {
-    // The other half of the same rule: `focusLocked`. An operator reading a
-    // node must not have the pane yanked away by the next state push.
     const { view, setup, frame } = await mount(96, 30, { on: allPending });
-    setup.mockInput.pressKey("j"); // install → e2e, same platform column
+    setup.mockInput.pressKey("j");
     await setup.flush();
     await settle(setup);
     expect(frame()).toContain("ci::e2e@x86_64-linux");
@@ -544,13 +468,7 @@ describe("LiveView — focus and the log subscription", () => {
   });
 
   it("marks the focused CELL per platform, not the whole recipe row", async () => {
-    // A past bug marked every cell of the focused recipe. Focus starts on
-    // e2e@aarch64-darwin; `h` steps to the other platform on the SAME row, so
-    // the row marker must stay put while the cell marker moves.
     const { view, setup, frame } = await mount(96, 30);
-    // Anchored to the start of the line: the pane's border title also contains
-    // "e2e" (it names the focused node) AND a `›` from its ‹follow› marker, so
-    // a bare `includes` reads the title's geometry instead of the matrix's.
     const e2eRow = (f: string) =>
       f.split("\n").find((l) => /^[›\s]\s*e2e\s/.test(l)) ?? "";
     const before = e2eRow(frame());
@@ -566,9 +484,6 @@ describe("LiveView — focus and the log subscription", () => {
   });
 
   it("carries the search query onto the newly focused node's log", async () => {
-    // The query lived in two objects, and a focus change built a fresh buffer
-    // with an empty one: `n` silently did nothing. `n` finding a hit unpins the
-    // tail, which the pane title reports.
     const lines = Array.from({ length: 40 }, (_, i) =>
       i === 0 ? "needle here" : `line ${i}`,
     ).join("\n");
@@ -579,12 +494,7 @@ describe("LiveView — focus and the log subscription", () => {
     await setup.flush();
     await settle(setup);
 
-    setup.mockInput.pressKey("j"); // focus a different node — new LogView
-    // The new pane starts empty; `n` on an empty buffer is a no-op and
-    // leaves ‹follow›. Wait for the snapshot the way the wheel test waits
-    // for the tail — settle() only proves a frame exists, not that the
-    // stream has written into this LogView. "needle here" is line 0, so
-    // follow-mode shows the last lines, not the needle.
+    setup.mockInput.pressKey("j");
     await until(
       setup,
       () => frame().includes("line 39"),
@@ -598,18 +508,12 @@ describe("LiveView — focus and the log subscription", () => {
   });
 
   it("drops late frames from a superseded log subscription", async () => {
-    // F1: a fast focus switch can leave the previous stream yielding after
-    // focus moved on. Applying it would paint one node's bytes under another's
-    // header.
     let releaseStale: (() => void) | undefined;
     const opts = {
       interactive: true,
       hookStderr: false,
       openLog: (id: string): Stream.Stream<NodeLogFrame> => {
         if (id === "ci::install@x86_64-linux") {
-          // Emits, then PARKS until released — the superseded subscription this
-          // test is about. Built from an async generator so the park is
-          // expressible; `Stream.fromAsyncIterable` is the bridge.
           return Stream.fromAsyncIterable(
             (async function* (): AsyncGenerator<NodeLogFrame> {
               yield { kind: "snapshot" as const, text: "INITIAL-A\n" };
@@ -633,7 +537,6 @@ describe("LiveView — focus and the log subscription", () => {
     });
     view.start(state, header);
     await settle(setup);
-    // Move focus, then let the superseded stream yield.
     setup.mockInput.pressKey("1");
     await setup.flush();
     setup.mockInput.pressKey("j");
@@ -643,8 +546,6 @@ describe("LiveView — focus and the log subscription", () => {
       "the new focus's log",
     );
     releaseStale?.();
-    // The stale frame, if it were going to leak, would arrive on the next few
-    // ticks — give it every chance to before asserting it did not.
     for (let i = 0; i < 20; i++) {
       await setup.flush();
       await new Promise((r) => setTimeout(r, 10));
@@ -656,15 +557,12 @@ describe("LiveView — focus and the log subscription", () => {
 
 describe("LiveView — keys", () => {
   it("Ctrl-C quits even with the search prompt open", async () => {
-    // Raw mode means no SIGINT, and the renderer is configured not to exit on
-    // its own — so if the search prompt swallows Ctrl-C the operator is stuck
-    // on the alternate screen with no way out but guessing esc.
     let quit = 0;
     const setup = await createTestRenderer({ width: 96, height: 30 });
     const view = new LiveView(makeOpts({ setup, onQuit: () => quit++ }));
     view.start(state, header);
     await settle(setup);
-    setup.mockInput.pressKey("/"); // open the search prompt
+    setup.mockInput.pressKey("/");
     await setup.flush();
     setup.mockInput.pressKey("c", { ctrl: true });
     await until(setup, () => quit > 0, "quit from the search prompt");
@@ -675,7 +573,6 @@ describe("LiveView — keys", () => {
 
 describe("LiveView — the log scrollbar", () => {
   const longLog = `${Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n")}\n`;
-  /** The gutter column: the last cell of each row inside the pane border. */
   const thumbRows = (frame: string): number[] => {
     const out: number[] = [];
     frame.split("\n").forEach((l, i) => {
@@ -692,7 +589,6 @@ describe("LiveView — the log scrollbar", () => {
   });
 
   it("stays blank while everything fits", async () => {
-    // A scrollbar that is always full is noise, not information.
     const { view, setup, frame } = await mount(96, 30, { log: "one\ntwo\n" });
     await until(setup, () => frame().includes("two"), "the short log");
     expect(thumbRows(frame())).toEqual([]);
@@ -711,14 +607,12 @@ describe("LiveView — the log scrollbar", () => {
       "the thumb to move",
     );
     const atTop = thumbRows(frame());
-    // Scrolled to the top of the buffer, the thumb sits above where it was.
     expect(atTop[0]).toBeLessThan(atTail[0] ?? 0);
     view.stop();
   });
 });
 
 describe("LiveView — mouse", () => {
-  /** The terminal row a matrix recipe was drawn on. */
   const rowOf = (frame: string, recipe: string): number =>
     frame.split("\n").findIndex((l) => l.includes(recipe));
 
@@ -732,24 +626,18 @@ describe("LiveView — mouse", () => {
       () => frame().includes("ci::install@"),
       "the pane to follow the click",
     );
-    // The pane title names the clicked node, so focus really moved.
     expect(frame()).toContain("ci::install@");
     view.stop();
   });
 
   it("clicking the second platform's cell focuses THAT platform", async () => {
-    // The matrix is 2D and a click specifies a cell, not a row. Resolving only
-    // the row and keeping the previously-focused platform sent every click to
-    // the first lane — clicking the second host focused the first host's node.
     const { view, setup, frame } = await mount(96, 30);
     const rows = frame().split("\n");
     const y = rows.findIndex((l) => l.includes("install"));
-    const header = rows[y - 1] ?? ""; // the matrix column header
+    const header = rows[y - 1] ?? "";
     const firstColumn = header.indexOf("x86_64-linux");
     const secondColumn = header.indexOf("aarch64-darwin");
     expect(secondColumn).toBeGreaterThan(0);
-    // Start on the FIRST lane, or "keep the current platform" would land on
-    // darwin by accident and the test would pass against the bug.
     await setup.mockMouse.click(firstColumn + 1, y);
     await until(
       setup,
@@ -771,7 +659,7 @@ describe("LiveView — mouse", () => {
     const { view, setup, frame } = await mount(96, 30);
     const rows = frame().split("\n");
     const y = rows.findIndex((l) => l.includes("install"));
-    const header = rows[y - 1] ?? ""; // the matrix column header
+    const header = rows[y - 1] ?? "";
     const firstColumn = header.indexOf("x86_64-linux");
     await setup.mockMouse.click(firstColumn + 1, y);
     await until(
@@ -784,9 +672,6 @@ describe("LiveView — mouse", () => {
   });
 
   it("clicking a gap cell does nothing rather than guessing", async () => {
-    // `typecheck` runs only on linux in this fixture, so its darwin cell is a
-    // gap. Snapping to a neighbour would focus a node the operator never
-    // pointed at.
     const gapped: PipelineState = {
       ...state,
       order: [...state.order, "ci::typecheck@x86_64-linux"],
@@ -799,22 +684,19 @@ describe("LiveView — mouse", () => {
     const before = frame().split("\n").find((l) => l.includes("‹")) ?? "";
     const rows = frame().split("\n");
     const y = rows.findIndex((l) => l.includes("typecheck"));
-    const header = rows[y - 1] ?? ""; // the matrix column header
+    const header = rows[y - 1] ?? "";
     await setup.mockMouse.click(header.indexOf("aarch64-darwin") + 1, y);
     await setup.flush();
-    // Focus did not move to some neighbouring node.
     expect(frame().split("\n").find((l) => l.includes("‹")) ?? "").toBe(before);
     view.stop();
   });
 
   it("clicking a matrix row pins focus, as hjkl does", async () => {
-    // Auto-follow must stop, or the next state push would yank the operator
-    // back to whatever is running.
     const { view, setup, frame } = await mount(96, 30);
     const y = rowOf(frame(), "install");
     await setup.mockMouse.click(4, y);
     await until(setup, () => frame().includes("ci::install@"), "the click");
-    view.update(state); // a push that would re-seed focus if it were unlocked
+    view.update(state);
     await setup.flush();
     expect(frame()).toContain("ci::install@");
     view.stop();
@@ -827,20 +709,14 @@ describe("LiveView — mouse", () => {
     expect(frame()).toContain("‹follow›");
     const shown = frame().split("\n");
     const paneY = shown.findIndex((l) => l.includes("‹follow›")) + 4;
-    // The matrix sits beside the pane on a terminal this wide, so a column
-    // picked near the left edge is over the matrix and the wheel never
-    // reaches the log. Aim inside the pane's own border.
     const paneX = (shown[2] ?? "").indexOf("┌") + 5;
     await setup.mockMouse.scroll(paneX, paneY, "up");
     await until(setup, () => frame().includes("‹pinned›"), "the tail to unpin");
-    // Scrolling up moved away from the newest line.
     expect(frame()).not.toContain("line 79");
     view.stop();
   });
 
   it("clicking a status hint runs it", async () => {
-    // The bar says `r rerun`; clicking it should rerun, through the same
-    // BINDINGS entry the key uses.
     const reran: string[] = [];
     const setup = await createTestRenderer({ width: 120, height: 30 });
     const view = new LiveView(makeOpts({ setup, rerun: (id) => reran.push(id) }));
@@ -873,8 +749,6 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
   });
 
   it("stop() prints nothing — verdict-on-exit is the host's policy", async () => {
-    // `run` ends with its own printVerdict. A recap from the view too meant the
-    // same information twice on every run; the host asks for verdict() instead.
     const { view } = await mount(96, 30);
     const written: string[] = [];
     const original = process.stdout.write.bind(process.stdout);
@@ -891,9 +765,6 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
   });
 
   it("an info before the frame exists still reaches the operator", () => {
-    // `run` builds the display and calls info() during a venue lease that can
-    // block for minutes — long before start(). Pre-mount those must go to real
-    // stdout or they are simply lost.
     const written: string[] = [];
     const original = process.stdout.write.bind(process.stdout);
     process.stdout.write = ((c: string | Uint8Array) => {
@@ -916,9 +787,6 @@ describe("LiveView — events land in the frame, never in scrollback", () => {
   });
 });
 
-/** A pipeline of `n` recipes across two platforms — the shape that reduced the
- *  log pane to a single row, because the matrix was sized to its content and
- *  the pane took whatever was left. */
 function manyRecipes(n: number): PipelineState {
   const platforms = ["x86_64-linux", "aarch64-darwin"];
   const order: string[] = [];
@@ -942,7 +810,6 @@ function manyRecipes(n: number): PipelineState {
 
 const logLines = (n: number): string =>
   `${Array.from({ length: n }, (_, i) => `line ${i}`).join("\n")}\n`;
-/** Rows of actual log on screen — the number the layout exists to protect. */
 const logRowCount = (f: string): number =>
   f.split("\n").filter((l) => /line \d+/.test(l)).length;
 
@@ -950,28 +817,21 @@ describe("LiveView — the frame has two layouts", () => {
   const big = manyRecipes(25);
 
   it("sits the matrix beside the log when the terminal is wide enough", async () => {
-    // 25 recipes on a 33-row terminal left the pane exactly one row: the
-    // matrix is sized to its content and the pane took the remainder. Across
-    // instead of down, the pane's height stops depending on the recipe count.
     const { view, setup, frame } = await mount(130, 33, {
       on: big,
       log: logLines(120),
     });
     await until(setup, () => logRowCount(frame()) > 0, "the log");
     const rows = frame().split("\n");
-    // The proof of "beside": one line holds a matrix row AND the pane's border.
     const shared = rows.find((l) => /recipe-00/.test(l));
     expect(shared).toBeDefined();
     expect(shared).toContain("│");
     expect(logRowCount(frame())).toBeGreaterThanOrEqual(20);
-    // Every recipe is still there — the log's height cost the matrix nothing.
     expect(frame()).toContain("recipe-24");
     view.stop();
   });
 
   it("keeps the log a floor of rows when it has to stack", async () => {
-    // Too narrow to sit side by side, so the matrix yields height instead —
-    // the case that used to produce a one-row pane.
     const { view, setup, frame } = await mount(70, 33, {
       on: big,
       log: logLines(120),
@@ -982,7 +842,6 @@ describe("LiveView — the frame has two layouts", () => {
   });
 
   it("says how many recipes it is holding back rather than just stopping", async () => {
-    // A matrix that ends at the terminal's edge reads as a shorter pipeline.
     const { view, setup, frame } = await mount(70, 33, {
       on: big,
       log: logLines(120),
@@ -993,15 +852,11 @@ describe("LiveView — the frame has two layouts", () => {
   });
 
   it("clicks the recipe under the pointer once the matrix has scrolled", async () => {
-    // The window offset has to be part of resolving a click. Without it a
-    // click reads the unwindowed list and focuses whatever recipe WOULD have
-    // been at that row — the same defect as a click resolving only the row.
     const { view, setup, frame } = await mount(70, 33, {
       on: big,
       log: logLines(10),
     });
     await until(setup, () => /⋯ \d+ more/.test(frame()), "a windowed matrix");
-    // Drive focus down until the window has scrolled off the first recipe.
     for (let i = 0; i < 24; i++) setup.mockInput.pressKey("j");
     await until(
       setup,
@@ -1009,8 +864,6 @@ describe("LiveView — the frame has two layouts", () => {
       "the matrix to scroll",
     );
 
-    // Read a recipe's name straight off the screen, click that line, and the
-    // pane must end up showing that same recipe.
     const rows = frame().split("\n");
     const y = rows.findIndex((l) => /^[›\s]\s*recipe-\d\d\s/.test(l));
     const name = (rows[y] ?? "").match(/recipe-\d\d/)?.[0] ?? "";
@@ -1025,9 +878,6 @@ describe("LiveView — the frame has two layouts", () => {
   });
 
   it("still names the focused node when the pane is narrower than the terminal", async () => {
-    // opentui draws a border title only when it fits ENTIRELY, so a title
-    // built for the full terminal width is dropped outright beside the matrix
-    // — taking with it the one place the frame names what you are reading.
     const { view, setup, frame } = await mount(90, 30);
     await until(
       setup,
@@ -1039,17 +889,6 @@ describe("LiveView — the frame has two layouts", () => {
   });
 });
 
-/**
- * Every affordance the frame presents, exercised once.
- *
- * The failure this guards against is shipping the DRAWN half of a feature
- * without the WIRED half: mouse reporting enabled with no listener, a scrollbar
- * that renders but cannot be grabbed, an events lane that names a node but does
- * nothing when clicked. Each of those shipped, and each was found by a human
- * looking at the screen rather than by a test.
- *
- * A new interactive region belongs here on the day it is added.
- */
 /** Real terminal sequences. `pressKey("pageup")` types the LETTERS p-a-g-e-u-p,
  *  whose `g` means "jump to top" — so a test written that way exercises a
  *  different binding and reports success. `KeyCodes` has no paging entries. */
@@ -1066,11 +905,9 @@ describe("LiveView — every affordance is wired", () => {
     const { view, setup, frame } = await mount(96, 30, { log: longLog });
     await until(setup, () => frame().includes("line 199"), "the log tail");
     const rows = () => frame().split("\n");
-    // len-1 is the pane border; the gutter sits just inside it.
     const gutterX = (rows()[6] ?? "").length - 2;
     const thumbY = rows().findIndex((l) => l.includes("█"));
     expect(thumbY).toBeGreaterThan(0);
-    // Grab the thumb and drag it up.
     await setup.mockMouse.pressDown(gutterX, thumbY);
     await setup.mockMouse.drag(gutterX, thumbY, gutterX, thumbY - 5);
     await until(
@@ -1086,10 +923,7 @@ describe("LiveView — every affordance is wired", () => {
     const { view, setup, frame } = await mount(96, 30, { log: longLog });
     await until(setup, () => frame().includes("line 199"), "the log tail");
     const rows = () => frame().split("\n");
-    // len-1 is the pane border; the gutter sits just inside it.
     const gutterX = (rows()[6] ?? "").length - 2;
-    // The first gutter row, i.e. immediately below the pane title. It maps to
-    // window start 0 — a click further down maps proportionally, not to the top.
     const firstGutterRow = rows().findIndex((l) => l.includes("‹follow›")) + 1;
     await setup.mockMouse.click(gutterX, firstGutterRow);
     await until(setup, () => frame().includes("line 0"), "a jump to the top");
@@ -1099,9 +933,6 @@ describe("LiveView — every affordance is wired", () => {
   });
 
   it("drag the scrollbar without leaving a selection behind", async () => {
-    // opentui runs its own mouse text-selection, so a drag painted a highlight
-    // across every cell it crossed and left it there — visible residue on the
-    // gutter after every scrollbar drag, with no copy behind it to justify it.
     const { view, setup, frame } = await mount(96, 30, { log: longLog });
     await until(setup, () => frame().includes("line 199"), "the log tail");
     const rows = () => frame().split("\n");
@@ -1109,10 +940,7 @@ describe("LiveView — every affordance is wired", () => {
     const thumbY = rows().findIndex((l) => l.includes("█"));
     expect(thumbY).toBeGreaterThan(0);
     // A bare drag, NOT pressDown-then-drag: `drag` ends with a release, and a
-    // release finishes an empty one-column selection by discarding it. Asserted
-    // after that sequence the residue is already gone and the assertion holds
-    // whether or not the rows are selectable — which is how the first version
-    // of this test passed against the unfixed code.
+    // release finishes an empty one-column selection by discarding it.
     await setup.mockMouse.drag(gutterX, thumbY, gutterX, thumbY - 6);
     await setup.flush();
     expect(setup.renderer.hasSelection).toBe(false);
@@ -1120,8 +948,6 @@ describe("LiveView — every affordance is wired", () => {
   });
 
   it("End jumps to the tail and Home to the top", async () => {
-    // The keys someone reaches for when the wheel is not getting them to the
-    // end of a long log. `g`/`G` did this already, and neither is guessable.
     const { view, setup, frame } = await mount(96, 30, { log: longLog });
     await until(setup, () => frame().includes("line 199"), "the log tail");
     setup.mockInput.pressKey(HOME);
@@ -1129,7 +955,6 @@ describe("LiveView — every affordance is wired", () => {
     expect(frame()).toContain("‹pinned›");
     setup.mockInput.pressKey(END);
     await until(setup, () => frame().includes("line 199"), "End");
-    // End is "follow the tail again", not merely "scroll there once".
     expect(frame()).toContain("‹follow›");
     view.stop();
   });
@@ -1158,23 +983,20 @@ describe("LiveView — every affordance is wired", () => {
   });
 
   it("every keyboard binding does something observable", async () => {
-    // Not a behaviour test for each key — those exist above. This asserts the
-    // dispatch table is wired end to end, so a binding cannot be listed in the
-    // status bar and the docs while doing nothing.
     const { view, setup, frame } = await mount(96, 30, { log: longLog });
     await until(setup, () => frame().includes("line 199"), "the log tail");
 
-    setup.mockInput.pressKey("f"); // follow -> pinned
+    setup.mockInput.pressKey("f");
     await until(setup, () => frame().includes("‹pinned›"), "f");
-    setup.mockInput.pressKey("g"); // top
+    setup.mockInput.pressKey("g");
     await until(setup, () => frame().includes("line 0"), "g");
-    setup.mockInput.pressKey("G"); // tail
+    setup.mockInput.pressKey("G");
     await until(setup, () => frame().includes("line 199"), "G");
     setup.mockInput.pressKey(PAGE_UP);
     await until(setup, () => !frame().includes("line 199"), "PgUp");
     setup.mockInput.pressKey(PAGE_DOWN);
     await until(setup, () => frame().includes("line 199"), "PgDn");
-    setup.mockInput.pressKey("/"); // search prompt
+    setup.mockInput.pressKey("/");
     await until(setup, () => frame().includes("esc cancel"), "/");
     setup.mockInput.pressKey(ESCAPE);
     await until(setup, () => !frame().includes("esc cancel"), "escape");

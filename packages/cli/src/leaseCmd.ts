@@ -1,20 +1,3 @@
-/**
- * The hidden `odu lease-hold` — the detached HOLDER, and the last process odu
- * has that is not a client.
- *
- * It is an argv entry point a launcher types and a person never does: the daemon
- * spawns it (see `@odu/ci/venuePort`), and its output is a log file nobody
- * reads unless a hold went wrong. Everything else this file used to hold —
- * resolving a platform set, spawning holders, releasing them — moved to the
- * daemon with the two commands that now ask it, because `odu ci lease` and
- * `odu ci release` are clients of the shared service and their work belongs where
- * the service is.
- *
- * What stays is the one thing that has to be a process: a hold outlives the
- * shell that asked for it, holds a venue for as long as it lives, and ends on
- * SIGTERM.
- */
-
 import { fanoutPools, loadHosts, shortHost } from "@odu/execution/coordinator/hosts";
 import {
   acquireFromPool,
@@ -33,10 +16,6 @@ function log(msg: string): void {
   process.stderr.write(`${msg}\n`);
 }
 
-/**
- * Detached holder entry: claim (wait or no-wait), update record, hold until
- * SIGTERM.
- */
 export async function leaseHoldCommand(opts: {
   platform: string;
   noWait: boolean;
@@ -52,8 +31,6 @@ export async function leaseHoldCommand(opts: {
     return 1;
   }
 
-  // Refuse a misbuilt binary (no baked agent source) before the pool claim
-  // dials any host.
   requireBakedRunnerSource();
   const pid = process.pid;
 
@@ -79,7 +56,6 @@ export async function leaseHoldCommand(opts: {
       resolveDrvPath: laneRunnerDrvPath,
       onLine: (msg) => {
         log(msg);
-        // Keep waiting state visible while queueing.
         if (msg.includes("waiting")) {
           upsertPlatformLease(repoRoot, platform, {
             host: null,

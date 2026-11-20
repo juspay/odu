@@ -1,28 +1,3 @@
-/**
- * `odu ci dump` · `odu ci graph` · `odu ci protect` — a checkout's recipes, as clients.
- *
- * These three looked like the safe exceptions. `dump` and `graph` read a
- * justfile and touch no run; `protect` writes a GitHub ruleset and spends the
- * caller's own `gh` credential. Both defences were wrong, and in different
- * ways.
- *
- * **Reading a justfile is not "no authority", it is a SECOND RESOLVER.** What
- * odu will run for a given checkout is a question the service has to answer
- * anyway — `run.start` resolves the same DAG through the same engine — so a
- * face that answered it locally was a second implementation of the one thing a
- * person most needs to be able to trust: `odu ci graph` and the run it is meant to
- * predict could disagree, and nothing would notice. It also meant the browser
- * could not draw a pipeline at all and an agent could not ask what a repository
- * even builds.
- *
- * **The `protect` defence was factually false.** "The daemon must not spend
- * your credential" describes an odu that does not exist: the coordinator the
- * daemon launches has posted commit statuses with that same credential since
- * long before this, and `--no-post` is the opt-out. Keeping `protect` local on
- * that ground preserved nothing and cost the other two faces the capability
- * entirely.
- */
-
 import type { Pipeline, ProtectOutput, TaskRow } from "@odu/service-client/surface";
 import {
   hostsFileHere,
@@ -35,20 +10,12 @@ import {
 } from "./serviceFace";
 
 export interface PipelineOpts {
-  /** `dump` is the resolved spec as JSON; `graph` is the same DAG as Mermaid. */
   as: "dump" | "graph";
   root?: string;
   origin?: string;
   cwd?: string;
 }
 
-/**
- * `odu ci dump` / `odu ci graph` — the pipeline this checkout declares.
- *
- * Two spellings of one read, which is why they are one function: the SERVICE
- * renders the Mermaid, so `odu ci graph` and a browser drawing the same pipeline
- * cannot be two renderers that drift apart.
- */
 export async function pipelineViaService(opts: PipelineOpts): Promise<number> {
   const checkout = checkoutHere(opts.cwd);
   return withService(opts.origin, async (client) => {
@@ -58,10 +25,6 @@ export async function pipelineViaService(opts: PipelineOpts): Promise<number> {
         ...(opts.root === undefined ? {} : { root: opts.root }),
       }),
     );
-    // `dump` has no non-JSON rendering — its whole output IS the JSON — so a
-    // refusal here reports as prose on stderr either way.
-    // Same reasoning as `protect` below: `odu ci dump` and `odu ci graph` either
-    // printed the pipeline or did not.
     if (!read.ok) return reportFailure(read, false, 1);
     const pipeline: Pipeline = read.value;
     if (opts.as === "graph") {
@@ -73,10 +36,6 @@ export async function pipelineViaService(opts: PipelineOpts): Promise<number> {
   });
 }
 
-/** The shape `odu ci dump` has always printed: the pipeline's name and its tasks.
- *  Spelled here rather than dumping the wire payload verbatim, because
- *  `checkout` and `mermaid` are answers to different questions and a consumer
- *  parsing this file's output should not have to skip past them. */
 function dumpShape(pipeline: Pipeline): {
   name: string;
   tasks: readonly TaskRow[];
@@ -94,14 +53,6 @@ export interface ProtectOpts {
   cwd?: string;
 }
 
-/**
- * `odu ci protect` — require exactly the status checks odu posts.
- *
- * `--dry-run` prints the contexts and writes nothing, which is the honest first
- * move: the contexts are derived from the repository's recipes crossed with a
- * platform set, and a person should see that list before it becomes a rule that
- * blocks merges.
- */
 export async function protectViaService(opts: ProtectOpts): Promise<number> {
   const checkout = checkoutHere(opts.cwd);
   return withService(opts.origin, async (client) => {
@@ -110,10 +61,6 @@ export async function protectViaService(opts: ProtectOpts): Promise<number> {
         checkout,
         ...(opts.branch === undefined ? {} : { branch: opts.branch }),
         platforms: opts.platforms,
-        // THIS shell's `$ODU_HOSTS`, for the same reason `odu ci run` sends it:
-        // an unsliced protect derives its platform set from the hosts file,
-        // and that derivation happens in a singleton whose environment is a
-        // fact about the shell that started it.
         hostsFile: hostsFileHere(opts.cwd),
         dryRun: opts.dryRun,
         create: opts.create,
@@ -126,14 +73,7 @@ export async function protectViaService(opts: ProtectOpts): Promise<number> {
       emitJson(answer);
       return 0;
     }
-    // A DERIVED platform set is a machine-local fact standing in for a repo
-    // one — the hosts file on THIS laptop deciding what a repository requires
-    // of everybody. It is allowed, and it is said out loud every time.
     if (answer.derivedFrom !== null) {
-      // The SET is named, not just the file it came from. A person reading
-      // this is being told a machine-local fact is about to become a repo-wide
-      // rule; which platforms is the part they have to check, and dropping it
-      // left them with a path and no way to see the halving.
       const derived = [
         ...new Set(
           answer.contexts.map((c) => c.slice(c.lastIndexOf("@") + 1)),
@@ -146,10 +86,6 @@ export async function protectViaService(opts: ProtectOpts): Promise<number> {
       );
     }
     if (answer.dryRun) {
-      // The contexts and nothing else. A dry run is the "what would this
-      // require" move, and it deliberately does not consult the forge — so
-      // there is no repo or branch to print, and printing a guess would be
-      // worse than printing neither.
       for (const context of answer.contexts) process.stdout.write(`${context}\n`);
       return 0;
     }

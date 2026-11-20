@@ -1,35 +1,3 @@
-/**
- * `odu ci status` · `odu ci attach` — this checkout's run, as clients.
- *
- * These two were the last public commands holding a run authority of their own,
- * and the hardest to move, because what they show — which lane is claiming
- * which box, how long provisioning has been going, which GitHub contexts the
- * run still owes — was only ever answerable by the live coordinator. So they
- * dialled `.ci/odu.sock` directly, and a face allowed to dial a coordinator is
- * a face that can do anything to a run.
- *
- * **It turned out not to need the dial at all.** The coordinator has been
- * writing `lane` and `phase` lines into the durable journal all along and no
- * reader read them — `foldJournal` dropped both arms on the floor. Folding them
- * out and publishing them as `RunEnv` on the nodes frame makes every one of
- * those facts a catalog read, which the service already owns.
- *
- * That is not merely a shorter path to the same place. It changes what is
- * ANSWERABLE: a run whose coordinator was killed, or that finished last week,
- * can still say which machines it landed on and what it never managed to post.
- * A socket cannot be asked either question.
- *
- * ## "This checkout" is resolved on this side; the listing is not
- *
- * The service addresses runs globally, so `status` and `attach` — the two
- * commands whose subject genuinely IS a directory — resolve WHICH directory
- * here, with `git rev-parse`, and send it as an explicit absolute `checkout` on
- * one `run.list` call. The service answers with that checkout's newest run, and
- * the policy of what is worth showing (`currentRun`) stays on this side. Where
- * the caller is standing is still the one kind of fact a face knows; it is just
- * no longer a reason to fetch every row in the catalog and filter them here.
- */
-
 import { randomUUID } from "node:crypto";
 import { isNoAnswer, runUnary } from "@odu/execution/common/effectEdge";
 import { exitCode } from "@odu/execution/common/verdict";
@@ -70,51 +38,16 @@ export interface HereRunOpts {
   cwd?: string;
 }
 
-/** The service face these commands use, narrowed so a test can stand one in. */
 export type HereClient = Pick<OduServiceClient, "surface">;
 
-/** The one state with nothing left to show. `expired` means retention has
- *  removed the evidence — the run's identity survives, its nodes and logs do
- *  not — so there is no grid to draw. Everything else, including `settled` and
- *  `owner_lost`, is a run a person standing here wants to see. */
 const NOTHING_TO_SHOW = new Set(["expired"]);
 
-/**
- * The newest run started from this checkout.
- *
- * NEWEST FIRST, THEN THE STATE TEST, and both halves of that were wrong before.
- * The service's listing is newest first, and asked for exactly one row, so
- * the state test below can only ever look at the newest.
- *
- * Filtering by state and sorting the survivors reads the same as this and is
- * not: an `owner_lost` run never leaves that state, so it stayed "current"
- * forever and SHADOWED every run started after it. `odu ci status` in this very
- * checkout spent an hour reporting an abandoned run's nodes as `running` while
- * the run the person had actually just started sat settled in the catalog,
- * with the two disagreeing on screen. A dead run is news only while it is the
- * last thing that happened here.
- *
- * And "has not finished" was the wrong test to begin with. A settled run is
- * the most likely thing somebody typing `odu ci status` wants — they just ran CI
- * and want the grid. Excluding it also broke the one feature whose entire
- * purpose is being asked after settlement: `odu ci run --linger` parks the
- * coordinator precisely so a caller can look afterwards, and `status` answered
- * "no run in flight for this checkout".
- *
- * `undefined` when this checkout has never run, or when retention has removed
- * the only run's evidence. That is an ANSWER and not an error — a checkout with
- * no run is the ordinary state of most checkouts most of the time, and exiting
- * non-zero for it would make `odu ci status` unusable in a prompt.
- */
 function currentRun(newest: RunRow | undefined): RunRow | undefined {
   return newest === undefined || NOTHING_TO_SHOW.has(newest.state)
     ? undefined
     : newest;
 }
 
-/** The run both commands start from: this checkout's newest, from one bounded
- *  listing. Split out because `status` prints it once and `attach` keeps
- *  reading, and the resolution must not be two implementations. */
 async function resolveHere(
   client: HereClient,
   checkout: string,
@@ -128,25 +61,12 @@ async function resolveHere(
   return row === undefined ? none() : use(row);
 }
 
-// ── odu ci status ───────────────────────────────────────────────────────────
-
-/**
- * `odu ci status` — where this checkout's run is right now, once.
- *
- * The JSON keeps the key names the socket-dialling version published
- * (`nodes` / `posting` / `run`), because scripts read them and re-pointing a
- * command at a different authority is not a reason to rename its output. The
- * VALUES are now catalog-derived, and two of them are better for it: `lanes`
- * survives the coordinator, and `owed` itemises the debt a bare count used to
- * summarise.
- */
 export async function statusViaService(opts: HereRunOpts): Promise<number> {
   const checkout = checkoutHere(opts.cwd);
   const p = patience(opts.origin, opts.json);
   return withService(opts.origin, (client) => statusWith(client, checkout, p), p.notice);
 }
 
-/** `odu ci status` against a client already in hand — the half a test drives. */
 export async function statusWith(
   client: HereClient,
   checkout: string,
@@ -157,16 +77,10 @@ export async function statusWith(
     checkout,
     p,
     async (row) => {
-      // A stream member is reached through `.get`, and a stream always opens
-      // with a SNAPSHOT — so the head frame IS the read, with no polling and no
-      // second call.
       const opened = await firstNodesFrame(client, row.runId, p);
       if (!opened.ok) return opened.exit;
       const frame = opened.value;
       if (frame === undefined) {
-        // A stream that opened and said nothing. Reported as itself rather than
-        // as an empty run: "the service answered with no frame" and "this run
-        // has no nodes" are different, and only the first is a fault.
         process.stderr.write(
           `odu: the service opened ${row.runId}'s node stream and sent no frame\n`,
         );
@@ -198,9 +112,6 @@ export async function statusWith(
   );
 }
 
-/** One node, in the shape `odu ci status -o json` has always used — snake_case,
- *  because that is what the published contract says and a rename would break
- *  every script reading it. */
 function nodeJson(node: RunNode): {
   id: string;
   status: string;
@@ -234,9 +145,6 @@ export function renderStatus(frame: NodesFrame, row: RunRow): string {
   }
   out.push(...envLines(frame.env));
   for (const node of frame.nodes) {
-    // The same external wording every other plain face uses, so a green node
-    // reads `success` in all of them. `??` keeps the states whose progress
-    // mapping is null (pending) reading as their raw status.
     const word = STATUS_META[node.status].progress ?? node.status;
     const mark = owed.some((o) => o.context === node.id) ? yellow(" ⇐ github?") : "";
     out.push(`${statusGlyph(node.status)} ${word.padEnd(7)} ${node.id}${mark}`);
@@ -247,15 +155,6 @@ export function renderStatus(frame: NodesFrame, row: RunRow): string {
   return `${out.join("\n")}\n`;
 }
 
-/**
- * The run-environment banner above the node rows.
- *
- * Printed only while a run is PROVISIONING, which is the window where the node
- * rows say nothing useful: every node is pending because no lane has a machine,
- * and an operator watching a multi-minute `nix copy` sees an idle-looking
- * matrix. Once the lanes have landed, the rows ARE the run's state and the
- * banner would be noise.
- */
 function envLines(env: RunEnv): string[] {
   if (env.phase !== "provisioning") return [];
   const lines: string[] = [];
@@ -284,39 +183,12 @@ function envLines(env: RunEnv): string[] {
   return lines;
 }
 
-/** `status` answers a question about a RUN, so it spends the run exit table. */
 function statusExit(row: RunRow): number {
   if (row.state === "owner_lost") return WAIT_EXITS.ownerLost;
-  // A run still going is the ORDINARY case, not an outcome — see `frameExit`.
-  // `odu ci status` reports what is true now; a script shaped `odu ci status && …`
-  // must not be told "2" for a run that is simply in progress.
   if (!row.settled) return 0;
   return row.passed ? 0 : 1;
 }
 
-// ── odu ci attach ───────────────────────────────────────────────────────────
-
-/**
- * `odu ci attach` — the same run, followed until it stops moving.
- *
- * **The matrix is the same matrix.** `odu ci attach` in a terminal opens the live
- * view it always has — the node grid, `r` to rerun the focused node, the log
- * pane beside it — and NOTHING about that is allowed to change here. It used to
- * be fed by a direct dial into the coordinator's own surface, which is the
- * authority a public command may no longer hold; it is fed from the shared
- * service now, through `./liveFromService`. The plumbing moved. The view did
- * not, because a consolidation that costs a person their dashboard is a
- * consolidation that has taken something from them.
- *
- * Piped or `-o json`, it is the transition stream instead — every frame that
- * differs from the last. That is not a lesser fallback, it is the right thing
- * for a non-terminal: `createDisplay` has always chosen between live, plain and
- * json on exactly this basis, and the choice is made here for the same reason.
- *
- * Ctrl-C ends the WATCHING. The run is a detached process group with its
- * evidence in the catalog; interrupting here changes nothing about it, which is
- * the same asymmetry `odu ci run` keeps.
- */
 export async function attachViaService(opts: HereRunOpts): Promise<number> {
   const checkout = checkoutHere(opts.cwd);
   const p = patience(opts.origin, opts.json);
@@ -324,17 +196,12 @@ export async function attachViaService(opts: HereRunOpts): Promise<number> {
     opts.origin,
     (client) =>
       attachWith(client, checkout, p, {
-        // A TERMINAL GETS THE MATRIX. The same rule `createDisplay` has always
-        // applied: interactive when there is a tty to be interactive on, and
-        // the stream otherwise.
         live: !opts.json && process.stdout.isTTY === true ? attachLive : null,
       }),
     p.notice,
   );
 }
 
-/** `odu ci attach` against a client already in hand — the half a test drives.
- *  `live` is the matrix, or null for the transition stream. */
 export async function attachWith(
   client: HereClient,
   checkout: string,
@@ -348,11 +215,6 @@ export async function attachWith(
     checkout,
     p,
     async (row) => {
-      // The FIRST frame is bounded, whichever face follows: a run that is
-      // there to watch answers at once, and a service that does not answer is
-      // reported rather than left painting a blank terminal (juspay/odu#113).
-      // The bound rides the follow's own subscription (`watchNodes`' patience)
-      // rather than a probe beside it, so `attach` opens the stream once.
       try {
         return await (deps.live === null
           ? attachStream(client, row, p)
@@ -369,14 +231,12 @@ export async function attachWith(
   );
 }
 
-/** The transition stream — `attach` piped or under `-o json`. */
 async function attachStream(
   client: HereClient,
   row: RunRow,
   p: Patience,
 ): Promise<number> {
   let last = "";
-  // Same reason as the matrix below: a stream ending is not a run ending.
   const final = await watchNodes(client, row.runId, (frame) => {
     if (p.json) {
       emitJson({
@@ -387,11 +247,6 @@ async function attachStream(
         done: frame.done,
       });
     } else {
-      // Only what CHANGED reaches the terminal. A frame is only sent when
-      // something moved, but "something moved" includes a lane landing on a
-      // box, which does not change a single node row — so a face that
-      // printed every frame would repeat the matrix for a reason the reader
-      // cannot see.
       const painted = renderStatus(frame, row);
       if (painted !== last) {
         process.stdout.write(painted);
@@ -405,29 +260,15 @@ async function attachStream(
     );
     return 3;
   }
-  // The FINAL frame decides the exit, not the row we resolved at the start:
-  // by the time a follow ends, the row is minutes stale.
   return frameExit(final);
 }
 
-/**
- * The live dashboard, fed from the shared service.
- *
- * Every fact the view wants is on the surface: the node grid and the lane
- * roster from `streams.nodes` (its frame carries `env`), an attempt's output
- * from `log.read` with `waitMs`, and `r` from `run.retry`. `./liveFromService`
- * maps those onto the shapes `liveView` was written against, so there is one
- * matrix rather than two that have to be kept identical.
- */
 async function attachLive(
   client: HereClient,
   row: RunRow,
   p: Patience,
 ): Promise<number> {
   let latest: NodesFrame | undefined;
-  /** The focused node's log ADDRESS, from the frame that drew it — never
-   *  reassembled here. A face that built its own log key would be a second
-   *  spelling of an address the service already published. */
   const logKeyOf = (id: string): string =>
     latest?.nodes.find((n) => n.id === id)?.logKey ?? "";
 
@@ -435,10 +276,6 @@ async function attachLive(
     interactive: true,
     hookStderr: false,
     openLog: (id) => nodeLogStream(client, logKeyOf(id)),
-    // Fire-and-forget, as it always was: a refused retry shows up as the node
-    // not moving. What matters is that the call is DISPATCHED — an Effect that
-    // is merely described does nothing, which is how `r` once silently stopped
-    // working with nothing in the type system to say so.
     rerun: (id) => {
       void runUnary(
         client.surface.run.retry({
@@ -455,16 +292,9 @@ async function attachLive(
   });
 
   let started = false;
-  // Through `watchNodes`, so a momentary stall on a busy service does not close
-  // somebody's dashboard on a run that is still going. The view is idempotent
-  // per frame, and a re-subscribe opens with a snapshot, so a repaint is the
-  // whole cost.
   await watchNodes(client, row.runId, (frame) => {
     latest = frame;
     const state = pipelineStateOf(frame, row);
-    // The header BEFORE the first paint: a run attached to during provisioning
-    // — which is exactly when somebody reaches for a dashboard — would
-    // otherwise show the claiming line for its whole life.
     view.setHeader(headerOf(frame.env, Date.now()));
     if (!started) {
       view.start(state);
@@ -477,23 +307,6 @@ async function attachLive(
   return latest === undefined ? 3 : frameExit(latest);
 }
 
-/** The exit a finished frame earns, on the shared run table. */
-/**
- * What `status` and `attach` exit with — and it is NOT the run-shaped table.
- *
- * `WAIT_EXITS` numbers the states of a WAIT: passed, red, still going, owner
- * lost. `odu ci status` does not wait; it prints what is true now, and a run that
- * is still going is the ordinary case rather than an outcome. Reporting that as
- * `2` broke every script shaped `odu ci status && …`, including this repo's own
- * e2e helper, whose "is a run live here?" probe read any non-zero as "no" and
- * then waited two minutes for a run that had been up the whole time.
- *
- * So: `exitCode`'s rule, which is what these two commands shipped with — 1 for
- * a run that FINISHED and is not clean, 0 otherwise. `owner_lost` keeps its own
- * code because a coordinator that died without finalizing is neither, and it is
- * the one case where the previous implementation also failed (it could not dial
- * at all).
- */
 function frameExit(frame: NodesFrame): number {
   if (frame.state === "owner_lost") return WAIT_EXITS.ownerLost;
   return exitCode(verdictStateOf(frame, ""));

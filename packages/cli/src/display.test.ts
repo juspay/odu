@@ -78,9 +78,6 @@ const claimingHeader: RunHeader = {
   ],
 };
 
-/** `setHeader` is the ONE way a run environment reaches a face — `start` takes
- *  state alone — so a display can never be handed two headers to arbitrate
- *  between. These pin the two consequences on the plain face. */
 describe("PlainDisplay — the run environment arrives through setHeader", () => {
   it("banners the header delivered before start", async () => {
     const display = createDisplay("plain");
@@ -94,10 +91,6 @@ describe("PlainDisplay — the run environment arrives through setHeader", () =>
   });
 
   it("announces the end of provisioning whichever way it ends", async () => {
-    // The old rule diffed the rendered lane string and refused to announce an
-    // EMPTY one, so the claim-failure republish (a roster that resolved to no
-    // lanes at all) was silently swallowed and a captured CI log got no line
-    // marking the transition out of provisioning.
     const failed = createDisplay("plain");
     const { out: outFailed } = await capturingStdout(() => {
       failed.setHeader(claimingHeader);
@@ -105,8 +98,6 @@ describe("PlainDisplay — the run environment arrives through setHeader", () =>
       failed.setHeader({ ...claimingHeader, lanes: [] });
       failed.stop();
     });
-    // In the face's own words — `no_lanes` is the JSON contract's enum, not a
-    // sentence to print at an operator.
     expect(outFailed).toContain("odu · no lanes — the run got no machine");
     expect(outFailed).not.toContain("no_lanes");
 
@@ -134,9 +125,6 @@ describe("PlainDisplay — the run environment arrives through setHeader", () =>
   });
 });
 
-// The single projection `run` and `attach` share so their json/plain faces
-// can't drift (juspay/odu#4). The fields a node-status-only emitter used to
-// drop — recipe, platform, log — are what these lock down.
 describe("progressEvent", () => {
   it("carries recipe, platform, and the durable per-SHA log path", () => {
     const event = progressEvent(
@@ -156,8 +144,6 @@ describe("progressEvent", () => {
   it("maps NodeStatus to the external ProgressStatus wording", () => {
     const status = (s: NodeState["status"]): string | undefined =>
       progressEvent("3cbac86", `n@p`, node("n@p", s))?.status;
-    // `ok` surfaces as `success`, the wording a face that emitted the raw
-    // NodeStatus got wrong (issue #4, divergence #2/#3).
     expect(status("ok")).toBe("success");
     expect(status("failed")).toBe("failed");
     expect(status("errored")).toBe("errored");
@@ -180,12 +166,7 @@ describe("progressEvent", () => {
   });
 });
 
-// `stepFocus` is the matrix's hjkl navigation: `j`/`k` move down/up a platform
-// column (recipe rows), `h`/`l` left/right a recipe row (platform columns). It
-// reads only the node-id `order`, so it's exercised here without a live TTY.
 describe("stepFocus — hjkl matrix navigation", () => {
-  // The shared `state` fixture is a full 3×2 matrix: rows
-  // [_ci-setup, ci::install, ci::e2e] × columns [x86_64-linux, aarch64-darwin].
   const full = state.order;
 
   it("lands on the first node when nothing is focused yet", () => {
@@ -212,23 +193,17 @@ describe("stepFocus — hjkl matrix navigation", () => {
   });
 
   it("wraps around each axis", () => {
-    // k off the top recipe wraps to the bottom of the same column.
     expect(stepFocus(full, "_ci-setup@x86_64-linux", "k")).toBe(
       "ci::e2e@x86_64-linux",
     );
-    // j off the bottom recipe wraps back to the top.
     expect(stepFocus(full, "ci::e2e@x86_64-linux", "j")).toBe(
       "_ci-setup@x86_64-linux",
     );
-    // With two columns, h and l from a row both reach the other column.
     expect(stepFocus(full, "_ci-setup@x86_64-linux", "h")).toBe(
       "_ci-setup@aarch64-darwin",
     );
   });
 
-  // A recipe (`linux-only`) that runs on just one platform leaves a `°` gap in
-  // the darwin column — navigation must skip those holes, never focusing a cell
-  // with no node behind it.
   const sparse = [
     "a@x86_64-linux",
     "linux-only@x86_64-linux",
@@ -238,12 +213,10 @@ describe("stepFocus — hjkl matrix navigation", () => {
   ];
 
   it("skips missing cells when stepping down a column", () => {
-    // j from a@darwin skips the absent linux-only@darwin to land on c@darwin.
     expect(stepFocus(sparse, "a@aarch64-darwin", "j")).toBe("c@aarch64-darwin");
   });
 
   it("returns undefined when no other cell exists along the axis", () => {
-    // linux-only has no darwin cell, so l/h off it find nothing.
     expect(stepFocus(sparse, "linux-only@x86_64-linux", "l")).toBeUndefined();
     expect(stepFocus(sparse, "linux-only@x86_64-linux", "h")).toBeUndefined();
   });
@@ -255,8 +228,6 @@ describe("stepFocus — hjkl matrix navigation", () => {
   });
 
   it("returns the original id for lane-local ids without an `@`", () => {
-    // A bare id splits to the `unknown` platform sentinel; stepping must return
-    // the stored id verbatim, not a reconstructed `b@unknown`.
     expect(stepFocus(["a", "b"], "a", "j")).toBe("b");
     expect(stepFocus(["a", "b"], "b", "k")).toBe("a");
   });

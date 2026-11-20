@@ -1,20 +1,3 @@
-/**
- * The WALL, enforced — what this package is allowed to import.
- *
- * Same instrument as the other members carry, and deliberately a SIBLING
- * rather than a shared helper: each package must be able to state its own
- * closure from inside its own directory, because that directory is the unit
- * the boundary is about. A guard imported from a neighbour is a guard that
- * only reaches as far as the neighbour does.
- *
- * What this one asserts: the arrow to the engine runs one way. The renderer
- * and terminal packages in this manifest are exactly what an engine must not
- * carry, which is why the two are separate walls at all.
- *
- * The walk is a PARSE, not a line scan, and TYPE-ONLY EDGES COUNT — see the
- * `@odu/run-client` twin for both arguments.
- */
-
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -28,23 +11,14 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned as a literal set: every entry is a wall this package leans on, and
- *  the renderer/terminal entries are exactly what the engine must not carry. */
 const EXPECTED_DEPENDENCIES = ["@effect/platform-node", "@modelcontextprotocol/sdk", "@odu/auth", "@odu/cache", "@odu/cloudflare", "@odu/cordis", "@odu/execution", "@odu/launch", "@odu/run-client", "@odu/run-history", "@odu/service", "@odu/service-client", "@opentui/core", "@xterm/headless", "effect"];
 
-/** The `@kolu/*` sources hydrated from a Nix pin rather than installed. */
 const HYDRATED = new Set<string>([
   "@kolu/surface",
-  // `@kolu/surface-mcp` is what the `odu mcp` bridge's adapter is built from.
   "@kolu/surface-mcp",
-  // `surface-cli` projects the service contract as argv (`odu surface …`).
-  // The LISTENER and the daemon spine — `surface-app`, `surface-daemon`, the
-  // supervisor, `surface-remote`, `osfacts-client` — left with the daemon root
-  // for `@odu/host`, so they are no longer this package's to hydrate.
   "@kolu/surface-cli",
 ]);
 
-/** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
 function tsFilesUnder(dir: string): string[] {
@@ -61,15 +35,12 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
-/** Every module specifier a consumer's compiler would have to resolve: static
- *  imports and re-exports (`import type` included), `import x = require("…")`,
- *  dynamic `import()`, and `import("…").T` in type position. */
 function specifiersIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
+    false,
     ts.ScriptKind.TS,
   );
   const out: string[] = [];
@@ -98,7 +69,6 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
-/** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@")
@@ -158,9 +128,6 @@ describe("@odu/cli's import closure", () => {
   });
 
   it("is the only side of the wall that knows about the other", () => {
-    // cli -> execution, and never back. Asserted from BOTH sides so a cycle
-    // introduced from either direction lands here: this package DOES import
-    // the engine, and the engine's own closure test refuses to import this.
     const usesEngine = sources.some(({ specifiers }) =>
       specifiers.some((s) => packageOf(s) === "@odu/execution"),
     );

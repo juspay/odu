@@ -1,39 +1,3 @@
-/**
- * `odu surface …` — the service, projected as argv.
- *
- * `@kolu/surface-cli` derives every command from the same surface and the same
- * `expose` map the MCP face reads, so `run_start` is one verb with one name and
- * one input shape in a terminal and to an agent. Nothing here is hand-written
- * per verb; what IS written here is the three things only odu knows: where to
- * dial, what the page says, and how the whole thing is mounted.
- *
- * ## Why it is mounted under a parent of its own
- *
- * `surfaceCommands` claims four subcommand names beside the verbs — `get`,
- * `keys`, `watch`, `list` — and each sibling row claims its own word. Mounting
- * the projection at the root would put those in the same namespace as odu's
- * rows, where `cache` already means the cache's shell-native verbs and `list`
- * would mean something about any member of any surface. `odu surface` takes no
- * names from anybody, which is exactly what the framework's own reference
- * recommends.
- *
- * ## The exits are the framework's, and that is the point
- *
- * A caller cannot tell "CI failed" from "odu is not running" by reading text,
- * so the two are different exits — and neither is invented here:
- *
- *   0   the call was answered, INCLUDING an answer that reports red CI
- *   1   odu declared a refusal (one JSON line on stderr)
- *   2   a usage error that never left this process
- *   3   nothing is serving — run `odu web --background`
- *   130 interrupted; the run carries on
- *
- * `odu ci wait`'s own exits are DIFFERENT and deliberately so: that command
- * answers a question about CI, so it spends its exit codes on CI's answer. This
- * face answers a question about a CALL, so it spends them on the call. Two
- * vocabularies, each internally consistent, and the docs' CLI reference says which is which.
- */
-
 import {
   buildSurfaceFace,
   type SurfaceClientCallable,
@@ -63,10 +27,6 @@ import { ODU_SERVICE_EXPOSE } from "@odu/service-client/verbs";
 import { Effect } from "effect";
 import { Command, Flag } from "effect/cli";
 
-/** The one flag this face adds. Defaulted from the environment so the common
- *  case is no flag at all, and named `--origin` rather than `--url` because it
- *  is the SERVICE's address, not one endpoint of it: the websocket route and
- *  the MCP route are both derived from it. */
 const endpointFlags = {
   origin: Flag.String("origin").pipe(Flag.withDefault(serviceOrigin())),
 };
@@ -75,30 +35,12 @@ const endpoint: EndpointSeam<typeof endpointFlags> = {
   flags: endpointFlags,
   resolve: (values): Effect.Effect<ResolvedEndpoint> =>
     Effect.succeed({
-      // What a FAILED dial reports, which is exactly when there is no
-      // connection left to ask. Named beside the thunk that opens it so the
-      // resolution order is walked once.
       where: values.origin,
       open: async (): Promise<SurfaceCliConnection> => {
-        // BOOTSTRAP, not just dial. On a fresh machine there is no daemon, and
-        // this face holds no run authority of its own — so "nothing is serving"
-        // used to be the end of the story for a first-time caller. It starts
-        // one and uses it, and it NEVER recovers a failed dial by doing the
-        // work locally.
-        //
-        // Only when the caller meant the singleton: `connectOrStart` starts
-        // nothing for an explicitly named `--origin`, so a typo reports that
-        // nothing is serving there rather than spawning a daemon that could not
-        // bind the address anyway.
         const connection = await connectToService(values.origin, {
           needs: EVERY_ROW_NEEDS,
         });
         return {
-          // THE ROOTED BUNDLE, over the one dispatch: the runs as the
-          // unprefixed core and the cache as the sibling its commands mount
-          // under. Both faces are `buildSurfaceFace` over the SAME dispatch —
-          // the projection holds them opaquely, so it wants two differently
-          // typed views of one connection rather than a second connection.
           client: {
             core: buildSurfaceFace(
               oduServiceSurface,
@@ -106,22 +48,12 @@ const endpoint: EndpointSeam<typeof endpointFlags> = {
             ) as unknown as SurfaceClientCallable,
             clients: composedClients(SERVICE_SIBLINGS, connection.dispatch),
           },
-          // Required, not optional: a CLI dials, does one thing and exits, and
-          // the one failure that costs a user something is a socket left open
-          // in a shell loop.
           dispose: () => connection.dispose(),
         };
       },
     }),
 };
 
-/**
- * How `odu surface` describes itself.
- *
- * Grouped by WHAT A CALLER IS DOING rather than by member kind, because the
- * loop this face exists to serve is a sequence — start, wait, diagnose, retry —
- * and a page sorted by "tools then resources" would scatter it.
- */
 const help: SurfaceCliHelp = {
   command: "surface",
   purpose:
@@ -159,20 +91,6 @@ const help: SurfaceCliHelp = {
     "service and could not, and says why.",
 };
 
-/**
- * EVERY SIBLING THE WIRE KNOWS, each under the key the daemon mounts it at —
- * `odu surface cache bucket_create`, `odu surface auth user_grant`,
- * `odu surface cloudflare status_read`. The framework names a sibling's
- * commands from that same key, which is why this word and the MCP tools'
- * prefix are one word.
- *
- * DERIVED FROM `SIBLING_ROWS`, not listed. It used to be the literal
- * `{ [CACHE_KEY]: CACHE_AGENT }`, so `auth` and `cloudflare` were reachable to
- * an agent over MCP (whose bridge reads the daemon's roster) and to nobody in
- * a terminal — which went unnoticed only because both rows still had argv
- * faces of their own. They do not: administration is the board and this
- * projection, so a row missing here is a row with no terminal at all.
- */
 const projectedSiblings = Object.fromEntries(
   SIBLING_ROWS.flatMap((row) => (row.key === null ? [] : [[row.key, row.agent] as const])),
 );
@@ -185,7 +103,6 @@ const projection = {
   info: { name: "odu" },
 } as const;
 
-/** The `odu surface` command tree. */
 function oduSurfaceFace() {
   return Command.make("surface").pipe(
     Command.withDescription(surfaceHelp(projection)),
@@ -194,20 +111,15 @@ function oduSurfaceFace() {
 }
 
 /**
- * Run the projection, and never come back.
- *
  * The Effect CLI runtime owns the process edge for this face — it writes the
  * failure's own line, maps the verdict to an exit code, and exits — which is
  * why this returns a promise that never settles rather than a code for odu's
- * own `exitAfterFlush`. Two owners of one exit is one too many, and the
- * framework's is the one that knows which of the five codes above applies.
+ * own `exitAfterFlush`.
  *
- * `reportingRunEdge` is not garnish: every failure this face raises carries
- * `errorReported = false` (its line is its own, and Effect's pretty cause dump
- * on top would land on STDOUT, in the middle of the data), so a host that
- * re-failed without writing that line would exit with the right code and say
- * NOTHING. `disableErrorReporting` is the other half — without it the runtime
- * prints a second, differently-worded report of the same failure.
+ * Every failure this face raises carries `errorReported = false`, so a host
+ * that re-failed without writing that line would exit with the right code and
+ * say NOTHING. `disableErrorReporting` is the other half — without it the
+ * runtime prints a second, differently-worded report of the same failure.
  */
 export function surfaceCliMain(argv: readonly string[]): Promise<number> {
   NodeRuntime.runMain(

@@ -1,19 +1,3 @@
-/**
- * The TUI's log pane, driven against a scripted service.
- *
- * `odu ci attach`'s pane and `odu ci logs -f` read the same verb through the same
- * three facts, and for a while they disagreed about what those facts mean. The
- * pane ended on `!open` alone, which is the loss `followLog.test.ts` documents
- * for the CLI, arriving one layer over: a read is bounded, so a producer that
- * finishes after appending more than one page hands back a page with
- * `open: false` and unread bytes behind it. The pane drew the first of them and
- * closed.
- *
- * That is the whole diagnosis a person opened the pane to read, thrown away.
- * Both faces call `logHasMore` now, and this is the assertion that says so for
- * this one — including the reviewer's own probe, which is the first case below.
- */
-
 import { describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import type { LogPage, OduServiceClient } from "@odu/service-client/surface";
@@ -26,8 +10,6 @@ const KEY = "0mtr-abc/ci~3A~3Aunit~40x86_64-linux/1";
 
 type ReadInput = { key: string; offset?: number; waitMs?: number };
 
-/** A service answering `log.read` from a script, recording what it was asked —
- *  the recorded offsets are the cursor's whole story. */
 function scripted(pages: readonly (LogPage | ServiceRefused)[]): {
   client: Pick<OduServiceClient, "surface">;
   asked: ReadInput[];
@@ -69,7 +51,6 @@ function page(over: Partial<LogPage> & Pick<LogPage, "text" | "offset">): LogPag
   } as LogPage;
 }
 
-/** Every frame the pane would draw, in order. */
 async function frames(
   client: Pick<OduServiceClient, "surface">,
 ): Promise<NodeLogFrame[]> {
@@ -83,10 +64,6 @@ async function frames(
 
 describe("the TUI's log pane", () => {
   it("drains a closed log that still has unread bytes", async () => {
-    // THE REPRODUCTION, verbatim: the first page says the log can no longer
-    // grow and that this read did not reach its end. Ending there made one
-    // call, emitted FIRST, and closed — losing FINAL, which is the line
-    // somebody opened the pane for.
     const { client, asked } = scripted([
       page({ text: "FIRST", offset: 0, size: 10, open: false, eof: false }),
       page({ text: "FINAL", offset: 5, size: 10, open: false, eof: true }),
@@ -109,14 +86,11 @@ describe("the TUI's log pane", () => {
 
     const seen = await frames(client);
 
-    // One read, because there was nothing else to ask for.
     expect(asked).toHaveLength(1);
     expect(seen.map((f) => f.kind)).toEqual(["snapshot", "end"]);
   });
 
   it("keeps following a log that is still open at its end", async () => {
-    // `eof` with `open` is the ordinary live case: caught up, and more coming.
-    // A pane that stopped here would go blank on every quiet moment.
     const { client } = scripted([
       page({ text: "so far", offset: 0, open: true, eof: true }),
       page({ text: " and more", offset: 6, open: false, eof: true }),
@@ -131,16 +105,8 @@ describe("the TUI's log pane", () => {
   });
 
   it("starts over when the attempt was re-run underneath it", async () => {
-    // A rerun rewrites the log in place, so the file can be SHORTER than the
-    // cursor. `snapshot` is what tells the pane to replace rather than append —
-    // appending would show the tail of a different attempt as a continuation of
-    // this one.
     const { client, asked } = scripted([
       page({ text: "old output", offset: 0, open: true, eof: true }),
-      // Shorter than the cursor: the read clamped, and the offset coming back
-      // BELOW what was asked for is the only signal a rewrite happened. This
-      // page is discarded and the cursor reset, so the next read is the one
-      // whose bytes reach the pane.
       page({ text: "ignored", offset: 0, size: 3, open: true, eof: true }),
       page({ text: "new", offset: 0, size: 3, open: false, eof: true }),
     ]);
@@ -148,9 +114,6 @@ describe("the TUI's log pane", () => {
     const seen = await frames(client);
 
     expect(asked.map((a) => a.offset)).toEqual([undefined, 10, 0]);
-    // TWO snapshots, and the second is the point: `snapshot` tells the pane to
-    // REPLACE, so the rewritten log shows as itself rather than as more of the
-    // old one. An `append` here would read as one attempt's output twice.
     expect(seen.map((f) => f.kind)).toEqual(["snapshot", "snapshot", "end"]);
     const last = seen.filter((f) => f.kind === "snapshot").at(-1);
     expect(last !== undefined && "text" in last ? last.text : "").toBe("new");

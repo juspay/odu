@@ -1,19 +1,3 @@
-/**
- * `odu ci status`, `odu ci attach` and `--run <address>` — resolved through ONE
- * bounded `run.list`, against a scripted service.
- *
- * These faces used to read the whole board a row per round trip and filter it
- * here, with nothing bounding the wait and nothing on screen while it lasted;
- * on a 710-run catalog `odu ci attach` sat blank for minutes (juspay/odu#113).
- * What is pinned below is the part a scripted service can state on cue: which
- * query each face sends, what it makes of the one row that comes back, and
- * what it says when the service accepts the call and then answers nothing.
- *
- * Stand-ins cannot see a wrong cast on the wire — `serviceFace.ts`'s history
- * says so twice — which is why `tests/e2e/catalog-scale.e2e.test.ts` drives the
- * same commands against the real binary.
- */
-
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,9 +70,6 @@ function frame(over: Partial<NodesFrame> = {}): NodesFrame {
   } as NodesFrame;
 }
 
-/** A service answering `run.list` with `rows` (filtered by nothing — the
- *  script IS the answer) and `nodes.get` with `nodes`, recording each query
- *  and counting each node-stream subscription. */
 function scripted(opts: {
   rows?: readonly RunRow[];
   nodes?: Stream.Stream<NodesFrame>;
@@ -146,7 +127,6 @@ async function captured(
   }
 }
 
-/** Quiet patience: no tty, so no waiting line unless a test asks for one. */
 const quiet = (json = false, deadlineMs?: number) =>
   patience("http://127.0.0.1:1", json, {
     tty: false,
@@ -170,8 +150,6 @@ describe("odu ci status through run.list", () => {
   });
 
   it("has nothing to show when the newest run has expired", async () => {
-    // Not "fall back to an older run": the newest is the one that happened
-    // here last, and retention having taken its evidence is the answer.
     const { client } = scripted({
       rows: [row({ state: "expired" }), row({ runId: "older" })],
     });
@@ -198,8 +176,6 @@ describe("odu ci status through run.list", () => {
   });
 
   it("reports a first nodes frame that never comes, bounded, as exit 3", async () => {
-    // The service is there and silent — the #113 shape. Before, nothing
-    // bounded this and the terminal stayed blank.
     const { client } = scripted({ rows: [row()], nodes: Stream.never });
     const { code, err } = await captured(() =>
       statusWith(client, CHECKOUT, quiet(false, 30)),
@@ -236,7 +212,6 @@ describe("odu ci attach through run.list", () => {
     let painted = false;
     const { code, err } = await captured(() =>
       attachWith(client, CHECKOUT, quiet(false, 30), {
-        // What `attachLive` does with the patience it is handed.
         live: async (c, r, p) => {
           await watchNodes(c, r.runId, () => {
             painted = true;
@@ -247,14 +222,10 @@ describe("odu ci attach through run.list", () => {
     );
     expect(code).toBe(3);
     expect(err).toContain("did not answer");
-    // The matrix never painted on a service that had not answered.
     expect(painted).toBe(false);
   });
 
   it("opens the node stream ONCE, and follows it", async () => {
-    // Not a probe and then the follow: the bound rides the subscription that is
-    // kept, so a service that answers a probe and stalls on the second
-    // subscription cannot leave the terminal blank.
     const { client, opened } = scripted({ rows: [row()] });
     const { code, out } = await captured(() =>
       attachWith(client, CHECKOUT, quiet(true), { live: null }),
@@ -359,7 +330,6 @@ describe("resolveRunAddress through run.list", () => {
       expect(code).toBe(4);
       expect(JSON.parse(out)).toMatchObject({ error: "unknown_run", run: address });
     }
-    // Only the well-formed ref was worth a round trip.
     expect(asked).toEqual([{ sha: "abcdef1", seq: 2, limit: 1 }]);
 
     const outside = tmp();

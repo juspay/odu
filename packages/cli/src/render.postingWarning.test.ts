@@ -1,15 +1,3 @@
-/**
- * The owed-statuses banner — moved here with the function it tests.
- *
- * `postingWarning` used to live in `@odu/execution/coordinator/statuses`, and
- * its tests with it. It is a pure function of `PostingHealth` with no authority
- * in it, and its only caller is a terminal — so keeping it beside the GitHub
- * poster meant the live matrix imported the coordinator's poster to format one
- * sentence, which is how `odu ci attach` came to drag the engine into a public
- * client. The import wall refused it, correctly, and the fix was to put the
- * rendering where the renderings are.
- */
-
 import { describe, expect, it } from "bun:test";
 import { EMPTY_POSTING } from "@odu/run-client/surface";
 import { postingWarning } from "./render";

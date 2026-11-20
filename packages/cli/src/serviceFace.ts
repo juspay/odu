@@ -1,39 +1,3 @@
-/**
- * WHAT A TERMINAL FACE IS ALLOWED TO BE — the plumbing every public command
- * shares, and nothing else.
- *
- * There are four client modules now (`./serviceCommands` for runs,
- * `./serviceStatus` for one checkout's live run, `./serviceVenue` for the
- * machines, `./servicePipeline` for a checkout's recipes and its branch
- * protection), and they exist because those are four different subjects, not
- * because they are four different authorities. This module is what makes that
- * true: the connection, the three-way outcome, the refusal rendering and the
- * exit table live HERE, once, so a face cannot quietly decide that a refusal
- * means something different to it than to its neighbour.
- *
- * That is not a tidiness argument. Before the consolidation, `odu ci wait` and the
- * MCP face disagreed about whether a red run was an error, and they disagreed
- * because each had written its own answer. One copy of this file is the
- * structural reason that cannot happen again.
- *
- * ## What a client is still allowed to know
- *
- * Two things, and both are about the CALLER rather than about a run:
- *
- *   - **which checkout the person is standing in** — `git rev-parse` in the
- *     cwd. The service addresses runs globally and takes `checkout` as an
- *     explicit absolute path precisely so no face has to guess; resolving
- *     "here" into that path is this side's job and cannot be anywhere else.
- *   - **which commit they mean** — `HEAD`, sent as `expectedSha` so the service
- *     can REFUSE a checkout that has moved on rather than quietly running a
- *     different commit.
- *
- * Both are reads of the caller's own working directory through `git` itself.
- * Neither is run authority, and `./authority.test.ts` is what keeps the
- * distinction honest: nothing reachable from a public command may import the
- * engine, the catalog store, or the coordinator dial.
- */
-
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -63,26 +27,6 @@ import { CI_NEEDS, isCommitPrefix, ServiceRefused } from "@odu/service-client/su
 import { Effect, type Stream } from "effect";
 import { connectToService, SERVICE_WIRE_GROUP } from "./wire";
 
-// ── exits ───────────────────────────────────────────────────────────────────
-
-/**
- * What a command that answers a question about CI exits with.
- *
- * Unchanged from the durable faces these replace, and deliberately so: the
- * table is a published contract that scripts branch on, and re-pointing a
- * command at a different authority is not a reason to renumber what its answer
- * means. `odu surface`'s exits are DIFFERENT and also unchanged — that face
- * answers a question about a CALL, so it spends its codes on the call.
- *
- * | exit | meaning | what to do next |
- * | --- | --- | --- |
- * | 0 | settled, and it passed | nothing |
- * | 1 | there is a failure to act on | read the failures, fix, retry |
- * | 2 | still going, nothing red yet | ask again with the returned cursor |
- * | 3 | its coordinator is gone and it never finalized | start a new run |
- * | 4 | no such run, or its evidence expired | check `odu ci history list` |
- * | 5 | the request itself was refused | read the refusal; resync if offered |
- */
 export const WAIT_EXITS = {
   passed: 0,
   failed: 1,
@@ -92,50 +36,24 @@ export const WAIT_EXITS = {
   refused: 5,
 } as const;
 
-/** Which exit a refusal earns. `unknown_run` and `expired` are facts about the
- *  RUN and keep the run-shaped exit a caller already branches on; everything
- *  else is a fact about the REQUEST. */
 export function refusalExit(code: string): number {
   return code === "unknown_run" || code === "expired"
     ? WAIT_EXITS.unknownRun
     : WAIT_EXITS.refused;
 }
 
-/** The one place an answer about attention becomes an exit, so every face that
- *  reports one reports the same number for the same state. */
 export function waitExitFor(answer: AttentionAnswer): number {
-  // INCOMPLETE IS NOT A PASS. `outcome` is the three-way — passed, failed,
-  // incomplete — and `passed` is the two-way that cannot express the third. A
-  // run whose only non-ok node was CANCELLED has no red node, so `passed` reads
-  // true and the exit was 0: `odu ci cancel @platform` on the only lane reported
-  // success for a pipeline that never finished.
   if (answer.settled) {
     return answer.outcome === "passed" ? WAIT_EXITS.passed : WAIT_EXITS.failed;
   }
-  // A red node is a failure whether or not the slow lanes have finished — the
-  // run cannot pass from here. Reporting it as "still running" would be true
-  // and useless: the caller has something to act on, and the exit is how it
-  // finds that out without parsing the payload.
   if (answer.failures.length > 0 || answer.actionable) return WAIT_EXITS.failed;
   if (answer.reason === "owner_lost") return WAIT_EXITS.ownerLost;
   return WAIT_EXITS.stillRunning;
 }
 
-// ── the connection ──────────────────────────────────────────────────────────
-
-/** Do one thing with the service and let go, answering with a process exit.
- *
- *  `dispose` is not bookkeeping: the link holds the dial, ping and response
- *  fibers, and a command that dropped it would be a process that never exits.
- *
- *  The return is a `number` rather than a generic because every caller is a
- *  COMMAND, and a command's answer is its exit code — which is also what lets
- *  a failure to reach the service be reported as an exit rather than escaping
- *  as a rejection. See {@link dial}. */
 export async function withService(
   origin: string | undefined,
   use: (client: OduServiceClient) => Promise<number>,
-  /** Wraps the dial so a slow one says so — see {@link Patience}. */
   notice: Patience["notice"] = (work) => work,
 ): Promise<number> {
   const dialled = await notice(dial(origin));
@@ -147,25 +65,10 @@ export async function withService(
   }
 }
 
-/**
- * Reach the service, or turn the failure into an EXIT rather than a rejection.
- *
- * `connectOrStart` rejects when it cannot dial and cannot start — an occupied
- * port, a misbuilt package, a daemon that will not come up. Left to reject, it
- * unwound to `src/main.ts`'s catch-all, which prints the message and exits 1 —
- * the code this file's own table reserves for "there is a failure to act on",
- * i.e. red CI. A script branching on that exit would have read "your tests
- * failed" from a machine where odu never started, which is the single most
- * misleading answer available.
- *
- * Exit 3 is the honest one and it is already the documented "nothing serving".
- */
 async function dial(
   origin: string | undefined,
 ): Promise<ServiceConnection | number> {
   try {
-    // The board and nothing else: a daemon whose cache moved is still one
-    // these commands can drive.
     return await connectToService(origin ?? serviceOrigin(), { needs: CI_NEEDS });
   } catch (err) {
     process.stderr.write(`${errorMessage(err)}\n`);
@@ -173,19 +76,6 @@ async function dial(
   }
 }
 
-/**
- * Run one procedure, keeping THREE outcomes apart.
- *
- * A procedure's declared error channel is `ServiceRefused`, but the wire adds
- * its own arm: a call can also fail because the link died under it. Those are
- * different facts and a caller must not act on them the same way — a refusal is
- * odu declining, with a code to branch on and often a recovery; a transport
- * failure is the service going away mid-call, which says nothing about the run
- * and leaves the mutation's outcome unknown.
- *
- * Collapsing the second into the first is how "the daemon was upgraded while I
- * was waiting" gets reported as "odu refused your request".
- */
 export async function call<A>(
   effect: Effect.Effect<A, unknown>,
 ): Promise<
@@ -201,9 +91,6 @@ export async function call<A>(
     : { ok: false, refusal: null, error: failure };
 }
 
-/** Is this the service declining, or the wire dying? `_tag` is the schema's own
- *  discriminator, checked rather than assumed: anything else on this channel is
- *  a transport failure wearing whatever shape the link gave it. */
 export function isRefusal(value: unknown): value is ServiceRefused {
   return (
     typeof value === "object" &&
@@ -212,9 +99,6 @@ export function isRefusal(value: unknown): value is ServiceRefused {
   );
 }
 
-/** What a transport failure exits with, and what it says. Exit 3 is the
- *  documented "nothing serving" code and it is the honest one here: whatever
- *  was serving is not serving this call. */
 export function reportLost(error: unknown, json: boolean): number {
   const message =
     `odu: the service went away mid-call — ${errorMessage(error)}. Whether it ` +
@@ -225,7 +109,6 @@ export function reportLost(error: unknown, json: boolean): number {
   return 3;
 }
 
-/** Report a refusal the way its own shape asks to be reported, and exit. */
 export function reportRefusal(refusal: ServiceRefused, json: boolean): number {
   if (json) {
     emitJson({
@@ -239,9 +122,6 @@ export function reportRefusal(refusal: ServiceRefused, json: boolean): number {
     });
   } else {
     process.stderr.write(`${refusal.message}\n`);
-    // A refusal with a ROUTE. A cursor that cannot be honoured is the one
-    // moment a caller is guaranteed to be confused, and "resync with this exact
-    // command" beats an error it has to interpret.
     if (refusal.resync !== undefined) {
       process.stderr.write(`  resync: ${refusal.resync}\n`);
     }
@@ -252,24 +132,11 @@ export function reportRefusal(refusal: ServiceRefused, json: boolean): number {
   return refusalExit(refusal.code);
 }
 
-/** The one shape both failure arms collapse to at a command's edge. Every
- *  command ends `if (!x.ok) return reportFailure(x, json)`, so no face can
- *  invent a fourth way of reporting the same two things. */
 export function reportFailure(
   outcome:
     | { ok: false; refusal: ServiceRefused }
     | { ok: false; refusal: null; error: unknown },
   json: boolean,
-  /**
-   * What a REFUSAL exits with, for a command the run-shaped table is not about.
-   *
-   * {@link WAIT_EXITS} numbers the states of a RUN — passed, red, still going,
-   * owner lost. `odu ci protect` and `odu ci graph` have none of those: they either
-   * did the thing or did not, which is `0` and `1`, and that is the contract
-   * they shipped with. Routing their refusals through `refusalExit` renumbered
-   * "protect found no platforms" from 1 to 5 — a script's error branch, moved
-   * for no reason its author could see.
-   */
   refusalIs?: number,
 ): number {
   if (outcome.refusal === null) return reportLost(outcome.error, json);
@@ -277,50 +144,21 @@ export function reportFailure(
   return refusalIs ?? reported;
 }
 
-/** One complete JSON value, one write, nothing else on stdout. An agent piping
- *  `-o json` through a shell gets a parseable line without `stdbuf`, and that
- *  is a property of where the bytes go rather than of the terminal. */
 export function emitJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-/** ONE LINE, no indentation — for a stream of values rather than a single
- *  answer.
- *
- *  `emitJson` pretty-prints, which is right for a command that emits one object
- *  and wrong for a follow: `odu ci logs -f -o json` promised NDJSON in its own
- *  comment, in the usage text and in the docs, and emitted an indented object
- *  spanning many lines per page. An agent reading it line by line got fragments
- *  that do not parse. */
 export function emitJsonLine(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
-// ── what the caller meant ───────────────────────────────────────────────────
-
-/** The checkout the caller is standing in, and the commit it is on. A read of
- *  the caller's own cwd through git — see the module header on why this, and
- *  only this, stays on the client's side. */
 export interface Here {
   checkout: string;
   sha: string;
 }
 
-/**
- * The checkout a RUN is about, and whether this shell is the world it happens
- * in.
- *
- * `mine` is not "did the caller pass `--checkout`": it is the answer that flag
- * was a proxy for, decided once in {@link runTarget}. Every per-caller fact
- * that only holds for a run in this shell's own world — `$ODU_HOSTS`'s
- * "my shell has none" reading, today — reads THIS rather than the flag, so the
- * two can never say different things about one run.
- */
 export interface RunTarget extends Here {
   mine: boolean;
-  /** The branch the SERVICE's clone should be on for {@link Here.sha}, when
-   *  the caller said so. Absent means today's rule: a clone that is not
-   *  already on that commit is refused rather than moved. */
   branch?: string;
 }
 
@@ -344,9 +182,6 @@ export function here(cwd: string = process.cwd()): Here {
   return { checkout, sha };
 }
 
-/** Just the checkout, for the verbs whose subject is a directory rather than a
- *  commit — `pipeline.read`, `catalog.import`, `venue.hold`. Asking for a
- *  commit there would refuse a perfectly good checkout with no history. */
 export function checkoutHere(cwd: string = process.cwd()): string {
   const checkout = git(["rev-parse", "--show-toplevel"], cwd);
   if (checkout === null) {
@@ -355,43 +190,6 @@ export function checkoutHere(cwd: string = process.cwd()): string {
   return checkout;
 }
 
-/**
- * WHICH CHECKOUT, AND WHICH COMMIT, a run is about — here, or over there.
- *
- * `odu ci run` with no flags means "this checkout, at HEAD", and that is a read
- * of the caller's own cwd ({@link here}). `--checkout` means something else
- * entirely: a path on the SERVICE's machine, which this process cannot see, has
- * no business resolving, and must therefore send verbatim.
- *
- * Three refusals, and each exists because the alternative is a run against
- * something nobody named:
- *
- *   - **`--sha` is REQUIRED with `--checkout`.** `expectedSha` is the strict
- *     gate: the service compares what the CALLER believes against the HEAD it
- *     reads, and refuses a checkout that has moved on. A `--checkout` without
- *     one would have to borrow this laptop's HEAD (a different repository's
- *     commit) or let the service fill in its own — which is the gate comparing
- *     a value against itself and passing for ever.
- *   - **`--checkout` needs a service NAMED.** The check is naming, not
- *     distance: an explicit `--origin http://127.0.0.1:18440` is accepted, and
- *     so it should be — a developer with two daemons on one machine means the
- *     one they named. What is refused is the DEFAULT, where naming a path the
- *     caller is not standing in is at best what `cd` already does. Whether the
- *     environment NAMES one is `namedOrigin`'s rule and not a second copy of
- *     it here: one reader asks "where do I dial" and gets the default, this
- *     one asks "did anybody say", and two spellings of the trim-and-empty
- *     test would answer `$ODU_WEB_ORIGIN="  "` differently.
- *   - **`--branch` is only meaningful with `--checkout`.** It licenses the
- *     SERVICE to move its own clone onto that branch at `--sha`. There is no
- *     such licence to give for the checkout you are standing in — odu never
- *     moves it — so the flag alone is a usage error rather than a no-op.
- *
- * It answers `mine` as well as the pair, because "is this shell the run's
- * world" is decided HERE and nowhere else. A caller re-deriving it from the
- * flag would be a second source for one fact — and the two can disagree, since
- * `--checkout $PWD --origin <this daemon>` is a path in the caller's own world
- * that the flag calls elsewhere.
- */
 export function runTarget(
   opts: {
     checkout?: string;
@@ -434,9 +232,6 @@ export function runTarget(
         `Pass --origin <url>, or export $${SERVICE_ORIGIN_ENV}.`,
     );
   }
-  // VERBATIM, all three. The path is resolved where it exists, the commit is
-  // read where the path is, and the branch is a ref in that clone's remote;
-  // this side knows none of them and must not pretend to.
   return {
     checkout: opts.checkout,
     sha: opts.sha,
@@ -445,53 +240,18 @@ export function runTarget(
   };
 }
 
-/**
- * A request id, when the caller did not bring one.
- *
- * Mandatory on every mutation, because a lost reply must be answerable: repeat
- * the SAME id and the service replays the receipt it already wrote. A caller
- * that lets us mint one gets exactly-once for the call it is making now and
- * nothing more — which is right for a person at a terminal, who will look at
- * the board if a command dies mid-flight. An agent brings its own.
- */
 export function requestId(given: string | undefined): string {
   return given ?? `cli-${randomUUID()}`;
 }
 
-// ── waiting on the service ──────────────────────────────────────────────────
-
-/**
- * How long a command waits for the service's FIRST answer — a run listing, or
- * a run's opening nodes frame — before it says the service is not answering.
- *
- * Nothing bounded that wait before, and juspay/odu#113 is what that cost: a
- * daemon whose loop was pinned by its own poller accepted the connection and
- * then answered nothing for minutes, and `odu ci attach` sat on a blank terminal
- * with no way to tell "slow" from "hung". Ten seconds is far beyond any healthy
- * answer, which is a single in-memory scan, and short enough that a person
- * learns something is wrong while they are still looking.
- *
- * Only the FIRST answer: a follow that has started is bounded by
- * {@link watchNodes}' own deadline, and a run that is simply long is not slow.
- */
 export const FIRST_ANSWER_MS = 10_000;
 
-/** How long a command stays silent before saying it is waiting. Below this a
- *  line would flash for an answer that was about to arrive anyway. */
 export const FEEDBACK_AFTER_MS = 250;
 
-/**
- * How a command waits: bounded, and not in silence.
- *
- * One per command, so the waiting line is printed AT MOST ONCE however many
- * steps (the dial, the listing, the first frame) turn out to be slow.
- */
 export interface Patience {
   origin: string;
   json: boolean;
   deadlineMs: number;
-  /** Resolve with `work`, writing the waiting line to stderr if it is still
-   *  pending after the threshold — and nothing otherwise. */
   notice: <T>(work: Promise<T>) => Promise<T>;
 }
 
@@ -501,14 +261,11 @@ export function patience(
   opts: {
     afterMs?: number;
     deadlineMs?: number;
-    /** Whether a person is watching stderr. Injected by tests. */
     tty?: boolean;
     write?: (text: string) => void;
   } = {},
 ): Patience {
   const at = origin ?? serviceOrigin();
-  // Never under `-o json` and never into a pipe: the line is for a person, and
-  // a consumer parsing output should not have to know it might appear.
   const speaks = !json && (opts.tty ?? process.stderr.isTTY === true);
   const write = opts.write ?? ((text: string) => void process.stderr.write(text));
   const afterMs = opts.afterMs ?? FEEDBACK_AFTER_MS;
@@ -533,8 +290,6 @@ export function patience(
   };
 }
 
-/** The service accepted us and then said nothing in time. Exit 3, the
- *  documented "nothing serving" — whatever is there is not serving THIS. */
 export function reportNoAnswer(p: Patience, what: string): number {
   const message =
     `odu: the service at ${p.origin} did not answer ${what} within ` +
@@ -546,26 +301,8 @@ export function reportNoAnswer(p: Patience, what: string): number {
   return WAIT_EXITS.ownerLost;
 }
 
-/** A question the service answered, or one already reported to the user with
- *  the exit it earned. One shape for every step a command threads through, so
- *  a caller passes the failure on (`if (!x.ok) return x.exit`) without
- *  remembering which step spelled its success arm how. */
 export type Answered<T> = { ok: true; value: T } | { ok: false; exit: number };
 
-// ── finding runs ────────────────────────────────────────────────────────────
-
-/**
- * The board, filtered by the service — ONE round trip, bounded.
- *
- * This replaced reading the `runs` collection a row at a time (`keys`, then a
- * `get` per key) and filtering here. That was one round trip per run in the
- * catalog to name a single one of them, on every `odu ci status`, `attach`,
- * `--run latest` and `history list` — 711 of them on the host that reported
- * juspay/odu#113. The filters did not move to the service because it should
- * know where the caller stands (it still does not: `checkout` is a path this
- * side resolved and sends as data), but because a filter that runs where the
- * rows are is one message, and one that runs here is all of them.
- */
 export async function findRuns(
   client: Pick<OduServiceClient, "surface">,
   query: ListInput,
@@ -581,8 +318,6 @@ export async function findRuns(
   return { ok: false, exit: reportFailure(answered, p.json) };
 }
 
-/** A run's opening nodes frame, bounded the same way. `undefined` is still a
- *  stream that opened and said nothing — a different fault from no answer. */
 export async function firstNodesFrame(
   client: Pick<OduServiceClient, "surface">,
   runId: string,
@@ -601,44 +336,14 @@ export async function firstNodesFrame(
   }
 }
 
-/**
- * THE THREE WAYS TO NAME A RUN, resolved in one place.
- *
- * `odu ci wait`, `odu ci rerun`, `odu ci cancel` and `odu ci history show` all
- * refuse a missing `--run` with the same sentence: "a run id, `<sha7>#<seq>`,
- * or `latest`". Two of those three spellings did not resolve anywhere — the
- * grammar was promised by the error message and implemented by nobody, so
- * `odu ci wait --run latest` exited 4 with "no run latest in the catalog" against
- * a run that had just finished in the directory the caller was standing in.
- *
- * A promise made by a refusal is still a promise, and this is where it is kept.
- *
- *   - a RUN ID passes through untouched — it is already the global address, and
- *     resolving it here would mean a listing on every command that has one;
- *   - `latest` is the newest run OF THIS CHECKOUT. Deliberately not the newest
- *     run in the catalog: the catalog is per user, and a person standing in one
- *     repository who types `latest` means the thing they just started, not
- *     whatever another worktree began a second later;
- *   - `<sha7>#<seq>` is the seq-th run recorded at that commit — the spelling
- *     `odu ci history list` prints, so what is on the screen can be typed back.
- *     Global, newest first, like the catalog's own `resolveRunRef`.
- */
 export async function resolveRunAddress(
   client: Pick<OduServiceClient, "surface">,
   address: string,
   cwd: string,
   p: Patience,
 ): Promise<Answered<string>> {
-  // EXIT 4, not a throw, on every arm that names nothing. An unresolvable
-  // address is a fact about the QUESTION, which is what exit 4 means in this
-  // file's table — and a throw would unwind to `main.ts` and exit 1, the code
-  // reserved for "your CI is red". A script branching on that would report a
-  // test failure for a run it could not name.
   const parsed = parseRunAddress(address);
   switch (parsed.kind) {
-    // A run id passes through WITHOUT a listing. The service is the authority
-    // on whether it exists and refuses it properly; resolving it here would
-    // buy nothing and cost a round trip on every `odu ci wait`.
     case "id":
       return { ok: true, value: parsed.runId };
     case "latest": {
@@ -672,17 +377,6 @@ export async function resolveRunAddress(
   }
 }
 
-/**
- * One command that takes `--run <address>`: its patience, its connection and
- * the address resolved, as ONE preamble.
- *
- * `odu ci wait`, `rerun`, `cancel` and `history show` each spelled these three
- * steps out, with the origin passed twice and the waiting line's `notice`
- * threaded to the dial by hand — so a fifth such command could build its
- * patience and forget to hand it to the dial, and nothing would say so.
- * Commands whose subject is not a run address (`status`, `attach`, `list`,
- * `logs`) keep calling {@link withService} directly.
- */
 export function withRunAt(
   opts: { origin?: string; json: boolean; run: string; cwd?: string },
   use: (client: OduServiceClient, runId: string) => Promise<number>,
@@ -698,8 +392,6 @@ export function withRunAt(
   );
 }
 
-/** A `<sha7>#<seq>` that named nothing — well-formed and unmatched, or not a
- *  ref at all; the same fact either way (see {@link RunAddress}). */
 function noRunAtRef(address: string, json: boolean): number {
   return unknownRun(
     address,
@@ -709,15 +401,10 @@ function noRunAtRef(address: string, json: boolean): number {
   );
 }
 
-/** The run-address grammar as a value — parsed once, so the resolver switches on
- *  what was typed rather than re-asking the string at every step. */
 export type RunAddress =
   | { kind: "id"; runId: string }
   | { kind: "latest" }
   | { kind: "ref"; sha: string; seq: number }
-  // A ref that cannot name a run is UNKNOWN, not refused: the grammar is this
-  // face's, so a malformed one is the same fact as a well-formed one nothing
-  // matches — and worth no round trip.
   | { kind: "malformed" };
 
 export function parseRunAddress(address: string): RunAddress {
@@ -731,20 +418,12 @@ export function parseRunAddress(address: string): RunAddress {
     : { kind: "malformed" };
 }
 
-/** Report an address that named no run, in whichever voice the caller asked
- *  for — the same `{error, message, run}` shape the service's own `unknown_run`
- *  refusal emits, so a JSON consumer branches on one thing. */
 function unknownRun(address: string, message: string, json: boolean): number {
   if (json) emitJson({ error: "unknown_run", message, run: address });
   else process.stderr.write(`${message}\n`);
   return WAIT_EXITS.unknownRun;
 }
 
-/** The head of a stream, through the shared Effect edge rather than a local
- *  loop: `firstFrame` and `subscribe` are where the laziness, teardown and
- *  interruption rules for a surface stream live, and a face that re-derived
- *  them would get one of the three wrong. `undefined` is a stream that ended
- *  without a frame — never a plausible-looking empty answer. */
 export async function firstFrame<A>(
   stream: Stream.Stream<A, unknown>,
 ): Promise<A | undefined> {
@@ -765,15 +444,6 @@ export function formatAgo(deltaMs: number): string {
   return "now";
 }
 
-/**
- * THIS shell's `$ODU_HOSTS`, as `run.start` takes it.
- *
- * The service is a per-user singleton somebody else may have started, and
- * `loadHosts` runs in the coordinator it spawns — so a variable that is not
- * carried here is a variable that stopped working the moment `odu ci run` became
- * a client. `""` is an answer, not a gap: it says this shell has none, which
- * is different from an agent's silence.
- */
 export function hostsFileHere(cwd: string | undefined): string {
   const raw = process.env.ODU_HOSTS;
   if (raw === undefined || raw === "") return "";
@@ -781,26 +451,12 @@ export function hostsFileHere(cwd: string | undefined): string {
 }
 
 /**
- * ONE RUN'S NODE STREAM, FENCED — the only way this package opens one.
- *
- * A bare `client.surface.nodes.get(…)` is an unfenced stream, and the framework
- * is explicit about what that costs: `fenceStream` is where transparent
+ * The only way this package opens a run's node stream. A bare
+ * `client.surface.nodes.get(…)` is an unfenced stream, and the framework is
+ * explicit about what that costs: `fenceStream` is where transparent
  * re-subscribe lives, and a call that skips it "silently loses the reconnect
- * context". Silently is the word that matters. A retryable transport hiccup —
- * a busy machine, a momentary stall on the socket — does not raise; it ENDS the
+ * context". A retryable transport hiccup does not raise; it ENDS the
  * iteration, and every consumer here reads that as "the stream is over".
- *
- * The three consumers then each reported something false. `odu ci run
- * --progress json` stopped emitting events for a run that was still going and
- * exited `2`; `odu ci status` said "the service opened this run's node stream
- * and sent no frame"; `odu ci attach` closed the matrix on a live run. All
- * three intermittent, all three under load, which is exactly when a fence
- * earns its keep — the e2e suite lost a different one of them on each
- * platform, on the same commit.
- *
- * `label` is the liveness registry's name for the subscription, spelled in
- * `client.health()`'s vocabulary so a diagnostic snapshot says which run's
- * stream is parked rather than "(unlabeled)".
  */
 export function nodesStream(
   client: Pick<OduServiceClient, "surface">,
@@ -815,35 +471,17 @@ export function nodesStream(
 }
 
 /**
- * EVERY FRAME OF A RUN, until it says it is done.
- *
- * A stream ENDING is not evidence about the run, and treating it as evidence is
- * the bug this exists to remove. A link can end under a live run — a daemon
- * busy with several live coordinators can go quiet past the keep-alive
- * backstop (60–65s, `@kolu/surface/keepAlive`; the websocket leg then cycles
- * its socket), or send a frame that does not decode — and the subscription
- * is INTERRUPTED. `endOnInterrupt` turns that into a clean end of iteration —
- * correctly, because an interrupt is not an error — and every consumer here
- * then concluded the run was over. `odu ci run --progress json` stopped emitting
- * events mid-run and exited 2; `odu ci attach` closed the matrix on a live run.
+ * A link can end under a live run — a daemon busy with several live
+ * coordinators can go quiet past the keep-alive backstop (60–65s,
+ * `@kolu/surface/keepAlive`; the websocket leg then cycles its socket), or
+ * send a frame that does not decode — and the subscription is INTERRUPTED.
+ * `endOnInterrupt` turns that into a clean end of iteration, correctly,
+ * because an interrupt is not an error.
  *
  * The fence (`nodesStream`) handles a retryable FAILURE. It cannot handle this
  * one: `Stream.retry` retries failures, and an interrupt is not one. So the
  * loop is here, where the only fact that ends a watch is the one the service
  * states — a frame with `done`.
- *
- * `sawDone` rather than a count: re-subscribing is cheap and idempotent (a
- * stream opens with a snapshot, and every consumer of this dedupes), while
- * stopping early is a wrong answer about somebody's CI. The deadline exists so
- * a service that has gone away entirely cannot hold a terminal forever.
- *
- * `patience` bounds the FIRST frame — across re-subscribes, on the subscription
- * that is then kept — and rejects with {@link NoAnswerWithin} when it does not
- * come (juspay/odu#113). On THIS stream rather than on a probe beside it: a
- * probe that answered proved nothing about the second subscription the follow
- * then opened, and cost `odu ci attach` two stream opens on the path it exists to
- * make cheap. After the first frame the follow is unbounded but for
- * `deadlineMs` — a long run is not a slow one.
  */
 export async function watchNodes(
   client: Pick<OduServiceClient, "surface">,
@@ -874,25 +512,17 @@ export async function watchNodes(
         if (frame.done) return frame;
       }
     } finally {
-      // Hand-advanced, so released by hand — what `for await … return` did.
       void sub.return?.();
     }
     trace(`watch ${runId}: stream ended without a verdict`);
-    // Still no first frame, and its bound is spent: re-subscribing would only
-    // hide a service that is not answering behind one that is slow.
     if (p !== undefined && firstBy !== undefined && last === undefined && Date.now() >= firstBy) {
       throw new NoAnswerWithin(p.deadlineMs);
     }
-    // The stream ended without saying the run had. Re-subscribe — unless the
-    // clock says nobody is coming back.
     if (Date.now() >= until) return last;
     await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_MS));
   }
 }
 
-/** The iterator's next result, or {@link NoAnswerWithin} once `by` passes. The
- *  caller releases the subscription; a `next()` that loses the race settles
- *  into the interrupt that release issues, never into an unhandled rejection. */
 async function nextBy<T>(
   sub: AsyncIterator<T>,
   by: number,
@@ -912,15 +542,8 @@ async function nextBy<T>(
   }
 }
 
-/** How long to wait before re-opening a watch that ended without a verdict.
- *  Short: the common cause is a momentary stall on a busy service, and the
- *  subscription that replaces it opens with a fresh snapshot. */
 const RESUBSCRIBE_MS = 250;
 
-/** A line on stderr under `$ODU_DEBUG`, and nothing otherwise. The subscription
- *  faults this exists to diagnose are invisible by construction — an interrupt
- *  is not an error and a parked retry says nothing at all — so the only way to
- *  see one is to have asked for it. */
 function trace(message: string): void {
   if (process.env.ODU_DEBUG !== undefined && process.env.ODU_DEBUG !== "") {
     process.stderr.write(`odu[debug] ${message}\n`);

@@ -1,14 +1,3 @@
-/**
- * THE ADDRESS `odu ci run` HANDS OUT, read back by the thing that opens it.
- *
- * The printer and the reader are two halves of one spelling (`runHash` ·
- * `parseRunHash` in `@odu/service-client/routes`), and this line is the only
- * place a terminal mints one. It printed `<origin>/runs/<id>` for a while —
- * a bare pathname the board answers with its run LIST — so the assertion is
- * not on the text but on the round trip: whatever is printed must parse back
- * to the run it is about.
- */
-
 import { describe, expect, it } from "bun:test";
 import { parseRunHash } from "@odu/service-client/routes";
 import type { StartReceipt } from "@odu/service-client/surface";
@@ -30,7 +19,6 @@ function receipt(extra: Partial<StartReceipt> = {}): StartReceipt {
   };
 }
 
-/** The one printed line that carries a URL. */
 function address(out: string): string {
   const found = out
     .split("\n")

@@ -1,9 +1,3 @@
-/**
- * Minimal ANSI styling — no deps, auto-disabled when stdout isn't a TTY or
- * `NO_COLOR` is set (so `bun test`, `run.sh`-captured logs, and `--progress
- * json` consumers always see plain bytes).
- */
-
 const enabled =
   process.stdout.isTTY === true &&
   process.env.NO_COLOR === undefined &&
@@ -32,9 +26,6 @@ export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "");
 }
 
-/** OSC 8 terminal hyperlink — modern terminals (incl. xterm.js with the
- *  web-links addon, i.e. kolu's own panes) render `text` clickable. Plain
- *  passthrough off-TTY, like every style here. */
 export function link(text: string, url: string): string {
   return enabled ? `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\` : text;
 }

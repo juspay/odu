@@ -1,28 +1,3 @@
-/**
- * THE WIRE — every row's tags in one group, for a CLIENT to encode against.
- *
- * A link encodes a request from the `Rpc` it looks up by TAG, so a client that
- * addressed a sibling's member through a link built from the core's group alone
- * would find no descriptor for it and fail on the frame it was trying to send.
- * The daemon serves one flat group; a face must address one.
- *
- * ## Why this is a module and not a line in the dial
- *
- * `@odu/service-client`'s dial is browser-safe and knows only the core. The
- * siblings' contracts belong to their own packages, and this package is a ROW:
- * it names the cache's SURFACE — a declared door of another row, which is what
- * the fence allows — and nothing of that row's server. A row that adds a surface
- * adds it here; `packages/host/src/fence.test.ts` asserts that the keys the
- * browser, this argv face and the daemon's roster all use are one word.
- *
- * ## What it is NOT
- *
- * The `control` sibling. It exists on the wire — the daemon's supervisor probes
- * it — but no face sends one of its tags, and a face that could would be able to
- * drain a daemon it has no business ending. A client addresses what it is
- * allowed to address.
- */
-
 import { composedWire } from "@odu/cordis/compose";
 import type { RowFacts } from "@odu/cordis/services";
 import {
@@ -39,65 +14,24 @@ import { authorizationHeaders } from "@odu/auth/credentials";
 import { connectOrStart } from "@odu/launch/webLauncher";
 import type { ServiceConnection } from "@odu/service-client/dial";
 
-/**
- * THE ROWS SERVED BESIDE THE RUNS, named ONCE — each row's own facts, read off
- * its surface module. Everything below is derived from this list: the sibling
- * surfaces, the group a link encodes against, what the composed faces need, and
- * which of them the `odu mcp` bridge advertises.
- * A second list was a row that could be added to one and forgotten in another.
- */
 export const SIBLING_ROWS: ReadonlyArray<RowFacts> = [
   CACHE_ROW,
   AUTH_ROW,
   CLOUDFLARE_ROW,
-  // THE HOST'S OWN FRAGMENT, served as a sibling because that is what it is on
-  // the wire: `odu surface metrics token_mint` reaches it exactly as the
-  // cache's token verbs are reached. Its facts come from `@odu/cordis` rather
-  // than from a row's package — the host mounts it, and the host is the one
-  // package a row may not import.
   METRICS_ROW,
 ];
 
-/** Each sibling's surface, under the key it is served at. */
 export const SERVICE_SIBLINGS = Object.fromEntries(
   SIBLING_ROWS.map((row) => [row.key as string, row.agent.surface]),
 );
 
-/**
- * ONE FLAT GROUP: the runs' bare tags plus each sibling's prefixed ones,
- * composed by the framework's own counted merge — so a tag two rows both spell
- * is a boot-time error naming both, rather than a last-writer-wins map that
- * drops one in silence.
- */
 export const SERVICE_WIRE_GROUP = composedWire(oduServiceSurface, SERVICE_SIBLINGS);
 
-/**
- * WHAT THE COMPOSED FACES READ — `odu surface`, the `odu mcp` bridge and the
- * board `odu web` hands out each project every row the daemon mounts: the runs
- * always, each sibling when it is there (the board draws no control for a row
- * `/_odu/rows` does not list — the cache included).
- *
- * Every other command declares only its own row (`odu ci run` the runs, `odu
- * cache` the cache — each row's `*_NEEDS`), so a daemon whose cache moved a
- * major is still one `odu ci run` can drive.
- */
 export const EVERY_ROW_NEEDS: RowNeeds = {
   ...CI_NEEDS,
   ...Object.fromEntries(SIBLING_ROWS.map((row) => [row.name, ifMounted(row.contract)])),
 };
 
-/**
- * REACH THE SERVICE AS THE CREDENTIAL THIS MACHINE HOLDS FOR IT.
- *
- * The one way a public command should dial, so nobody has to remember it: a
- * server with a door answers an unauthenticated socket with its identity and
- * nothing else, and a face that forgot the token would look like a board with
- * no data rather than like a refusal. `$ODU_TOKEN` first, then the entry
- * `odu auth login` wrote for that origin — the same order the docs promise.
- *
- * `needs` is what the calling command reads; a daemon is adopted on those rows
- * and no others.
- */
 export function connectToService(
   origin: string | undefined,
   opts: { needs: RowNeeds; warned?: Set<string> },

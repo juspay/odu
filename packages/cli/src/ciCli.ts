@@ -1,50 +1,3 @@
-/**
- * `odu ci` — the runs' row, projected as argv.
- *
- * THE ROW OWNS ITS WORD. `odu cache` is the cache's argv face and lives in the
- * cache's package; these are the runs', and they live here, in the package the
- * manifest already marks `"cordis": { "row": "ci" }`. They used to BE the top
- * level of `odu`, from the days when a run was the only thing odu did — which
- * left the root naming one row's fifteen verbs beside every other row's single
- * word, and made "which row is `odu protect`?" a question only the source
- * answered.
- *
- * EVERY command here is a CLIENT of the shared `odu web` daemon, which owns
- * execution, retry policy, the run catalog, the venue inventory, pipeline
- * resolution and every coordinator dial. The commands contribute argument
- * grammar, rendering and exit codes, and nothing else. They bootstrap the
- * service if none is running, and they never fall back to doing the work
- * locally: a second authority is exactly what this arrangement exists to
- * remove. `./authority.test.ts` derives the set it polices from the imports
- * that reach here, so a command cannot be exempted by forgetting to list it.
- *
- *   odu ci run [recipe[@platform]…]        start a run here, watch it, and push
- *                                          what it builds to the cache the repo
- *                                          already reads from (PLAN 4.1)
- *                                          (Ctrl-C stops WATCHING, not the run)
- *   odu ci wait [--run R]                  bounded, resumable attention
- *   odu ci rerun [--run R] <selector>      retry; odu decides live vs replay
- *   odu ci cancel [--run R] [node|@plat]   stop a run, a node, or a lane
- *   odu ci logs <log-key> [-f]             one attempt's bytes, by its key
- *   odu ci history <list|show|import|prune>  the per-user run catalog
- *   odu ci status / attach                 this checkout's newest live run
- *   odu ci hosts / lease / release         venue inventory and holds
- *   odu ci dump / graph                    the resolved pipeline
- *   odu ci protect                         required status checks
- *
- * Runs are addressed GLOBALLY, by run id, so `wait`, `rerun` and `cancel`
- * take `--run` and work from any directory about any run — `odu ci history
- * list` is where you find an id. Omitting it means `latest`: the newest run of
- * THIS checkout, which is what these three have always meant when typed bare
- * and is a default rather than a second addressing scheme.
- *
- * Strict by default: refuses a dirty tree, pins HEAD via `git worktree`,
- * posts commit statuses under `<recipe>@<platform>` contexts, splits logs
- * into `.ci/<sha>/<platform>/<recipe>.log`. Opt-outs: `--no-post` (strict,
- * no GitHub writes), `--no-snapshot` (live tree, implies --no-post),
- * `--no-strict` (≡ both — the dev-iteration one-flag opt-out).
- */
-
 import { parseArgs } from "node:util";
 import { LOG_STREAMS, type LogStream } from "@odu/service-client/surface";
 import {
@@ -139,11 +92,6 @@ http://127.0.0.1:18440). A named origin is dialled and only dialled: odu starts
 a service for you only when you meant the default one.
 `;
 
-/** A flag's integer value, or a usage error naming the flag.
- *
- *  `Number("")` is 0 and `Number(" 5 ")` is 5, so a bare `Number` would read a
- *  truncated `--offset=` as "from the beginning" and a typo as a value. A
- *  digits-only parse refuses what the flag cannot have meant. */
 function integer(flag: string, raw: string): number {
   const trimmed = raw.trim();
   if (!/^-?\d+$/.test(trimmed)) {
@@ -164,12 +112,6 @@ function positiveInt(flag: string, raw: string): number {
   return value;
 }
 
-/** `--stream`'s value, checked against the contract's own list.
- *
- *  Checked HERE rather than left to the service's schema because the answer a
- *  typo deserves is the list of what exists, said by the thing that took the
- *  word — a wire-level validation failure names a schema a caller of `odu ci
- *  logs` never wrote and cannot see. */
 function logStream(raw: string): LogStream {
   const found = LOG_STREAMS.find((one) => one === raw);
   if (found === undefined) {
@@ -190,9 +132,6 @@ prune [--days N] [--dry-run] [-o json]
                                      expire finished runs past the window (30d)
 `;
 
-/** `odu ci history` — the per-user catalog's own commands. A sub-command group
- *  rather than four more verbs of the row: these are all about the CATALOG,
- *  and the rest of `odu ci` is about a RUN. */
 async function historyCommand(
   sub: string | undefined,
   rest: string[],
@@ -208,10 +147,6 @@ async function historyCommand(
           output: { type: "string", short: "o" },
         },
       });
-      // The BOARD, filtered to this checkout unless `--all`. It reads the
-      // service's `runs` collection rather than walking the catalog: the
-      // catalog is the service's to read, and a second reader is a second
-      // answer to "what runs do I have".
       return listViaService({
         json: values.output === "json",
         all: values.all ?? false,
@@ -286,42 +221,13 @@ async function historyCommand(
   }
 }
 
-/**
- * THE RUN A BARE COMMAND IS ABOUT.
- *
- * `odu wait`, `odu rerun` and `odu cancel` took no run at all before runs
- * became globally addressed: they meant the one in this checkout, which is
- * what somebody standing in a repository means when they type `odu cancel`.
- * Making `--run` mandatory turned that gesture into a usage error.
- *
- * `latest` is that gesture, spelled in the new grammar — the newest run OF
- * THIS CHECKOUT (see `resolveRunAddress`). A run id is still accepted, and now
- * so is another checkout's, which is the capability the addressing bought.
- */
 const HERE_AND_NOW = "latest";
 
-/**
- * THE ROW'S DOOR: one word, then its verb.
- *
- * `sub` is what followed `odu ci` and `rest` is everything after that, so each
- * command body reads exactly as it did when these were the top level.
- */
 export async function ciCommand(
   sub: string | undefined,
   rest: string[],
 ): Promise<number> {
   switch (sub) {
-    /**
-     * `odu run` — start a run through the service, then watch it.
-     *
-     * It no longer runs CI. `run.start` is the whole of the mutation; what
-     * follows is observation, and Ctrl-C ends the observation rather than the
-     * run. There is deliberately NO local-execution branch when the daemon is
-     * unreachable: `connectOrStart` starts one, and a face that could fall back
-     * to running the pipeline itself would be the second authority this whole
-     * consolidation exists to remove — reappearing exactly where it is least
-     * visible, at the moment the shared service is unreachable.
-     */
     case "run": {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -330,13 +236,8 @@ export async function ciCommand(
           platform: { type: "string", multiple: true },
           host: { type: "string", multiple: true },
           root: { type: "string" },
-          // THE RUN'S SUBJECT, when it is not this checkout: a path on the
-          // SERVICE's machine and the commit the caller believes is on it.
-          // Parsed as a pair and refused as a pair — see `runTarget`.
           checkout: { type: "string" },
           sha: { type: "string" },
-          // And the branch that clone should be ON, which licenses the
-          // service to fetch and move it there. Refused without `--checkout`.
           branch: { type: "string" },
           "no-deps": { type: "boolean" },
           "no-strict": { type: "boolean" },
@@ -351,12 +252,6 @@ export async function ciCommand(
           output: { type: "string", short: "o" },
         },
       });
-      // `--progress json` is a FROZEN contract that `/do` and kolu's CI parse.
-      // It was the coordinator's flag while `odu run` WAS the coordinator, and
-      // when this verb became a client it went to `run-coordinator` and nothing
-      // put it back — so every caller passing it got `parseArgs` throwing on an
-      // unknown option and an immediate exit 1. Same spelling, same events, now
-      // read off the service's own node stream.
       if (values.progress !== undefined && values.progress !== "json") {
         throw new Error(`odu: unknown --progress format "${values.progress}"`);
       }
@@ -396,17 +291,6 @@ export async function ciCommand(
         json: values.output === "json",
       });
     }
-    /**
-     * `odu logs <key>` — one attempt's bytes, addressed by the key a failure
-     * handed you.
-     *
-     * The addressing changed with the authority. It used to take a NODE id and
-     * mean "in this checkout's live run" — which is only nameable if the face
-     * is allowed to dial that checkout's socket. A log key is host-global and
-     * self-contained, so this command works from anywhere, about any run, and
-     * an agent echoes the key `run_wait` gave it rather than reassembling a run,
-     * a node and an attempt into an address.
-     */
     case "logs": {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -440,9 +324,6 @@ export async function ciCommand(
         ...(values["wait-ms"] === undefined
           ? {}
           : { waitMs: positiveInt("--wait-ms", values["wait-ms"]) }),
-        // ONE KEY, TWO STREAMS. The key still addresses the attempt; the flag
-        // says which of its two logs to read, and absent is the recipe's — so
-        // every `odu ci logs <key>` ever typed still means what it meant.
         ...(values.stream === undefined
           ? {}
           : { stream: logStream(values.stream) }),
@@ -467,16 +348,6 @@ export async function ciCommand(
         json: values.output === "json",
       });
     }
-    /**
-     * `odu wait [--run R]` — bounded, resumable attention on one run.
-     *
-     * A run id is host-global, so this works from any directory about any run,
-     * and `odu history list` is how you find one. Bare `odu wait` still means
-     * what it always meant — the run in this checkout — but it means it through
-     * the CATALOG now rather than by dialling that checkout's socket, which is
-     * the authority change. `latest` is the spelling of it, and it therefore
-     * also answers about a run whose coordinator has gone.
-     */
     case "wait": {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -486,9 +357,6 @@ export async function ciCommand(
           run: { type: "string" },
           after: { type: "string" },
           "deadline-ms": { type: "string" },
-          // The spelling `odu wait` had before the deadline was a service
-          // parameter. Kept, because scripts are written against it and a flag
-          // that used to work is not a thing to remove in passing.
           "timeout-ms": { type: "string" },
           "expected-sha": { type: "string" },
           origin: { type: "string" },
@@ -500,10 +368,6 @@ export async function ciCommand(
           "odu: wait takes no positional arguments (use --run / --after / --settle)",
         );
       }
-      // One deadline, two spellings. `--deadline-ms` is the name the service
-      // parameter has; `--timeout-ms` is what this command took before there
-      // was a service. Naming both is not ambiguity — it is the same number —
-      // so the second is read only when the first is absent.
       const deadline =
         values["deadline-ms"] !== undefined
           ? positiveInt("--deadline-ms", values["deadline-ms"])
@@ -522,15 +386,6 @@ export async function ciCommand(
         json: values.output === "json",
       });
     }
-    /**
-     * `odu rerun --run R SELECTOR` — retry, and let odu decide what that means.
-     *
-     * The policy is the service's: a coordinator still up gets a new attempt on
-     * the same run, one that is gone gets a fresh linked replay, and the receipt
-     * says which in `mode`. This face used to bind `packagedLauncher()` and make
-     * that decision itself — a second retry policy, in a CLI, that the browser
-     * and the agent could not see.
-     */
     case "rerun": {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -548,20 +403,7 @@ export async function ciCommand(
           "odu: rerun needs exactly one argument (node id, @platform, or recipe)",
         );
       }
-      // `--expect-attempt` guards against acting on a stale reading, so it has
-      // to name WHICH node it is about — and the only node it can name is the
-      // selector, because there is nowhere else to put one.
-      //
-      // So it is refused for a selector that is not a node id. `odu rerun` also
-      // takes `@platform` and a bare recipe name, both of which can match
-      // several nodes; the guard looks its argument up as a node id, finds
-      // nothing, and the service refuses `stale_attempt` — a refusal about a
-      // run that has moved on, for a request that was merely unaskable. A usage
-      // error naming the reason is the honest answer.
       const target = positionals[0];
-      // `indexOf("@") > 0`, not `includes("@")`: a node id is
-      // `<namepath>@<platform>`, and a LANE selector is `@<platform>` — which
-      // contains an `@` and names no node at all.
       if (values["expect-attempt"] !== undefined && target.indexOf("@") <= 0) {
         throw new Error(
           `odu: --expect-attempt names one node's attempt, but "${target}" is ` +
@@ -587,15 +429,6 @@ export async function ciCommand(
         json: values.output === "json",
       });
     }
-    /**
-     * `odu cancel --run R [node|@platform]` — stop a run, a node, or a lane.
-     *
-     * Through the service, which dials the coordinator and PROVES it is the run
-     * the caller named before it mutates anything. That check is not a nicety:
-     * a checkout serves one run after another on one socket path, so the window
-     * where a dead run's recorded address and a live run's actual address are
-     * the same string is real — and this face used to dial that path directly.
-     */
     case "cancel": {
       const { values, positionals } = parseArgs({
         args: rest,
@@ -613,9 +446,6 @@ export async function ciCommand(
         );
       }
       const target = positionals[0];
-      // Three EXPLICIT scopes, never a precedence rule. A request that could be
-      // read two ways is how somebody who meant to stop one node stops the
-      // whole run, so the ambiguity is not expressible.
       const scope =
         target === undefined
           ? ({ kind: "run" } as const)
@@ -712,13 +542,6 @@ export async function ciCommand(
           output: { type: "string", short: "o" },
         },
       });
-      // A BLANK `--platform=` IS A USAGE ERROR, refused here.
-      //
-      // It has to be refused where the argument was typed. Left to the
-      // service, it comes back as a refusal — exit 5, "the request itself was
-      // refused" — and a malformed argument is not that: nothing was asked of
-      // odu that odu declined. It is exit 1, the same as every other unusable
-      // argv, which is what it was before `protect` became a client.
       if ((values.platform ?? []).some((p) => p.trim() === "")) {
         throw new Error(
           "odu: --platform expects a Nix system tuple (e.g. x86_64-linux), " +
