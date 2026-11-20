@@ -1,10 +1,7 @@
-# Odu CI: both e2e suites exercise the Nix-built application.
-
 set working-directory := '..'
 
 nix_shell := if env('IN_NIX_SHELL', '') != '' { '' } else { 'nix develop --accept-flake-config -c' }
 
-# The default devshell has no browsers; use the e2e shell unless they are present.
 nix_shell_e2e := if env('PLAYWRIGHT_BROWSERS_PATH', '') != '' { '' } else { 'nix develop .#e2e --accept-flake-config -c' }
 
 [parallel]
@@ -15,7 +12,6 @@ install:
     {{ nix_shell }} bun install --frozen-lockfile
     {{ nix_shell }} sh scripts/hydrate-pins.sh
 
-# The site, by the same two recipes a contributor runs: `astro check` and the
 # docs lint, then the build and the link check. No OS attribute, as `nixos-module`.
 website:
     just website-check website-linkcheck
@@ -38,16 +34,6 @@ e2e-web: install nix
     cd packages/web-acceptance
     ODU_BIN="$odu" {{ nix_shell_e2e }} bun run test
 
-# THE NIXOS MODULE, booted: two VMs, a real nginx, a real `nix copy` through it.
-#
-# NOT `[linux]`, and that is a correction the darwin lane made: `just` EXCLUDES a
-# recipe whose OS attribute does not match the host, and `default` depends on
-# this one, so `[linux]` made every darwin node fail before it started with
-# "recipe `default` has unknown dependency `nixos-module`". The attribute is a
-# runtime check instead, which keeps the dependency resolvable everywhere and
-# makes the skip a line in the lane's log rather than a silent green.
-#
-# On x86_64-linux the host has `/dev/kvm`: ~41 s warm, ~63 s when the VM image
 # has to be built. Without KVM the same test runs under TCG and takes minutes.
 nixos-module:
     #!/usr/bin/env bash
@@ -61,26 +47,6 @@ nixos-module:
 fmt:
     {{ nix_shell }} nixpkgs-fmt --check *.nix nix/*.nix nix/packages/*.nix
 
-# THE FLAKE'S OUTPUTS — and odu's own dogfood of what 4.1 and 4.2 ship.
-#
-# `--out-link result-<output>` rather than `--no-link`, one build per output so
-# each link says what it holds. THE OUT-LINK IS THE PUSH: when this recipe
-# exits 0 the lane globs `result*` in the directory it ran in — the workspace
-# root, since this module sets `working-directory := '..'` — and sends each
-# closure to the odu cache `flake.nix` already reads from (`kolu-r2`). Odu
-# asked every other repository to declare one line and build for its cache; it
-# builds for its own by the same rule, with nothing in this file naming a
-# bucket or holding a token.
-#
-# `odu:pin` KEEPS THAT CLOSURE past retention, and only on the repository's
-# DEFAULT branch: the bare attribute names no ref, so the coordinator reads
-# `origin/HEAD` out of the checkout and a run on master re-points
-# `juspay/odu@master/<system>` at what this recipe just pushed. The odu a
-# developer substitutes is held however long nobody asks for it, while a run
-# on a branch pushes exactly the same paths and pins nothing — and the day
-# this repository renames its trunk the attribute follows rather than going
-# stale. The same name shape `.github/actions/push/pin-name.sh` derives for
-# the workflow, so the run and the workflow re-point one pin per system rather
 # than two.
 [metadata("odu:pin")]
 nix:
@@ -89,15 +55,6 @@ nix:
     nix build .#web-ui --out-link result-web-ui
     nix build .#agent-flake-source --out-link result-agent-flake-source
 
-# The AGENT SOURCE a remote dial resolves `odu-runner` from, evaluated exactly
-# the way `@kolu/surface-remote` evaluates it.
-#
-# Load-bearing, not a nicety. `.#agent-flake-source` is ASSEMBLE-ONLY
-# (`mkAgentSourceTree` — odu proves no attr through it), so the `nix` recipe
-# above builds the tree without ever asking whether it exports the runner. What
-# asks is this recipe, and it asks with the dial's own command, on the dial's
-# own store path: a fileset or flake gap that reaches only a REMOTE host fails
-# at `_ci-setup` on somebody's box, minutes into a lane, otherwise. Kolu carries
 # the same guard over its `expose` inventory (`ci::agent-flake-nix`).
 agent-flake-nix: nix
     #!/usr/bin/env bash
