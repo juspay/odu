@@ -2,12 +2,7 @@ export interface ByteSink {
   write(chunk: Uint8Array): number | Promise<number>;
 }
 
-/**
- * WRITE THE WHOLE CHUNK. A sink may accept a prefix (Bun's FileSink returns the
- * count it took). Ignoring that count truncates an object with no error, and
- * the loss only surfaces later as a hash mismatch. A copy of `@odu/cache`'s:
- * this package borrows nothing from the cache.
- */
+/** A sink may accept a prefix (Bun's FileSink returns the count it took). */
 export async function writeAll(sink: ByteSink, chunk: Uint8Array, what: string): Promise<void> {
   for (let at = 0; at < chunk.length; ) {
     const wrote = await sink.write(chunk.subarray(at));

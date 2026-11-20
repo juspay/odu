@@ -65,11 +65,6 @@ const said = (body: string): string => {
   return message === null ? code : `${code} (${message})`;
 };
 
-/**
- * HOW LONG A SERVICE THAT SAID "SLOW DOWN" IS LEFT ALONE, and how many times
- * it is asked at all: 250 ms doubling, five tries in the whole, with jitter
- * so callers refused together do not return together.
- */
 const PRESSURE_BACKOFF_MS = [250, 500, 1000, 2000] as const;
 export const S3_PRESSURE_TRIES = PRESSURE_BACKOFF_MS.length + 1;
 
@@ -84,11 +79,6 @@ interface Pressed {
 const isPressed = (outcome: unknown): outcome is Pressed =>
   typeof outcome === "object" && outcome !== null && "pressed" in outcome;
 
-/**
- * RUN `attempt` UNTIL THE SERVICE STOPS ASKING FOR LESS, then answer what it
- * answered; after {@link S3_PRESSURE_TRIES} of them, throw the last refusal
- * as the {@link S3Failure} it always was, naming the tries.
- */
 async function underPressure<T>(attempt: () => Promise<T | Pressed>): Promise<T> {
   for (let tries = 1; ; tries += 1) {
     const outcome = await attempt();
@@ -173,11 +163,8 @@ async function untilDecided<T>(attempt: () => Promise<T | "conflict">): Promise<
  * the object's size from its first GET's `Content-Range`, which Bun's
  * `S3File` does not show.
  *
- * **Exactly one writer per key — what holds, and where.** In this process,
- * writes of one key queue behind each other (`oneWriter`) after a HEAD, so the
- * second sees the first's object and is refused. Across processes, the write
- * that makes an object visible carries `If-None-Match: *`, and how much that
- * buys is the service's:
+ * How much `If-None-Match: *` buys on the write that makes an object visible
+ * is the service's:
  *
  * - AWS honours it on `PutObject` and `CompleteMultipartUpload`, first to
  *   finish wins and the rest get `412`
@@ -188,16 +175,13 @@ async function untilDecided<T>(attempt: () => Promise<T | "conflict">): Promise<
  *   `kolu` on 2026-11-03, it does honour it there (`412 PreconditionFailed`).
  * - versitygw (the suite's gateway) checks the precondition and THEN writes,
  *   so two truly concurrent conditional PUTs can both succeed. It DOES honour
- *   `If-None-Match: *` on `CompleteMultipartUpload` (a `412`), which is what
- *   `copy`'s decision rests on there.
+ *   `If-None-Match: *` on `CompleteMultipartUpload` (a `412`).
  *
  * WHAT R2 DOES NOT IMPLEMENT is the SOURCE condition on a copy's parts:
  * `x-amz-copy-source-if-match` is listed as not implemented on
  * `UploadPartCopy` (it is implemented on `CopyObject`, which this store does
- * not use). So `CopyOptions.sourceIfMatch` binds a copy on AWS and versitygw
- * and is IGNORED on R2, and a caller whose source some other writer can
- * reach must not rest on it — see `@odu/cache`'s direct upload, which hands
- * out no URL that can write the key it proves.
+ * not use), so `CopyOptions.sourceIfMatch` binds a copy on AWS and versitygw
+ * and is IGNORED on R2.
  *
  * An object made by `completeUpload` alone carries no facts at all —
  * `facts()` refuses it as an {@link UnrecordedObject} until something copies
@@ -239,17 +223,12 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   /**
    * One HEAD: the object's length and the facts its put wrote, or null.
    *
-   * TWO NUMBERS, FROM TWO PLACES. `x-amz-meta-odu-size` is what this store
-   * RECORDED beside the bytes; `content-length` is what the ANSWER MEASURED,
-   * and an answer an intermediary re-encoded measured its own body rather
-   * than the object: R2 sits behind Cloudflare, which compresses a
-   * compressible content type (`text/plain` — a bucket's `nix-cache-info`)
-   * and answers the HEAD with `content-encoding` and NO `content-length` at
-   * all (#151).
-   *
-   * So the record answers, and an answer that measured the OBJECT still
-   * checks it: bytes replaced behind the store's back, under the metadata it
-   * wrote, are an {@link UnrecordedObject}.
+   * `x-amz-meta-odu-size` is what this store RECORDED beside the bytes;
+   * `content-length` is what the ANSWER MEASURED, and an answer an
+   * intermediary re-encoded measured its own body rather than the object: R2
+   * sits behind Cloudflare, which compresses a compressible content type
+   * (`text/plain` — a bucket's `nix-cache-info`) and answers the HEAD with
+   * `content-encoding` and NO `content-length` at all (#151).
    */
   async function headOf(key: string): Promise<{ size: number; facts: ObjectFacts | null } | null> {
     const response = await call("HEAD", safeKey(key));
@@ -288,10 +267,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
    * ONE `DeleteObjects` — up to {@link DELETE_KEYS} keys in ONE request.
    *
    * QUIET, so a 200 carries only what did NOT go. An absent key is not among
-   * them: S3 reports deleting a key that was never there as a success. A key
-   * the service refused with a code that means "ask again" is asked again —
-   * the whole request, with just those keys — and anything else ends the call
-   * with what the service said.
+   * them: S3 reports deleting a key that was never there as a success.
    *
    * Content-MD5 IS REQUIRED by S3 on this call (and accepted by R2), which is
    * also why the body is built as bytes and measured here rather than handed
@@ -422,15 +398,10 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   }
 
   /**
-   * MAKE `tempKey`'s bytes the object at `key`, with `facts` as metadata —
-   * server-side, part by part, and ALWAYS put-if-absent, like every other
-   * write this store makes visible.
-   *
-   * `options.sourceIfMatch` BINDS IT TO BYTES SOMEBODY MEASURED. Every part
-   * is its own request and S3 resolves the source afresh for each, so each
-   * `UploadPartCopy` carries `x-amz-copy-source-if-match` and a `412` ends the
-   * copy as `source_changed` — on the services that implement it (not R2; see
-   * the module header).
+   * `options.sourceIfMatch`: every part is its own request and S3 resolves the
+   * source afresh for each, so each `UploadPartCopy` carries
+   * `x-amz-copy-source-if-match` and a `412` ends the copy as
+   * `source_changed` — on the services that implement it (not R2).
    */
   async function copyInto(
     key: string,
@@ -478,8 +449,6 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     options?: PutOptions,
   ): Promise<PutOutcome> {
     safeKey(key);
-    // ASKED FIRST so a re-push costs a HEAD rather than an upload; the
-    // conditional write below is what actually decides a race.
     if ((await headOf(key)) !== null) {
       await stream.cancel().catch(() => {});
       return exists(key);
@@ -527,13 +496,6 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     const direct = expected !== undefined;
     const uploadKey = direct ? key : `${key.slice(0, key.lastIndexOf("/") + 1)}${TEMP}${randomUUID()}`;
     const uploadId = await createUpload(uploadKey, direct ? { ...metaOf(expected), ...headersOf(options) } : {});
-    // PARTS IN PARALLEL, `parallel` at a time. The stream is read in order —
-    // the hash needs that — and a part is read only once a slot is free, into
-    // one of `parallel` buffers that are REUSED (a fresh buffer per part left
-    // RSS waiting on the collector), so a put holds `parallel` parts. The
-    // first failure aborts its siblings' requests and, below, the upload once.
-    // `etags` is by number, so Complete lists the parts in order whichever
-    // finished first.
     const etags: string[] = [];
     const control = new AbortController();
     const inFlight = new Set<Promise<void>>();
@@ -600,8 +562,6 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       const decided = await complete(key, uploadId, etags, true);
       if (decided === "stored") return { ok: true, facts };
       await abort(key, uploadId);
-      // A CONFLICTED UPLOAD must be started again: `put` does that for a body
-      // it can read again, and tells a stream's caller.
       if (decided === "conflict") return conflicted(key, 1);
       return exists(key);
     }
@@ -615,9 +575,6 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     }
   }
 
-  /** One window: a ranged GET of bytes `from`..`to` (inclusive). `version` is
-   *  the ETag the read is held to, so a key rewritten mid-read fails the read
-   *  instead of splicing two objects together. */
   const fetchWindow = (
     key: string,
     from: number,
@@ -638,33 +595,15 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
   };
 
   /**
-   * The bytes after the first window up to `end`, as a pull stream: ONE window
-   * being read and ONE prefetched, never more (see READ_WINDOW). The first
-   * window's response is `get`'s, already in hand, holding bytes `start`
-   * through `from - 1`; `control` aborts every GET in flight when the reader
-   * cancels.
-   *
    * A read of several windows is several requests, and S3 resolves each
    * against the key AS IT IS THEN, so each window after the first carries
    * `If-Match` on the first's ETag. A `412`, a `416` and a short `206` are one
    * condition, and the stream fails with one sentence for all of them
    * ({@link ObjectChanged}).
    *
-   * EVERY WINDOW MUST BE AS LONG AS ITS RANGE. The caller has already promised
-   * the length (a `content-length` from the row), so a window that answers 206
-   * with fewer bytes would truncate the object WITHOUT an error, and the client
-   * would see only a hash mismatch.
-   *
-   * AND EVERY WINDOW MUST BE THE SAME OBJECT. A read of several windows is
-   * several requests, and S3 resolves each against the key AS IT IS THEN — so
-   * a key rewritten between two of them would hand the reader a splice of two
-   * objects, hashing to nothing either of them has. Each window after the
-   * first carries `If-Match` on the first's ETag.
-   *
-   * THE REJECTION IS THE STREAM'S, NOT THE PULL'S: one `catch` aborts the
-   * GETs still in flight and hands the reader the error on its next `read`,
-   * where a `throw` out of `pull` leaves a rejection the reader may never be
-   * handed at all (issue #160).
+   * A `throw` out of `pull` leaves a rejection the reader may never be handed
+   * at all (issue #160), so one `catch` aborts the GETs still in flight and
+   * hands the reader the error on its next `read`.
    */
   function windowed(
     key: string,
@@ -813,18 +752,12 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
 
     partSize,
 
-    // NO METADATA: these bytes are a temp object whose facts nobody has proved
-    // yet, and an upload's metadata is fixed here, before the first byte.
+    // An upload's metadata is fixed at creation, before the first byte.
     createUpload: (key) => createUpload(safeKey(key), {}),
 
     presignPart: (key, uploadId, index, expiresSeconds) =>
       presign(target, "PUT", safeKey(key), expiresSeconds, { partNumber: String(index + 1), uploadId }),
 
-    // A COMPLETION MAKES AN OBJECT VISIBLE at the key, so it queues on that
-    // key's writer chain exactly as a put does. `async`, so a part set this
-    // refuses comes back as a rejection like every other failure here. No
-    // precondition: a direct upload's key is the writer's own temp name, and
-    // `copy` is the call that claims a key somebody else might want.
     async completeUpload(key, uploadId, parts) {
       const etags = etagsInOrder(key, parts);
       return oneWriter(key, () => complete(safeKey(key), uploadId, etags, false));
@@ -832,14 +765,6 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
 
     abortUpload: (key, uploadId) => abort(safeKey(key), uploadId),
 
-    // THE BYTES NEVER LEAVE THE SERVICE: UploadPartCopy, part by part, with
-    // the caller's facts as the destination's metadata, put-if-absent like
-    // every other write that makes an object. The source stays where it is,
-    // so a `409` is simply copied again — and a copy still undecided after
-    // the last try is a `conflict`, as a put's would be. A `sourceIfMatch`
-    // holds every one of those parts to the version the caller read, and a
-    // source that moved is NOT retried: copying it again would only find the
-    // new bytes again.
     copy: (from, to, options) =>
       oneWriter(to, () =>
         untilDecided(() => copyInto(safeKey(to), safeKey(from), options.facts, options)),

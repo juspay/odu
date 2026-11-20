@@ -9,8 +9,6 @@
 
 import { createHash, createHmac } from "node:crypto";
 
-/** Where a store's bucket is and who may write it. The secret never leaves
- *  this value: not logged, not stored, not printed in a refusal. */
 export interface S3Target {
   readonly endpoint: URL;
   readonly bucket: string;
@@ -18,11 +16,8 @@ export interface S3Target {
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
   readonly sessionToken?: string;
-  /** WHERE THE WORLD READS THIS STORE FROM, when it is readable without a
-   *  credential: an R2 custom domain (`https://cache.example.com`) bound to
-   *  the same bucket. Never where odu signs a request — signing stays on
-   *  `endpoint`, whose host is the service's own. A URL with no path, query
-   *  or fragment; the keys hang under it as they do in the bucket. */
+  /** An R2 custom domain (`https://cache.example.com`) bound to the same
+   *  bucket. A URL with no path, query or fragment. */
   readonly publicUrl?: URL;
 }
 
@@ -72,12 +67,6 @@ function signature(target: S3Target, stamp: string, day: string, canonical: stri
   return createHmac("sha256", key).update(toSign).digest("hex");
 }
 
-/**
- * The headers that sign one request. `headers` are the request's own (each is
- * signed, so a metadata header or a precondition cannot be stripped in
- * transit); the answer adds `host`, the date, the payload marker and
- * `authorization`.
- */
 export function signedHeaders(
   target: S3Target,
   method: string,
@@ -113,18 +102,11 @@ export function signedHeaders(
 
 /**
  * A URL THAT MAKES ONE REQUEST BY ITSELF, for `expiresSeconds` from `at`. The
- * signature is in the query, so whoever holds the URL sends no credential and
- * needs none. Only `host` is signed — the holder may add any header it likes,
- * `Range` above all on a GET — and the payload hash is the literal
- * `UNSIGNED-PAYLOAD` that query auth uses, which is also what lets a PUT's
- * body be anything the holder streams.
- *
- * `query` is the request's own parameters, signed with the rest: a part
- * upload's `partNumber` and `uploadId` cannot be moved to another part or
- * another upload by whoever holds the URL.
- *
- * Signed against `endpoint`, never `publicUrl`: a signature covers the host it
- * names.
+ * signature is in the query, so whoever holds the URL sends no credential.
+ * Only `host` is signed — the holder may add any header it likes, `Range`
+ * above all on a GET — and the payload hash is the literal `UNSIGNED-PAYLOAD`
+ * that query auth uses. `query` is the request's own parameters, signed with
+ * the rest.
  */
 export function presign(
   target: S3Target,
@@ -150,7 +132,6 @@ export function presign(
   return url;
 }
 
-/** {@link presign}'s GET — a URL that fetches `key` by itself. */
 export const presignGet = (target: S3Target, key: string, expiresSeconds: number, at: Date = new Date()): URL =>
   presign(target, "GET", key, expiresSeconds, {}, at);
 

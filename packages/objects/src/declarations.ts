@@ -7,7 +7,6 @@ export interface S3Declaration {
 
 export type StoreDeclarations = ReadonlyMap<string, S3Declaration>;
 
-/** Each names what happened; none carries a credential. */
 export type DeclarationRefusal =
   | { kind: "malformed"; file: string; reason: string }
   | { kind: "bad_store"; store: string; reason: string }
@@ -87,10 +86,6 @@ export function parseStoreDeclarations(
     if (endpoint.search !== "" || endpoint.hash !== "") {
       return bad(`endpoint ${spelled} has a query or fragment, and an S3 endpoint has neither`);
     }
-    // A STORE'S PUBLIC URL is where the WORLD reads the bucket from — an R2
-    // custom domain — and never where odu signs. The keys hang under it
-    // exactly as they do in the bucket, so a path of its own would move every
-    // one of them; it is a host and nothing else.
     const spelledPublic = entry["publicUrl"];
     let publicUrl: URL | undefined;
     if (spelledPublic !== undefined) {

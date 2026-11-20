@@ -27,8 +27,6 @@ describe("a store's publicUrl", () => {
     if (parsed.kind !== "declared") throw new Error(`refused: ${JSON.stringify(parsed.refusal)}`);
     const target = parsed.stores.get("r2");
     expect(target?.target.publicUrl?.href).toBe("https://cache.example.com/");
-    // SIGNING STAYS WHERE IT WAS: a public address is read from, never signed
-    // for, and the endpoint is untouched by having one.
     expect(target?.target.endpoint.href).toBe("https://account.r2.cloudflarestorage.com/");
   });
 

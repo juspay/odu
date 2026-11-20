@@ -64,8 +64,6 @@ function fileBody(path: string, start: number, length: number): ReadableStream<U
 
 export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
   const root = join(options.dir, "objects");
-  /** The facts kept beside each object, under a name no key's first segment
-   *  can share with an object (a dot-name, which `list` never shows). */
   const factsRoot = join(root, ".facts");
   const pathOf = (key: string): string => join(root, safeKey(key));
   const factsPathOf = (key: string): string => join(factsRoot, safeKey(key));
@@ -101,8 +99,8 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     return { ok: false, refusal: { kind: "exists", key, facts } };
   }
 
-  /** LINK, never rename: `link` refuses an existing name, so of two writers of
-   *  one key exactly one makes the object. The source name stays the caller's. */
+  /** `link` refuses an existing name, so of two writers of one key exactly one
+   *  makes the object. */
   async function linkInto(key: string, file: string, facts: ObjectFacts): Promise<PutOutcome | "cross-device"> {
     const target = pathOf(key);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
@@ -114,8 +112,6 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
       if (code === "EXDEV") return "cross-device";
       throw err;
     }
-    // THE SOURCE NAME GOES: a link shares the inode, and a caller that later
-    // wrote to its staged file would be writing into the object.
     await unlink(file).catch(() => {});
     await writeFacts(key, facts);
     return { ok: true, facts };

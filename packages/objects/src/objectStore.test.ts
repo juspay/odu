@@ -42,8 +42,6 @@ objectStoreContract("s3 (versitygw)", async () => {
   const target = await gateway.bucket();
   return {
     store: s3ObjectStore({ target, partSize: PART, listPageSize: 2 }),
-    // A PLAIN PUT over the key, carrying the metadata the store wrote: the
-    // bytes change, the store's record does not.
     rewriteBehind: async (key, bytes) => {
       const head = await s3Fetch(target, "HEAD", key);
       const meta = Object.fromEntries([...head.headers.entries()].filter(([name]) => name.startsWith("x-amz-meta-")));
@@ -100,9 +98,8 @@ const once = (stream: Uint8Array) => new Response(stream as Uint8Array<ArrayBuff
 
 /**
  * A `send` that answers the first `times` CONDITIONAL writes with `409
- * ConditionalRequestConflict` and forwards everything else to the gateway —
- * the answer versitygw never gives and AWS gives when a delete is in flight.
- * `meanwhile` runs at each 409.
+ * ConditionalRequestConflict` — the answer versitygw never gives and AWS
+ * gives when a delete is in flight.
  */
 function conflicting(times: number, meanwhile: () => Promise<void> = async () => {}) {
   const seen = { conflicts: 0 };
@@ -181,8 +178,8 @@ describe("s3 object store: a 409 decides nothing", () => {
 
 /**
  * A `send` that ANSWERS `DeleteObjects` itself and forwards everything else
- * to the gateway. The keys are read back out of the body: one request per
- * chunk, each with its own Content-MD5, which S3 requires on this call.
+ * to the gateway: one request per chunk, each with its own Content-MD5, which
+ * S3 requires on this call.
  */
 function batchDeletes(answer: (at: number) => Response) {
   const sent: { keys: string[]; md5: string | null; body: Uint8Array }[] = [];

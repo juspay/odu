@@ -1,7 +1,3 @@
-/**
- * `bun test/storeMemory.ts '<spec json>'` puts 300 MiB, reads it back with a
- * slow reader, and prints `{"put":<bytes>,"get":<bytes>}` of peak RSS growth.
- */
 import { diskObjectStore } from "../src/diskStore";
 import type { ObjectStore } from "../src/objectStore";
 import { s3ObjectStore } from "../src/s3Store";
@@ -34,7 +30,6 @@ async function growth(work: () => Promise<void>): Promise<number> {
 
 if (import.meta.main) {
   const spec = JSON.parse(process.argv[2] as string) as StoreSpec;
-  // A URL crosses the argument as its href; the target holds it parsed.
   const store = storeOf(
     spec.kind === "s3" ? { ...spec, target: { ...spec.target, endpoint: new URL(spec.target.endpoint) } } : spec,
   );

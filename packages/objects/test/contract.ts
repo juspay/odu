@@ -8,12 +8,8 @@ import type { StoreSpec } from "./storeMemory";
 
 export interface ContractSubject {
   store: ObjectStore;
-  /** Replace the bytes at `key` in the backing, keeping the store's record of
-   *  the object (disk's sidecar, S3's metadata) as it was. */
   rewriteBehind: (key: string, bytes: Uint8Array) => Promise<void>;
-  /** The store's multipart part size, or null for a store with no parts. */
   partSize: number | null;
-  /** How to build this same store in another process, for the memory case. */
   memorySpec: StoreSpec;
   dispose: () => Promise<void>;
 }
@@ -67,9 +63,6 @@ const kept = (outcome: PutOutcome): ObjectFacts => {
   return outcome.facts;
 };
 
-/** The direct upload's members, all of them, or null for a store that
- *  declines the capability — which is all-or-nothing (see `objectStore.ts`),
- *  so one check answers for the group. */
 type DirectStore = ObjectStore &
   Required<Pick<ObjectStore, "partSize" | "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy">>;
 
@@ -84,19 +77,12 @@ function directly(store: ObjectStore): DirectStore | null {
   return offered ? (store as DirectStore) : null;
 }
 
-/** A TEMP OBJECT THE WAY A DIRECT UPLOAD MAKES ONE: one upload, one part,
- *  completed. There is no presigned `PUT` to make one with — that is the
- *  point of the shape (see `objectStore.ts`) — so the cases that need bytes
- *  under a temp key put them there the way a writer would. */
 async function uploadedTemp(direct: DirectStore, key: string, payload: Uint8Array): Promise<void> {
   const uploadId = await direct.createUpload(key);
   const parts = await uploadParts(direct, key, uploadId, [payload]);
   expect(await direct.completeUpload(key, uploadId, parts)).toBe("stored");
 }
 
-/** Send `chunks` as the parts of `uploadId`, each through a URL of its own,
- *  and answer what the writer would report: the index it sent and the ETag
- *  the service answered. */
 async function uploadParts(
   store: DirectStore,
   key: string,
@@ -213,10 +199,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         writeFileSync(file, "a file's own bytes");
         const facts = factsOf(bytes("a file's own bytes"));
         kept(await store.put("main/nar/filed.nar.zst", Bun.file(file), facts));
-        // A DRY RUN NEVER OPENS AN OBJECT: it adds up what `list` answered, so
-        // that number is the stored object's own length — a multipart upload's
-        // whole length rather than a part's, and a file's rather than whatever
-        // the store staged on the way in.
         const listed = (await store.list("main")).sort((a, b) => a.key.localeCompare(b.key));
         expect(listed).toEqual([
           { key: "main/nar/filed.nar.zst", size: facts.size },
@@ -459,11 +441,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         abortUpload: store.abortUpload !== undefined,
         copy: store.copy !== undefined,
       };
-      // ALL OF IT OR NONE: half a direct upload is no capability at all —
-      // a caller asks `store.createUpload === undefined` once and uses the
-      // rest. And a store whose WRITERS can reach it is one whose READERS
-      // can: the two are the same reachability, so disk (no `presignGet`)
-      // declines every member and S3 offers every one.
       const whole = store.presignGet !== undefined;
       expect(offered).toEqual({
         partSize: whole,
@@ -483,9 +460,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         await dispose();
         return;
       }
-      // The only URLs this store signs for a key are parts of ONE upload, and
-      // the completion ends that upload. There is no `presignPut` to leave a
-      // second way in.
       const key = `main/nar/${TEMP}write-once`;
       const uploadId = await direct.createUpload(key);
       const payload = bytes("the bytes somebody will prove");
@@ -493,8 +467,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       const parts = await uploadParts(direct, key, uploadId, [payload]);
       expect(await direct.completeUpload(key, uploadId, parts)).toBe("stored");
 
-      // THE SAME PART URL, AFTERWARDS: the upload it names is gone, and the
-      // object does not move.
       const again = await fetch(url, { method: "PUT", body: bytes("other bytes") as Uint8Array<ArrayBuffer> });
       expect(again.ok).toBe(false);
       expect(Array.from((await read(store, key)) as Uint8Array)).toEqual(Array.from(payload));
@@ -509,14 +481,10 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         return;
       }
       const key = "main/nar/parts.nar.zst";
-      // THE FIRST PART IS EXACTLY `partSize` and the last is short: what the
-      // number is for — S3 refuses a short part anywhere but the end.
+      // S3 refuses a short part anywhere but the end.
       const chunks = [patterned(direct.partSize, 11), patterned(4_321, 12)];
       const uploadId = await direct.createUpload(key);
       const parts = await uploadParts(direct, key, uploadId, chunks);
-      // REPORTED OUT OF ORDER, because a writer uploads parts in parallel and
-      // finishes them in whatever order the network gives: the index says
-      // where each belongs, not the order they arrive in.
       expect(await direct.completeUpload(key, uploadId, [...parts].reverse())).toBe("stored");
       const whole = new Uint8Array(Buffer.concat(chunks));
       expect(factsOf((await read(store, key)) as Uint8Array)).toEqual(factsOf(whole));
@@ -525,8 +493,8 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     });
 
     it("completes an upload of ONE part far smaller than a part", async () => {
-      // A few KiB, one part, nowhere near S3's 5 MiB floor — which applies to
-      // every part BUT the last, and a single part is the last one.
+      // One part, nowhere near S3's 5 MiB floor — which applies to every part
+      // BUT the last, and a single part is the last one.
       const { store, dispose } = await make();
       const direct = directly(store);
       if (direct === null) {
@@ -609,12 +577,8 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         await dispose();
         return;
       }
-      // WHAT A PROVER DOES: read the object, learn which version it read,
-      // then copy THAT. This is the SECOND line of defence — the first is
-      // that a finished key has no writer at all — and how far it reaches is
-      // the service's: AWS and versitygw hold `UploadPartCopy` to
-      // `x-amz-copy-source-if-match`, R2 does not implement it there. So a
-      // caller may use it, and may not rest on it.
+      // AWS and versitygw hold `UploadPartCopy` to
+      // `x-amz-copy-source-if-match`, R2 does not implement it there.
       const source = `main/nar/${TEMP}versioned`;
       const proved = patterned(5_000, 18);
       await uploadedTemp(direct, source, proved);

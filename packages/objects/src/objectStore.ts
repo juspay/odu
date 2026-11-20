@@ -1,13 +1,3 @@
-/**
- * **Objects are immutable, and a put is put-if-absent.** A put onto a key that
- * exists is REFUSED with `exists` and the kept object's facts; of two
- * concurrent puts of one key exactly one wins. Disk links a finished temp file
- * into place (`link` fails on an existing name, where `rename` would replace
- * it); S3 sends `If-None-Match: *` on the write that makes the object visible.
- * No half object is ever visible under its final key: disk's temp names and
- * S3's temp keys are `.tmp-*`, which `list` skips and `sweepTemp` removes.
- */
-
 import { createHash } from "node:crypto";
 
 export interface ObjectFacts {
@@ -36,9 +26,7 @@ export interface StoredObject {
   size: number;
   /**
    * WHICH VERSION OF THE KEY THESE BYTES ARE, when the store names one (S3's
-   * ETag). A reader that must act on what it read — prove it, then copy it —
-   * hands this back as {@link CopyOptions.sourceIfMatch}, so a key rewritten
-   * in between is a refusal rather than a copy of other bytes. A store whose
+   * ETag), handed back as {@link CopyOptions.sourceIfMatch}. A store whose
    * objects are files it alone writes has no versions and leaves it out.
    */
   etag?: string;
@@ -59,8 +47,7 @@ export type PutOutcome = { ok: true; facts: ObjectFacts } | { ok: false; refusal
 /**
  * The response headers an HTTP read of the object answers with. A store that
  * serves its objects itself (S3) keeps them with the object; a store whose
- * objects are plain files ignores them. They are not facts: nothing reads
- * them back, and they never decide a put.
+ * objects are plain files ignores them.
  */
 export interface PutOptions {
   readonly contentType?: string;
@@ -88,9 +75,8 @@ export interface UploadedPart {
 export type WriteDecision = "stored" | "exists" | "conflict" | "source_changed";
 
 /** What a server-side copy writes beside the bytes. The facts are the
- *  CALLER'S — a copy moves bytes it never read. A copy is PUT-IF-ABSENT like
- *  every other write this interface makes visible: `exists` keeps what is
- *  there. */
+ *  CALLER'S — a copy moves bytes it never read. A copy is PUT-IF-ABSENT:
+ *  `exists` keeps what is there. */
 export interface CopyOptions extends PutOptions {
   readonly facts: ObjectFacts;
   /**
@@ -100,9 +86,7 @@ export interface CopyOptions extends PutOptions {
    *
    * HOW FAR IT REACHES IS THE SERVICE'S: AWS and versitygw honour it on
    * `UploadPartCopy`; R2 lists it as NOT IMPLEMENTED there (it implements it
-   * on `CopyObject`, which this store does not use). It is a second line of
-   * defence and never a caller's only one — a caller whose source another
-   * writer can reach must make it unreachable instead.
+   * on `CopyObject`, which this store does not use).
    */
   readonly sourceIfMatch?: string;
 }
@@ -153,14 +137,6 @@ export interface ObjectStore {
    *  temp names, and on S3 incomplete multipart uploads. A younger one is a
    *  live put. Scoped like `list`. Answers how many it removed. */
   sweepTemp(prefix: string, current: number): Promise<number>;
-
-  // AND NOTHING HERE PRESIGNS A PLAIN PUT. A multipart upload is the only way
-  // in: its parts are writable only until the upload is completed, and after
-  // that NO url this store ever signed can write the key — which is what lets
-  // a caller prove an object and then act on the proof. A presigned
-  // `PutObject` would leave the key writable for as long as the URL lived,
-  // and no source precondition closes that everywhere (R2 does not implement
-  // `x-amz-copy-source-if-match` on `UploadPartCopy`).
 
   /** The length every part but the last must have. S3 refuses a short part in
    *  the middle of an upload. */
