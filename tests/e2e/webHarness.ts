@@ -1,37 +1,3 @@
-/**
- * A REAL web service, in a world of its own — the harness the cross-face suite
- * drives.
- *
- * Everything here is deliberately out-of-process. The daemon is the nix-built
- * binary, started the way `odu web` starts it; the CLI is that same binary in
- * another process; the HTTP MCP face is `curl`-shaped JSON-RPC over a socket.
- * Nothing imports `src/` — the contract under test is what a person and an agent
- * actually meet.
- *
- * The BROWSER is driven from `packages/web-acceptance` instead, through
- * Playwright against this same binary. It used to be driven from here with
- * `chrome --headless --dump-dom`, which is ONE STATIC SNAPSHOT of a live page —
- * and which skipped itself where no browser was on PATH, so on a CI runner it
- * graded nothing. Those three helpers are deleted rather than left standing
- * beside the new suite: an unused, silently-skipping browser path in the tree is
- * the finding, not a spare.
- *
- * **The world is a private one, and privacy stops where odu stops.** The port
- * is picked per suite and `ODU_STATE_DIR` points into a temp directory, so the
- * catalog, the receipts, the daemon home and its pid gate are all this suite's
- * — a developer's own running `odu web` is untouched and two runs of this suite
- * on one machine do not fight.
- *
- * What is NOT redirected is `HOME`, and that is a correction rather than an
- * omission: it used to be, and a synthetic home takes `~/.config/nix/nix.conf`
- * with it. On a single-user Nix install — which is what a CI runner is — that
- * file is where `experimental-features = nix-command flakes` lives, so every
- * coordinator this suite started could not evaluate a flake and every run
- * refused. It passed locally, on a machine with a system-wide nix.conf, and
- * failed on CI for a reason that had nothing to do with the code under test. A
- * host where odu needs a faked home is a host odu does not work on.
- */
-
 import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
 import { connect as netConnect } from "node:net";
 import {
@@ -55,30 +21,15 @@ import {
   suitePortFor,
 } from "./harness";
 
-// The port scheme and the private world moved to `./harness`, because the
-// black-box suite needs them too: `odu run` is a client now, so a fixture run
-// reaches a daemon and must reach ITS OWN. Re-exported here so the web tests
-// that have always named them here do not have to learn where they went.
 export { hostsFile, PORT_SLOT, privateWorld, suitePort, suitePortFor };
 
-/** One service, and the world it owns. */
 export interface WebWorld {
-  /** The `odu` binary under test. */
   odu: string;
-  /** Where the service is bound. */
   origin: string;
-  /** The private HOME/state the daemon was started with. */
   env: NodeJS.ProcessEnv;
-  /** The daemon process when this suite forked it directly; `null` when it was
-   *  started by `odu web`, which is the whole point of that path — the daemon
-   *  is nobody's child. */
   daemon: ChildProcess | null;
-  /** The daemon's log, for a failure that needs to say why. */
   logPath: string;
   root: string;
-  /** Where the daemon put its gate and control socket — read off the service's
-   *  own identity rather than re-derived, and removed at teardown so a suite
-   *  leaves nothing under the developer's state root. */
   daemonHome?: string;
   dispose: () => void;
 }
@@ -135,11 +86,6 @@ export const SHARED_TOOLS = [
   "venue_release",
 ] as const;
 
-/** A hosts file pinning this machine's platform to a localhost lane, so lane
- *  resolution is hermetic wherever the suite runs. */
-/** Whatever the daemon has said about itself, for a failure that needs to name
- *  a cause rather than a status code. Absent is normal on the systemd branch,
- *  where the journal has it instead. */
 export function daemonLog(world: WebWorld): string {
   try {
     return readFileSync(world.logPath, "utf-8").slice(-4000);
@@ -192,12 +138,10 @@ export function killDaemon(pid: number, signal: NodeJS.Signals = "SIGTERM"): voi
     try {
       process.kill(target, signal);
     } catch {
-      // Already gone, or never a group leader.
     }
   }
 }
 
-/** Poll until `ask` answers, or fail with a sentence naming what was waited on. */
 export async function until<T>(
   what: string,
   ask: () => Promise<T | null> | (T | null),
@@ -215,14 +159,6 @@ export async function until<T>(
   }
 }
 
-/**
- * Start a service in a private world and wait for it to say it is ready.
- *
- * `envOver` is for a suite whose SUBJECT is a service setting — the cache's
- * `$ODU_ROOT_TOKEN` and `$ODU_CACHE_STORE`, say — and is applied to the daemon
- * and to the world's clients alike, because a variable that reached only one of
- * them would be a test of the wrong thing.
- */
 export async function startWebService(
   oduBin: string,
   envOver: NodeJS.ProcessEnv = {},
@@ -257,7 +193,6 @@ export async function startWebService(
         // started is detached from IT, so a plain kill would leave one behind.
         if (daemon.pid !== undefined) process.kill(-daemon.pid, "SIGTERM");
       } catch {
-        // Already gone. Nothing to do, and nothing worth failing a teardown for.
       }
       void sink.end();
       for (const dir of [root, world.daemonHome]) {
@@ -287,44 +222,18 @@ export async function startWebService(
         return null;
       }
     });
-    // The daemon home lives under the real `~/.local/state`, named for this
-    // suite's origin — so it is ours to remove and nobody else's to trip over.
     world.daemonHome = cell.identity.home;
   } catch (err) {
-    // A daemon that never answered has usually SAID why, and a bare "did not
-    // happen within 120000ms" throws that away — which on a CI runner is the
-    // whole of what a failure gets to say.
     throw new Error(`${String(err)}\n--- daemon log ---\n${daemonLog(world)}`);
   }
   return world;
 }
 
-/**
- * Start a service the way a person leaves one running — `odu web --background`,
- * which spawns the daemon and returns.
- *
- * Deliberately a different path from {@link startWebService}, which forks
- * `web-daemon` itself. That one exercises the daemon; this one exercises the
- * BOOTSTRAP — the launch-mode decision, the environment allowlist the child
- * gets, and the readiness handshake the command prints a URL on the strength of.
- * A suite that only ever forked the daemon could not have caught a spawn that
- * forced the wrong branch or handed the child an environment it could not run
- * a coordinator in, because it never used either.
- */
 export async function startWebServiceViaCommand(
   oduBin: string,
   port: number = suitePortFor("commandDaemon"),
   envOver: NodeJS.ProcessEnv = {},
 ): Promise<WebWorld> {
-  // A different port from the forked-daemon world, so the two coexist — which
-  // they can only do because the gate is derived from the origin. A caller that
-  // needs a world of its very own (the lifecycle gates kill and restart their
-  // daemon, which no other test may be sharing) names its own slot.
-  //
-  // `envOver` is how a caller states a DAEMON environment that differs from its
-  // clients'. Not a convenience: a per-user singleton runs work on behalf of
-  // callers whose environment is not its own, and a suite that could only ever
-  // give the two the same one cannot say what happens when they diverge.
   const { root, origin, env: worldEnv } = privateWorld(port);
   const env = { ...worldEnv, ...envOver };
   const started = spawnSync(oduBin, ["web", "--background"], {
@@ -358,9 +267,6 @@ export async function startWebServiceViaCommand(
     origin,
     env,
     daemon: null,
-    // Where the daemon says its own home is, rather than a path this file
-    // re-derives — the crash-catcher lives in it, and a second derivation is a
-    // second thing that can be wrong about where the daemon put its reasons.
     logPath: join(cell.identity.home, "web-daemon.stderr.log"),
     root,
     daemonHome: cell.identity.home,
@@ -371,7 +277,6 @@ export async function startWebServiceViaCommand(
         try {
           process.kill(target, "SIGTERM");
         } catch {
-          // Already gone, or never a group leader. Nothing worth failing on.
         }
       }
       for (const dir of [root, cell.identity.home]) {
@@ -385,7 +290,6 @@ export async function startWebServiceViaCommand(
   };
 }
 
-/** One `odu surface …` call against this world's service. */
 export function surfaceCall(
   world: WebWorld,
   argv: string[],
@@ -398,7 +302,6 @@ export function surfaceCall(
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-/** A verb call with a JSON input, answered as JSON. */
 export function verb(
   world: WebWorld,
   name: string,
@@ -415,7 +318,6 @@ export function verb(
   return { status: res.status, json, stderr: res.stderr };
 }
 
-/** One JSON-RPC message to the HTTP MCP endpoint. */
 export async function mcp(
   world: WebWorld,
   method: string,
@@ -466,7 +368,6 @@ export function makeWebFixture(justfile: string): string {
   return dir;
 }
 
-/** The commit a fixture is on. */
 export function headOf(dir: string): string {
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: dir,
@@ -474,7 +375,6 @@ export function headOf(dir: string): string {
   }).trim();
 }
 
-/** Is the run socket for `dir` there yet? */
 export function runSocketExists(dir: string): boolean {
   return existsSync(join(dir, ".ci", "odu.sock"));
 }

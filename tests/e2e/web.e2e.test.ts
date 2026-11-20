@@ -1,25 +1,3 @@
-/**
- * THE CROSS-FACE GATE — the same run, through every face odu advertises.
- *
- * Black-box and out-of-process: a real nix-built binary, a real daemon that
- * outlives its launcher, a real coordinator on a localhost lane, a real
- * websocket and a real JSON-RPC endpoint. Nothing here imports `src/`.
- *
- * What it is FOR is the property the whole release rests on and that no unit
- * test can reach: a start, a wait, a log read, a retry and a cancel produce the
- * SAME addressed state whichever door they came through — and the three
- * outcomes (answered, refused, nothing serving) stay apart at each one.
- *
- * **The BROWSER is not one of the doors this file drives, and used to be.** It
- * held three cases that shelled out to `chrome --headless --dump-dom` and
- * asserted on substrings of one static snapshot — no click, no keystroke, no
- * viewport, no reconnect — and skipped themselves entirely where no browser was
- * on PATH, which on a CI runner meant they graded nothing at all. That coverage
- * now lives in `packages/web-acceptance`: Gherkin scenarios driven through
- * Playwright against this same nix-built binary, where the browser is REQUIRED
- * and its absence is a hard failure. See that package's README.
- */
-
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -42,7 +20,6 @@ import {
   type WebWorld,
 } from "./webHarness";
 
-/** A DAG whose second node fails — the shape a diagnosis is about. */
 const FAILING = `[metadata("ci")]
 default: alpha beta
 
@@ -54,7 +31,6 @@ beta: alpha
     exit 3
 `;
 
-/** A DAG that stays running, to cancel out from under. */
 const SLOW = `[metadata("ci")]
 default: alpha slow
 
@@ -86,15 +62,6 @@ function fixture(justfile: string): string {
   return dir;
 }
 
-/**
- * Start a run through the service, or fail with the reason.
- *
- * The reason MATTERS. `run_start` refusing is one assertion — `status` is 1 —
- * and on a CI runner nobody can attach to, "expected 0, received 1" is the
- * whole of what a failure says. The refusal carries a sentence naming what odu
- * declined and why, and the daemon's own log carries the rest, so both go into
- * the message.
- */
 function startOrExplain(
   at: WebWorld,
   input: Record<string, unknown>,
@@ -109,7 +76,6 @@ function startOrExplain(
   return start.json as { runId: string };
 }
 
-/** Start a run through the service and wait for it to settle. */
 async function runToSettle(
   dir: string,
   requestId: string,
@@ -136,9 +102,6 @@ async function runToSettle(
 
 describe("the web service", () => {
   it("is one singleton: a second launcher yields rather than binding", () => {
-    // Concurrent launchers converge through the framework's pid gate — a
-    // loser never binds the port, and yielding is a SUCCESS because the caller
-    // wanted a service and there is one.
     const second = Bun.spawnSync([odu, "web-daemon"], { env: world.env });
     expect(second.exitCode).toBe(0);
     expect(second.stderr.toString()).toContain("already running");
@@ -152,16 +115,11 @@ describe("the web service", () => {
   }, 120_000);
 
   it("bare `odu web` REFUSES to pretend it is serving one that already is", () => {
-    // The UX this default exists for. `--background` asks "make sure one is
-    // running", and there is one, so it succeeds. Bare `odu web` asks "serve
-    // HERE", and here is taken — returning 0 with a URL would tell a person
-    // this terminal is the server when Ctrl-C would stop nothing.
     const res = Bun.spawnSync([odu, "web"], { env: world.env });
     expect(res.exitCode).toBe(1);
     const said = res.stderr.toString();
     expect(said).toContain("already running");
     expect(said).toContain("This terminal is NOT serving it");
-    // And it names both ways out rather than leaving a person stuck.
     expect(said).toContain("odu web --upgrade");
     expect(said).toContain("odu web --background");
   }, 120_000);
@@ -176,8 +134,6 @@ describe("the web service", () => {
     };
     expect(cell.identity.origin).toBe(world.origin);
     expect(cell.readiness.state).toBe("ready");
-    // Both compatibility axes are visible — a caller can see what it is talking
-    // to rather than inferring it from behaviour.
     expect(cell.identity.protocolVersion).toMatch(/^\d+\.\d+$/);
     expect(cell.identity.storageVersion).toBeGreaterThan(0);
     expect(cell.build.oduVersion).not.toBe("");
@@ -214,8 +170,6 @@ describe("start → wait → logs → retry, through the CLI face", () => {
     const value = page.json as { text: string; eof: boolean; complete: boolean };
     expect(value.text).toContain("beta is about to fail");
     expect(value.eof).toBe(true);
-    // The log got its producer's last word — distinct from having been read to
-    // its end.
     expect(value.complete).toBe(true);
   }, 120_000);
 
@@ -233,17 +187,15 @@ describe("start → wait → logs → retry, through the CLI face", () => {
   }, 120_000);
 
   it("gives two observers independent cursors", () => {
-    // A cursor is per CALLER and never a destructive global acknowledgement:
-    // one observer draining the journal must not blind the other.
     const a = verb(world, "run_wait", { runId, deadlineMs: 1000 });
     const b = verb(world, "run_wait", { runId, deadlineMs: 1000 });
     expect(a.status).toBe(0);
     expect(b.status).toBe(0);
     const first = a.json as { cursor: string; failuresTotal: number };
     const second = b.json as { cursor: string; failuresTotal: number };
+    // A cursor is per CALLER and never a destructive global acknowledgement:
+    // one observer draining the journal must not blind the other.
     expect(second.cursor).toBe(first.cursor);
-    // And the red node is STILL red for both. Consuming a cursor resolves
-    // nothing.
     expect(first.failuresTotal).toBe(1);
     expect(second.failuresTotal).toBe(1);
   }, 120_000);
@@ -253,8 +205,6 @@ describe("start → wait → logs → retry, through the CLI face", () => {
       runId,
       after: "0zzzzzzzz-zzzzzzzz@2",
     });
-    // A REFUSAL is exit 1 and one JSON line on stderr — not exit 0 with a
-    // different answer, and not exit 3.
     expect(refused.status).toBe(1);
     const value = refused.json as { code: string; resync?: string };
     expect(value.code).toBe("bad_cursor");
@@ -287,14 +237,11 @@ describe("start → wait → logs → retry, through the CLI face", () => {
       parentRun: string;
       scope: { selectors: string[] };
     };
-    // The caller did not choose this — odu did, because the run had finalized.
     expect(receipt.mode).toBe("relaunched");
     expect(receipt.parentRun).toBe(runId);
     expect(receipt.effectiveRun).not.toBe(runId);
-    // A SELECTION is not a pipeline, and the receipt says which it got.
     expect(receipt.scope.selectors).toEqual(["beta"]);
 
-    // Repeating the same request id replays rather than starting a second run.
     const again = verb(world, "run_retry", {
       runId,
       selector: "beta",
@@ -364,8 +311,6 @@ describe("the HTTP MCP face", () => {
     });
     const result = answer.result as { serverInfo: { name: string }; instructions: string };
     expect(result.serverInfo.name).toBe("odu");
-    // The domain is taught at the handshake, which is the only place an MCP
-    // host will read it.
     expect(result.instructions).toContain("run_start");
   }, 60_000);
 
@@ -417,9 +362,6 @@ describe("the HTTP MCP face", () => {
   }, 60_000);
 
   it("refuses a body that is not a JSON-RPC message rather than hanging", async () => {
-    // A half-duplex transport hands the SDK a message and waits for a reply; a
-    // non-object body would be reported to `onerror` and answered with nothing,
-    // hanging the POST until the client gives up. Refused at the HTTP edge.
     const response = await fetch(`${world.origin}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -434,8 +376,6 @@ describe("the HTTP MCP face", () => {
   }, 60_000);
 
   it("refuses a POST from a page the operator merely visited", async () => {
-    // The mutation IS the attack: a cross-site page never has to read the
-    // reply. This used to answer 200 and reach domain dispatch.
     const response = await fetch(`${world.origin}/mcp`, {
       method: "POST",
       headers: {
@@ -462,8 +402,6 @@ describe("the HTTP MCP face", () => {
   }, 60_000);
 
   it("answers under a forwarded name with no configuration", async () => {
-    // An SSH forward published on another machine's name: the Host and the
-    // page's Origin are both that name, and the service serves it.
     const port = new URL(world.origin).port;
     const response = await fetch(`${world.origin}/mcp`, {
       method: "POST",
@@ -532,8 +470,6 @@ describe("cancelling, and outliving the caller", () => {
       300_000,
     );
 
-    // A second start in the same checkout is an ANSWER — the run already there
-    // — rather than a refusal.
     const busy = verb(world, "run_start", {
       checkout: dir,
       expectedSha: headOf(dir),
@@ -572,20 +508,10 @@ describe("cancelling, and outliving the caller", () => {
       300_000,
       0,
     );
-    // A cancelled run is INCOMPLETE, never failed: reporting it as failed sends
-    // somebody looking for a test that broke.
     expect(settled.outcome).toBe("incomplete");
   }, 900_000);
 
   it("takes a busy checkout when asked, and refuses a replacement that never starts", async () => {
-    // THE FALSE-READINESS CASE, end to end against the packaged binary.
-    //
-    // `.ci/odu.sock` belongs to the CHECKOUT, so while a run is live there the
-    // path answers immediately. A launcher that waited on the path therefore
-    // reported a replacement as started before it had reached its own DAG
-    // ingest — and `run.start` wrote an accepted receipt for a run that never
-    // registered. Both halves are here: a replacement that dies, and one that
-    // works.
     const dir = fixture(SLOW);
     const { runId } = startOrExplain(world, {
       checkout: dir,
@@ -604,6 +530,15 @@ describe("cancelling, and outliving the caller", () => {
       300_000,
     );
 
+    // THE FALSE-READINESS CASE, end to end against the packaged binary.
+    //
+    // `.ci/odu.sock` belongs to the CHECKOUT, so while a run is live there the
+    // path answers immediately. A launcher that waited on the path therefore
+    // reported a replacement as started before it had reached its own DAG
+    // ingest — and `run.start` wrote an accepted receipt for a run that never
+    // registered. Both halves are here: a replacement that dies, and one that
+    // works.
+
     // A justfile odu cannot read. The coordinator dies at ingest, which is
     // BEFORE it would claim the checkout — so nothing is superseded and nothing
     // registers, while the incumbent's socket goes on answering.
@@ -620,17 +555,13 @@ describe("cancelling, and outliving the caller", () => {
     expect(broken.status).toBe(1);
     const refusal = broken.json as { code: string; runId?: string };
     expect(refusal.code).toBe("launch_failed");
-    // The run it minted an id for does not exist, and the service says so
-    // rather than handing out a receipt for it.
     if (refusal.runId !== undefined) {
       const missing = verb(world, "run_wait", { runId: refusal.runId });
       expect(missing.status).toBe(1);
       expect((missing.json as { code: string }).code).toBe("unknown_run");
     }
-    // And the run that WAS there is untouched.
     expect(running(runId)).toBe("running");
 
-    // Now a replacement that can actually start.
     writeFileSync(join(dir, "justfile"), SLOW);
     const taken = verb(world, "run_start", {
       checkout: dir,
@@ -645,8 +576,6 @@ describe("cancelling, and outliving the caller", () => {
     const replacement = taken.json as { runId: string; accepted: boolean };
     expect(replacement.accepted).toBe(true);
     expect(replacement.runId).not.toBe(runId);
-    // The one it replaced stopped, and stopped as INCOMPLETE rather than
-    // failed: nothing about it broke.
     const settled = await until(
       `run ${runId} to be superseded`,
       () => {
@@ -668,8 +597,6 @@ describe("cancelling, and outliving the caller", () => {
   }, 900_000);
 
   it("discovers a native run started with `odu ci run`, from the catalog alone", async () => {
-    // No filesystem scan and nothing told the service: `odu ci run` registers in
-    // the per-user catalog, and the board is a projection of that.
     const dir = fixture(FAILING);
     Bun.spawnSync([odu, "ci", "run", "--no-post"], { cwd: dir, env: world.env });
     const found = await until(
@@ -694,12 +621,6 @@ describe("cancelling, and outliving the caller", () => {
 
 describe("the websocket door", () => {
   it("serves a websocket reached under a forwarded name", async () => {
-    // issue #111: a tab opened through an SSH forward on another machine's
-    // name used to get an open socket that answered nothing, under a green
-    // "live". The service now answers to whatever name it was reached by.
-    //
-    // Proven with the RPC protocol's own keep-alive: a `Ping` frame is
-    // answered with a `Pong` only by a connection that has a serving stack.
     const port = new URL(world.origin).port;
     const socket = new WebSocket(`ws://127.0.0.1:${port}/rpc/ws`, {
       headers: {
@@ -724,27 +645,14 @@ describe("the websocket door", () => {
   }, 60_000);
 });
 
-/**
- * THE FOREGROUND — bare `odu web`, which is what a person types.
- *
- * Two promises, and neither is checkable from the inside: the server lives as
- * long as the terminal does, and a run it started does NOT. Ctrl-C reaches this
- * process's group; a coordinator is a detached group of its own, so the signal
- * never arrives there.
- */
 describe("`odu web` serves in this terminal", () => {
   it("serves until it is interrupted, and leaves the run it started going", async () => {
-    // A THIRD origin, which is also what gives this server its own gate: the
-    // daemon home is named for the origin (`daemonHome`'s "state" placement
-    // ignores XDG_STATE_HOME on purpose), so moving the port moves the gate.
     const origin = `http://127.0.0.1:${suitePort() + 2}`;
     const env = { ...world.env, ODU_WEB_ORIGIN: origin };
     const server = Bun.spawn([odu, "web"], { env, stdout: "pipe", stderr: "pipe" });
     const at = { ...world, origin, env } as WebWorld;
     let home: string | undefined;
     try {
-      // It STAYS UP. A command that printed a URL and exited is the thing this
-      // default replaced, so the first assertion is that it is still there.
       home = await until(
         "the foreground server to answer",
         () => {
@@ -760,7 +668,6 @@ describe("`odu web` serves in this terminal", () => {
       );
       expect(server.killed).toBe(false);
 
-      // A run started through it, which must outlive it.
       const dir = fixture(SLOW);
       const { runId } = startOrExplain(at, {
         checkout: dir,
@@ -780,7 +687,6 @@ describe("`odu web` serves in this terminal", () => {
         300_000,
       );
 
-      // Ctrl-C.
       server.kill("SIGINT");
       await server.exited;
       // The SERVER is gone: nothing answers its address any more.
@@ -798,9 +704,6 @@ describe("`odu web` serves in this terminal", () => {
         60_000,
       );
 
-      // The RUN is not. Its coordinator is a process group of its own, so the
-      // interrupt never reached it — and its evidence is in the catalog, which
-      // this suite can still read with a different service.
       const stillThere = surfaceCall(world, ["get", "runs", runId]);
       expect(stillThere.status).toBe(0);
       expect(runSocketExists(dir)).toBe(true);
@@ -817,15 +720,6 @@ describe("`odu web` serves in this terminal", () => {
   }, 900_000);
 });
 
-/**
- * THE BOOTSTRAP — `odu web --background`, which is what an agent runs.
- *
- * Everything above drives a daemon this suite forked itself, which means it
- * never used the one path a person does: the launch-mode decision, the
- * environment the child is handed, and the readiness handshake the command
- * prints a URL on the strength of. All three were wrong at once, and no test
- * noticed, because none of them was ever executed.
- */
 describe("`odu web --background` starts a service that can run CI", () => {
   let booted: WebWorld | null = null;
 
@@ -833,14 +727,9 @@ describe("`odu web --background` starts a service that can run CI", () => {
 
   it("spawns a daemon that outlives the command, and runs a real pipeline", async () => {
     booted = await startWebServiceViaCommand(odu);
-    // The daemon is nobody's child — the command returned and this process
-    // never forked it — and it is nonetheless serving.
     const cell = surfaceCall(booted, ["get", "service"]);
     expect(cell.status).toBe(0);
 
-    // And the environment it was handed is enough to START A RUN, which is the
-    // part an allowlist gets wrong quietly: a daemon missing PATH or the nix
-    // variables looks perfectly healthy until the first coordinator.
     const dir = fixture(FAILING);
     const { runId } = startOrExplain(booted, {
       checkout: dir,
@@ -866,31 +755,7 @@ describe("`odu web --background` starts a service that can run CI", () => {
   }, 900_000);
 });
 
-/**
- * A REPLAY RESOLVES THE CALLER'S INVENTORY, NOT THE DAEMON'S.
- *
- * The service is a per-user singleton, so `$ODU_HOSTS` at the moment a run
- * started is a fact about somebody's shell and has nothing to do with the shell
- * the daemon was started in. A run records the caller's; a replay is checked
- * against the recorded one and the child is handed the recorded one.
- *
- * Three readings, and the middle one is what this gate is about: a PATH names a
- * file, `""` says the caller's shell named none (so resolution starts at
- * `~/.config`), and ABSENT says nobody said, which is the only reading under
- * which the daemon's own environment answers. `""` was being translated into
- * absent on the way into the pre-check — so validation consulted the service's
- * fleet while execution got the caller's, and the two disagreed about their
- * inputs.
- *
- * Stated here by giving the DAEMON an `$ODU_HOSTS` it cannot even read. Nothing
- * in a correct replay ever opens that file; a replay that consulted it refuses
- * with `no_venue` naming a parse error, which is a sentence about a fleet
- * nobody in this run ever named. Packaged, because the divergence only exists
- * where the client and the service are separate processes.
- */
 describe("a replay resolves the caller's inventory", () => {
-  /** One node, so the run settles in seconds; the placement is what is on
-   *  trial, not the DAG. */
   const SOLO = `[metadata("ci")]
 default: solo
 
@@ -912,22 +777,12 @@ solo:
     );
 
     const dir = fixture(SOLO);
-    // `hostsFile: ""` is the caller SAYING its shell had none — the reading the
-    // wire carries and the manifest records. The pin is what makes the run
-    // hermetic without one: `--host P=ADDR` upserts a pool on top of whatever
-    // the chain resolved, so this does not depend on the machine having a
-    // `~/.config/odu/hosts.json` (or on what is in one).
     const { runId } = startOrExplain(alien, {
       checkout: dir,
       expectedSha: headOf(dir),
       requestId: "alien-start",
       noPost: true,
       hostsFile: "",
-      // The pin AND the slice. `""` means resolution starts at `~/.config`, so
-      // on a developer's machine the chain resolves a real fleet — and an
-      // unsliced run would then fan out onto whatever platforms that file
-      // configures, which is somebody's build farm rather than this test's
-      // subject. One platform, pinned to localhost, on every machine.
       platforms: [currentNixSystem()],
       hostPins: [`${currentNixSystem()}=localhost`],
     });
@@ -947,11 +802,6 @@ solo:
     );
     expect(settled.passed).toBe(true);
 
-    // THE ASSERTION. A finalized run, so this is the replay path: the recorded
-    // `""` is checked against the caller's chain and handed to the child. A
-    // replay that read the daemon's `$ODU_HOSTS` instead would refuse here,
-    // and its refusal would quote a JSON parse error from a file this run
-    // never had anything to do with.
     const retried = verb(alien, "run_retry", {
       runId,
       selector: "solo",

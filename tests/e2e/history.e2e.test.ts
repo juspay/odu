@@ -1,44 +1,3 @@
-/**
- * End-to-end: the durable run catalog, through the real nix-built binary.
- *
- * This suite exists because the promises the catalog makes are all promises
- * about a run NOBODY IS SERVING, and none of them can be measured in-process:
- * they are about what a second command, in a second terminal, can find out —
- * after the coordinator exited, after the checkout was deleted, without
- * attaching to anything.
- *
- * Four claims are asserted here and nowhere else:
- *
- *   1. A bounded wait returns a red node's diagnostics BEFORE its sibling
- *      settles. The `fast-red` fixture pairs a lane that fails at once with a
- *      lane that sleeps for two minutes; a wait that reported the failure only
- *      after settlement would take those two minutes, so the assertion is
- *      about the CLOCK as well as the payload.
- *   2. A cursor suppresses repeats without resolving anything, and two callers
- *      hold their own. Each resumes where it left off; both still see the red.
- *   3. The exits are a contract. Passed, a failure to act on, still-going,
- *      no-such-run and a refused cursor are five different exits, and a script
- *      that cannot tell them apart takes the wrong next step.
- *   4. Evidence outlives its checkout. The catalog is per-user, so deleting the
- *      worktree — which used to delete the logs with it — leaves it readable.
- *
- * Black-box like the rest of this directory: nothing is imported from `src/`,
- * and the JSON shapes below are what the binary is asserted to emit rather
- * than a type shared with the code that emits them.
- *
- * ## A LOG IS ADDRESSED BY THE KEY ODU ISSUED
- *
- * Not by `--run R <node>`, and this suite must not reassemble one either. The
- * key is `<runId>/<encoded node>/<attempt>` and the encoding is odu's, so the
- * only supported way to hold one is to have been given it. This suite takes
- * every key from a FAILURE's `logKey`, which is the route that still works
- * once the run is over — `odu ci status` hands out keys too, but only for a run
- * that has not finished, so reading one from there is a race against a fixture
- * that settles in seconds. That is why the big-log fixture is red. A test that
- * built a key by hand would pass against an encoding the product does not
- * have.
- */
-
 import { rmSync } from "node:fs";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
@@ -55,7 +14,7 @@ let oduBin: string;
 
 beforeAll(() => {
   oduBin = buildOduBinary();
-}, 600_000); // nix build, cold cache
+}, 600_000);
 
 const created: string[] = [];
 const running: { kill: () => void; exited: Promise<void> }[] = [];
@@ -73,9 +32,6 @@ function fixture(name: string): string {
   return dir;
 }
 
-/** One reported failure, as this suite asserts it. A local shape on purpose —
- *  see the header: sharing the type with the producer would hide exactly the
- *  wire-shape regressions a black-box suite exists to catch. */
 interface Failure {
   node: string;
   attempt: number;
@@ -88,8 +44,6 @@ interface Failure {
   excerptSource: "attempt_log" | "none";
 }
 
-/** The attention payload `odu ci wait -o json` and `odu ci history show -o json`
- *  both answer with. */
 interface Attention {
   runId: string;
   reason: "failure" | "still_running" | "settled" | "owner_lost";
@@ -104,7 +58,6 @@ interface Attention {
   hasMore: boolean;
 }
 
-/** One `odu ci logs <key> -o json` read, parsed. */
 interface LogPage {
   key: string;
   text: string;
@@ -143,8 +96,6 @@ describe("a bounded wait answers before the slow lane finishes", () => {
     await awaitRunSocket(dir);
 
     const started = Date.now();
-    // A deadline far shorter than the sibling's sleep: if this only answered on
-    // settlement it could not answer inside it at all.
     const { status, attention } = waitJson(dir, [
       "--run",
       "latest",
@@ -168,10 +119,8 @@ describe("a bounded wait answers before the slow lane finishes", () => {
     expect(failure!.logComplete).toBe(true);
     expect(failure!.excerpt).toContain("BOOM: the quick lane failed");
     expect(failure!.excerptSource).toBe("attempt_log");
-    // The address to read it again, echoed rather than reassembled.
     expect(failure!.logKey).toContain(attention.runId);
 
-    // A failure to act on, whether or not every lane has finished.
     expect(status).toBe(1);
   }, 300_000);
 
@@ -185,15 +134,12 @@ describe("a bounded wait answers before the slow lane finishes", () => {
     const runId = first.attention.runId;
     expect(first.attention.cursor).toContain(runId);
 
-    // A SECOND caller with no cursor sees the run from the beginning — one
-    // caller acknowledging events does not consume them for anybody else.
     const second = waitJson(dir, ["--run", runId, "--deadline-ms", "5000"]);
     expect(second.attention.cursor).toContain(runId);
     expect(
       second.attention.failures.some((f) => f.node.startsWith("quick@")),
     ).toBe(true);
 
-    // The FIRST caller, resuming: its cursor never goes backwards…
     const resumed = waitJson(dir, [
       "--run",
       runId,
@@ -206,9 +152,6 @@ describe("a bounded wait answers before the slow lane finishes", () => {
     expect(seq(resumed.attention.cursor)).toBeGreaterThanOrEqual(
       seq(first.attention.cursor),
     );
-    // …and the failure is STILL there. Acknowledging a cursor suppresses
-    // repeats; it does not resolve anything, and this is the assertion that
-    // says so out loud.
     expect(
       resumed.attention.failures.some((f) => f.node.startsWith("quick@")),
     ).toBe(true);
@@ -223,14 +166,11 @@ describe("the wait's exits are a contract", () => {
     running.push({ kill: () => bg.child.kill("SIGTERM"), exited: bg.exited });
     await awaitRunSocket(dir);
 
-    // Nothing red, nothing settled: still going.
     const pending = waitJson(dir, ["--run", "latest", "--deadline-ms", "1500"]);
     expect(pending.status).toBe(2);
     expect(pending.attention.reason).toBe("still_running");
     expect(pending.attention.passed).toBe(false);
 
-    // A run that does not exist is not a failure of the run — it is a failure
-    // of the question.
     const unknown = oduCli(oduBin, dir, [
       "ci",
       "wait",
@@ -241,8 +181,6 @@ describe("the wait's exits are a contract", () => {
     ]);
     expect(unknown.status).toBe(4);
 
-    // A cursor for another run is refused WITH a resync route, never silently
-    // restarted from zero.
     const refused = oduCli(oduBin, dir, [
       "ci",
       "wait",
@@ -259,8 +197,6 @@ describe("the wait's exits are a contract", () => {
       resync: string;
     };
     expect(payload.error).toBe("bad_cursor");
-    // A refusal WITH A ROUTE: the exact command that resyncs, so a caller that
-    // has lost its place is told where to stand rather than left to guess.
     expect(payload.resync).toContain(pending.attention.runId);
   }, 300_000);
 
@@ -273,7 +209,6 @@ describe("the wait's exits are a contract", () => {
     expect(attention.settled).toBe(true);
     expect(attention.passed).toBe(true);
     expect(attention.outcome).toBe("passed");
-    // No coordinator is serving anything by now — this is read off disk.
     expect(attention.reason).toBe("settled");
   }, 300_000);
 
@@ -288,10 +223,6 @@ describe("the wait's exits are a contract", () => {
   }, 300_000);
 
   it("resolves `latest` to THIS checkout's newest run, not the catalog's", () => {
-    // Two checkouts, two runs, and the second one is newer. A `latest` that
-    // meant "newest in the catalog" would answer the first with the second's
-    // verdict — green where the caller is red — which is the failure this
-    // grammar has to not have.
     const red = fixture("fail");
     expect(oduRun(oduBin, red).status).not.toBe(0);
     const green = fixture("pass");
@@ -304,9 +235,6 @@ describe("the wait's exits are a contract", () => {
 
 describe("evidence is addressed, complete, and outlives its checkout", () => {
   it("reads a noisy node's log back by byte range, and says it is complete", () => {
-    // RED on purpose. The key has to be one odu issued (see the header), and a
-    // failure is the route that still works once the run is over — reading it
-    // off a live node is a race against a fixture that settles in seconds.
     const dir = fixture("noisy-red");
     expect(oduRun(oduBin, dir).status).not.toBe(0);
     const { attention } = waitJson(dir, ["--run", "latest"]);
@@ -314,25 +242,13 @@ describe("evidence is addressed, complete, and outlives its checkout", () => {
     expect(failure, "the noisy lane's failure should carry a log key").toBeDefined();
     const key = failure!.logKey;
 
-    // BY RANGE, and the range is the point twice over. It is the API a caller
-    // resuming a long log uses — and it is also the only way to ask this
-    // question through a pipe: the fixture's log is megabytes, which is more
-    // than a `spawnSync` capture will comfortably carry, so a test that
-    // demanded the whole thing in one answer would be testing the harness.
     const head = logJson(dir, key, ["--limit", "4096"]);
     expect(head.offset).toBe(0);
     expect(head.size).toBeGreaterThan(1_000_000);
     expect(head.eof).toBe(false);
-    // The continuation offset is a FACT ABOUT THE READ, not something a
-    // consumer may recompute from the text: the decode is non-fatal, so a
-    // range that split a multibyte character has more characters in the string
-    // than were taken off the file.
     expect(head.nextOffset).toBeGreaterThan(head.offset);
     expect(head.nextOffset - head.offset).toBeLessThanOrEqual(4096);
 
-    // A negative offset is a tail. The END is the part that used to go missing
-    // (juspay/odu#87): a log that stops early is still "a log", and only its
-    // last line says otherwise.
     // `--offset=-N`, joined: `parseArgs` refuses a bare `--offset -4096`
     // because a leading dash is ambiguous with the next flag. The joined form
     // is the one the usage text shows for exactly this reason.
@@ -347,20 +263,14 @@ describe("evidence is addressed, complete, and outlives its checkout", () => {
     const dir = fixture("fail");
     expect(oduRun(oduBin, dir).status).not.toBe(0);
 
-    // The address comes from the failure that reported it, which is how a
-    // person or an agent actually comes to hold one.
     const { attention } = waitJson(dir, ["--run", "latest"]);
     const failure = attention.failures[0];
     expect(failure, "the failing node should have reported a log key").toBeDefined();
     const key = failure!.logKey;
 
-    // The move the old layout could not survive: the worktree goes away, and
-    // with it `.ci/` and every byte of the run's output.
     rmSync(dir, { recursive: true, force: true });
     created.splice(created.indexOf(dir), 1);
 
-    // Asked from somewhere else entirely — the catalog is per user, not per
-    // checkout, so the key is still an address.
     const page = logJson(process.cwd(), key);
     expect(page.complete).toBe(true);
     expect(page.text.length).toBeGreaterThan(0);
@@ -371,9 +281,6 @@ describe("evidence is addressed, complete, and outlives its checkout", () => {
     expect(oduRun(oduBin, dir).status).not.toBe(0);
     const { attention } = waitJson(dir, ["--run", "latest"]);
     const key = attention.failures[0]!.logKey;
-    // The SAME key with a different attempt — an address odu's grammar accepts
-    // and its catalog cannot answer, which is a different thing from a
-    // malformed key and gets a different exit.
     const never = key.replace(/\/\d+$/, "/7");
 
     const res = oduCli(oduBin, dir, ["ci", "logs", never]);

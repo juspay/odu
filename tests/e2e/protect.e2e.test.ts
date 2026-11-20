@@ -1,20 +1,3 @@
-/**
- * End-to-end: `odu ci protect --dry-run` prints the (recipe × platform) contexts
- * branch protection would require. `protect` never dials a host, so its
- * platform enumeration must not depend on the machine's hosts config:
- * explicit `--platform` flags work against an EMPTY hosts file
- * (juspay/odu#52), and a hosts-derived platform set names its machine-local
- * provenance on stderr — branch protection is a repo-global fact, and
- * deriving it silently from one machine's config once halved a repo's
- * required contexts.
- *
- * The second suite drives the write path against a stand-in `gh`. Everything
- * `protect` decides is unit-tested (packages/cli/src/rulesets.test.ts); what only a
- * black-box run can catch is which GitHub endpoint it decides *at* — the
- * `Branch not protected (HTTP 404)` bug was a correct context list PATCHed to
- * classic branch protection on a repo that has none.
- */
-
 import {
   execFileSync,
   type SpawnSyncReturns,
@@ -41,16 +24,12 @@ import {
 
 let oduBin: string;
 
-// Dry-run never builds or dials anything — git rev-parse + just ingest only.
 const PROTECT_TIMEOUT = 60_000;
 
 beforeAll(() => {
   oduBin = buildOduBinary();
-}, 600_000); // nix build, cold cache
+}, 600_000);
 
-// Every temp dir a test makes — fixture repos and per-test hosts dirs alike —
-// lands here and is swept after the test. bun:test has no per-test
-// `onTestFinished`, so one file-local registry stands in for it.
 const created: string[] = [];
 afterEach(() => {
   for (const dir of created.splice(0)) cleanup(dir);
@@ -62,13 +41,6 @@ function fixture(name: string): string {
   return dir;
 }
 
-/** Run `odu ci protect --dry-run` in `dir` with a throwaway hosts file holding
- *  exactly `hosts` (an object, or a raw string for a deliberately malformed
- *  file) — hermetic against the dev machine's ambient config, like the
- *  harness's `hermeticEnv`, but per-test so a test can name an EMPTY config
- *  (the #52 case `hermeticEnv` can never express). Returns the generated
- *  `hostsFile` path too, so tests can assert the provenance messages name the
- *  file that actually won. */
 function oduProtect(
   dir: string,
   hosts: Record<string, string> | string,
@@ -85,10 +57,6 @@ function oduProtect(
     cwd: dir,
     encoding: "utf-8",
     maxBuffer: BIG,
-    // The suite's OWN service (`hermeticEnv`), with this test's hosts file on
-    // the client — which is where `$ODU_HOSTS` is read and from where it
-    // travels to the service as `hostsFile`. Using the ambient env here
-    // reached whatever daemon the machine already had.
     env: { ...hermeticEnv, ODU_HOSTS: hostsFile },
   });
   return { res, hostsFile };
@@ -107,8 +75,6 @@ const BOTH_PLATFORMS = [
 describe("odu ci protect --dry-run (black-box)", () => {
   it("enumerates explicit --platform flags with an empty hosts config (#52)", () => {
     const { res } = oduProtect(fixture("pass"), {}, BOTH_PLATFORMS);
-    // Explicit platforms are the operator's own decision — no provenance
-    // warning, no host requirement, just the contexts.
     expect(res.stderr).toBe("");
     expect(lines(res.stdout).sort()).toEqual([
       "alpha@aarch64-darwin",
@@ -120,9 +86,6 @@ describe("odu ci protect --dry-run (black-box)", () => {
   }, PROTECT_TIMEOUT);
 
   it("never parses the hosts file when --platform is explicit", () => {
-    // Not just independence from the file's *membership* — the explicit path
-    // must bypass hosts resolution entirely, so even an unparseable file
-    // cannot break it.
     const { res } = oduProtect(fixture("pass"), "not json {{{", BOTH_PLATFORMS);
     expect(res.stderr).toBe("");
     expect(lines(res.stdout).length).toBe(4);
@@ -130,8 +93,6 @@ describe("odu ci protect --dry-run (black-box)", () => {
   }, PROTECT_TIMEOUT);
 
   it("refuses a blank --platform value instead of emitting `recipe@` contexts", () => {
-    // `--platform=` used to be rejected only incidentally (no host named "");
-    // with enumeration decoupled the refusal must be deliberate.
     const { res } = oduProtect(fixture("pass"), {}, ["--platform", ""]);
     expect(res.status).toBe(1);
     expect(res.stdout).toBe("");
@@ -146,8 +107,6 @@ describe("odu ci protect --dry-run (black-box)", () => {
       "alpha@x86_64-linux",
       "beta@x86_64-linux",
     ]);
-    // The silent-halving trap: protection is repo-global, the hosts file is
-    // machine-local. The derived set must say exactly which file it came from.
     expect(res.stderr).toContain("derives from");
     expect(res.stderr).toContain(hostsFile);
     expect(res.stderr).toContain("--platform");
@@ -159,7 +118,6 @@ describe("odu ci protect --dry-run (black-box)", () => {
     expect(res.status).toBe(1);
     expect(res.stdout).toBe("");
     expect(res.stderr).toContain("--platform");
-    // The winning-but-empty file is diagnosed as such (lens fix ee4939f).
     expect(res.stderr).toContain(hostsFile);
   }, PROTECT_TIMEOUT);
 });
@@ -173,10 +131,6 @@ describe("odu ci protect --dry-run (black-box)", () => {
  */
 const SLUG = "odu-e2e-fixture/absent-repo";
 
-/** The ruleset governing the fixture's `master`, shaped like the real
- *  `GET /repos/juspay/olai/rulesets/20468764` that provoked this path: PRs plus
- *  green CI, still requiring the GitHub Actions contexts a move to odu leaves
- *  behind. */
 const FIXTURE_RULESET = {
   id: 20468764,
   name: "master: PRs + green CI",
@@ -219,20 +173,12 @@ const RULES_ON_MASTER = FIXTURE_RULESET.rules.map((rule) => ({
   ruleset_id: FIXTURE_RULESET.id,
 }));
 
-/**
- * Run a real `odu ci protect` (no `--dry-run`) whose `gh` is a shell script
- * answering the two reads from canned JSON and capturing the write. Faking at
- * the `$ODU_GH_BIN` seam rather than stubbing a module keeps the test
- * black-box: the argv it records is exactly the argv that would have reached
- * GitHub, which is the only place an endpoint mistake is observable.
- */
 function oduProtectWrite(opts: {
   branchRules: unknown;
   ruleset?: unknown;
   args?: string[];
 }): {
   res: SpawnSyncReturns<string>;
-  /** Every argv the fake `gh` was spawned with, one string per call. */
   calls: string[];
   putBody: () => Record<string, unknown> | null;
   postBody: () => Record<string, unknown> | null;
@@ -279,16 +225,7 @@ esac
     },
   );
   const calls = lines(readFileSync(at("calls.txt"), "utf-8"));
-  // Every path through `protect` reaches GitHub at least once, so an empty
-  // recording means the stand-in was bypassed — the nix wrapper `--set` rather
-  // than `--set-default`-ing ODU_GH_BIN did exactly that. Fail here rather than
-  // let assertions further down interpret a real API's answers.
   if (calls.length === 0) {
-    // WHAT ODU SAID, not just that the stand-in went unused. `gh` is reached
-    // last — after the checkout, the justfile, the platform set and the origin
-    // — so "no calls recorded" is far more often a refusal before that point
-    // than a bypassed seam, and the original message named only the one cause
-    // it was written for.
     const seam = hermeticEnv.ODU_GH_BIN ?? "(unset)";
     throw new Error(
       `e2e: protect made no gh call (exit ${res.status}). Either the ` +
@@ -297,7 +234,6 @@ esac
         `\n  it said:\n${res.stderr}${res.stdout}`,
     );
   }
-  /** The captured body of a write, or null when protect never made that call. */
   const bodyOf = (file: string) => (): Record<string, unknown> | null => {
     try {
       return JSON.parse(readFileSync(at(file), "utf-8"));
@@ -339,8 +275,6 @@ describe("odu ci protect (ruleset write path)", () => {
     const checks = (body?.rules as Rule[]).find(
       (rule) => rule.type === "required_status_checks",
     );
-    // The stale Actions contexts are gone: leaving them required would block
-    // every merge on checks no odu run posts.
     expect(checks?.parameters?.required_status_checks).toEqual(
       expect.arrayContaining(CONTEXTS),
     );
@@ -351,11 +285,6 @@ describe("odu ci protect (ruleset write path)", () => {
   }, PROTECT_TIMEOUT);
 
   it("never touches the classic branch-protection endpoint", () => {
-    // The regression this suite exists for. `protect` PATCHed
-    // /branches/{b}/protection/required_status_checks, which 404s
-    // `Branch not protected` on any repo governed by a ruleset — and the
-    // context list it sent was perfectly correct, so nothing but the endpoint
-    // itself is worth asserting on.
     const { calls } = oduProtectWrite({
       branchRules: RULES_ON_MASTER,
       ruleset: FIXTURE_RULESET,
@@ -367,13 +296,13 @@ describe("odu ci protect (ruleset write path)", () => {
   }, PROTECT_TIMEOUT);
 
   it("carries the ruleset's other rules and bypass actors through the write", () => {
-    // The PUT replaces `rules` wholesale and GitHub has no per-rule endpoint,
-    // so anything protect fails to echo back is policy it silently deleted.
     const { putBody } = oduProtectWrite({
       branchRules: RULES_ON_MASTER,
       ruleset: FIXTURE_RULESET,
     });
     const body = putBody();
+    // The PUT replaces `rules` wholesale and GitHub has no per-rule endpoint,
+    // so anything protect fails to echo back is policy it silently deleted.
     expect((body?.rules as Rule[]).map((r) => r.type)).toEqual([
       "deletion",
       "non_fast_forward",
@@ -386,9 +315,6 @@ describe("odu ci protect (ruleset write path)", () => {
   }, PROTECT_TIMEOUT);
 
   it("refuses a branch no ruleset covers, and names --create", () => {
-    // GitHub answers 200 `[]` here, so there is no error to propagate — the
-    // refusal is protect's own. Creating merge-blocking policy is opt-in, so
-    // the bare command must not do it, and must say what would.
     const { res, putBody, postBody } = oduProtectWrite({ branchRules: [] });
     expect(res.status).toBe(1);
     expect(putBody()).toBeNull();
@@ -403,25 +329,19 @@ describe("odu ci protect (ruleset write path)", () => {
       args: ["--create"],
     });
     expect(res.status).toBe(0);
-    // Created, not updated — there was nothing to update.
     expect(putBody()).toBeNull();
 
     const body = postBody();
     expect(body?.enforcement).toBe("active");
     expect(body?.bypass_actors).toEqual([]);
-    // One rule. A pull_request or deletion rule here would be protect deciding
-    // the repo's review policy off the back of a question about status checks.
     const rules = body?.rules as Rule[];
     expect(rules.map((r) => r.type)).toEqual(["required_status_checks"]);
     expect(rules[0]?.parameters?.required_status_checks).toEqual(
       expect.arrayContaining(CONTEXTS),
     );
-    // The branch was resolved from the repo's default, so the ruleset follows a
-    // later rename rather than pinning the name odu happened to see today.
     expect(body?.conditions).toEqual({
       ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] },
     });
-    // The empty bypass list is the surprising part; the report has to say it.
     expect(res.stdout).toContain("nobody bypasses it");
   }, PROTECT_TIMEOUT);
 
@@ -437,9 +357,6 @@ describe("odu ci protect (ruleset write path)", () => {
   }, PROTECT_TIMEOUT);
 
   it("updates rather than creates when --create meets an existing ruleset", () => {
-    // --create is a fallback for an uncovered branch, not a mode. Creating a
-    // second ruleset beside the one already there would make GitHub require the
-    // union, stranding the old contexts as permanently-blocking checks.
     const { res, postBody, putBody } = oduProtectWrite({
       branchRules: RULES_ON_MASTER,
       ruleset: FIXTURE_RULESET,

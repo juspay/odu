@@ -1,24 +1,3 @@
-/**
- * End-to-end: odu over a THOUSAND-RUN catalog, through the nix-built binary.
- *
- * juspay/odu#113: on a host with 710 runs, `odu ci attach` sat blank for minutes.
- * Two costs compounded — the daemon's poller parsed every run's whole journal
- * on every 250 ms tick, keeping its event loop busy full-time, and the client
- * read the board one row per round trip, each landing behind a tick. Neither
- * shows up on a catalog of the handful of runs every other suite here makes,
- * which is exactly how it shipped.
- *
- * So this suite makes the catalog big. It runs the `pass` fixture ONCE for a
- * real settled run directory, clones that directory a thousand times across
- * three checkouts (one of them real), and then asks the questions the report
- * was about — each under a bound generous enough for a loaded CI runner and
- * far below the minutes the bug cost. The wall time of each is printed, so a
- * slow-but-passing runner is visible in the log rather than only a red one.
- *
- * Black-box, like the rest of this directory: the catalog is seeded by copying
- * files the binary wrote, and every assertion reads the binary's output.
- */
-
 import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
@@ -47,10 +26,7 @@ const CLONES = 1_000;
  *  and the responsiveness check below would pass against it. Same figure as
  *  `tests/evidence/big-catalog-demo.sh`. */
 const JOURNAL = 1_500;
-/** Far above any healthy answer, far below the minutes #113 cost. */
 const BOUND_MS = 10_000;
-/** A test's own budget, above `BOUND_MS`, so a slow answer fails the bound —
- *  with its measured time — rather than bun's 5 s default killing the call. */
 const TEST_MS = 3 * BOUND_MS;
 
 let odu: string;
@@ -83,7 +59,6 @@ function fixture(name: string): string {
   return dir;
 }
 
-/** Every file under `dir`, recursively. */
 function filesUnder(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -94,18 +69,11 @@ function filesUnder(dir: string): string[] {
   return out;
 }
 
-/** A run id `mintRunId` could have produced, `i + 1` seconds older than `from`. */
 function olderId(from: string, i: number): string {
   const ts = Number.parseInt(from.split("-")[0] as string, 36) - (i + 1) * 1_000;
   return `${ts.toString(36).padStart(9, "0")}-${i.toString(36).padStart(8, "0")}`;
 }
 
-/**
- * Clone one real run directory `CLONES` times, rewriting the run id in every
- * file and the checkout in the manifest, and padding each journal to `JOURNAL`
- * lines of well-formed `phase` events. A third of the clones land in the real
- * checkout, so "this checkout's newest run" has to be found among them.
- */
 function seedCatalog(source: string, checkout: string): void {
   const roots = [checkout, "/nonexistent/odu-scale-b", "/nonexistent/odu-scale-c"];
   const from = join(catalog, source);
@@ -136,9 +104,6 @@ function seedCatalog(source: string, checkout: string): void {
   }
 }
 
-/** One read of the identity cell over the HTTP MCP door, timed from THIS
- *  process — no `odu` process start in the measurement, so a sub-second bound
- *  is about the daemon's loop and nothing else. */
 async function identityReadMs(): Promise<number> {
   const began = performance.now();
   const response = await fetch(`${world.origin}/mcp`, {
@@ -178,7 +143,6 @@ beforeAll(async () => {
   if (up.status !== 0) throw new Error(`odu web --background exited ${up.status}: ${up.stderr}`);
 }, 900_000);
 
-/** Stop this world's daemon, if one answers, and wait for it to be gone. */
 function stopDaemon(): void {
   const cell = cli(world.root, ["surface", "get", "service"], 30_000);
   if (cell.status !== 0) return;
@@ -204,7 +168,6 @@ afterAll(() => {
   stopDaemon();
   cleanup(world.root);
   for (const dir of fixtures) cleanup(dir);
-  // Removing a thousand run directories outlasts bun's default hook budget.
 }, 120_000);
 
 describe("a thousand-run catalog", () => {
@@ -238,11 +201,6 @@ describe("a thousand-run catalog", () => {
   }, TEST_MS);
 
   it("keeps answering RPCs while it holds the catalog", async () => {
-    // The identity cell does no catalog work at all, so its latency is the
-    // daemon loop's. Sampled across a couple of seconds, because one read can
-    // land in the gap between two ticks: the worst of them is what a poller
-    // hogging the loop would show. On the base build a tick over this catalog
-    // takes seconds, so the bound discriminates by an order of magnitude.
     const samples: number[] = [];
     for (let i = 0; i < 8; i += 1) {
       samples.push(await identityReadMs());
@@ -261,7 +219,6 @@ describe("a thousand-run catalog", () => {
       stdio: "ignore",
     });
     try {
-      // Up when `status` names it — asked, not slept on.
       const deadline = Date.now() + 120_000;
       let runId: string | null = null;
       while (runId === null) {
@@ -289,7 +246,6 @@ describe("a thousand-run catalog", () => {
         );
         attach.stdout?.on("data", (chunk: Buffer) => {
           buffer += chunk.toString();
-          // One pretty-printed object per frame; the first complete one is enough.
           const end = buffer.indexOf("\n}\n");
           if (end < 0) return;
           clearTimeout(timer);

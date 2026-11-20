@@ -1,25 +1,3 @@
-/**
- * ONE PLUGIN, ONE SKILL, ONE MCP SERVER — asserted against this repo's tree.
- *
- * odu's agent face is an Agent Plugin (https://agent-plugins.org/, spec 1.0.0)
- * rooted at the repository root: a `plugin.json`, the `odu` skill under
- * `skills/`, and the `odu` MCP server in `mcp.json`. The same root manifest is
- * odu's own agent-distro profile, whose extension adds only the maintainer-only
- * `dev/` plugin.
- *
- * ## What this file checks, and what it deliberately does not
- *
- * These are STATIC checks over the committed tree: the manifests are shaped the
- * way the spec requires, the profile loads them, and the skill teaches the one
- * vocabulary. They are cheap and run everywhere. They are not a loading gate —
- * `install.e2e.test.ts` loads the exported plugin the way a client does and
- * drives a real tool call through it.
- *
- * odu's agent face used to be two authored skills, `odu` and `odu-mcp`; while
- * two existed, an agent could read either and reach a different vocabulary.
- * Hence the insistence on exactly one of each below.
- */
-
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -38,10 +16,6 @@ interface McpConfig {
   mcpServers: Record<string, { type?: string; command?: string; args?: string[] }>;
 }
 
-/** The one command odu's MCP face is launched with, everywhere it is named:
- *  upstream master, unpinned, through Nix. `--accept-flake-config` because
- *  odu's flake declares a binary cache, and without it `nix run` stops on a
- *  trust prompt no MCP host can answer. */
 const ODU_SERVER = {
   type: "stdio",
   command: "nix",
@@ -87,11 +61,6 @@ describe("odu's Agent Plugin", () => {
   });
 
   it("is the plugin odu's own profile publishes, with only dev/ added", () => {
-    // The root manifest is BOTH the published plugin and this repository's
-    // agent-distro profile: the extension adds the maintainer-only `dev/`
-    // plugin, and nothing else, so maintainers load exactly what consumers do
-    // plus `dev/`. `dev/` is its own package, so nothing in it can ride along
-    // into the published plugin.
     const profile = readJson<{
       name: string;
       extensions: Record<string, { plugins: string[] }>;
@@ -104,8 +73,6 @@ describe("odu's Agent Plugin", () => {
   });
 
   it("publishes exactly one skill", () => {
-    // EQUALITY. A second skill directory is a second vocabulary — that is what
-    // the deleted `odu-mcp` was. "Contains odu" would not have seen it.
     expect(readdirSync(join(repoRoot, PLUGIN, "skills")).sort()).toEqual(["odu"]);
   });
 
@@ -119,12 +86,6 @@ describe("odu's Agent Plugin", () => {
     for (const verb of SHARED_TOOLS) {
       expect(skill, `the skill never mentions ${verb}`).toContain(verb);
     }
-    // Nothing deleted may still be TAUGHT — but the skill is allowed, and
-    // expected, to NAME what is gone in its closing removal notice. An agent
-    // arriving with stale knowledge of the nine tools is better served by being
-    // told they no longer exist than by their silent absence, so the two are
-    // different things and the check has to tell them apart. Everything before
-    // "## What changed" is instruction; the notice below it is history.
     const marker = "## What changed";
     expect(skill, "the skill has no removal notice").toContain(marker);
     const teaches = skill.slice(0, skill.indexOf(marker));
@@ -143,8 +104,6 @@ describe("odu's Agent Plugin", () => {
       expect(teaches, `the skill still teaches "${gone}", which no longer exists`)
         .not.toContain(gone);
     }
-    // And the notice must actually say the nine tools are gone, rather than
-    // leaving an agent to discover it as a tool that is not there.
     for (const named of ["wait_for_settle", "node_rerun", "odu runs"]) {
       expect(notice, `the removal notice never mentions ${named}`).toContain(
         named,
@@ -153,8 +112,6 @@ describe("odu's Agent Plugin", () => {
   });
 
   it("teaches the MCP command the plugin actually ships", () => {
-    // A skill documenting a different launch than `mcp.json` declares would be
-    // telling a hand-configuring user to wire something no client runs.
     expect(read(SKILL)).toContain(
       "nix run --accept-flake-config github:juspay/odu -- mcp",
     );

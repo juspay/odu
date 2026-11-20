@@ -1,4 +1,3 @@
-/** Real packaged coordinator/runner wire, including the bundle arm, without sshd. */
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
@@ -54,7 +53,6 @@ afterAll(() => {
       try {
         process.kill(service.identity.pid, "SIGTERM");
       } catch {
-        /* already stopped */
       }
     }
     cleanup(world.root);

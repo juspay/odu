@@ -1,11 +1,3 @@
-/**
- * Black-box: kill the localhost runner (the stdio pipe) after MANY nodes have
- * finished and one is still running. The incident was eight sealed-log throws
- * in one burst; N=1 survived on master (throw printed, record still written).
- * The coordinator must error the live node and settle — not die on
- * `logTail: append to <finished> after its log ended`.
- */
-
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -93,8 +85,6 @@ function isRunner(args: string): boolean {
   );
 }
 
-/** The run id `odu ci run` printed on stderr — the only handle a black-box caller
- *  gets on the process tree, now that the tree is not its own. */
 function runIdOf(stderr: string): string {
   const said = /odu · started (\S+)/.exec(stderr);
   if (said === null) {
@@ -103,15 +93,6 @@ function runIdOf(stderr: string): string {
   return said[1] as string;
 }
 
-/**
- * The lane runner, found under the COORDINATOR rather than under `odu ci run`.
- *
- * `odu ci run` is a client: the coordinator it asks for is a detached process
- * group belonging to the service, so the runner is not a descendant of the
- * process this test spawned and walking that tree finds nothing at all. The
- * coordinator is still findable — it carries `--run-id` in its argv, which is
- * exactly the id the caller was told — and the runner is under IT.
- */
 function findRunnerPid(runId: string): number {
   const coordinator = processTable().find(
     (p) => p.args.includes("run-coordinator") && p.args.includes(runId),
@@ -133,7 +114,6 @@ function killIfAlive(pid: number): void {
   try {
     process.kill(pid, "SIGKILL");
   } catch {
-    // already gone
   }
 }
 
@@ -159,20 +139,17 @@ function jsonEvents(stdout: string): { recipe: string; status: string }[] {
         events.push({ recipe: ev.recipe, status: ev.status });
       }
     } catch {
-      // non-JSON on stdout is noise; the assertions below look at recipes.
     }
   }
   return events;
 }
 
-/** Last-seen status per recipe. Empty until the first progress line. */
 function lastStatuses(stdout: string): Map<string, string> {
   const last = new Map<string, string>();
   for (const e of jsonEvents(stdout)) last.set(e.recipe, e.status);
   return last;
 }
 
-/** Durable per-recipe log under `.ci/<sha>/<plat>/<recipe>.log`. */
 function findRecipeLog(dir: string, recipe: string): string {
   const ci = join(dir, ".ci");
   if (!existsSync(ci)) throw new Error(`no .ci in ${dir}`);
@@ -241,9 +218,6 @@ describe("odu lane transport death (black-box)", () => {
       for (const p of recipeTree) killIfAlive(p.pid);
       killIfAlive(runnerPid);
 
-      // Errored node → non-zero. A crash also exits non-zero, so the rest of
-      // the assertions tell them apart: no sealed-log throw, a verdict block,
-      // a real run record, slow errored.
       expect(code).toBeGreaterThan(0);
       expect(stderr).not.toContain("after its log ended");
       expect(stderr).toContain("ci run summary");
@@ -273,13 +247,6 @@ describe("odu lane transport death (black-box)", () => {
   it(
     "killing the runner after every node succeeded still exits 0",
     async () => {
-      // Dual of the test above, and the shape juspay/odu#18 named: the
-      // verdict is already green, THEN the lane pipe dies. `--linger` keeps
-      // the runner attached past settle so the kill is not a race with
-      // natural `lane.close()`; idle-reap then exits via `verdictCode`.
-      // An `ok` node is immune to `onDead`'s overlay; a still-running one
-      // is not. A crash on EPIPE / a sealed-log throw would pick a
-      // non-zero code here even though the projection is already 0.
       const dir = makeFixture("pass");
       created.push(dir);
       const lingerEnv: NodeJS.ProcessEnv = {

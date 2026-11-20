@@ -1,13 +1,3 @@
-/**
- * End-to-end: the nix-built `odu` binary driven from a *second* process, the way
- * an agent (or a human in another terminal) drives it — cancelled, superseded,
- * lingered, and read through `status`. Exercises the seams the in-process suites
- * stub: the live coordinator's `run.cancel` teardown, the one-run lock,
- * `--linger` keeping the socket alive past settle, and the run environment
- * `status` reports off the header cell. Black-box: we only drive the binary and
- * read its sockets + exit codes.
- */
-
 import {
   type ChildProcess,
   execFileSync,
@@ -26,8 +16,6 @@ import {
 } from "./harness";
 
 let oduBin: string;
-// Pin every spawned run to a localhost lane regardless of the machine's ambient
-// `~/.config/odu/hosts.json` — the shared empty-`ODU_HOSTS` env (see harness).
 const env = hermeticEnv;
 
 beforeAll(() => {
@@ -52,8 +40,6 @@ function fixture(name: string): string {
   return dir;
 }
 
-/** Spawn `odu <args>` in `dir`, detached from this test's stdio, and track it
- *  for teardown. Returns the child plus a promise of its exit code. */
 function spawnOdu(dir: string, args: string[]): {
   child: ChildProcess;
   exited: Promise<number>;
@@ -82,7 +68,6 @@ async function waitUntil(
   }
 }
 
-/** The fixture's own HEAD, short — how its durable logs are addressed. */
 function sha7Of(dir: string): string {
   return execFileSync("git", ["rev-parse", "--short=7", "HEAD"], {
     cwd: dir,
@@ -90,16 +75,6 @@ function sha7Of(dir: string): string {
   }).trim();
 }
 
-/**
- * Is a coordinator SERVING this checkout? The socket, and only the socket.
- *
- * It used to be "the socket exists and `odu ci status` dials it", which was one
- * fact twice: `status` reached the coordinator through that socket, so its exit
- * proved the socket was answering. It does not any more — `status` is a catalog
- * read, and it answers about a run whose coordinator has been gone for a week.
- * Keeping it in this predicate made a liveness probe out of something that is
- * no longer evidence of liveness.
- */
 function runIsLive(dir: string): boolean {
   return existsSync(join(dir, ".ci", "odu.sock"));
 }
@@ -108,21 +83,7 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
   it(
     "drops one lane and still settles cleanly — no crash, no invented notice",
     async () => {
-      // Lane-drop followed by NATURAL settle was untested, and it is the shape
-      // that bites: the coordinator seals the dropped node's log with its own
-      // `cancelled by operator (lane)` line, and the settle that follows finds
-      // that same node still listed as owing output by the lane it was dropped
-      // from. Stamping a truncation notice onto a sealed log is a hard throw by
-      // design (`logTail: append to <node> after its log ended`), so the run
-      // died on a documented operator command while every other e2e test here
-      // stayed green — whole-run `cancel` was covered, `cancel @<platform>`
-      // was not.
       const dir = fixture("sleep");
-      // stderr is CAPTURED here, unlike the other tests: a crashed coordinator
-      // and a cleanly-settled one both exit non-zero and both leave a log with
-      // no truncation line, so the exit code cannot tell them apart. The
-      // difference is whether the run reached its verdict block or died with
-      // the throw — which only stderr shows.
       const child = spawn(oduBin, ["ci", "run", "--no-strict", "--progress", "json"], {
         cwd: dir,
         stdio: ["ignore", "ignore", "pipe"],
@@ -157,17 +118,11 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
 
       execFileSync(oduBin, ["ci", "cancel", `@${platform}`], { cwd: dir, env });
 
-      // Dropping the only lane leaves nothing left to run, so the run settles
-      // on its own. INCOMPLETE — a cancelled node is not a pass.
       expect(await exited).toBeGreaterThan(0);
 
-      // THE assertion: the coordinator reached its verdict instead of dying on
-      // the way there. Both halves matter — the absence of the throw, and the
-      // presence of the summary that proves we got past where it was thrown.
       expect(stderr).not.toContain("after its log ended");
       expect(stderr).toContain("ci run summary");
 
-      // The log keeps the true reason, and gains no second invented account.
       const log = readFileSync(slowLog(), "utf-8");
       expect(log).toContain("[odu] cancelled by operator (lane)");
       expect(log).not.toContain("[odu] log truncated");
@@ -180,7 +135,6 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
     const { exited } = spawnOdu(dir, ["ci", "run", "--no-strict"]);
     await waitUntil(() => runIsLive(dir), 120_000, "the run to come up");
 
-    // The cancel is a different process dialing the live socket.
     const out = execFileSync(oduBin, ["ci", "cancel"], { cwd: dir, encoding: "utf-8", env });
     expect(out).toMatch(/run cancelled/);
 
@@ -205,11 +159,6 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
     });
     const before = (JSON.parse(firstRun) as { runId: string }[]).length;
 
-    // THE ONE-RUN LOCK still holds; what changed is what a caller is told.
-    // `run.start` answers a busy checkout with the run that is ALREADY there —
-    // `accepted: false`, addressed — instead of refusing, because that run is
-    // almost always the one the caller wanted. So the property to assert is
-    // that no SECOND run came into existence, which is what the lock is for.
     const second = spawnSync(oduBin, ["ci", "run", "--no-strict", "--no-wait"], {
       cwd: dir,
       encoding: "utf-8",
@@ -227,16 +176,15 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
     ).length;
     expect(after).toBe(before);
 
-    // With supersede, the new run cancels the first and binds the lock itself.
     spawnOdu(dir, ["ci", "run", "--no-strict", "--supersede"]);
     const firstCode = await Promise.race([
       first.exited,
       sleep(30_000).then(() => "timeout" as const),
     ]);
-    expect(firstCode).not.toBe("timeout"); // the superseded run exited
+    expect(firstCode).not.toBe("timeout");
     await waitUntil(() => runIsLive(dir), 120_000, "the superseding run to serve");
 
-    execFileSync(oduBin, ["ci", "cancel"], { cwd: dir, env }); // clean up the live run
+    execFileSync(oduBin, ["ci", "cancel"], { cwd: dir, env });
   }, 240_000);
 
   it("--linger keeps the coordinator serving past settle", async () => {
@@ -244,8 +192,6 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
     spawnOdu(dir, ["ci", "run", "--no-strict", "--linger"]);
     await waitUntil(() => runIsLive(dir), 120_000, "the run to come up");
 
-    // The `pass` DAG drains in seconds; a non-linger run would exit and drop the
-    // socket. With --linger the coordinator stays up, so `status` keeps dialing.
     await waitUntil(() => {
       try {
         const out = execFileSync(oduBin, ["ci", "status", "-o", "json"], {
@@ -263,11 +209,6 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
       }
     }, 60_000, "the run to drain green");
 
-    // Several seconds after settle the socket is *still* there — the linger.
-    // Asserted on the socket rather than on `odu ci status`, which now answers
-    // from the catalog and would say "settled" just as happily about a
-    // coordinator that exited an hour ago. What `--linger` promises is that
-    // something is still SERVING, and the socket is where that is visible.
     await sleep(3_000);
     expect(runIsLive(dir)).toBe(true);
 
@@ -276,15 +217,6 @@ describe("odu ci cancel / supersede / linger (black-box)", () => {
   }, 180_000);
 });
 
-/**
- * The run *environment* on `odu ci status`, read from a second process
- * (juspay/odu#84). A localhost lane claims nothing, so these fixtures can never
- * sit in the `provisioning` phase — what the shipped binary proves here is the
- * contract's other half: the `run` key exists, and a run that reached its lanes
- * reports them and keeps the output it always had. The provisioning phase itself
- * is covered over the socket in `packages/cli/src/introspect.provisioning.test.ts`,
- * which does not need an ssh host to reach it.
- */
 describe("odu ci status reports the run environment (black-box)", () => {
   it("carries phase + lanes on a live localhost run", async () => {
     const dir = fixture("sleep");
@@ -309,10 +241,8 @@ describe("odu ci status reports the run environment (black-box)", () => {
     expect(parsed.run.lanes.every((l) => l.state === "leased")).toBe(true);
     expect(parsed.run.lanes[0]?.host).toBe("localhost");
     expect(parsed.run.elapsed_ms).toBeGreaterThanOrEqual(0);
-    // The keys that predate the `run` block are untouched.
     expect(parsed.nodes.length).toBeGreaterThan(0);
 
-    // The plain face says nothing extra once a run has its lanes.
     const plain = execFileSync(oduBin, ["ci", "status"], {
       cwd: dir,
       encoding: "utf-8",
