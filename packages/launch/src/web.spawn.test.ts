@@ -1,17 +1,3 @@
-/**
- * HOW `odu web` starts the daemon — which is a promise, not a detail.
- *
- * "It will outlive this shell" is printed to a person, and on cgroup-v2 it is
- * only true if the daemon leaves the launching unit's cgroup. A detached child
- * does NOT: `KillMode=control-group` walks cgroup membership, so stopping the
- * caller reaps it. Forcing the detached branch therefore does not merely lose an
- * optimisation — it makes the sentence false.
- *
- * That is exactly what `fromSource: { inheritParentEnv: true }` did here,
- * unconditionally, and it also layered the launcher's whole environment under
- * the allowlist that exists to stop precisely that. Both are pinned below.
- */
-
 import { describe, expect, it } from "bun:test";
 import { survivableSpawnPlan } from "@odu/execution/coordinator/spawn";
 import { assertPackaged, bakedBuild, daemonEnv, webDaemonSpawnConfig } from "./webDaemonLaunch";
@@ -19,7 +5,6 @@ import { assertPackaged, bakedBuild, daemonEnv, webDaemonSpawnConfig } from "./w
 const SELF = "/nix/store/x/bin/odu";
 const HOME_DIR = "/home/dev/.local/state/odu-web";
 
-/** A world where a user manager is genuinely there. */
 const underSystemd = survivableSpawnPlan(
   {
     INVOCATION_ID: "9d7a",
@@ -30,15 +15,11 @@ const underSystemd = survivableSpawnPlan(
   () => true,
 );
 
-/** A login shell: no unit, so nothing to escape. */
 const bareShell = survivableSpawnPlan({}, "linux", "odu-web");
 
 describe("the daemon's launch mode", () => {
   it("takes the systemd branch inside a unit, so the daemon leaves its cgroup", () => {
     const config = webDaemonSpawnConfig(SELF, underSystemd, {}, HOME_DIR);
-    // ABSENT, which is what tells the driver this is a normal launch. Present —
-    // as it used to be, always — forces the detached branch even here, where
-    // detaching escapes nothing and the daemon dies with the caller's unit.
     expect(config.fromSource).toBeUndefined();
     expect(config.unitPrefix).toBe("odu-web");
     expect(config.binPath).toBe(SELF);
@@ -48,10 +29,6 @@ describe("the daemon's launch mode", () => {
   it("forces the detached branch outside one, and inherits NOTHING", () => {
     const config = webDaemonSpawnConfig(SELF, bareShell, {}, HOME_DIR);
     expect(config.fromSource).toEqual({ inheritParentEnv: false });
-    // `false`, not `true`. This is a PACKAGED launch: the binary is a Nix
-    // wrapper carrying its own environment, so layering the launcher's under it
-    // would only add an orchestrator's ambient identity — which then rides into
-    // every run the daemon later starts.
   });
 
   it("wires a crash-catcher, because nobody holds a detached child's stderr", () => {
@@ -79,9 +56,6 @@ describe("the daemon's environment", () => {
   });
 
   it("carries the cache's two settings, and no further", () => {
-    // The cache lives in the daemon, so its settings must reach it: a launcher
-    // that kept `$ODU_ROOT_TOKEN` for itself served a service that refused
-    // every admin verb for an environment the operator had set correctly.
     const env = daemonEnv({
       ODU_ROOT_TOKEN: "root-secret",
       ODU_CACHE_STORE: "local?root=/tmp/chroot",
@@ -89,20 +63,11 @@ describe("the daemon's environment", () => {
     });
     expect(env.ODU_ROOT_TOKEN).toBe("root-secret");
     expect(env.ODU_CACHE_STORE).toBe("local?root=/tmp/chroot");
-    // The daemon is what builds a bucket's substituter URL, so the address it
-    // is published under has to travel with it.
     expect(env.ODU_PUBLIC_ORIGIN).toBe("https://cache.example.com");
-    // A BLANK token is the same absence as no variable at all — the reading
-    // `webPorts` does — so forwarding `ODU_ROOT_TOKEN=` would make an empty
-    // string a credential.
     expect(daemonEnv({ ODU_ROOT_TOKEN: "" }).ODU_ROOT_TOKEN).toBeUndefined();
   });
 
   it("carries what a COORDINATOR it starts will need", () => {
-    // The daemon's whole job includes spawning coordinators that shell out to
-    // nix and git. On the detached branch this list is the complete child
-    // environment, so anything missing here surfaces much later — as a run that
-    // cannot provision, in a process nobody is watching.
     const env = daemonEnv({
       HOME: "/home/dev",
       PATH: "/usr/bin",
@@ -111,8 +76,6 @@ describe("the daemon's environment", () => {
       NIX_SSL_CERT_FILE: "/etc/ssl/certs/ca-bundle.crt",
       LOCALE_ARCHIVE: "/nix/store/l/lib/locale/locale-archive",
       XDG_RUNTIME_DIR: "/run/user/1000",
-      // The lane runner is resolved from this baked source; a coordinator that
-      // cannot see it is a coordinator that cannot provision a lane.
       SURFACE_AGENT_FLAKE_REF: "/nix/store/abc-odu-agent-flake-source",
     });
     for (const key of [
@@ -143,16 +106,6 @@ describe("the daemon's environment", () => {
   });
 });
 
-/**
- * THE PACKAGED CONTRACT — the rule that replaced three runtime fallbacks.
- *
- * Nix is odu's only supported runtime. What used to happen when the wrapper had
- * not baked something was that odu repaired it: an interpreter path guessed
- * from `process.argv`, a service that bound its wire and 404'd its page, an
- * identity that quietly went null. Each repair turned a packaging defect into a
- * subtly degraded application that looked like a mode somebody had chosen, and
- * the degradation surfaced somewhere else entirely.
- */
 describe("the packaged contract", () => {
   const COMPLETE = {
     ODU_SELF: SELF,
@@ -184,24 +137,12 @@ describe("the packaged contract", () => {
   });
 
   it("reports every missing locator at once, not the first one", () => {
-    // A person fixing a wrapper wants the list. Reporting them one rebuild at a
-    // time is three rebuilds to learn what one message could have said.
     expect(() => assertPackaged({})).toThrow(
       /ODU_SELF, ODU_WEB_DIST, ODU_BUILD_ID, ODU_OSFACTS_BIN/,
     );
   });
 });
 
-/**
- * IDENTITY AND PROVENANCE ARE TWO AXES, and conflating them broke the singleton.
- *
- * `ODU_BUILD_ID` and `ODU_COMMIT_HASH` used to be baked together or not at all,
- * on the framework's rule that "a Nix build id means the source commit was
- * knowable". A dirty tree still produces a complete, hash-identified Nix
- * package — so that build reported NO identity, `ensureService`'s `sameBuild`
- * was permanently false, and the compatible-reuse branch was dead on every
- * developer machine and every local e2e run.
- */
 describe("bakedBuild", () => {
   const withEnv = <T,>(env: Record<string, string | undefined>, f: () => T): T => {
     const saved = { ...process.env };
@@ -223,7 +164,6 @@ describe("bakedBuild", () => {
       bakedBuild,
     );
     expect(build.buildId).toBe("/nix/store/z-odu");
-    // The dirty-tree case: a real package, honestly unable to name a commit.
     expect(build.commit).toBeNull();
     expect(build.self).toBe(SELF);
   });
@@ -241,8 +181,6 @@ describe("bakedBuild", () => {
       { ODU_BUILD_ID: undefined, ODU_COMMIT_HASH: undefined, ODU_SELF: undefined },
       bakedBuild,
     );
-    // Null rather than a plausible blank — and `assertPackaged` is what turns
-    // this into a refusal at the one place it matters.
     expect(build).toMatchObject({ buildId: null, commit: null, self: null });
   });
 });

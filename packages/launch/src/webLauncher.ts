@@ -1,54 +1,3 @@
-/**
- * CONVERGING ON THE SINGLETON — adopt, spawn, or refuse, and never guess.
- *
- * `odu web` has to end in one of three places, and the whole value of this
- * module is that they stay apart:
- *
- *   - **adopted** — a service is running, this build can speak to it, and its
- *     URL is the answer. The common case, and it must be cheap: no spawn, no
- *     wait, no side effect.
- *   - **spawned** — nothing is running, so one is started and VERIFIED before a
- *     URL is printed. Not "the spawn returned": a person about to open that URL
- *     is entitled to a service that answers.
- *   - **refused** — something is there and this build cannot use it, or the
- *     port belongs to something else. An actionable sentence, never a fallback
- *     to a different port. A relocating service is an unfindable one.
- *
- * ## Readiness is VERIFIED, never polled blind
- *
- * The old shape of this problem is a launcher that sleeps and hopes. Here the
- * service publishes what it is on a cell — its pid, its origin, its contract
- * version, its storage version, and whether it has finished reconciling — and
- * this module reads that. So "ready" means the service said so, `starting`
- * means it is reconciling and the wait continues, and a dial that fails means
- * nothing is there yet. Three facts, none of them inferred from a clock.
- *
- * ## Compatibility is TWO axes, and only one of them is ordered
- *
- * The contract is `major.minor` — the host's, and each mounted row's on the
- * identity cell — and the rule is ADDITIVE (`admitService`'s): a running
- * service is adopted when the host's major and the major of every row THE
- * CALLER NEEDS match, whatever the minors — a minor only ever ADDS members, so
- * the worst a skew costs is one control answering "unknown verb" — and a
- * different major is refused with a sentence naming the row. The caller
- * declares its needs (`odu ci run` reads the runs, `odu cache` the cache); this
- * module names no row and never guesses them. `buildId` is MATCH-ONLY — there is
- * no such thing as a newer build — so a differing one is reported and never
- * acted on unless a person asks for an upgrade. That asymmetry is the
- * framework's (`admitService` has no `buildIsNewer` beside it) and it
- * is right: versions are a protocol claim, builds are an identity.
- *
- * ## The upgrade is capture → drain → reattach
- *
- * `--upgrade` reads the running service's identity off the frozen control
- * fragment (`core.hello`, the one contract that never versions within a
- * protocol epoch — so it is readable even when the application surface is
- * skewed beyond speaking), asks it to drain (`core.drain`), waits for the GATE
- * to clear rather than for the process to look gone, and starts this build.
- * Nothing is signalled. A service that will not drain is reported, not killed:
- * it may be finishing a write.
- */
-
 import { readFileSync } from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
@@ -95,9 +44,6 @@ import {
 import { serviceBind, serviceOrigin } from "@odu/service-client/endpoint";
 import type { Rpc, RpcGroup } from "effect/rpc";
 
-/** The composed contract a control dial speaks: the frozen fragment under the
- *  sibling key the daemon mounts it at, which is also where the framework's own
- *  identity probe looks. */
 const CONTROL = composeSurfaceContracts({ control: controlCoreSurface });
 
 export type EnsureOutcome =
@@ -114,32 +60,17 @@ export type EnsureOutcome =
 export interface EnsureOptions {
   origin: string;
   home: DaemonHomePaths;
-  /** THIS build's identity, so the comparison is against a value rather than
-   *  against the environment a launcher happens to be running in. */
   baked: ServiceBuild;
-  /** THE ROWS THE CALLER READS, and at which version — what a running daemon
-   *  is adopted or refused on. Declared by the face, never defaulted here: this
-   *  module names no row. */
   needs: RowNeeds;
   upgrade: boolean;
-  /** Start the daemon so it outlives this process. */
   spawn: () => Effect.Effect<void, Error>;
-  /** How long to wait for a spawned service to say it is ready. Generous: a
-   *  cold start reconciles the catalog first, and a catalog with a thousand
-   *  runs takes longer than one with three. */
   readyMs?: number;
-  /** How long to wait for a drained service to release its gate. */
   drainMs?: number;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** Read the service cell, or `null` when nothing usable answers. A dial that
- *  fails is ABSENCE. A dial that succeeds and then cannot read is a service
- *  that is there and broken — a different fact, but reported as `null` here
- *  too, because the caller tells the two apart by the GATE, which a foreign
- *  program does not hold. The dial path wants the opposite answer and gets it
- *  from {@link adoptOrRefuse}, which throws. */
+/** Read the service cell, or `null` when nothing usable answers. */
 export async function readService(
   origin: string,
   group?: RpcGroup.RpcGroup<Rpc.Any>,
@@ -153,9 +84,6 @@ export async function readService(
   try {
     return await Effect.runPromise(readServiceCell(connection.client));
   } catch {
-    // Connected, then said nothing readable. Not a service of ours — reported
-    // as absence would be wrong, so it is reported as null here and the caller
-    // distinguishes it by the gate, which a foreign program does not hold.
     return null;
   } finally {
     await connection.dispose();
@@ -163,10 +91,7 @@ export async function readService(
 }
 
 /** The refusal a running service's cell earns, or `null` when this build can
- *  speak to it — the surface's own {@link admitService} verdict, projected to
- *  the shape this launcher branches on. The decision and the sentence live
- *  with the contract version they are about, so the ws face and every local
- *  face refuse the same daemon for the same reason, in the same words. */
+ *  speak to it. */
 export function contractVerdict(
   cell: ServiceCell,
   origin: string,
@@ -176,25 +101,13 @@ export function contractVerdict(
   return verdict.kind === "adopt" ? null : verdict.message;
 }
 
-/**
- * ADOPT OR REFUSE, over a connection already open. The framework's handshake
- * rule — read the contract version BEFORE invoking anything else — applied
- * to the thin-client path, which used to hand back whatever answered and let
- * the first unknown verb surface as `Unknown request tag: …` from inside the
- * RPC layer. On refusal the connection is disposed here: the caller never
- * sees it, so nothing can leak the link's fibers.
- */
 export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" | "dispose">>(
   connection: C,
   origin: string,
   opts: {
-    /** The rows this caller reads — see {@link EnsureOptions.needs}. */
     needs: RowNeeds;
     handshakeMs?: number;
     warn?: (line: string) => void;
-    /** Daemon instances this caller already warned about — owned by a caller
-     *  that dials more than once (the stdio bridge redials per connection), so
-     *  the skew note is said once per daemon rather than once per redial. */
     warned?: Set<string>;
   },
 ): Promise<C> {
@@ -215,8 +128,6 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
     );
   }
   if (cell === undefined) {
-    // First-frame read finished without one: the peer answered and said
-    // nothing. Same refusal as a dead cell — answered, but not a service.
     await connection.dispose();
     throw new Error(
       `odu: something answered on ${origin} but published no service cell ` +
@@ -225,14 +136,9 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
   }
   const refusal = contractVerdict(cell, origin, opts.needs);
   if (refusal !== null) {
-    // Disposed HERE, on the only path that refuses: the caller never sees this
-    // connection, so nothing can leak the link's dial, ping and response fibers.
     await connection.dispose();
     throw new Error(refusal);
   }
-  // ADOPTED BEHIND: said once, on stderr, so stdout and `-o json` are the
-  // command's alone — and the "unknown" a newer verb would meet is explained
-  // before it arrives.
   const note = skewNote(cell, origin, opts.needs);
   const instance = `${cell.identity.pid}:${cell.identity.startedAt}`;
   if (note !== null && opts.warned?.has(instance) !== true) {
@@ -242,7 +148,6 @@ export async function adoptOrRefuse<C extends Pick<ServiceConnection, "client" |
   return connection;
 }
 
-/** Ask the running daemon to drain, over the frozen control contract. */
 async function drain(home: DaemonHomePaths): Promise<void> {
   const link = await unixSocketLink({
     group: CONTROL.group,
@@ -257,32 +162,13 @@ async function drain(home: DaemonHomePaths): Promise<void> {
   }
 }
 
-/**
- * How long the port probe waits for a TCP accept. Loopback, so a listener
- * answers in microseconds; the budget exists for the case where the origin is
- * NOT loopback and a packet has to travel.
- */
 const PORT_PROBE_MS = 1_000;
 
-/**
- * IS ANYTHING ACCEPTING ON THIS ADDRESS? A raw TCP connect and nothing more.
- *
- * Deliberately below the surface protocol. {@link readService} answers "is
- * there an odu service here", and it collapses two very different silences into
- * one `null`: nothing is listening, and something is listening that is not
- * ours. Those need different answers — the first is "start one", the second is
- * "the port is taken" — and no amount of surface handshaking can tell them
- * apart, because a foreign program will not speak the handshake either way.
- * The only question that separates them is the one the kernel can answer.
- */
 async function whoeverIsListening(origin: string): Promise<number | null> {
   let bind: { host: string; port: number };
   try {
     bind = serviceBind(origin);
   } catch {
-    // An origin that is not a URL cannot be probed, and this is not the place
-    // to refuse it: the bind attempt downstream says so properly, and naming
-    // the same defect twice in two wordings is worse than naming it once.
     return null;
   }
   return new Promise<number | null>((resolve) => {
@@ -297,9 +183,6 @@ async function whoeverIsListening(origin: string): Promise<number | null> {
   });
 }
 
-/** Is the gate free — either absent, or naming a process that is gone? The
- *  GATE rather than the port, because the gate is what a successor must be able
- *  to claim and a released port can still be in TIME_WAIT. */
 function gateFree(home: DaemonHomePaths): boolean {
   const identity = gateIdentity(home.gatePath);
   if (identity === undefined) return true;
@@ -316,11 +199,6 @@ export async function ensureService(
 
   const running = await readService(opts.origin);
   if (running !== null) {
-    // MATCH-ONLY, never ordered: there is no such thing as a newer build, so a
-    // difference is reported and acted on only when a person asks for an
-    // upgrade. Two UNKNOWN identities never match — an off-nix daemon and an
-    // off-nix client are not the same build, they are two builds nobody can
-    // name — which is why the null case answers false rather than true.
     const verdict = contractVerdict(running, opts.origin, opts.needs);
     const compatible = verdict === null;
     const mine = opts.baked;
@@ -353,9 +231,6 @@ export async function ensureService(
     return spawnAndVerify(opts, sleep, pollMs, readyMs, "upgraded");
   }
 
-  // Nothing answered. The gate tells the two silences apart: a HELD gate means a
-  // daemon is coming up (it claims the gate before it binds), and waiting is
-  // right. A free gate means there is nothing, and starting one is right.
   if (!gateFree(opts.home)) {
     const cell = await untilValue(
       () => readService(opts.origin),
@@ -364,10 +239,6 @@ export async function ensureService(
       sleep,
     );
     if (cell !== null) {
-      // The SAME rule as the arm above: a daemon that came up behind a held
-      // gate is still a daemon this build may not be able to speak to, and
-      // adopting it here is how an `Unknown request tag` reaches a caller
-      // that never got the upgrade sentence.
       const refusal = contractVerdict(cell, opts.origin, opts.needs);
       if (refusal !== null) return { ok: false, message: refusal };
       return {
@@ -389,21 +260,6 @@ export async function ensureService(
     };
   }
 
-  // THE PORT BELONGS TO SOMEBODY ELSE — refused here, in a second, rather than
-  // discovered in sixty.
-  //
-  // Nothing answered as an odu service AND no odu daemon holds the gate, so if
-  // the kernel still accepts a connection at this address, the thing accepting
-  // it is not odu's and never will be. Spawning into that costs the daemon a
-  // failed bind (it says so, correctly, to a stderr log nobody is holding) and
-  // costs the caller the entire readiness deadline followed by a sentence that
-  // names no cause. Through `odu mcp` it was worse than useless: the MCP SDK's
-  // own request timeout fires first, so an agent's only account of an occupied
-  // port was `MCP error -32001: Request timed out`.
-  //
-  // A refusal, never a fallback to another port — for the same reason
-  // `serveWebService` refuses: every face derives ONE address, and a service
-  // that relocated would be a service nobody could find.
   const occupiedPort = await whoeverIsListening(opts.origin);
   if (occupiedPort !== null) {
     return {
@@ -419,14 +275,6 @@ export async function ensureService(
   return spawnAndVerify(opts, sleep, pollMs, readyMs, "spawned");
 }
 
-/**
- * CAPTURE → DRAIN → WAIT FOR THE GATE. What a takeover is, wherever it happens.
- *
- * Shared by the background launcher (which then spawns a successor) and by the
- * foreground server (which then becomes one). Nothing is signalled: a service
- * that will not drain is REPORTED, because it may be finishing a write, and the
- * gate rather than the process is what a successor has to be able to claim.
- */
 export async function clearTheGate(opts: {
   origin: string;
   home: DaemonHomePaths;
@@ -443,11 +291,6 @@ export async function clearTheGate(opts: {
   // stop; a process that stops promptly closes the socket it would have
   // replied on, and the client sees `SocketCloseError: 1000` — a NORMAL
   // closure — where it wanted a reply. That is the drain working perfectly.
-  //
-  // So the transport error is kept as evidence and nothing is concluded from
-  // it. Only the gate answers this question, because the gate is the thing a
-  // successor actually has to claim, and it says the same word whether the
-  // incumbent replied first or simply left.
   let said: string | null = null;
   try {
     await drain(opts.home);
@@ -486,9 +329,6 @@ async function spawnAndVerify(
   const cell = await untilValue(
     async () => {
       const seen = await readService(opts.origin);
-      // `starting` is a real state, not a gap: the service reconciles the
-      // catalog before it claims to know the board, and a caller told "ready"
-      // during that window would read a partial one.
       return seen !== null && seen.readiness.state === "ready" ? seen : null;
     },
     readyMs,
@@ -496,12 +336,6 @@ async function spawnAndVerify(
     sleep,
   );
   if (cell === null) {
-    // THE DAEMON'S OWN WORDS, not a paraphrase of the silence. Nobody holds a
-    // detached daemon's stderr, so it writes it to a file in its home — and
-    // this launcher was pointing at that file rather than reading it, which
-    // left a caller with sixty seconds and a sentence naming no cause. Absent
-    // on the systemd branch, where the journal has it instead and the pointer
-    // below is the right answer.
     const said = daemonSaid(opts.home.dir);
     return {
       ok: false,
@@ -524,14 +358,6 @@ async function spawnAndVerify(
   };
 }
 
-/** The tail of what a spawned daemon said before it gave up, or `null` when it
- *  left nothing — which on the systemd branch is normal, because the journal
- *  has it instead.
- *
- *  The path comes from `webStderrLog`, which is the module that TELLS the spawn
- *  driver where to write it. It used to be a second string literal here with a
- *  comment asking the two to stay equal; the failure that invites is a launcher
- *  reporting silence from a daemon that said exactly why it died. */
 function daemonSaid(homeDir: string): string | null {
   try {
     const text = readFileSync(webStderrLog(homeDir), "utf-8")
@@ -543,7 +369,6 @@ function daemonSaid(homeDir: string): string | null {
   }
 }
 
-/** Poll a predicate to a deadline. */
 async function until(
   ask: () => boolean,
   deadlineMs: number,
@@ -558,7 +383,6 @@ async function until(
   }
 }
 
-/** Poll for a value to a deadline. */
 async function untilValue<T>(
   ask: () => Promise<T | null>,
   deadlineMs: number,
@@ -574,80 +398,13 @@ async function untilValue<T>(
   }
 }
 
-/**
- * DIAL THE SERVICE, STARTING ONE IF THERE IS NONE — the seam every thin client
- * bootstraps through.
- *
- * Public odu is now a set of clients: `odu ci run`, `odu ci wait`, `odu surface`,
- * the `odu mcp` bridge. None of them owns execution, and on a fresh machine none
- * of them can do anything until a daemon exists. Two ways that could have gone,
- * and only one of them is honest:
- *
- *   - **Recover a failed dial by doing the work locally.** Never. That is the
- *     second authority the whole consolidation exists to remove, and it would
- *     reappear exactly where it is least visible — at the moment the shared
- *     service is unreachable, which is precisely when two answers about one run
- *     start to diverge.
- *   - **Start the shared service and use it.** This.
- *
- * ## Only at THIS INSTALL'S OWN origin
- *
- * `allowStart` is false whenever the caller named an origin OTHER than the one
- * this install answers to, and that is not a nicety: `--origin` is how a person
- * addresses a service somewhere else, and a mistyped one must report that
- * nothing is serving there rather than starting a daemon of our own — which
- * could not bind that address anyway, and would spend the whole readiness
- * deadline discovering it.
- *
- * **The comparison is against `serviceOrigin()`, not against the compiled-in
- * default**, and getting that wrong is a real bug this had. `ODU_WEB_ORIGIN` is
- * how a developer, and every e2e world, moves the whole service — address,
- * gate, catalog and all — and it is still THEIR singleton. Comparing against
- * `DEFAULT_SERVICE_ORIGIN` meant that anybody who set it got a face that would
- * dial but never start, so a cold machine with a moved origin had no way to
- * bootstrap at all. The rule is "did the caller ask for somewhere else", and
- * the environment is not somewhere else.
- *
- * ## The absence probe is short; the readiness wait is not
- *
- * A dial that finds nothing must fail FAST, because the common case for a
- * failure here is "there is no daemon" and the caller is about to start one.
- * Once a daemon has been started, `ensureService` waits on its readiness CELL —
- * `starting` is a service reconciling the catalog and is a reason to keep
- * waiting; silence is not. That asymmetry is why the two deadlines differ by an
- * order of magnitude instead of being one number.
- */
 export async function connectOrStart(
   origin: string = serviceOrigin(),
   opts: {
-    /** THE ROWS THIS CALLER READS — what an existing daemon is adopted or
-     *  refused on. Required: a face that reads only the runs must be able to
-     *  say so, and one that reads the cache must not be admitted without it. */
     needs: RowNeeds;
     allowStart?: boolean;
-    /**
-     * EVERY TAG THIS CLIENT MAY SEND — the composed wire, when the daemon
-     * serves more than one row.
-     *
-     * A link encodes each request from the `Rpc` it looks up by tag, so a face
-     * that addressed a SIBLING's member through a core-only link would find no
-     * descriptor for it. The composition lives where the rows are NAMED, which
-     * is a row's own package (or a root) — never here: this package names no
-     * row, which is what lets a row import it.
-     */
     group?: RpcGroup.RpcGroup<Rpc.Any>;
-    /**
-     * THE CREDENTIAL THIS MACHINE HOLDS FOR THAT ORIGIN, as upgrade headers.
-     *
-     * A server with a door answers an unauthenticated socket with nothing but
-     * its own identity, so a face that reached it without a token would look
-     * like a board with no data. Resolving it is the CLI's business (the file is
-     * `~/.config/odu/auth/credentials`, and `$ODU_TOKEN` comes first) — this
-     * package names no row and reads no environment. Absent means no credential,
-     * which is loopback and is unconditional there.
-     */
     authorization?: (origin: string) => Promise<Record<string, string>>;
-    /** See {@link adoptOrRefuse}: the daemons already warned about. */
     warned?: Set<string>;
   },
 ): Promise<ServiceConnection> {
@@ -668,15 +425,8 @@ export async function connectOrStart(
     spawn: spawnWebDaemon,
   });
   if (!outcome.ok) {
-    // The launcher's own sentence, carried out verbatim. It already names the
-    // recovery — an upgrade, a wedged gate, a misbuilt package — and rewording
-    // it here would be a second, worse account of the same fact.
     throw new Error(outcome.message);
   }
-  // The ONLY way a connection leaves this function is through the handshake —
-  // even the one `ensureService` produced after its own contract check, so
-  // "adopted" means "read its cell and this build can speak to it" by
-  // construction rather than by argument.
   return adoptOrRefuse(
     await dialService(outcome.origin, dialOptions(opts.group, headers)),
     outcome.origin,
@@ -684,22 +434,6 @@ export async function connectOrStart(
   );
 }
 
-/**
- * A CONNECTION TO A SERVICE ALREADY THERE, or `null` when there is none.
- *
- * SLOW IS NOT ABSENT, and only one of the two is cheap to be sure about. The
- * probe above is deliberately impatient (300ms) because its failure is the
- * ordinary first step of a bootstrap — but on a machine running its own CI, a
- * perfectly healthy daemon can miss that window, and the fall-through then
- * takes a command through a bootstrap it did not need. Under load that path
- * failed outright: `odu ci wait` exited 3 with an empty stdout and "All fibers
- * interrupted without error" on stderr, which is a sentence about this process
- * rather than about the service.
- *
- * Absence is a question the KERNEL answers, immediately: is anything accepting
- * on that address. When something is, this waits the full dial budget for it
- * instead of concluding it is not there.
- */
 async function dialExisting(
   origin: string,
   allowStart: boolean,
@@ -715,33 +449,19 @@ async function dialExisting(
     if ((await whoeverIsListening(origin)) !== null) {
       return await dialService(origin, dialOptions(group, headers));
     }
-    // Nothing is accepting. That is absence — an answer only a caller allowed
-    // to bootstrap can act on; anyone else gets the dial's own sentence.
     if (!allowStart) throw err;
     return null;
   }
 }
 
-/**
- * How long a client waits to find out there is NOTHING there.
- *
- * Deliberately shorter than {@link DIAL_READY_MS}'s three seconds: this dial's
- * failure is not an error, it is the ordinary first step of a bootstrap, and
- * every second spent proving it is a second added to `odu ci run` on a cold
- * machine. Loopback answers in microseconds when anything is listening.
- */
 const ABSENCE_PROBE_MS = 300;
 
-/** The group a dial is built over, as an option object — `{}` when the caller
- *  named none, which leaves the dial on the core's tags alone. */
 function dialGroup(group: RpcGroup.RpcGroup<Rpc.Any> | undefined): {
   group?: RpcGroup.RpcGroup<Rpc.Any>;
 } {
   return group === undefined ? {} : { group };
 }
 
-/** The dial options a service connection takes, from the two things a face
- *  knows: the tags it will address, and the credential it holds. */
 function dialOptions(
   group: RpcGroup.RpcGroup<Rpc.Any> | undefined,
   headers: Record<string, string> = {},

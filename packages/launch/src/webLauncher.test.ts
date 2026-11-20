@@ -1,14 +1,3 @@
-/**
- * ADOPT OR REFUSE — the thin-client handshake. These tests defend the one
- * regression the module doc now promises: a dial that answers is adopted only
- * if its service cell's contract is compatible with THIS build, and anything
- * else is refused with an honest sentence rather than surfacing later as an
- * `Unknown request tag` from inside the RPC layer. The cell read is scripted —
- * `service.get` is handed a one-frame Stream — so the unit is tested without a
- * socket; the failure it defends is the adoption decision and the disposal
- * discipline on refusal.
- */
-
 import { describe, expect, it } from "bun:test";
 import { Effect, Stream } from "effect";
 import type { OduServiceClient, ServiceCell } from "@odu/service-client/surface";
@@ -24,20 +13,16 @@ import { adoptOrRefuse, contractVerdict } from "./webLauncher";
 
 const ORIGIN = "http://127.0.0.1:3737";
 
-/** A contract version one major step from this build's. */
 function majorStep(steps: number): string {
   const [major, minor] = HOST_CONTRACT_VERSION.split(".");
   return `${Number(major) + steps}.${minor}`;
 }
 
-/** A contract version one minor step from this build's, in either direction. */
 function minorStep(steps: number): string {
   const [major, minor] = HOST_CONTRACT_VERSION.split(".");
   return `${major}.${Number(minor) + steps}`;
 }
 
-/** A daemon speaking `protocolVersion` as its HOST contract, mounting the runs
- *  at this build's version — so these tests move the host axis alone. */
 function cell(protocolVersion: string): ServiceCell {
   return {
     ...UNKNOWN_SERVICE,
@@ -49,12 +34,8 @@ function cell(protocolVersion: string): ServiceCell {
   };
 }
 
-/** What every caller here reads: the runs. */
 const NEEDS = { needs: CI_NEEDS };
 
-/** A connection whose `service.get` runs `get`, counting disposes. The fake's
- *  `url` matches what `dialService` really produces (a websocket route, not an
- *  origin) so the fixture does not teach that the two fields are the same. */
 function scripted(get: () => unknown): {
   connection: ServiceConnection;
   disposed: () => number;
@@ -89,8 +70,6 @@ describe("adoptOrRefuse", () => {
       () => null,
       (err: unknown) => err,
     );
-    // The ONE sentence, asserted by identity against the shared verdict rather
-    // than as substrings — so a rewording fails the test instead of drifting.
     const verdict = contractVerdict(cell(other), ORIGIN, CI_NEEDS);
     if (verdict === null) throw new Error("other-major fixture must refuse");
     expect(messageOf(rejection)).toBe(verdict);
@@ -98,7 +77,6 @@ describe("adoptOrRefuse", () => {
   });
 
   it("adopts a service whose minor is BEHIND this build — the additive rule", async () => {
-    // A minor only ADDS members: the daemon's host contract is one minor behind.
     const warned: string[] = [];
     const { connection, disposed } = scripted(() => Stream.make(cell(minorStep(-1))));
     const result = await adoptOrRefuse(connection, ORIGIN, {
@@ -153,9 +131,6 @@ describe("adoptOrRefuse", () => {
   });
 
   it("refuses a service whose cell read never answers, within the handshake deadline", async () => {
-    // The wedged-daemon case: socket is open, no first frame ever arrives.
-    // #113 is this, one layer down — without the deadline every thin client
-    // would hang on a blank terminal waiting for a snapshot that never comes.
     const { connection, disposed } = scripted(() => Stream.never);
 
     await expect(
