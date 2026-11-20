@@ -1,11 +1,3 @@
-/**
- * `logPathFor` — the on-disk spelling of a node's durable log. Byte-compatible
- * with what justci wrote (verified against merged kolu PRs) — these strings are
- * what odu's coordinator writes AND what any consumer of this package derives
- * to point at the same files, which is why the rule lives here and not in the
- * face that renders it.
- */
-
 import { describe, expect, it } from "bun:test";
 import { logPathFor } from "./nodeId";
 
