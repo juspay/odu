@@ -108,6 +108,8 @@ describe("the door's row", () => {
         "exactly one row",
       );
 
+      // THE TWO STRUCTURAL FACTS: the refused row mounted nothing and registered
+      // no routes, because both acquisitions come after the claim.
       expect(mounts).toBe(0);
       expect(layers).toHaveLength(0);
 

@@ -134,6 +134,8 @@ describe("$ODU_TOKEN drives a command against a server with a door", () => {
 
 describe("odu auth login stores the token, and --origin uses it", () => {
   it("writes a credential for the origin and reaches the server with it", () => {
+    // A PRIVATE config home, so the run cannot touch the developer's own
+    // `~/.config/odu/auth/credentials`.
     const configHome = mkdtempSync(join(tmpdir(), "odu-e2e-auth-home-"));
     const env = { ...world.env, XDG_CONFIG_HOME: configHome };
     try {

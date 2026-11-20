@@ -80,6 +80,11 @@ export function SignIn(): JSX.Element {
   );
 }
 
+/**
+ * It draws the way to the PROFILE and
+ * nothing else: the rows, People included, are the rail's own navigation, and
+ * a second list of them down here was two things to keep in step.
+ */
 export function SignedInHeader(props: {
   who: Who;
   atProfile: boolean;
