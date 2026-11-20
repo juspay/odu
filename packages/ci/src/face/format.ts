@@ -5,7 +5,6 @@ import {
   duration,
   OUTCOME,
   scopeLabel,
-  type StatusHue,
 } from "@odu/service-client/board";
 import { STATUS_META } from "@odu/service-client/surface";
 import { bytes } from "@odu/cordis/format";
@@ -17,17 +16,10 @@ import type {
   RunNode,
 } from "./types";
 
-export type { StatusHue };
-
-type Assignable<A extends B, B> = A;
-export type StatusHuesAgree = [
-  Assignable<FaceHue, WireHue>,
-  Assignable<WireHue, FaceHue>,
-];
+type SameUnion<A, B> = [A] extends [B] ? ([B] extends [A] ? A : never) : never;
+export type StatusHue = SameUnion<FaceHue, WireHue>;
 
 export { BOARD_STATE, OUTCOME };
-
-export const NODE_STATUS = STATUS_META;
 
 export const NODE_WORD: Record<NodeStatus, string> = {
   pending: "pending",
@@ -79,7 +71,7 @@ export function lanesOf(nodes: readonly RunNode[]): Lane[] {
 export function laneCells(nodes: readonly RunNode[]): LaneCell[] {
   return nodes.map((node) => ({
     label: `${node.id}, ${NODE_WORD[node.status]}`,
-    hue: node.status === "pending" ? null : NODE_STATUS[node.status].hue,
+    hue: node.status === "pending" ? null : STATUS_META[node.status].hue,
     ...(node.status === "skipped" ? { skipped: true } : {}),
   }));
 }

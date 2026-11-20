@@ -14,9 +14,12 @@ import type {
   VenueRowFacts,
 } from "@odu/service/ports";
 
-function venueState(probe: ProbeResult): VenueRowFacts["state"] {
-  return probe.state === "unreachable" ? "down" : probe.state;
-}
+const VENUE_STATE: Record<ProbeResult["state"], VenueRowFacts["state"]> = {
+  free: "free",
+  busy: "busy",
+  local: "local",
+  unreachable: "down",
+};
 
 function rowFacts(platform: string, probe: ProbeResult): VenueRowFacts {
   return {
@@ -24,7 +27,7 @@ function rowFacts(platform: string, probe: ProbeResult): VenueRowFacts {
     host: probe.host,
     slot: probe.slot,
     slots: probe.slots,
-    state: venueState(probe),
+    state: VENUE_STATE[probe.state],
     heldBy:
       probe.heldBy === null
         ? null

@@ -33,7 +33,7 @@ const VIEWPORTS = [
 
 const THEMES = ["dark", "light"] as const;
 
-async function rest(page: Page): Promise<void> {
+async function settleForScreenshot(page: Page): Promise<void> {
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.mouse.move(0, 0);
   await page.waitForTimeout(150);
@@ -86,7 +86,7 @@ try {
         .locator("button.node-open")
         .click();
       await page.locator("pre.log-text").first().waitFor({ timeout: 60_000 });
-      await rest(page);
+      await settleForScreenshot(page);
       await page.evaluate(() => document.fonts.ready).catch(() => undefined);
       const recipeShot = join(outDir, `${label}-run-recipe-${theme}-${viewport.name}.png`);
       await page.screenshot({ path: recipeShot, fullPage: true });
@@ -97,7 +97,7 @@ try {
         .getByRole("button", { name: "Push", exact: true })
         .click();
       await page.waitForTimeout(500);
-      await rest(page);
+      await settleForScreenshot(page);
       const pushShot = join(outDir, `${label}-run-push-${theme}-${viewport.name}.png`);
       await page.screenshot({ path: pushShot, fullPage: true });
       process.stdout.write(`  ${pushShot}  (overflow ${await overflow(page)}px)\n`);

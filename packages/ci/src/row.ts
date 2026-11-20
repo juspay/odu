@@ -1,5 +1,6 @@
 import { Effect } from "effect";
 import { definePlugin, offer } from "@olai/effect-cordis";
+import { ghForge } from "@odu/execution/common/forge";
 import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import { createOduService, type OduService } from "@odu/service/service";
 import { CI_CONTRACT_VERSION, CI_ROW, oduServiceSurface } from "@odu/service-client/surface";
@@ -42,7 +43,7 @@ export const ciRow = definePlugin({
     const shutdown = yield* Shutdown;
     const rows = yield* RowContracts;
 
-    const { ports } = webPorts(grants, process.env);
+    const { ports } = webPorts(grants, process.env, ghForge());
     const service: OduService = createOduService({
       ports,
       origin,
@@ -60,16 +61,19 @@ export const ciRow = definePlugin({
 
     yield* offer(Bundle, () => service.runtime as unknown as RootedSurfacesRuntime<never>);
 
-    const withdrawMetrics = metrics.add({
-      name: CI_ROW,
-      read: runMetricsReader({
-        catalog: service.registry.catalog,
-        venues: () => service.venues(),
-      }),
-    });
-
     yield* Effect.addFinalizer(() => Effect.promise(() => service.close()));
-    yield* Effect.addFinalizer(() => Effect.sync(withdrawMetrics));
+    yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        metrics.add({
+          name: CI_ROW,
+          read: runMetricsReader({
+            catalog: service.registry.catalog,
+            venues: () => service.venues(),
+          }),
+        }),
+      ),
+      (withdraw) => Effect.sync(withdraw),
+    );
   }),
 });
 

@@ -29,6 +29,7 @@ import {
   TitleTooltip,
 } from "@odu/face/ui";
 import { bytes } from "@odu/cordis/format";
+import { STATUS_META } from "@odu/service-client/surface";
 import { CommitRef } from "./commit";
 import {
   duration,
@@ -36,7 +37,6 @@ import {
   laneCells,
   lanesOf,
   logMetaText,
-  NODE_STATUS,
   NODE_WORD,
   OUTCOME,
   projectOf,
@@ -71,7 +71,19 @@ export interface DetailControls {
   dismiss: () => void;
 }
 
-const STATUS_ORDER = Object.keys(NODE_STATUS) as NodeStatus[];
+const STATUS_RANK: Record<NodeStatus, number> = {
+  pending: 0,
+  running: 1,
+  ok: 2,
+  failed: 3,
+  skipped: 4,
+  errored: 5,
+  cancelled: 6,
+};
+
+const STATUS_ORDER: readonly NodeStatus[] = (
+  Object.keys(STATUS_RANK) as NodeStatus[]
+).sort((a, b) => STATUS_RANK[a] - STATUS_RANK[b]);
 
 const wentWrong = (node: RunNode): boolean =>
   node.status === "failed" || node.status === "errored";
@@ -148,8 +160,8 @@ function LaneHead(props: {
         <For each={counts()}>
           {(entry) => (
             <span title={`${entry.count} ${NODE_WORD[entry.status]}`}>
-              <span class={`glyph hue-${NODE_STATUS[entry.status].hue}`}>
-                {NODE_STATUS[entry.status].glyph}
+              <span class={`glyph hue-${STATUS_META[entry.status].hue}`}>
+                {STATUS_META[entry.status].glyph}
               </span>
               {entry.count}
             </span>
@@ -181,13 +193,13 @@ function NodeRow(props: {
   busy: boolean;
   canRun: boolean;
 }): JSX.Element {
-  const meta = (): (typeof NODE_STATUS)[RunNode["status"]] =>
-    NODE_STATUS[props.node.status];
+  const meta = (): (typeof STATUS_META)[RunNode["status"]] =>
+    STATUS_META[props.node.status];
   const step = createMemo(() => {
     const push = props.node.push;
     if (push === undefined) return null;
     const { text, as } = pushStep(push, props.bucket);
-    const status = NODE_STATUS[as];
+    const status = STATUS_META[as];
     return { text, hue: status.hue, glyph: status.glyph, span: props.push };
   });
   const hint = (): string =>
@@ -322,6 +334,28 @@ function writeWrap(on: boolean): void {
   }
 }
 
+function visibleLogText(view: {
+  page: LogPage | null;
+  followed: string | null;
+  tail: LogTail | undefined;
+  stream: LogStream;
+  faulted: boolean;
+}): string {
+  if (view.page !== null) return view.page.text;
+  const following = view.faulted ? null : view.followed;
+  if (view.stream === "push") return following ?? "";
+  return following ?? view.tail?.text ?? "";
+}
+
+/** On the NEXT task: Solid runs effects after render, but the `<pre>`'s text is
+ *  inserted by its own computation, so the height read here is only correct
+ *  once that has run. */
+function stickToBottom(pane: HTMLPreElement): void {
+  queueMicrotask(() => {
+    pane.scrollTop = pane.scrollHeight;
+  });
+}
+
 export function LogPanel(props: {
   node: RunNode | null;
   attempt: number | null;
@@ -341,13 +375,15 @@ export function LogPanel(props: {
   const [stuck, setStuck] = createSignal(true);
   const [wrap, setWrap] = createSignal(readWrap());
 
-  const shown = createMemo(() => {
-    const paged = props.page?.text;
-    if (paged !== undefined) return paged;
-    const following = props.logFault === null ? props.followed : null;
-    if (props.stream === "push") return following ?? "";
-    return following ?? props.tail?.text ?? "";
-  });
+  const shown = createMemo(() =>
+    visibleLogText({
+      page: props.page,
+      followed: props.followed,
+      tail: props.tail,
+      stream: props.stream,
+      faulted: props.logFault !== null,
+    }),
+  );
 
   const growing = createMemo(() =>
     props.stream === "push"
@@ -375,12 +411,7 @@ export function LogPanel(props: {
     shown();
     const node = pane;
     if (node === undefined || !stuck()) return;
-    // On the NEXT task: Solid runs effects after render, but the `<pre>`'s text
-    // is inserted by its own computation, so the height read here is only
-    // correct once that has run.
-    queueMicrotask(() => {
-      node.scrollTop = node.scrollHeight;
-    });
+    stickToBottom(node);
   });
 
   return (

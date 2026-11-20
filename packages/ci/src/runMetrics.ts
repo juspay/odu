@@ -76,7 +76,7 @@ interface Accumulated {
 }
 
 interface RunProgress {
-  seq: number;
+  maxSeqFolded: number;
   counted: number;
 }
 
@@ -93,12 +93,12 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
   for (const row of listRuns({ root: catalog, limit })) {
     present.add(row.runId);
     const fresh = !state.progress.has(row.runId);
-    const progress = state.progress.get(row.runId) ?? { seq: 0, counted: 0 };
+    const progress = state.progress.get(row.runId) ?? { maxSeqFolded: 0, counted: 0 };
     state.progress.set(row.runId, progress);
     const handle = handleFor(row.runId, { root: catalog });
 
     const entries = readJournal(handle).entries;
-    for (const entry of entries.filter((one) => one.seq > progress.seq)) {
+    for (const entry of entries.filter((one) => one.seq > progress.maxSeqFolded)) {
       const event = entry.event;
       if (event.kind !== "node_status") continue;
       if (event.durationMs === null) continue;
@@ -109,7 +109,7 @@ function foldCatalog(state: Accumulated, catalog: string, limit: number): void {
       };
       observe(tallyFor(state.nodeDurations, labels), event.durationMs / 1000);
     }
-    progress.seq = entries.at(-1)?.seq ?? progress.seq;
+    progress.maxSeqFolded = entries.at(-1)?.seq ?? progress.maxSeqFolded;
 
     const verdict = row.verdict;
     if (verdict === null) continue;

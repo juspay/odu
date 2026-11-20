@@ -56,6 +56,10 @@ export function ansiSpans(text: string): AnsiSpan[] {
     line = [];
   };
 
+  const discardRedrawnLine = (): void => {
+    line = [];
+  };
+
   const emit = (chunk: string): void => {
     const nl = chunk.lastIndexOf("\n");
     if (nl === -1) {
@@ -124,7 +128,7 @@ export function ansiSpans(text: string): AnsiSpan[] {
     const at = hit.index;
     if (at > i) emit(text.slice(i, at));
     if (text[at] === "\r") {
-      if (text[at + 1] !== "\n") line = [];
+      if (text[at + 1] !== "\n") discardRedrawnLine();
       i = at + 1;
       continue;
     }

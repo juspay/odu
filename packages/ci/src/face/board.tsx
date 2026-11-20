@@ -158,9 +158,21 @@ function Row(props: {
   );
 }
 
-const [filter, setFilter] = createSignal<BoardFilter>("all");
-const [history, setHistory] = createSignal(false);
-const [query, setQuery] = createSignal("");
+function createBoardViewState(): {
+  filter: () => BoardFilter;
+  setFilter: (next: BoardFilter) => void;
+  history: () => boolean;
+  setHistory: (next: (on: boolean) => boolean) => void;
+  query: () => string;
+  setQuery: (next: string) => void;
+} {
+  const [filter, setFilter] = createSignal<BoardFilter>("all");
+  const [history, setHistory] = createSignal(false);
+  const [query, setQuery] = createSignal("");
+  return { filter, setFilter, history, setHistory, query, setQuery };
+}
+
+const boardViewState = createBoardViewState();
 
 export function Board(props: {
   checkouts: CheckoutFrame[];
@@ -174,11 +186,11 @@ export function Board(props: {
 }): JSX.Element {
   const work = createMemo(() => nodesByRun(props.checkouts));
   const shown = createMemo<Standing[]>(() => {
-    const needle = query().trim().toLowerCase();
+    const needle = boardViewState.query().trim().toLowerCase();
     const nodes = work();
     const admits = (run: RunRow): boolean =>
-      matches(run, filter()) && searched(run, needle);
-    if (history()) {
+      matches(run, boardViewState.filter()) && searched(run, needle);
+    if (boardViewState.history()) {
       return props.rows
         .filter(admits)
         .map((run) => ({ latest: run, runs: 1, nodes: nodes.get(run.runId) ?? [] }));
@@ -217,17 +229,17 @@ export function Board(props: {
       <div class="toolbar">
         <SearchInput
           label="Filter by project or branch"
-          value={query()}
+          value={boardViewState.query()}
           placeholder="project or branch"
-          onValue={setQuery}
+          onValue={boardViewState.setQuery}
         />
         <div class="filters" role="group" aria-label="Filter runs">
           <For each={FILTERS}>
             {(entry) => (
               <Button
                 title={entry.hint}
-                pressed={filter() === entry.id}
-                onClick={() => setFilter(entry.id)}
+                pressed={boardViewState.filter() === entry.id}
+                onClick={() => boardViewState.setFilter(entry.id)}
               >
                 {entry.label}
               </Button>
@@ -236,8 +248,8 @@ export function Board(props: {
         </div>
         <Button
           title="show every run of every checkout, not just the latest"
-          pressed={history()}
-          onClick={() => setHistory((on) => !on)}
+          pressed={boardViewState.history()}
+          onClick={() => boardViewState.setHistory((on) => !on)}
         >
           History
         </Button>

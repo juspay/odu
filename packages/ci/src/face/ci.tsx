@@ -76,6 +76,14 @@ function isTerminalReadRefusal(err: unknown): boolean {
   return typeof code === "string" && TERMINAL_READ_REFUSALS.has(code);
 }
 
+function streamArg(stream: LogStream): { stream?: "push" } {
+  return stream === "push" ? { stream } : {};
+}
+
+function logWasRewritten(page: LogPage, cursor: number | undefined): boolean {
+  return cursor !== undefined && cursor > 0 && page.offset < cursor;
+}
+
 const FOLLOW_RETRY_MS = 1_500;
 const FOLLOW_RETRY_LIMIT = 20;
 
@@ -372,7 +380,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
               ...(cursor === undefined ? { offset: -LOG_TAIL_BYTES } : { offset: cursor }),
               limit: LOG_PAGE_BYTES,
               waitMs: FOLLOW_WAIT_MS,
-              ...(reading === "recipe" ? {} : { stream: reading }),
+              ...streamArg(reading),
             }),
           );
         } catch (err) {
@@ -395,7 +403,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         refusals = 0;
         setLogFault(null);
         setFollowedPage({ size: page.size, complete: page.complete });
-        if (cursor !== undefined && cursor > 0 && page.offset < cursor) {
+        if (logWasRewritten(page, cursor)) {
           cursor = 0;
           text = "";
           setFollowed("");
@@ -421,7 +429,7 @@ export function CiFace(props: CiFaceProps): JSX.Element {
         key,
         offset,
         limit: LOG_PAGE_BYTES,
-        ...(reading === "recipe" ? {} : { stream: reading }),
+        ...streamArg(reading),
       }),
       (answer) => {
         if (!mine()) return;

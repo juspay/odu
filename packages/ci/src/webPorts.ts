@@ -3,7 +3,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { dialRun } from "@odu/run-client/dial";
 import { errorMessage, firstFrame, runUnary } from "@odu/execution/common/effectEdge";
-import { ghForge } from "@odu/execution/common/forge";
+import type { Forge } from "@odu/execution/common/forge";
 import { packagedLauncher } from "@odu/execution/coordinator/launcher";
 import {
   isSameRun,
@@ -229,9 +229,9 @@ export function configured(value: string | undefined): string | null {
 export function webPorts(
   grants: CacheGrants,
   env: NodeJS.ProcessEnv,
+  forge: Forge,
 ): WebPorts {
   const launcher = packagedLauncher();
-  const forge = ghForge();
   const push: PushPort = {
     resolve: (checkout) => resolvePush(checkout, grants, env),
     grant: ({ bucket, runId }) => {

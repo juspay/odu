@@ -19,13 +19,21 @@ import {
 } from "./rulesets";
 
 export interface ProtectArgs {
-  dryRun: boolean;
   branch?: string;
   platforms: readonly string[];
   create: boolean;
   checkout: string;
   caller: Caller;
 }
+
+type ProtectionPlan =
+  | { ok: false; refusal: Extract<ProtectOutcome, { ok: false }> }
+  | {
+      ok: true;
+      repoRoot: string;
+      contexts: string[];
+      derivedFrom: string | null;
+    };
 
 type PlatformSet =
   | { kind: "explicit"; platforms: string[] }
@@ -79,15 +87,22 @@ function ghRefusal(
     : { ok: false, code: "bad_input", message };
 }
 
-function decode<T>(schema: Schema.Codec<T, unknown>, raw: string): T | null {
+type DecodeFault = "not-json" | "wrong-shape";
+
+function decode<T>(
+  schema: Schema.Codec<T, unknown>,
+  raw: string,
+): Result.Result<T, DecodeFault> {
+  let parsed: unknown;
   try {
-    const decoded = Schema.decodeUnknownResult(schema)(
-      JSON.parse(raw) as unknown,
-    );
-    if (Result.isSuccess(decoded)) return decoded.success;
+    parsed = JSON.parse(raw) as unknown;
   } catch {
+    return Result.fail("not-json");
   }
-  return null;
+  const decoded = Schema.decodeUnknownResult(schema)(parsed);
+  return Result.isSuccess(decoded)
+    ? Result.succeed(decoded.success)
+    : Result.fail("wrong-shape");
 }
 
 function unreadable(what: string): Extract<ProtectOutcome, { ok: false }> {
@@ -98,10 +113,7 @@ function unreadable(what: string): Extract<ProtectOutcome, { ok: false }> {
   };
 }
 
-export async function applyProtection(
-  args: ProtectArgs,
-  forge: Forge,
-): Promise<ProtectOutcome> {
+function protectionPlan(args: ProtectArgs): ProtectionPlan {
   const top = spawnSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: args.checkout,
     encoding: "utf-8",
@@ -110,8 +122,11 @@ export async function applyProtection(
   if (repoRoot === "") {
     return {
       ok: false,
-      code: "checkout_refused",
-      message: `odu: protect needs a git checkout — ${args.checkout} is not one`,
+      refusal: {
+        ok: false,
+        code: "checkout_refused",
+        message: `odu: protect needs a git checkout — ${args.checkout} is not one`,
+      },
     };
   }
 
@@ -121,8 +136,11 @@ export async function applyProtection(
   } catch (err) {
     return {
       ok: false,
-      code: "pipeline_refused",
-      message: (err as Error).message,
+      refusal: {
+        ok: false,
+        code: "pipeline_refused",
+        message: (err as Error).message,
+      },
     };
   }
 
@@ -130,7 +148,10 @@ export async function applyProtection(
   try {
     set = protectPlatforms(args.platforms, args.caller.hostsFile);
   } catch (err) {
-    return { ok: false, code: "bad_input", message: (err as Error).message };
+    return {
+      ok: false,
+      refusal: { ok: false, code: "bad_input", message: (err as Error).message },
+    };
   }
   if (set.kind === "none") {
     const why =
@@ -139,34 +160,51 @@ export async function applyProtection(
         : `to name the repo's CI platforms — ${set.source} configured no platform`;
     return {
       ok: false,
-      code: "bad_input",
-      message:
-        `odu: protect found no platforms — pass --platform PLAT (repeatable) ${why}`,
-      suggestion: ["odu", "ci", "protect", "--platform", "x86_64-linux"],
-    };
-  }
-  const derivedFrom = set.kind === "derived" ? set.source : null;
-
-  const contexts = set.platforms.flatMap((platform) =>
-    laneTasks(spec, platform, [], false).map((task) => fanId(task.id, platform)),
-  );
-
-  if (args.dryRun) {
-    return {
-      ok: true,
-      facts: {
-        repo: null,
-        branch: null,
-        contexts,
-        derivedFrom,
-        rulesetId: null,
-        applied: false,
-        created: false,
-        detail: "dry run — nothing was written, and the forge was not asked",
+      refusal: {
+        ok: false,
+        code: "bad_input",
+        message:
+          `odu: protect found no platforms — pass --platform PLAT (repeatable) ${why}`,
+        suggestion: ["odu", "ci", "protect", "--platform", "x86_64-linux"],
       },
     };
   }
 
+  return {
+    ok: true,
+    repoRoot,
+    derivedFrom: set.kind === "derived" ? set.source : null,
+    contexts: set.platforms.flatMap((platform) =>
+      laneTasks(spec, platform, [], false).map((task) => fanId(task.id, platform)),
+    ),
+  };
+}
+
+export function previewProtection(args: ProtectArgs): ProtectOutcome {
+  const plan = protectionPlan(args);
+  if (!plan.ok) return plan.refusal;
+  return {
+    ok: true,
+    facts: {
+      repo: null,
+      branch: null,
+      contexts: plan.contexts,
+      derivedFrom: plan.derivedFrom,
+      rulesetId: null,
+      applied: false,
+      created: false,
+      detail: "dry run — nothing was written, and the forge was not asked",
+    },
+  };
+}
+
+export async function applyProtection(
+  args: ProtectArgs,
+  forge: Forge,
+): Promise<ProtectOutcome> {
+  const plan = protectionPlan(args);
+  if (!plan.ok) return plan.refusal;
+  const { repoRoot, contexts, derivedFrom } = plan;
   const origin = spawnSync("git", ["remote", "get-url", "origin"], {
     cwd: repoRoot,
     encoding: "utf-8",
@@ -198,15 +236,15 @@ export async function applyProtection(
     }
   }
 
-  // Bound to a const because every `facts(...)` below is a closure, and TypeScript
-  // does not carry a `let`'s narrowing into one.
-  const onBranch = branch;
-  const facts = (extra: {
-    rulesetId: number | null;
-    applied: boolean;
-    created: boolean;
-    detail: string | null;
-  }): ProtectFacts => ({
+  const facts = (
+    onBranch: string,
+    extra: {
+      rulesetId: number | null;
+      applied: boolean;
+      created: boolean;
+      detail: string | null;
+    },
+  ): ProtectFacts => ({
     repo: slug,
     branch: onBranch,
     contexts,
@@ -219,9 +257,9 @@ export async function applyProtection(
     return ghRefusal(`read the rules on ${branch}`, covering.error);
   }
   const branchRules = decode(BranchRulesSchema, covering.value);
-  if (branchRules === null) return unreadable(`the rules on ${branch}`);
+  if (Result.isFailure(branchRules)) return unreadable(`the rules on ${branch}`);
 
-  const choice = chooseRuleset(branchRules);
+  const choice = chooseRuleset(branchRules.success);
   const rulesetUrl = (id: number): string =>
     `https://github.com/${slug}/rules/${id}`;
   switch (choice.kind) {
@@ -252,7 +290,7 @@ export async function applyProtection(
       const id = rulesetId(made.value);
       return {
         ok: true,
-        facts: facts({
+        facts: facts(branch, {
           rulesetId: id,
           applied: true,
           created: true,
@@ -289,8 +327,9 @@ export async function applyProtection(
 
   const read = await forge.readRuleset({ ...github, id: choice.id });
   if (!read.ok) return ghRefusal(`read ruleset ${choice.id}`, read.error);
-  const ruleset = decode(RulesetSchema, read.value);
-  if (ruleset === null) return unreadable(`ruleset ${choice.id}`);
+  const decoded = decode(RulesetSchema, read.value);
+  if (Result.isFailure(decoded)) return unreadable(`ruleset ${choice.id}`);
+  const ruleset = decoded.success;
 
   const write = await forge.replaceRuleset({
     ...github,
@@ -300,7 +339,7 @@ export async function applyProtection(
   if (!write.ok) return ghRefusal(`write ruleset ${ruleset.id}`, write.error);
   return {
     ok: true,
-    facts: facts({
+    facts: facts(branch, {
       rulesetId: ruleset.id,
       applied: true,
       created: false,

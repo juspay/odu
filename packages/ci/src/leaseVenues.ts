@@ -19,6 +19,9 @@ import type {
   VenueReleaseResult,
 } from "@odu/service/ports";
 
+const HOLD_SETTLE_MS = 150;
+const NO_WAIT_SETTLE_MS = 400;
+
 function asyncSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -171,7 +174,7 @@ export async function leaseVenues(
       run: null,
     });
 
-    await asyncSleep(opts.noWait ? 400 : 150);
+    await asyncSleep(opts.noWait ? NO_WAIT_SETTLE_MS : HOLD_SETTLE_MS);
     const held = heldHostForPlatform(repoRoot, platform);
     if (held !== null) {
       results.push({
