@@ -1,9 +1,3 @@
-/**
- * THE DISK STORE — objects as files under `<dir>/objects`, facts in sidecar
- * files under `<dir>/objects/.facts`. What a store promises is `./objectStore`'s;
- * this module is how a filesystem keeps it.
- */
-
 import { randomUUID } from "node:crypto";
 import { open, link, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, normalize, sep } from "node:path";
@@ -26,12 +20,8 @@ export interface DiskObjectStoreOptions {
 }
 
 /**
- * A FILE AS A PULL STREAM, 64 KiB per read.
- *
  * NEVER a `BunFile`'s own stream: a Node HTTP adapter does not write that body,
- * so the response headers go out and the socket then waits for ever. An
- * `open`/`handle.read` loop is a stream every consumer knows, and it reads only
- * the range asked for.
+ * so the response headers go out and the socket then waits for ever.
  */
 function fileBody(path: string, start: number, length: number): ReadableStream<Uint8Array> {
   let handle: Awaited<ReturnType<typeof open>> | null = null;
@@ -100,14 +90,11 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
       .then((text) => JSON.parse(text) as ObjectFacts)
       .catch(() => null);
     if (kept !== null && kept.size === size) return kept;
-    // AN OBJECT WRITTEN BEFORE FACTS WERE KEPT really has no sidecar (nor one
-    // whose writer died between link and sidecar): hash it once, keep the answer.
     const computed = await hashStream(fileBody(pathOf(key), 0, size));
     await writeFacts(key, computed).catch(() => {});
     return computed;
   }
 
-  /** The kept object's refusal: it exists, and these are its facts. */
   async function exists(key: string): Promise<PutOutcome> {
     const facts = await factsOf(key);
     if (facts === null) throw new Error(`${key} vanished while its put was refused`);
@@ -134,17 +121,12 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     return { ok: true, facts };
   }
 
-  // `_options` IS ACCEPTED AND DROPPED: a file has no response of its own to
-  // carry a content type or a cache lifetime, and nothing fetches an object
-  // from this store without going through odu, which decides them itself.
-  // There is no `presignGet` here for the same reason: these objects are
-  // files on odu's machine, reachable only by reading them.
   async function put(key: string, body: ObjectBody, expected?: ObjectFacts, _options?: PutOptions): Promise<PutOutcome> {
     const stream = body instanceof Blob ? body.stream() : body;
     const target = pathOf(key);
     if ((await isFile(target)) !== null) {
-      // THE STREAM'S PRODUCER MUST STOP: abandoning a stream a pipe feeds
-      // would leave its writer blocked on the full pipe for ever.
+      // Abandoning a stream a pipe feeds would leave its writer blocked on
+      // the full pipe for ever.
       await stream.cancel().catch(() => {});
       return exists(key);
     }
@@ -173,9 +155,6 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     }
   }
 
-  /** ONE KEY GONE: the object and the facts beside it. Absent is not an
-   *  error — the store's promise, kept for `delete` and `deleteMany` alike
-   *  from one place. */
   async function removeKey(key: string): Promise<void> {
     for (const path of [pathOf(key), factsPathOf(key)]) {
       await unlink(path).catch((err: NodeJS.ErrnoException) => {
@@ -189,8 +168,6 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
 
     async link(key, file, facts) {
       const linked = await linkInto(key, file, facts);
-      // A FILE ON ANOTHER FILESYSTEM cannot be linked; copying it through
-      // `put` is the exception rather than the write path.
       if (linked !== "cross-device") return linked;
       const copied = await put(key, Bun.file(file), facts);
       if (copied.ok) await unlink(file).catch(() => {});
@@ -212,10 +189,6 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
 
     delete: removeKey,
 
-    // A LOOP, because a filesystem has no batch call and needs none: these
-    // are local unlinks, not round trips. The port's verb is one call so an
-    // S3 bucket can answer it in one request; here it is the same per-key
-    // delete, and an absent key is no more an error in a set than alone.
     async deleteMany(keys) {
       for (const key of keys) await removeKey(key);
     },
@@ -225,7 +198,6 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
       const out: { key: string; size: number }[] = [];
       const walk = async (dir: string): Promise<void> => {
         for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
-          // `.facts` and `.tmp-*` are the store's own, never objects.
           if (entry.name.startsWith(".")) continue;
           const at = join(dir, entry.name);
           if (entry.isDirectory()) {
@@ -256,7 +228,6 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
           }
           if (!entry.name.startsWith(TEMP)) continue;
           const info = await stat(at).catch(() => null);
-          // A temp file younger than this process is a put that is running now.
           if (info === null || info.mtimeMs > current) continue;
           await unlink(at).catch(() => {});
           removed += 1;
@@ -268,8 +239,6 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
   };
 }
 
-/** Read a whole stream through a counter: the fallback for a disk object whose
- *  facts nobody wrote down (one written before they were kept). */
 async function hashStream(stream: ReadableStream<Uint8Array>): Promise<ObjectFacts> {
   const counter = factsCounter();
   for await (const chunk of stream as unknown as AsyncIterable<Uint8Array>) counter.update(chunk);

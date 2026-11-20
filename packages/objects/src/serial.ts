@@ -1,13 +1,9 @@
 /**
- * ONE THING AT A TIME — a promise chain: the S3 store's per-key write queue.
- *
  * A copy of `@odu/cache`'s, not an import of it: this package is below the
- * cache and borrows nothing from it. Twelve lines, and the one line that
- * matters is the same in both: the tail never rejects, so one failed put does
- * not wedge every later put of its key.
+ * cache and borrows nothing from it. The tail never rejects, so one failed put
+ * does not wedge every later put of its key.
  */
 
-/** A queue of work, run in order, one at a time. */
 export interface Chain {
   tail: Promise<void>;
 }

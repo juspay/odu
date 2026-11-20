@@ -1,4 +1,3 @@
-/** A byte sink that reports how many bytes it accepted, like Bun's FileSink. */
 export interface ByteSink {
   write(chunk: Uint8Array): number | Promise<number>;
 }

@@ -1,13 +1,3 @@
-/**
- * AN S3 SERVICE FOR THE SUITE: versitygw over a temporary directory.
- *
- * versitygw (nixpkgs, in the dev shell) is a real S3 gateway — signed requests,
- * conditional writes, multipart, ranges, paged lists — over a plain directory,
- * so the S3 store is tested against S3 semantics rather than a mock of them.
- * One gateway per test file, on a free port; every case gets a bucket of its
- * own, so cases never see each other's keys.
- */
-
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";

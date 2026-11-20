@@ -1,42 +1,13 @@
-/**
- * DECLARED STORES — a declarations file and its credentials files, parsed once
- * into values.
- *
- * The declarations are JSON, one entry per named store:
- *
- * ```json
- * { "r2": { "kind": "s3", "endpoint": "https://<account>.r2.cloudflarestorage.com",
- *           "bucket": "odu", "region": "auto", "credentialsFile": "/run/…/r2",
- *           "publicUrl": "https://cache.example.com" } }
- * ```
- *
- * and each `credentialsFile` is `KEY=value` lines — `AWS_ACCESS_KEY_ID`,
- * `AWS_SECRET_ACCESS_KEY`, optionally `AWS_SESSION_TOKEN` — the shape an
- * `EnvironmentFile`, an agenix secret or an R2 key export already has.
- *
- * `publicUrl` is optional: the host the world reads this store's objects from,
- * when its operator has bound one to the bucket. It is a host alone — no path,
- * query or fragment — because the keys hang under it as they do in the bucket.
- *
- * The parser takes the declarations' TEXT and a reader for the credentials
- * files, so where the declarations come from (an environment variable, a test)
- * is the caller's. A refusal is a value naming what is wrong and never carries
- * a credential.
- */
-
 import type { S3Target } from "./s3sign";
 
-/** One declared S3-compatible store, credentials read. */
 export interface S3Declaration {
   readonly kind: "s3";
   readonly target: S3Target;
 }
 
-/** The declared stores by name. */
 export type StoreDeclarations = ReadonlyMap<string, S3Declaration>;
 
-/** Why the declarations could not be used. Each names what happened; none
- *  carries a credential. */
+/** Each names what happened; none carries a credential. */
 export type DeclarationRefusal =
   | { kind: "malformed"; file: string; reason: string }
   | { kind: "bad_store"; store: string; reason: string }
@@ -47,13 +18,10 @@ export type DeclarationsParse =
   | { kind: "declared"; stores: StoreDeclarations }
   | { kind: "refused"; refusal: DeclarationRefusal };
 
-/** A store name is a bucket-name-shaped label: it is spelled in a UI and in
- *  configuration attribute names. */
 const STORE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 const nonEmpty = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
-/** `KEY=value` lines; `#` starts a comment. */
 function parseCredentials(
   text: string,
 ): { accessKeyId: string; secretAccessKey: string; sessionToken?: string } | string {

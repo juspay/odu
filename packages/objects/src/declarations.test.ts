@@ -1,12 +1,3 @@
-/**
- * A STORE'S PUBLIC URL, as the declarations file spells it.
- *
- * The rest of the parser is exercised where its refusals are read (the cache's
- * `stores.test.ts`); what is proved here is the one field a reader of the
- * store depends on, because an operator writes it by hand and a wrong one
- * would send every reader of the bucket to the wrong address.
- */
-
 import { describe, expect, it } from "bun:test";
 import { parseStoreDeclarations } from "./declarations";
 
@@ -42,14 +33,11 @@ describe("a store's publicUrl", () => {
   });
 
   it("takes a plain http host, for the same reason an endpoint may be one", () => {
-    // A LOCAL GATEWAY in a VM test has no certificate; production is https.
     const parsed = parse({ publicUrl: "http://localhost:7070" });
     expect(parsed.kind === "declared" && parsed.stores.get("r2")?.target.publicUrl?.href).toBe("http://localhost:7070/");
   });
 
   it("refuses anything but a host, naming what is wrong", () => {
-    // A PATH WOULD MOVE EVERY KEY, and a query or a fragment would be carried
-    // into a URL the reader builds by appending to this one.
     const cases: [unknown, string][] = [
       ["https://cache.example.com/cache", "has a path"],
       ["https://cache.example.com/?x=1", "has a query or fragment"],

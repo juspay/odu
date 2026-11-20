@@ -1,10 +1,4 @@
 /**
- * ONE STORE'S MEMORY, IN A PROCESS OF ITS OWN — the contract's constant-memory
- * case. Run in-process, a 300 MB read's RSS mixed the store's footprint with
- * the garbage of every test before it, and an S3 store's windows (fetch bodies
- * Bun frees at its next collection) read as growth that was only lag. A fresh
- * process measures the store and nothing else.
- *
  * `bun test/storeMemory.ts '<spec json>'` puts 300 MiB, reads it back with a
  * slow reader, and prints `{"put":<bytes>,"get":<bytes>}` of peak RSS growth.
  */
@@ -40,7 +34,7 @@ async function growth(work: () => Promise<void>): Promise<number> {
 
 if (import.meta.main) {
   const spec = JSON.parse(process.argv[2] as string) as StoreSpec;
-  // A URL CROSSES THE ARGUMENT as its href; the target holds it parsed.
+  // A URL crosses the argument as its href; the target holds it parsed.
   const store = storeOf(
     spec.kind === "s3" ? { ...spec, target: { ...spec.target, endpoint: new URL(spec.target.endpoint) } } : spec,
   );
@@ -60,8 +54,6 @@ if (import.meta.main) {
     );
     if (!outcome.ok || outcome.facts.size !== 300 * MIB) throw new Error(`put: ${JSON.stringify(outcome)}`);
   });
-  // A SLOW READER, like a Nix client on a thin link: a store whose stream ran
-  // ahead of its consumer (Bun's S3 body does, unwindowed) holds the object.
   const get = await growth(async () => {
     const got = await store.get(key);
     let read = 0;

@@ -1,6 +1,3 @@
-/**
- * `@odu/objects` — the one door. See the package README.
- */
 export {
   type ByteRange,
   type CopyOptions,
@@ -16,9 +13,6 @@ export {
   type PutOutcome,
   sameFacts,
   type StoredObject,
-  /** The prefix a key that is not an object yet carries — what a direct
-   *  upload writes to before anybody has proved its bytes — and the question
-   *  "is this key one of those", which no caller should answer by hand. */
   isTemp,
   TEMP,
   UnrecordedObject,

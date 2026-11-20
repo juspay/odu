@@ -1,25 +1,9 @@
 /**
- * AWS SIGNATURE V4, for the S3 requests Bun's client cannot express.
- *
- * Bun's `S3Client` streams reads, ranges, lists and deletes, and it is what the
- * S3 store uses for those. It cannot send a CONDITIONAL write
- * (`If-None-Match: *`) or USER METADATA (`x-amz-meta-*`), and those two are the
- * store's promises: an object is never overwritten, and its facts are read back
- * rather than recomputed. So the writes — a single PUT, and the three calls of
- * a multipart upload — and the metadata HEAD are signed here and sent with
- * `fetch`.
- *
- * SIGNATURES ALSO TRAVEL ALONE. `presign` puts one in a URL's QUERY rather
- * than a header, so whoever holds the URL and no credential of this store's —
- * a Nix client odu redirected to the bytes, a writer odu sent to upload them —
- * makes that ONE request against the service itself, until the URL's own
- * expiry passes. `presignGet` is its GET; a `PUT`, with a part's `partNumber`
- * and `uploadId` signed into the query, is how bytes reach the store without
- * crossing the process that owns the credentials.
- *
- * This module knows WHO is asking and WHERE (endpoint, bucket, region,
- * credentials) and nothing about objects: no streaming, no ranges, no
- * multipart. The payload is never hashed — `UNSIGNED-PAYLOAD` is what every S3
+ * AWS SIGNATURE V4, for the S3 requests Bun's client cannot express: Bun's
+ * `S3Client` cannot send a CONDITIONAL write (`If-None-Match: *`) or USER
+ * METADATA (`x-amz-meta-*`), so the writes — a single PUT, and the three calls
+ * of a multipart upload — and the metadata HEAD are signed here and sent with
+ * `fetch`. The payload is never hashed — `UNSIGNED-PAYLOAD` is what every S3
  * service accepts over TLS and what lets a part stream through.
  */
 
@@ -28,8 +12,6 @@ import { createHash, createHmac } from "node:crypto";
 /** Where a store's bucket is and who may write it. The secret never leaves
  *  this value: not logged, not stored, not printed in a refusal. */
 export interface S3Target {
-  /** `https://<account>.r2.cloudflarestorage.com`, `http://127.0.0.1:7070` —
-   *  parsed once, where the declaration is read. */
   readonly endpoint: URL;
   readonly bucket: string;
   readonly region: string;
@@ -59,8 +41,6 @@ const encode = (text: string): string =>
  *  R2 and AWS accept it. */
 export function objectUrl(target: S3Target, key: string, query: Record<string, string> = {}): URL {
   const url = new URL(target.endpoint);
-  // JOINED BY SEGMENT under whatever path the endpoint has: the bucket, then
-  // the key's own segments, each encoded once. The empty key is the bucket.
   const base = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
   const segments = key === "" ? [target.bucket] : [target.bucket, ...key.split("/")];
   url.pathname = `${base}${segments.map(encode).join("/")}`;
@@ -75,7 +55,6 @@ const stampOf = (at: Date): { stamp: string; day: string } => {
   return { stamp, day: stamp.slice(0, 8) };
 };
 
-/** What a signature is good for: one day, one region, S3. */
 const scopeOf = (target: S3Target, day: string): string => `${day}/${target.region}/s3/aws4_request`;
 
 /** The query string as SigV4 canonicalises it: every pair encoded, then sorted
@@ -87,8 +66,6 @@ const canonicalQuery = (url: URL): string =>
     .map(([name, value]) => `${name}=${value}`)
     .join("&");
 
-/** The signature over one canonical request: the day's derived key (the secret
- *  itself never signs anything) over the string to sign. */
 function signature(target: S3Target, stamp: string, day: string, canonical: string): string {
   const toSign = ["AWS4-HMAC-SHA256", stamp, scopeOf(target, day), sha256Hex(canonical)].join("\n");
   const key = hmac(hmac(hmac(hmac(`AWS4${target.secretAccessKey}`, day), target.region), "s3"), "aws4_request");
@@ -137,17 +114,17 @@ export function signedHeaders(
 /**
  * A URL THAT MAKES ONE REQUEST BY ITSELF, for `expiresSeconds` from `at`. The
  * signature is in the query, so whoever holds the URL sends no credential and
- * needs none: the service checks the URL. Only `host` is signed — the holder
- * may add any header it likes, `Range` above all on a GET — and the payload
- * hash is the literal `UNSIGNED-PAYLOAD` that query auth uses, which is also
- * what lets a PUT's body be anything the holder streams.
+ * needs none. Only `host` is signed — the holder may add any header it likes,
+ * `Range` above all on a GET — and the payload hash is the literal
+ * `UNSIGNED-PAYLOAD` that query auth uses, which is also what lets a PUT's
+ * body be anything the holder streams.
  *
  * `query` is the request's own parameters, signed with the rest: a part
  * upload's `partNumber` and `uploadId` cannot be moved to another part or
  * another upload by whoever holds the URL.
  *
  * Signed against `endpoint`, never `publicUrl`: a signature covers the host it
- * names, and the host odu knows the credentials for is the service's.
+ * names.
  */
 export function presign(
   target: S3Target,
@@ -173,12 +150,10 @@ export function presign(
   return url;
 }
 
-/** A URL that FETCHES `key` by itself — {@link presign}'s GET, which is what a
- *  reader odu redirected to the service holds. */
+/** {@link presign}'s GET — a URL that fetches `key` by itself. */
 export const presignGet = (target: S3Target, key: string, expiresSeconds: number, at: Date = new Date()): URL =>
   presign(target, "GET", key, expiresSeconds, {}, at);
 
-/** What one request carries beyond its method and key. */
 export interface S3Request {
   query?: Record<string, string>;
   headers?: Record<string, string>;
@@ -191,19 +166,14 @@ export interface S3Request {
  * One signed request, sent by `send`. `body` is a stream or bytes; a stream
  * is sent with `duplex: "half"` and never buffered here.
  *
- * ASKS FOR THE OBJECT, NOT A RE-ENCODING OF IT. Bun's `fetch` offers an
- * `accept-encoding` of its own, and an edge in front of the service — R2 sits
- * behind Cloudflare — takes that offer for a compressible content type: the
- * answer then measures its own body rather than the object, which is what
+ * `accept-encoding: identity` asks for the object, NOT A RE-ENCODING OF IT:
+ * an edge in front of the service — R2 sits behind Cloudflare — takes Bun's
+ * own `accept-encoding` offer for a compressible content type, and the answer
+ * then measures its own body rather than the object, which is what
  * `content-length` on a HEAD and `content-range` on a window are read for.
- * Asked here, at the one place every request is made, rather than tolerated
- * at each answer that measures something.
- *
- * NOT SIGNED, deliberately: it goes in UNDER the signed headers, so
- * `SignedHeaders` never names it and a proxy rewriting what it asks for
- * cannot turn a request into a SigV4 failure. An edge free to ignore it is
- * also free to re-encode anyway, so `s3Store`'s HEAD still reads the record
- * before the length.
+ * It goes in UNDER the signed headers, so `SignedHeaders` never names it and
+ * a proxy rewriting what it asks for cannot turn a request into a SigV4
+ * failure.
  */
 export function s3Fetch(
   target: S3Target,

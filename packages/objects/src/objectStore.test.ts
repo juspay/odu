@@ -1,9 +1,3 @@
-/**
- * BOTH IMPLEMENTATIONS, through the one contract: the disk store, and the S3
- * store against versitygw. Nothing here names a path the interface does not
- * own, except each fixture's `rewriteBehind`, which is how the suite proves
- * facts are read back rather than recomputed.
- */
 import { existsSync, mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -42,8 +36,6 @@ afterAll(async () => {
   await gateway.stop();
 });
 
-/** Five MiB parts (S3's floor) and two keys a page, so multipart and paging
- *  are exercised by objects and listings a test can afford. */
 const PART = 5 * 1024 * 1024;
 
 objectStoreContract("s3 (versitygw)", async () => {
@@ -75,7 +67,6 @@ describe("disk object store details", () => {
     const facts = { size: 10, sha256: "0".repeat(64) };
     expect(await store.link?.("main/nar/a.nar.zst", staged, facts)).toEqual({ ok: true, facts });
     expect(await store.head("main/nar/a.nar.zst")).toBe(10);
-    // THE SOURCE NAME IS GONE: the object never aliases a file its caller holds.
     expect(existsSync(staged)).toBe(false);
 
     const old = join(scratch, "objects", "main", "nar", ".tmp-old");
@@ -89,7 +80,6 @@ describe("disk object store details", () => {
   });
 
   it("hashes an object from before facts were kept, once", async () => {
-    // A 3b object: the file, and no sidecar beside it.
     const store = diskObjectStore({ dir: scratch });
     const path = join(scratch, "objects", "main", "nar", "old.nar.zst");
     mkdirSync(dirname(path), { recursive: true });
@@ -101,7 +91,6 @@ describe("disk object store details", () => {
   });
 });
 
-/** `bytes`' facts, spelled as a store records them. */
 const factsOf = (bytes: Uint8Array) => ({
   size: bytes.length,
   sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -113,7 +102,7 @@ const once = (stream: Uint8Array) => new Response(stream as Uint8Array<ArrayBuff
  * A `send` that answers the first `times` CONDITIONAL writes with `409
  * ConditionalRequestConflict` and forwards everything else to the gateway —
  * the answer versitygw never gives and AWS gives when a delete is in flight.
- * `meanwhile` runs at each 409: whatever the other party did while it stood.
+ * `meanwhile` runs at each 409.
  */
 function conflicting(times: number, meanwhile: () => Promise<void> = async () => {}) {
   const seen = { conflicts: 0 };
@@ -163,8 +152,6 @@ describe("s3 object store: a 409 decides nothing", () => {
     writeFileSync(file, large);
     const kept = conflicting(1);
     const keeping = s3ObjectStore({ target, partSize: PART, send: kept.send });
-    // NO LOCAL FILES, so no `link`: a caller puts the file, and a Blob body is
-    // what lets a conflicted upload start over from it.
     expect(keeping.link).toBeUndefined();
     expect(await keeping.put("main/nar/k.nar.zst", Bun.file(file), factsOf(large))).toEqual({
       ok: true,
@@ -193,11 +180,9 @@ describe("s3 object store: a 409 decides nothing", () => {
 });
 
 /**
- * A `send` that ANSWERS `DeleteObjects` itself — what each request carried,
- * and whatever the service is being made to say to it — and forwards
- * everything else to the gateway. The keys are read back out of the body, so
- * these cases hold the wire: one request per chunk, each with its own
- * Content-MD5, which S3 requires on this call.
+ * A `send` that ANSWERS `DeleteObjects` itself and forwards everything else
+ * to the gateway. The keys are read back out of the body: one request per
+ * chunk, each with its own Content-MD5, which S3 requires on this call.
  */
 function batchDeletes(answer: (at: number) => Response) {
   const sent: { keys: string[]; md5: string | null; body: Uint8Array }[] = [];
@@ -217,7 +202,6 @@ function batchDeletes(answer: (at: number) => Response) {
   return { send, sent };
 }
 
-/** What R2 answered the collection that ended, verbatim in shape. */
 const slowDown = (): Response =>
   new Response(
     "<Error><Code>ServiceUnavailable</Code><Message>Reduce your concurrent " +
@@ -244,12 +228,9 @@ describe("s3 object store: deleting a set of keys", () => {
   });
 
   it("asks again when the service says it is being asked too fast", async () => {
-    // THE INCIDENT: one 429 ended a 6 137-path collection. A service asking
-    // for less is not a failure, and the second ask lands.
     const { send, sent } = batchDeletes((at) => (at === 1 ? slowDown() : deleted()));
     await s3ObjectStore({ target, partSize: PART, send }).deleteMany(keys.slice(0, 3));
     expect(sent.length).toBe(2);
-    // THE SAME KEYS, all of them: a refused batch is not a partial one.
     expect(sent.map((request) => request.keys)).toEqual([keys.slice(0, 3), keys.slice(0, 3)]);
   });
 
@@ -286,8 +267,6 @@ describe("s3 object store: an object odu did not write", () => {
     const store = s3ObjectStore({ target, partSize: PART });
     const bytes = new TextEncoder().encode("the bytes the put recorded");
     expect((await store.put("main/nar/y.nar.zst", new Blob([bytes]))).ok).toBe(true);
-    // THE BYTES REPLACED BEHIND THE STORE'S BACK, carrying the metadata of
-    // the object they displaced and a LENGTH that is not its own.
     const head = await s3Fetch(target, "HEAD", "main/nar/y.nar.zst");
     const meta = Object.fromEntries([...head.headers.entries()].filter(([name]) => name.startsWith("x-amz-meta-")));
     const shorter = new TextEncoder().encode("fewer bytes");
@@ -296,7 +275,6 @@ describe("s3 object store: an object odu did not write", () => {
       body: shorter as Uint8Array<ArrayBuffer>,
     });
     expect(put.ok).toBe(true);
-    // A PLAIN ANSWER MEASURED THE OBJECT, so the record is still checked.
     await expect(store.facts("main/nar/y.nar.zst")).rejects.toBeInstanceOf(UnrecordedObject);
   });
 });
@@ -308,9 +286,7 @@ describe("s3 object store: an edge that re-encodes the answer", () => {
    * to read at all. Cloudflare in front of R2 sends both at once — measured
    * on `cache.kolu.dev`, a HEAD of a `text/plain` object from a client that
    * accepts an encoding (Bun's `fetch` offers one) answers with
-   * `content-encoding` and no length — but the store keys on each
-   * independently, and a chunked edge that re-encodes without saying so is
-   * the other. The `x-amz-meta-*` the store wrote survive either.
+   * `content-encoding` and no length.
    */
   const reencoding = (encoding: string | null): typeof fetch =>
     (async (url: string | URL | Request, init?: RequestInit) => {
@@ -338,12 +314,8 @@ describe("s3 object store: an edge that re-encodes the answer", () => {
       });
 
       const store = s3ObjectStore({ target, partSize: PART, send: reencoding(encoding) });
-      // THE RECORD ANSWERS, not the length of a response that carries no bytes.
       expect(await store.facts(KEY)).toEqual(factsOf(bytes));
       expect(await store.head(KEY)).toBe(bytes.length);
-      // AND THE REWRITE PATH WORKS: a put of new text over the key is refused
-      // with the kept object's facts, which is how the backfill learns the
-      // stored text is stale. It used to throw `UnrecordedObject` instead.
       const next = new TextEncoder().encode(`${text}Odu-Origin: https://odu.example\n`);
       expect(await store.put(KEY, new Blob([next]), factsOf(next), { contentType: "text/plain" })).toEqual({
         ok: false,
@@ -354,14 +326,11 @@ describe("s3 object store: an edge that re-encodes the answer", () => {
 });
 
 describe("s3 object store: a put killed mid-upload", () => {
-  /** The keys of every incomplete multipart upload in the bucket. */
   const uploadsIn = async (target: S3Target): Promise<string[]> => {
     const response = await s3Fetch(target, "GET", "", { query: { uploads: "" } });
     expect(response.ok).toBe(true);
     return [...(await response.text()).matchAll(/<Key>([^<]*)<\/Key>/g)].map((found) => found[1] as string).sort();
   };
-  /** What a daemon killed mid-put leaves: an upload with a part, never
-   *  completed and never aborted. */
   const abandon = async (target: S3Target, key: string): Promise<void> => {
     const created = await s3Fetch(target, "POST", key, { query: { uploads: "" } });
     const uploadId = /<UploadId>([^<]*)<\/UploadId>/.exec(await created.text())?.[1];
@@ -390,13 +359,11 @@ describe("s3 object store: a put killed mid-upload", () => {
 
     const store = s3ObjectStore({ target, partSize: PART, listPageSize: 1 });
     expect(await store.sweepTemp("main", boot)).toBe(1);
-    // Only the bucket's own prefix, and only what began before the boot.
     expect(await uploadsIn(target)).toEqual(["main/nar/live.nar.zst", "other/nar/not-ours.nar.zst"]);
   });
 });
 
 describe("s3 object store: round trips", () => {
-  /** A `send` that records every request (method and signal), then forwards. */
   const recording = (fail?: (method: string, url: URL) => boolean) => {
     const seen: { method: string; url: URL; signal: AbortSignal | undefined }[] = [];
     const send = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -435,20 +402,15 @@ describe("s3 object store: round trips", () => {
     const got = await store.get("main/nar/w");
     const reader = (got?.stream as ReadableStream<Uint8Array>).getReader();
     await reader.read();
-    // The first window, and the one prefetched behind it — never a third.
     expect(seen.filter((one) => one.method === "GET")).toHaveLength(2);
     await reader.cancel("enough");
     expect(seen.every((one) => one.signal?.aborted === true)).toBe(true);
   });
 
-  // The short window comes from the package's own testing door, so this suite
-  // and a consumer's drive their readers with the same lie.
   it("fails the read as a CHANGED OBJECT when a window answers fewer bytes than its range", async () => {
     const target = await gateway.bucket();
     const bytes = new Uint8Array(3 * 1024 * 1024).map((_, at) => at % 251);
     expect((await s3ObjectStore({ target, partSize: PART }).put("main/nar/s", once(bytes))).ok).toBe(true);
-    // A later window, and the first one — each is held to its own range: a
-    // window that came up short is not the object this read was promised.
     for (const from of [1024 * 1024, 0]) {
       const got = await s3ObjectStore({ target, partSize: PART, send: shortWindowFrom(from) }).get("main/nar/s");
       expect(got?.size).toBe(bytes.length);
@@ -464,8 +426,6 @@ describe("s3 object store: round trips", () => {
     const target = await gateway.bucket();
     const bytes = new Uint8Array(3 * 1024 * 1024).map((_, at) => at % 251);
     expect((await s3ObjectStore({ target, partSize: PART }).put("main/nar/m", once(bytes))).ok).toBe(true);
-    // THE KEY REWRITTEN UNDER THE READ, as the service reports it: the
-    // `If-Match` on the first window's ETag no longer holds.
     const refusing = (async (url: string | URL | Request, init?: RequestInit) => {
       const range = new Headers(init?.headers).get("range");
       if (range?.startsWith("bytes=1048576-") !== true) return fetch(url, init);
@@ -484,7 +444,6 @@ describe("s3 object store: round trips", () => {
     const store = s3ObjectStore({ target, partSize: PART, parallelParts: 4, send });
     await expect(store.put("main/nar/p", once(bytes))).rejects.toThrow("UploadPart");
     expect(await store.head("main/nar/p")).toBeNull();
-    // ABORTED ONCE, and nothing left for a sweep to find.
     expect(seen.filter((one) => one.method === "DELETE" && one.url.searchParams.has("uploadId"))).toHaveLength(1);
     const listed = await s3Fetch(target, "GET", "", { query: { uploads: "" } });
     expect(await listed.text()).not.toContain("<Upload>");

@@ -1,17 +1,3 @@
-/**
- * THE `ObjectStore` CONTRACT — run against every implementation.
- *
- * Disk and S3 (a versitygw fixture) run the SAME suite, which is the point: a
- * caller must not learn a second dialect of "put"/"get" when the bytes move off
- * a local disk.
- *
- * A factory owns its own temporary backing and answers the store, a dispose
- * that removes it, and `rewriteBehind` — a write to the BACKING that keeps the
- * store's own record of the object, which is how the suite proves `facts`
- * reads that record instead of re-hashing the bytes. The suite never names a
- * path, a bucket or a filesystem.
- */
-
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -53,7 +39,6 @@ function streamOf(parts: readonly Uint8Array[]): ReadableStream<Uint8Array> {
   });
 }
 
-/** `size` bytes of a pattern seeded by `seed`, in 1 MiB pieces. */
 function patterned(size: number, seed: number): Uint8Array {
   const out = new Uint8Array(size);
   for (let at = 0; at < size; at++) out[at] = (at * 31 + seed) & 0xff;
@@ -176,7 +161,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     });
 
     it("lists every page of a long prefix", async () => {
-      // The S3 fixture pages two keys at a time, so seven keys are four LISTs.
       const { store, dispose } = await make();
       const keys = Array.from({ length: 7 }, (_, at) => `main/nar/k${at}.nar.zst`);
       for (const key of keys) await store.put(key, streamOf([bytes(key)]));
@@ -185,10 +169,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     });
 
     it("answers the survivors of a collection, with their sizes still right", async () => {
-      // THE SHAPE OF A COLLECTION: walk a bucket's prefix, delete the keys that
-      // walk answered and nothing else, and walk again. What comes back is
-      // exactly what was kept, and each survivor still answers its own size —
-      // the number the next dry run adds up.
       const { store, dispose } = await make();
       const payloads: [string, Uint8Array][] = [
         ["main/nar/keep1.nar.zst", bytes("k")],
@@ -210,9 +190,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     });
 
     it("empties one prefix and leaves the others whole: a collection is one bucket's", async () => {
-      // A COLLECTION THAT EVICTS EVERYTHING a bucket holds says nothing about
-      // the bucket next to it, not even the one whose prefix begins with this
-      // one's name.
       const { store, dispose } = await make();
       await store.put("main/nar/one.nar.zst", streamOf([bytes("1")]));
       await store.put("main/nar/two.nar.zst", streamOf([bytes("22")]));
@@ -227,10 +204,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     });
 
     it("lists the whole object's size, for a stream and for a file", async () => {
-      // A DRY RUN NEVER OPENS AN OBJECT: it adds up what `list` answered, so
-      // that number is the stored object's own length — a multipart upload's
-      // whole length rather than a part's, and a file's rather than whatever
-      // the store staged on the way in.
       const { store, partSize, dispose } = await make();
       const streamed = patterned((partSize ?? 5 * 1024 * 1024) + 1024, 9);
       await store.put("main/nar/streamed.nar.zst", streamOf(pieces(streamed)));
@@ -240,6 +213,10 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         writeFileSync(file, "a file's own bytes");
         const facts = factsOf(bytes("a file's own bytes"));
         kept(await store.put("main/nar/filed.nar.zst", Bun.file(file), facts));
+        // A DRY RUN NEVER OPENS AN OBJECT: it adds up what `list` answered, so
+        // that number is the stored object's own length — a multipart upload's
+        // whole length rather than a part's, and a file's rather than whatever
+        // the store staged on the way in.
         const listed = (await store.list("main")).sort((a, b) => a.key.localeCompare(b.key));
         expect(listed).toEqual([
           { key: "main/nar/filed.nar.zst", size: facts.size },
@@ -253,10 +230,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     });
 
     it("takes a second delete of a key, and a delete while another prefix is being walked", async () => {
-      // A COLLECTION DELETES WHILE IT WALKS, and two rows may name the same
-      // bytes, so it evicts one key twice and does so with the next bucket's
-      // walk — several pages of it — still in flight. Neither is an error, and
-      // the walk answers the prefix it was given.
       const { store, dispose } = await make();
       const walked = Array.from({ length: 7 }, (_, at) => `main/nar/w${at}.nar.zst`);
       for (const key of walked) await store.put(key, streamOf([bytes(key)]));
@@ -271,11 +244,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     });
 
     it("takes a whole set of keys at once, absent ones among them", async () => {
-      // WHAT A COLLECTION ACTUALLY ASKS FOR: not one delete per object — six
-      // thousand paths is twelve thousand round trips and a service that
-      // starts refusing — but the set, in as few requests as the service has.
-      // Absent keys are no more an error here than they are alone, so a
-      // caller may name keys it only believes are there.
       const { store, dispose } = await make();
       const doomed = ["main/nar/one.nar.zst", "main/a1.narinfo", "main/nar/two.nar.zst"];
       for (const key of doomed) await store.put(key, streamOf([bytes(key)]));
@@ -284,8 +252,8 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       expect(await store.list("main")).toEqual([]);
       expect(await store.facts("main/a1.narinfo")).toBeNull();
       expect((await store.list("other")).map((entry) => entry.key)).toEqual(["other/nar/spared.nar.zst"]);
-      // NOTHING TO DELETE IS NOT A REQUEST: a batch whose twins all survived
-      // has no NARs to take, and S3 refuses an empty delete document.
+      // Nothing to delete is not a request: S3 refuses an empty delete
+      // document.
       await store.deleteMany([]);
       expect((await store.list("other")).length).toBe(1);
       await dispose();
@@ -309,19 +277,12 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       const payload = bytes("0123456789abcdef");
       await store.put("main/nar/p.nar.zst", streamOf([payload]));
       if (store.presignGet === undefined) {
-        // A STORE WITH NO URLS OF ITS OWN leaves the member out, and that
-        // absence is the whole answer: its objects are reachable only through
-        // whoever holds the store. Nothing else here applies to it.
         await dispose();
         return;
       }
       const url = store.presignGet("main/nar/p.nar.zst", 600);
-      // A PLAIN `fetch`: no Authorization, no netrc, no client of this
-      // store's — the URL carries every bit of authority the read needs.
       const whole = await fetch(url);
       expect({ status: whole.status, text: await whole.text() }).toEqual({ status: 200, text: "0123456789abcdef" });
-      // THE READER RE-SENDS ITS RANGE to the store, so the store must answer
-      // one: a redirected Nix client resuming a NAR depends on it.
       const ranged = await fetch(url, { headers: { range: "bytes=3-6" } });
       expect({
         status: ranged.status,
@@ -338,9 +299,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         return;
       }
       await store.put("main/nar/short.nar.zst", streamOf([bytes("briefly readable")]));
-      // ONE SECOND, then two of them pass: the URL is not a key to the object
-      // for ever, which is what makes handing one out safe for a private
-      // bucket.
       const url = store.presignGet("main/nar/short.nar.zst", 1);
       await Bun.sleep(2_000);
       const late = await fetch(url);
@@ -353,16 +311,10 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       const { store, partSize, dispose } = await make();
       const options = { contentType: "application/x-nix-nar", cacheControl: "public, max-age=31536000, immutable" };
       const small = bytes("one part of a NAR");
-      // LARGER THAN ONE PART, both ways a multipart object is made: with its
-      // facts promised it goes straight to the key, and without them it is
-      // staged and copied into place — and the copy is what carries the
-      // headers for the second, so both are asked.
       const big = patterned((partSize ?? 5 * 1024 * 1024) + 1024, 13);
       kept(await store.put("main/nar/opt-small.nar.zst", streamOf([small]), undefined, options));
       kept(await store.put("main/nar/opt-direct.nar.zst", streamOf(pieces(big)), factsOf(big), options));
       kept(await store.put("main/nar/opt-copied.nar.zst", streamOf(pieces(big)), undefined, options));
-      // THE OPTIONS DECIDE NOTHING ABOUT THE OBJECT: the bytes and the facts
-      // are what they would have been without them, on every store.
       expect(new TextDecoder().decode((await read(store, "main/nar/opt-small.nar.zst")) as Uint8Array)).toBe(
         "one part of a NAR",
       );
@@ -370,7 +322,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         expect(await store.facts(key)).toEqual(factsOf(big));
       }
       if (store.presignGet === undefined) {
-        // A STORE WITH NO RESPONSES OF ITS OWN took them and dropped them.
         await dispose();
         return;
       }
@@ -390,12 +341,9 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     it("reads the facts its put wrote, never the bytes", async () => {
       const { store, rewriteBehind, dispose } = await make();
       expect(await store.facts("main/nar/none.nar.zst")).toBeNull();
-      // A READ: asking about a missing key does not create it.
       expect(await store.head("main/nar/none.nar.zst")).toBeNull();
       const put = kept(await store.put("main/nar/f.nar.zst", streamOf([bytes("stored "), bytes("bytes")])));
       expect(await store.facts("main/nar/f.nar.zst")).toEqual(put);
-      // THE BYTES CHANGE UNDER IT, same length: a store that re-hashed would
-      // answer the new bytes' sha256. It answers what the put recorded.
       await rewriteBehind("main/nar/f.nar.zst", bytes("other bytes!"));
       expect(await store.facts("main/nar/f.nar.zst")).toEqual(put);
       await dispose();
@@ -413,7 +361,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
 
     it("lets exactly one of two concurrent puts of one key win", async () => {
       const { store, partSize, dispose } = await make();
-      // Small and multipart both: the two writes S3 makes conditional.
       for (const size of [64, partSize === null ? 6 * 1024 * 1024 : partSize * 2 + 17]) {
         const key = `main/nar/race-${size}.nar.zst`;
         const one = patterned(size, 1);
@@ -442,8 +389,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         expect(factsOf((await read(store, key)) as Uint8Array)).toEqual(factsOf(payload));
         expect(await store.facts(key)).toEqual(factsOf(payload));
       }
-      // NO TEMP LEFT BEHIND: the unpromised put staged and copied, and its
-      // temp is gone — neither listed nor waiting for a sweep.
       expect((await store.list("main")).map((entry) => entry.key).sort()).toEqual([
         "main/nar/big1.nar.zst",
         "main/nar/big2.nar.zst",
@@ -504,13 +449,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       await dispose();
     });
 
-    // ── THE DIRECT UPLOAD ────────────────────────────────────────────────
-    //
-    // A STORE THE WRITER ITSELF CAN REACH: the bytes go from whoever holds
-    // them to the service, and never through the process holding the
-    // credentials. Every case below runs on every store: one asserts the
-    // group is all-or-nothing, the rest apply to a store that offers it.
-
     it("offers the whole direct upload or none of it, and only where a reader has URLs too", async () => {
       const { store, dispose } = await make();
       const offered = {
@@ -545,10 +483,9 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         await dispose();
         return;
       }
-      // THE WHOLE PROOF A CALLER GETS. The only URLs this store signs for a
-      // key are parts of ONE upload, and the completion ends that upload — so
-      // whoever proved the finished object cannot have it changed underneath
-      // them. There is no `presignPut` to leave a second way in.
+      // The only URLs this store signs for a key are parts of ONE upload, and
+      // the completion ends that upload. There is no `presignPut` to leave a
+      // second way in.
       const key = `main/nar/${TEMP}write-once`;
       const uploadId = await direct.createUpload(key);
       const payload = bytes("the bytes somebody will prove");
@@ -588,9 +525,8 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     });
 
     it("completes an upload of ONE part far smaller than a part", async () => {
-      // THE COMMON CASE FOR A NAR: a few KiB, one part, nowhere near S3's 5
-      // MiB floor — which applies to every part BUT the last, and a single
-      // part is the last one.
+      // A few KiB, one part, nowhere near S3's 5 MiB floor — which applies to
+      // every part BUT the last, and a single part is the last one.
       const { store, dispose } = await make();
       const direct = directly(store);
       if (direct === null) {
@@ -617,8 +553,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       const uploadId = await direct.createUpload(key);
       const parts = await uploadParts(direct, key, uploadId, [patterned(2_000, 14)]);
       const gap = [{ index: 1, etag: (parts[0] as UploadedPart).etag }];
-      // NAMED, not silently glued: a gap would make an object out of the
-      // parts that did arrive, with a hash nobody measured.
       await expect(direct.completeUpload(key, uploadId, gap)).rejects.toThrow("indexes [1]");
       await expect(direct.completeUpload(key, uploadId, [])).rejects.toThrow("0 arrived");
       await direct.abortUpload(key, uploadId);
@@ -636,12 +570,9 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       const uploadId = await direct.createUpload(key);
       const parts = await uploadParts(direct, key, uploadId, [patterned(2_000, 15)]);
       await direct.abortUpload(key, uploadId);
-      // IDEMPOTENT: an upload that is not there is not an error.
       await direct.abortUpload(key, uploadId);
       await expect(direct.completeUpload(key, uploadId, parts)).rejects.toThrow();
       expect(await store.head(key)).toBeNull();
-      // NOTHING LEFT FOR THE SWEEP: the abort removed the upload, so a sweep
-      // of everything older than now finds no dead put of this one's.
       expect(await store.sweepTemp("main", Number.POSITIVE_INFINITY)).toBe(0);
       await dispose();
     });
@@ -653,9 +584,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
         await dispose();
         return;
       }
-      // THE SOURCE IS A DIRECT UPLOAD'S TEMP OBJECT: bytes the store never
-      // read, so it knows no facts about them. The prover does, and passes
-      // them to the copy that makes them an object.
       const source = `main/nar/${TEMP}copied`;
       const payload = patterned(5_000, 16);
       await uploadedTemp(direct, source, payload);
@@ -664,8 +592,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       expect(await direct.copy(source, destination, { facts })).toBe("stored");
       expect(await store.facts(destination)).toEqual(facts);
       expect(factsOf((await read(store, destination)) as Uint8Array)).toEqual(facts);
-      // ONTO A KEY THAT IS TAKEN: the copy is refused and the object there
-      // is the one that was there.
       const other = patterned(5_000, 17);
       await uploadedTemp(direct, `main/nar/${TEMP}other`, other);
       expect(await direct.copy(`main/nar/${TEMP}other`, destination, { facts: factsOf(other) })).toBe(
@@ -697,8 +623,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       expect(version).toBeTruthy();
       await opened?.stream.cancel();
 
-      // Something writes the key again — which odu's own shape prevents, and
-      // which this case stages deliberately to see what the copy does.
       const swapped = patterned(5_000, 19);
       await store.delete(source);
       await uploadedTemp(direct, source, swapped);
@@ -710,11 +634,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
           sourceIfMatch: version,
         }),
       ).toBe("source_changed");
-      // NOTHING WAS WRITTEN: the key the swapped bytes would have taken under
-      // the proved bytes' facts is still absent, and `nar/<file>` being
-      // put-if-absent would have made that permanent.
       expect(await store.head(destination)).toBeNull();
-      // AND THE SAME COPY OF WHAT IS REALLY THERE IS ALLOWED.
       const now = await store.get(source);
       await now?.stream.cancel();
       expect(
@@ -736,7 +656,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       }
       const temp = `main/nar/${TEMP}unproved`;
       await uploadedTemp(direct, temp, bytes("bytes nobody proved"));
-      // NOT AN OBJECT: a temp name is never listed, whoever wrote it.
       expect(await store.list("main")).toEqual([]);
       expect(await store.head(temp)).toBe(19);
       expect(await store.sweepTemp("main", Number.POSITIVE_INFINITY)).toBe(1);
@@ -745,9 +664,6 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
     });
 
     it("streams a 300 MB object at constant memory, to a slow reader too", async () => {
-      // OUT OF PROCESS (test/storeMemory.ts): the same store, rebuilt from its
-      // spec in a fresh process, so the number is the store's and not the
-      // garbage of the tests before it.
       const { memorySpec, dispose } = await make();
       const child = Bun.spawn([process.execPath, join(import.meta.dirname, "storeMemory.ts"), JSON.stringify(memorySpec)], {
         stdout: "pipe",
