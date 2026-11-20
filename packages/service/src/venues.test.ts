@@ -1,12 +1,3 @@
-/**
- * THE KEPT PROBE — what the Machines page reads instead of dialling.
- *
- * Two claims: a probe of the SERVICE'S OWN fleet (no caller `hostsFile`) is
- * kept on the `venues` cell with when and for which platforms; a probe naming a
- * caller's hosts file — `odu ci hosts` forwarding someone's `$ODU_HOSTS` — is
- * answered and NOT kept, so no reader is shown another person's fleet or path.
- */
-
 import { afterEach, describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import { buildSurfaceFace } from "@kolu/surface/client";

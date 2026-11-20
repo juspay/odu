@@ -1,13 +1,3 @@
-/**
- * `run.wait`, `log.read` and `run.cancel` — the answers, and what stays a
- * refusal.
- *
- * The line these tests draw over and over: a red CI answer is a SUCCESS. It
- * travels on the output channel, it exits 0 through the CLI, it is a normal
- * tool result to an agent. Only a request odu DECLINES is an error. Confusing
- * the two is how "your tests failed" becomes "the tool is broken".
- */
-
 import { afterEach, describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import { formatLogKey } from "@odu/service-client/logKey";
@@ -66,7 +56,6 @@ describe("run.wait", () => {
     const failure = answer.success.failures[0];
     expect(failure?.exitCode).toBe(3);
     expect(failure?.excerpt).toContain("assertion failed");
-    // The log is ADDRESSED, so an agent echoes rather than reassembles.
     expect(failure?.logKey).toBe(
       formatLogKey({ runId: fixture.runId, node: "unit@x86_64-linux", attempt: 1 }),
     );
@@ -88,8 +77,6 @@ describe("run.wait", () => {
   });
 
   it("refuses a cursor belonging to another run, with a resync", async () => {
-    // The case that matters most and is hardest to notice: a finalized retry
-    // mints a NEW run, so an agent that kept its cursor is holding the parent's.
     const w = open();
     const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
     const answer = await run(
@@ -114,8 +101,6 @@ describe("run.wait", () => {
   });
 
   it("delivers an actionable failure before an unrelated node settles", async () => {
-    // The whole point of a bounded wait: a red unit lane beside a lane with
-    // ninety seconds to go is already actionable.
     const w = open();
     const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
     writeRoster(fixture.handle, fixture.token, [
@@ -127,7 +112,6 @@ describe("run.wait", () => {
       status: "failed",
       log: "red\n",
     });
-    // `e2e` has started and has NOT finished — the run is not settled.
     const answer = await run(
       waitForRun({ runId: fixture.runId, deadlineMs: 2000 }, {
         catalog: { root: w.catalogRoot },
@@ -141,18 +125,8 @@ describe("run.wait", () => {
   });
 });
 
-/**
- * `run.read` — the same question, asked without waiting.
- *
- * This is what `odu ci history show` is. It used to open the catalog in the
- * caller's own process, beside a daemon reading and writing the same files.
- */
 describe("run.read", () => {
   it("gives the IDENTICAL answer a wait would, without waiting for one", async () => {
-    // One answer shape, deliberately: "what is this run's state" has one
-    // answer, and a second shape for the non-blocking case would be a second
-    // thing to keep true — wrong first for the caller who alternates between
-    // them, reading to see and waiting to follow.
     const w = open();
     const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
     writeRoster(fixture.handle, fixture.token, ["unit@x86_64-linux"]);
@@ -178,8 +152,6 @@ describe("run.read", () => {
   });
 
   it("answers WHO started the run, and says nothing for a record that predates it", async () => {
-    // PLAN 4.4. On the answer as well as on the board row, so an agent that
-    // reads one run and nothing else can tell whose work it is looking at.
     const w = open();
     const catalog = { root: w.catalogRoot };
     const mine = registerFixtureRun(w, {
@@ -194,9 +166,6 @@ describe("run.read", () => {
     if (read._tag !== "Success") return;
     expect(read.success.actor).toBe("srid");
 
-    // ABSENT, never `"local"`: a run recorded before odu asked the question
-    // has no answer to it, and attributing it to this machine's owner would
-    // be the one place an actor was invented rather than carried.
     const before = await run(readRun({ runId: old.runId }, { catalog }));
     expect(before._tag).toBe("Success");
     if (before._tag !== "Success") return;
@@ -204,9 +173,6 @@ describe("run.read", () => {
   });
 
   it("returns at once for a run that is still going, rather than holding", async () => {
-    // The whole difference between the two verbs: this one does not hold the
-    // call open. A read of a live run answers `still_running` immediately —
-    // which is a FACT, on the success channel, not a timeout.
     const w = open();
     const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
     writeRoster(fixture.handle, fixture.token, ["slow@x86_64-linux"]);
@@ -217,14 +183,10 @@ describe("run.read", () => {
     expect(answer._tag).toBe("Success");
     if (answer._tag !== "Success") return;
     expect(answer.success.reason).toBe("still_running");
-    // A wait with the default deadline would have sat here for thirty seconds.
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   it("refuses the same things a wait refuses, from the same resolution", async () => {
-    // The refusals are decided ONCE, in the core both verbs share. Two copies
-    // of "does this cursor belong to this run" would be two chances to answer
-    // it differently.
     const w = open();
     const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
     const catalog = { root: w.catalogRoot };
@@ -261,9 +223,6 @@ describe("run.read", () => {
     );
     expect(next._tag).toBe("Success");
     if (next._tag !== "Success") return;
-    // The run's verdict does not move because a reader paged past it: the
-    // failures are recomputed in full on every read, and the cursor only
-    // decides which EVENTS come back.
     expect(next.success.settled).toBe(true);
   });
 });
@@ -321,9 +280,6 @@ describe("log.read", () => {
   });
 
   it("says a truncated log is truncated rather than quiet", async () => {
-    // `eof` says this READ reached the end; `complete` says the file got its
-    // producer's last word. The difference is "the recipe was quiet" versus
-    // "the evidence is gone".
     const w = open();
     const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
     writeRoster(fixture.handle, fixture.token, ["unit@x86_64-linux"]);
@@ -450,8 +406,6 @@ describe("run.cancel", () => {
     );
     expect(answer._tag).toBe("Success");
     if (answer._tag !== "Success") return;
-    // A cheerful ok here would leave a caller believing it had stopped work
-    // that is still running.
     expect(answer.success.effective).toBe("nothing");
     expect(answer.success.detail).toBe("the stub declined");
   });
@@ -487,10 +441,6 @@ describe("run.cancel", () => {
   });
 
   it("carries the run's identity to the port, so the socket can be checked", async () => {
-    // `.ci/odu.sock` is scoped to a CHECKOUT and a crashed coordinator keeps its
-    // recorded endpoint through the ownership grace — so the address alone can
-    // reach a DIFFERENT, live run. The adapter compares `<sha>#<seq>` before it
-    // mutates anything, and it can only do that if the service sends it.
     const w = open();
     const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
     const { ports, deps } = cancelDeps(w);
@@ -503,12 +453,6 @@ describe("run.cancel", () => {
   });
 
   it("keeps an UNCONFIRMED cancel unresolved, and the receipt open", async () => {
-    // The reply went missing and the socket stayed up, so whether the run was
-    // cancelled is not known. Reporting success would write a completed receipt
-    // for a mutation nobody saw happen; reporting failure would tell a caller
-    // nothing happened when it may have. Neither — and the claim stays in
-    // flight so the same request id may ask again, which is safe because
-    // cancelling twice cancels once.
     const w = open();
     const fixture = registerFixtureRun(w, { repoRoot: "/code/app", sha: SHA });
     const { ports, deps } = cancelDeps(
@@ -525,7 +469,6 @@ describe("run.cancel", () => {
     expect((answer.failure as ServiceRefused).code).toBe("request_unresolved");
     expect(readReceipt(deps.requests, "c-6")?.state).not.toBe("completed");
 
-    // And the repeat DOES ask again rather than replaying a non-answer.
     await run(
       cancelRun({ runId: fixture.runId, scope: { kind: "run" }, requestId: "c-6" }, deps),
     );

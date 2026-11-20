@@ -1,40 +1,3 @@
-/**
- * `log.read` and the `logTails` collection — one attempt's output, two shapes.
- *
- * They answer different questions and that is why there are two:
- *
- *   - **`log.read` is EVIDENCE.** A byte offset, a limit, a next offset and an
- *     EOF flag: a caller paging through a failure's output, or asking for the
- *     last 4 KiB of it. It is addressed and bounded, and a caller can walk the
- *     whole file with it.
- *   - **`logTails` is a VIEW.** The end of the log, re-read as it grows, for a
- *     browser watching a node work. It is a collection so a page subscribes to
- *     one key and gets frames.
- *
- * Collapsing them would mean either a paged read that a browser has to poll
- * itself, or a live tail an agent has to reassemble a file from. Both exist
- * because both callers exist.
- *
- * **The evidence outlives the coordinator, the checkout and the retry.** Every
- * read here goes through the catalog's per-attempt store — `attempts/<node>/<N>/log`
- * — so deleting the worktree does not delete the log you are reading, and a
- * retry writes attempt N+1 rather than over N. That is PR 1's guarantee; this
- * module only addresses it.
- *
- * **THREE facts about the bytes, not two.** `eof` says this READ reached the end
- * of the file; `complete` says the file got its producer's last word; `open`
- * says whether it can still grow. A log that is short because the lane died
- * mid-sentence is `eof: true, complete: false, open: false` — and it is the
- * third field that makes a follow terminate, because `eof` and `complete`
- * together describe that log identically to one whose writer is merely slow.
- *
- * **The follow is `waitMs`, not a sixth verb.** A caller that has read to the
- * end and wants the next bytes re-issues the same paged read with a deadline;
- * the cursor is `nextOffset`, which the CALLER holds, so a call that dies is
- * re-issued rather than resumed from state a server was keeping for it. The
- * surface states why that shape and not a stream; this module only honours it.
- */
-
 import {
   type CatalogOptions,
   handleFor,
@@ -62,30 +25,13 @@ import { Effect } from "effect";
 
 export interface LogDeps {
   catalog?: CatalogOptions;
-  /** A caller's own cancellation — an HTTP disconnect, an MCP cancellation, a
-   *  CLI Ctrl-C. It ends the OBSERVATION and nothing else: the run keeps going,
-   *  because watching a log and producing it are different acts and only one of
-   *  them was cancelled. */
   signal?: AbortSignal;
-  /** How often the follow looks, and what it calls the clock. Injected only so
-   *  a test can state the wait's behaviour in tens of milliseconds instead of
-   *  seconds; every real face leaves both alone. */
   pollMs?: number;
   now?: () => number;
 }
 
-/** How much a single `log.read` may return when the caller names no limit.
- *  Below the surface's own 16 KiB domain-response budget with room for the
- *  envelope, so the common "give me this failure's log" call comes back in one
- *  frame rather than being chunked by the transport. */
 export const DEFAULT_LOG_PAGE_BYTES = 12 * 1024;
 
-/** One page, built from a slice the caller already read.
- *
- *  ONE construction path, used by both the immediate answer and the answer
- *  after a wait. Two would be two places for `open` to be computed, and a
- *  follow whose last page disagreed with its first about whether the log can
- *  still grow is precisely the bug that makes a follower spin. */
 function pageOf(
   handle: RunHandle,
   key: LogKey,
@@ -93,44 +39,15 @@ function pageOf(
   slice: LogSlice,
   now: number,
 ): LogPage {
-  // Completeness comes from the attempt RECORD rather than from the bytes: a
-  // log that simply ends looks identical to one that was cut off, and only the
-  // sidecar knows which. Absent means unknown, and unknown is reported as NOT
-  // complete — claiming a log had its last word when there is no sidecar to say
-  // so is the one lie this field exists to prevent.
   const complete = readAttemptRecord(handle, key.node, key.attempt)?.logComplete ?? false;
   return {
     key: keyText,
     text: slice.text,
     offset: slice.offset,
     size: slice.size,
-    // `bytesRead`, never the decoded string's own byte length: the decode is
-    // non-fatal, so a slice that cut a multibyte character in half yields
-    // U+FFFD where one or two real bytes were — and a caller resuming from a
-    // measured text length would skip log content.
     nextOffset: slice.offset + slice.bytesRead,
-    // The store's own answer about THIS read, rather than a comparison
-    // recomputed here from two numbers it already compared.
     eof: slice.eof,
     complete,
-    // Can this log still GROW? Not while the producer has said its last word,
-    // not once the run reached a terminal record — a verdict or an expiry both
-    // mean there is nobody left to append — and not once its owner is PROVABLY
-    // GONE.
-    //
-    // That third arm is the one a killed coordinator needs, and the first two
-    // do not cover it. A verdict is written in exactly one place: the
-    // coordinator's own `finalize`. A SIGKILLed coordinator writes no verdict,
-    // no expiry, and never seals the attempt it was mid-write on — so
-    // `complete` is false, both records are null, and `open` would stay true
-    // for ever. A follow of that log issues one deadline-length read after
-    // another until somebody notices, while `odu ci wait --run` on the same run
-    // answers `owner_lost` immediately. Two faces disagreeing about a run that
-    // is provably dead is exactly what `open` exists to prevent.
-    //
-    // `null` — no owner record at all — is NOT "gone": an imported run has
-    // never had one, and reading its absence as death would close a log nobody
-    // has finished writing.
     open:
       !complete &&
       readVerdict(handle) === null &&
@@ -139,9 +56,6 @@ function pageOf(
   };
 }
 
-/** No evidence at this address — told as a refusal, because a caller that asked
- *  for a specific attempt's output and got an empty success would read it as
- *  "the recipe was quiet". */
 function noEvidence(key: LogKey): ServiceRefused {
   return new ServiceRefused({
     code: "unknown_run",
@@ -161,9 +75,6 @@ export function readLog(
     const clock = deps.now ?? Date.now;
     const key = parseLogKey(input.key);
     if (key === null) {
-      // A malformed key is refused BEFORE any deadline is honoured. A follow
-      // that held a bad address open for its full `waitMs` would turn a typo
-      // into a minute of silence and then the same refusal.
       return Effect.fail(
         new ServiceRefused({
           code: "bad_input",
@@ -175,18 +86,7 @@ export function readLog(
     }
     const handle = handleFor(key.runId, catalog);
     const limit = input.limit ?? DEFAULT_LOG_PAGE_BYTES;
-    // WHICH OF THE ATTEMPT'S TWO STREAMS. Absent is the recipe's own output —
-    // the reading every caller written before the push became a step makes,
-    // and the one a bare key still means. The stream is a choice about WHAT TO
-    // READ at an address, never part of the address: the page below echoes
-    // `input.key` verbatim, so a follower's cursor stays valid across both and
-    // no second key grammar has to be parsed, formatted or taught.
     const stream = input.stream;
-    // An attempt recorded before the push had its own log has no `push.log` at
-    // all, so a `push` read of it finds nothing and takes the same no-evidence
-    // refusal a wrong attempt number does. That is the right answer and not a
-    // case to special-case: "this attempt kept no such record" is exactly what
-    // happened, and an empty success would read as "it pushed, and was quiet".
     const slice = readAttemptLog(
       handle,
       key.node,
@@ -199,23 +99,10 @@ export function readLog(
     );
     if (slice === null) return Effect.fail(noEvidence(key));
     const page = pageOf(handle, key, input.key, slice, clock());
-    // THE WAIT FIRES ONLY FOR A CAUGHT-UP FOLLOWER. `bytesRead === 0` is
-    // load-bearing: a caller that is BEHIND has bytes in hand and must get them
-    // now — delaying a page that is already full would turn a follow of a
-    // finished log into one deadline per page. And a log that cannot grow has
-    // nothing to wait for, so `open` is what stops the follow of a dead
-    // writer's log from blocking on every call forever.
     if (input.waitMs === undefined || slice.bytesRead !== 0 || !page.open) {
       return Effect.succeed(page);
     }
     return Effect.flatMap(
-      // `Effect.callback`, not `Effect.promise`: a promise is UNINTERRUPTIBLE,
-      // so a caller that walked away — an HTTP client that disconnected, an MCP
-      // request that was cancelled, a browser tab that closed — left this poll
-      // running to its full deadline with nobody to answer. Interruption is the
-      // signal here, and the finalizer turns it into the abort the poll already
-      // knows how to take, leaving no timer behind. The RUN is untouched either
-      // way: ending an observation and stopping CI are different acts.
       Effect.callback<LogGrowth>((resume) => {
         const controller = new AbortController();
         const stop = (): void => controller.abort();
@@ -225,13 +112,8 @@ export function readLog(
           else outer.addEventListener("abort", stop, { once: true });
         }
         void waitForLogGrowth(handle, key.node, key.attempt, {
-          // The end of the page just built, never the caller's own `offset`,
-          // which may have been a negative tail.
           from: page.nextOffset,
           deadlineMs: input.waitMs,
-          // THE WAIT WATCHES THE FILE THIS READ IS OF. A follow of the push
-          // stream that polled the recipe's log would wake on the recipe's
-          // bytes and answer an empty page, and sleep through the push's own.
           ...(stream === undefined ? {} : { stream }),
           ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
           ...(deps.now === undefined ? {} : { now: deps.now }),
@@ -245,11 +127,6 @@ export function readLog(
           outer?.removeEventListener("abort", stop);
         });
       }),
-      // The outcome named WHY the wait ended; the answer is a fresh read in
-      // every case, because "what do the file and the records say now" is the
-      // answer to all five and re-deriving it keeps ONE page-construction path.
-      // A shrink included: re-reading at a cursor the file no longer reaches
-      // comes back clamped, which is how the caller learns its offsets moved.
       () => {
         const grown = readAttemptLog(
           handle,
@@ -266,21 +143,6 @@ export function readLog(
   });
 }
 
-/**
- * The tail of one attempt's log, for the live view.
- *
- * `null` for a key that addresses nothing — which the collection turns into an
- * absent item rather than an error, because a browser subscribing to a node
- * that has not started yet is asking a reasonable question and the answer is
- * "not yet".
- *
- * **THE TAIL IS THE RECIPE'S, and stays so.** There is no `stream` here and
- * there should not be: the live view's tail is the work a node is DOING, and a
- * collection keyed by log key alone is what lets a page subscribe to a node
- * without first knowing which of its streams has bytes. The push's output is
- * paged, followed and shown through `log.read` with `stream: "push"` — a tab a
- * reader opens, not a second frame every watcher of every node pays for.
- */
 export function readTail(
   key: string,
   catalog: CatalogOptions = {},
@@ -292,14 +154,9 @@ export function readTail(
     handle,
     parsed.node,
     parsed.attempt,
-    // NEGATIVE offset: a tail, because the end of a failing log is where the
-    // reason is. The same spelling `odu ci logs --offset=-4096` already takes.
     { offset: -LOG_TAIL_BYTES },
   );
   if (slice === null) return null;
-  // The same three facts the page carries, minus the addressing a tail has no
-  // cursor for — so a view that stops re-subscribing when a log closes reaches
-  // that decision by the same rule a follower does.
   const page = pageOf(handle, parsed, key, slice, Date.now());
   return {
     key,

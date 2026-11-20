@@ -1,22 +1,3 @@
-/**
- * `run.start` AND WHERE THE RUN PUSHES (PLAN 4.1).
- *
- * Four properties, and each is a decision the module header argues for:
- *
- *   - a resolved target reaches the LAUNCH, with a token minted for this run
- *     and nothing else;
- *   - two odu caches REFUSE the start, naming both, because a repository
- *     builds for one;
- *   - a launch that failed gives the token BACK, so a credential never
- *     outlives a run that does not exist;
- *   - the target is NOT in the request digest, so a replayed `requestId`
- *     re-resolves rather than replaying yesterday's bucket.
- *
- * Every one of them is asserted through the recording ports, which record what
- * the service ASKED FOR — the only way to tell a replayed answer from a second
- * act.
- */
-
 import { afterEach, describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import { LOCAL_OWNER } from "@odu/cordis/principal";
@@ -97,22 +78,15 @@ describe("a start that resolves a cache", () => {
     const launched = ports.launches[0];
     expect(launched?.push).toEqual({
       substituter: "https://cache.kolu.dev/kolu-r2",
-      // THE RESOLVED ORIGIN travels with the launch: the lane pushes THERE
-      // and asks no server what the substituter is.
       origin: "https://odu.kolu.dev",
       bucket: "kolu-r2",
       tokenId: "tok-1",
       token: "odu_stub_1",
     });
-    // THE GRANT IS SCOPED TO THE RUN: the bucket it resolved and the run id
-    // the receipt already names. No lifetime — how long a push credential may
-    // outlive its run is the cache row's decision, made where `expires` is
-    // written rather than by whichever caller happens to be minting.
     expect(ports.pushGrants[0]).toEqual({
       bucket: "kolu-r2",
       runId: launched?.runId ?? "",
     });
-    // NOTHING TO SAY, either way: the key is trusted and a target stands.
     expect(launched?.pushSkipped).toBeNull();
     expect(launched?.pushKeyWarning).toBeNull();
     expect(ports.pushRevokes).toEqual([]);
@@ -131,9 +105,6 @@ describe("a start that resolves a cache", () => {
     expect(ports.launches[0]?.pushKeyWarning).toBe(
       "its key is missing from trusted-public-keys",
     );
-    // AND NOT AS A SKIP. The two sentences read the same way in a log and
-    // mean opposite things, and one field holding both is what made every
-    // reader consult `push` to learn which it had.
     expect(ports.launches[0]?.pushSkipped).toBeNull();
   });
 
@@ -146,8 +117,6 @@ describe("a start that resolves a cache", () => {
     expect(ports.launches[0]?.push).toBeNull();
     expect(ports.launches[0]?.pushSkipped).toBe("no flake.nix");
     expect(ports.launches[0]?.pushKeyWarning).toBeNull();
-    // A run that pushes nothing mints nothing: there is no credential to
-    // revoke and none to leak.
     expect(ports.pushGrants).toEqual([]);
   });
 
@@ -179,8 +148,6 @@ describe("a start that resolves a cache", () => {
       }),
     });
     await start(w, ports);
-    // NOTHING EVER REACHED A LANE, so a credential left live for a day would
-    // be a grant with no run behind it.
     expect(ports.pushRevokes).toEqual(["tok-1"]);
   });
 });
@@ -191,9 +158,6 @@ describe("the request digest", () => {
     let answer: PushResolution = TARGET;
     const ports = recordingPorts({ push: () => answer });
     await start(w, ports);
-    // The world moved: the bucket is gone. A repeat of the SAME request id is
-    // still answered from the receipt — one execution per request id — and the
-    // resolution is asked again rather than replayed from a stale value.
     answer = { kind: "skipped", reason: "no flake.nix" };
     await start(w, ports);
     expect(ports.launches).toHaveLength(1);

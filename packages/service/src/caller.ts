@@ -1,51 +1,10 @@
-/**
- * WHO IS ASKING — the one per-caller fact the ports receive today.
- *
- * The service is a per-user singleton, so its own environment is a fact about
- * the shell that started it — never about the person asking for this run. The
- * one such fact is `$ODU_HOSTS`: the inventory a launch resolves, the venue
- * verbs probe and hold, and an unsliced protect derives its platform set from.
- * It used to travel as a loose `hostsFile` field on every port signature (and
- * on every adapter behind them), which is one edit per per-caller fact and five
- * places for the next one to be forgotten.
- *
- * It arrives as ONE value instead, assembled per call inside the service from
- * the verb input, and this is the only shape the ports see. Later per-caller
- * facts — a principal resolved from the connection, an org — join this type
- * rather than every signature, which is why it has a module of its own rather
- * than living in the ports list.
- *
- * **Not a wire type.** Verb inputs keep `hostsFile` exactly as they always
- * have: the three readings (a path, `""` for "my shell has none", absent for
- * "I have no shell") are the contract the docs and agents already speak, and
- * {@link callerOf} is where that contract becomes this object.
- *
- * **The principal comes from the CONNECTION, never from input.** It is resolved
- * at the upgrade (a session cookie) or at the HTTP door (a Bearer token) and
- * read by the verb out of the Effect context, so a caller cannot type who they
- * are. {@link callerOf} takes it as an argument rather than reading it, which
- * is what keeps this module a pure assembly step — {@link principalOf} is where
- * the connection's answer arrives.
- */
-
 import type { Principal } from "@odu/cordis/principal";
 
 export interface Caller {
-  /** The CALLER's `$ODU_HOSTS`, or `null` when the caller expressed nothing. */
   readonly hostsFile: string | null;
-  /** Who this call acts for: the machine's own owner, or a signed-in person and
-   *  their role. Each row decides what that may do; this only carries it. */
   readonly principal: Principal;
 }
 
-/**
- * Assemble the caller from a verb input.
- *
- * The three readings are kept, not flattened: absent becomes `null` (use the
- * service's own configuration), `""` stays `""` (the caller's shell had none),
- * and a path stays a path. The first two mean opposite things downstream, which
- * is why this is `?? null` and not `?? ""`.
- */
 export function callerOf(
   input: {
     readonly hostsFile?: string | undefined;
@@ -56,33 +15,12 @@ export function callerOf(
 }
 
 /**
- * WHAT A LOOPBACK CONNECTION IS CALLED in a run's `actor` field.
- *
  * `@local` and not `local`, because the field is one string space shared with
  * GitHub logins and it is DURABLE: every manifest already written spells its
- * answer, and the `ci` contract publishes it. A login cannot contain `@`, so
- * this is a word no person can ever be — which is what keeps "the machine's
- * own owner" and "a user called local" distinguishable for as long as the
- * records last. The same reservation is what a later principal kind would
- * need, and it costs nothing to have made it now.
+ * answer, and the `ci` contract publishes it.
  */
 export const LOCAL_ACTOR = "@local";
 
-/**
- * WHO A RUN RECORDS AS ITS ACTOR — one word, from the principal this call
- * carries (PLAN 4.4).
- *
- * A signed-in person is their `login`. A loopback connection is
- * {@link LOCAL_ACTOR}, because that principal has no login: it is the
- * machine's own owner, and inventing a name for them ("you", `$USER`, the
- * daemon's uid) would put a second, unreliable spelling of one fact into a
- * durable record.
- *
- * Here rather than at the launch port because it is a reading of the
- * {@link Caller}, and every face that shows "started by" must read the same
- * one — a board, a runs table and an agent disagreeing about who started a run
- * is worse than none of them saying.
- */
 export function actorOf(principal: Principal): string {
   return principal.kind === "local" ? LOCAL_ACTOR : principal.login;
 }

@@ -1,13 +1,3 @@
-/**
- * `run.list` through the real runtime, and the poller that keeps it fresh.
- *
- * `run.list` exists because the faces that needed ONE run by where it came
- * from read the whole board a row per round trip (juspay/odu#113). What these
- * pin is the part a registry test cannot: that the procedure is in the
- * DISPATCH, refuses what it must, and sees a run the caller has just started —
- * the ordinary agent loop of `run_start` then "which run is mine".
- */
-
 import { afterEach, describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import { buildSurfaceFace } from "@kolu/surface/client";
@@ -109,9 +99,6 @@ describe("run.list", () => {
   });
 
   it("sees a run the caller just started, without waiting for a tick", async () => {
-    // `run.start` refreshes before it answers, so the very next `run.list` —
-    // an agent's "which run is mine" — must find it. The stub launcher
-    // registers the run the way a coordinator would.
     world = makeWorld();
     const w = world;
     const ports = recordingPorts({
@@ -141,7 +128,6 @@ describe("run.list", () => {
   });
 });
 
-/** Timers a test drives by hand: `fire` runs whatever is armed. */
 function manualTimers(): Timers & { armed: number; fire: () => void; log: string[] } {
   let pending: (() => void) | null = null;
   const self = {
@@ -167,15 +153,11 @@ function manualTimers(): Timers & { armed: number; fire: () => void; log: string
 
 describe("the poller", () => {
   it("arms the next tick only AFTER the current one returns", () => {
-    // The whole fix for back-to-back ticks: `setInterval` fired on the clock
-    // whatever the last tick was doing; this arms on completion, so the loop
-    // always gets its idle gap and two ticks can never overlap.
     const timers = manualTimers();
     const stop = everyAfter(() => timers.log.push("tick"), 250, timers);
     expect(timers.log).toEqual(["arm"]);
     timers.fire();
     timers.fire();
-    // Every arm follows the tick before it; none happens while one is running.
     expect(timers.log).toEqual(["arm", "tick", "arm", "tick", "arm"]);
     stop();
     timers.fire();

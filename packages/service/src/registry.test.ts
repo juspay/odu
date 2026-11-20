@@ -1,10 +1,3 @@
-/**
- * The BOARD, against real catalog files.
- *
- * The class of bug this projection can have is a disagreement with the records
- * it projects, so every fixture here is written by the catalog's own writers.
- */
-
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -42,9 +35,6 @@ afterEach(() => {
 
 describe("the run registry", () => {
   it("discovers a run nobody told it about", () => {
-    // The whole reason the board reads the CATALOG rather than being notified:
-    // a run started by `odu ci run` in a terminal, before this service existed,
-    // appears on the first refresh without anything having announced it.
     const w = open();
     registerFixtureRun(w, { repoRoot: "/code/app", sha: "a".repeat(40) });
     const registry = createRegistry({ root: w.catalogRoot });
@@ -60,9 +50,6 @@ describe("the run registry", () => {
     const registry = createRegistry({ root: w.catalogRoot });
     registry.refresh();
 
-    // Nothing has changed, so nothing is republished. A projection that
-    // re-emitted every row each tick would wake every open board four times a
-    // second to redraw what it already has.
     expect(registry.refresh().upserted).toEqual([]);
 
     writeRoster(a.handle, a.token, ["unit@x86_64-linux"]);
@@ -72,9 +59,6 @@ describe("the run registry", () => {
   });
 
   it("tells provisioning apart from running", () => {
-    // A run holding a checkout while a cold box finishes a `nix copy` has no
-    // lane behind it. Reporting "running" about a run with nothing running is
-    // how a multi-minute provision reads as a hang.
     const w = open();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "c".repeat(40) });
     const registry = createRegistry({ root: w.catalogRoot });
@@ -122,13 +106,10 @@ describe("the run registry", () => {
     expect(row?.settled).toBe(true);
     expect(row?.passed).toBe(false);
     expect(row?.outcome).toBe("failed");
-    // Still red. Settling does not resolve a failure — it stops new ones.
     expect(row?.unresolvedFailures).toBe(1);
   });
 
   it("does not call a cancelled run failed", () => {
-    // `passed: false` covers two different endings, and reporting a cancelled
-    // run as failed sends somebody looking for a test that broke.
     const w = open();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "1".repeat(40) });
     writeRoster(run.handle, run.token, ["unit@x86_64-linux"]);
@@ -181,8 +162,6 @@ describe("the run registry", () => {
   });
 
   it("shows a rostered node that never started as pending, at attempt 0", () => {
-    // Attempt 0 is not a fabricated attempt 1: naming evidence that does not
-    // exist is worse than saying there is none.
     const w = open();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "5".repeat(40) });
     writeRoster(run.handle, run.token, ["unit@x86_64-linux", "e2e@x86_64-linux"]);
@@ -198,9 +177,6 @@ describe("the run registry", () => {
   });
 
   it("projects a run the registry has not seen, identically", () => {
-    // A detail view opened on a run that arrived between refreshes reads the
-    // same fold, so the two paths cannot disagree about which attempt a node is
-    // on.
     const w = open();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "6".repeat(40) });
     writeRoster(run.handle, run.token, ["unit@x86_64-linux"]);
@@ -220,8 +196,6 @@ describe("the run registry", () => {
     registry.refresh();
     expect(registry.rows()).toHaveLength(1);
 
-    // Retention, or a person with `rm`. Either way the board must stop showing
-    // it rather than keep a row nothing backs.
     const { rmSync } = require("node:fs") as typeof import("node:fs");
     rmSync(`${w.catalogRoot}/${run.runId}`, { recursive: true, force: true });
     const delta = registry.refresh();
@@ -230,11 +204,6 @@ describe("the run registry", () => {
   });
 
   it("reports a crashed coordinator as owner_lost WITHOUT anything on disk moving", () => {
-    // The bug this pins: a dead coordinator stops writing, so it stops moving
-    // the very files a "did anything change?" check reads. Fingerprinting only
-    // the files left such a row saying `provisioning` for ever — the one state
-    // a crashed run must not be reported in — while `projectRun`, which reads
-    // straight through, said `owner_lost` about the same run.
     const w = open();
     const at = Date.now();
     const run = registerFixtureRun(w, {
@@ -246,23 +215,16 @@ describe("the run registry", () => {
     registry.refresh(at);
     expect(registry.row(run.runId)?.state).toBe("provisioning");
 
-    // The coordinator dies. Its heartbeat is now as old as the grace, and
-    // NOTHING in the run directory changes from here on.
     crashOwner(run.handle, { heartbeatAt: at - OWNERSHIP_GRACE_MS - 1 });
     const moved = registry.refresh(at);
     expect(moved.upserted.map((row) => row.runId)).toEqual([run.runId]);
     expect(registry.row(run.runId)?.state).toBe("owner_lost");
-    // And the board now agrees with the read-through projection, which is the
-    // property that was actually broken.
     expect(projectRun(run.runId, { root: w.catalogRoot }, at)?.row.state).toBe(
       "owner_lost",
     );
   });
 
   it("flips to owner_lost when the GRACE expires, with no write at all", () => {
-    // Time alone, which is the harder half: the record was written by a process
-    // that is gone, and the only thing that changes between these two refreshes
-    // is the clock.
     const w = open();
     const at = Date.now();
     const run = registerFixtureRun(w, {
@@ -281,29 +243,12 @@ describe("the run registry", () => {
   });
 });
 
-/**
- * THE PUSH, AS A NODE'S OWN STEP.
- *
- * A node has two pieces of work and either can fail on its own: the recipe,
- * and the push of what the recipe built. So the journal records three states
- * for the second one and the node row carries them, which is what lets a
- * reader tell "the tests are red" from "the tests passed and the bucket was
- * unreachable" without opening a log.
- *
- * What is NOT on the node is as deliberate as what is. The fold knows the
- * bucket (the run's, carried once on the row) and the failure's message (the
- * push log's first business, addressable at the node's own `logKey`), and
- * neither is copied here — a second home for a fact is a second thing that
- * can be stale, and a truncated error on a row is what a reader would trust
- * instead of the log that has the whole of it.
- */
 describe("a node's push", () => {
   const PUSHING = "unit@x86_64-linux";
   const PUSHED = "lint@x86_64-linux";
   const FAILED = "build@x86_64-linux";
   const BUCKET = "odu-main";
 
-  /** A finished run whose three nodes are each in a different push state. */
   const threeStates = (w: World) => {
     const run = registerFixtureRun(w, {
       repoRoot: "/code/app",
@@ -322,8 +267,6 @@ describe("a node's push", () => {
     for (const id of [PUSHING, PUSHED, FAILED]) {
       writeNode(w, run.handle, run.token, { id, status: "ok" });
     }
-    // The push's own lines, appended after each node's status the way a lane
-    // does: the recipe passed, and the push is the step that follows it.
     appendEvent(run.handle, run.token, {
       kind: "pushing",
       node: PUSHING,
@@ -364,8 +307,6 @@ describe("a node's push", () => {
       bytes: 4_096,
       durationMs: 1_200,
     });
-    // A FAILURE DROPS ONLY THE BUCKET, which the run names once. Its
-    // message is the wire's own field and crosses unchanged.
     expect(push(FAILED)).toEqual({
       state: "failed",
       message: "403 from the bucket — the token is not valid for this path",
@@ -374,8 +315,6 @@ describe("a node's push", () => {
   });
 
   it("leaves the push off a node that has none, rather than zeroing it", () => {
-    // A node of a run with nowhere to push and a node that pushed nothing are
-    // the same absence to a reader, and an absence is what the schema says.
     const w = open();
     const run = registerFixtureRun(w, { repoRoot: "/code/b", sha: "d".repeat(40) });
     writeRoster(run.handle, run.token, [PUSHED]);
@@ -386,12 +325,6 @@ describe("a node's push", () => {
   });
 
   it("sums only what LANDED on the run's answer, and names who failed", async () => {
-    // The totals are a claim about the bucket's contents, so a node still
-    // pushing and a node that failed must add nothing to them — and the one
-    // that failed has to be nameable, or a green-looking count is the only
-    // thing a reader sees about a run that half-warmed its cache. The two
-    // counts stay apart: what this run SENT and what the bucket already had
-    // are different facts, and their sum reads as traffic that never was.
     const w = open();
     const run = threeStates(w);
 
@@ -412,18 +345,6 @@ describe("a node's push", () => {
   });
 });
 
-/**
- * THE RUN ENVIRONMENT — where the work is placed, read from the catalog.
- *
- * The bug this whole section pins is an ABSENCE: the coordinator journalled
- * `lane` and `phase` lines from the beginning and `foldJournal` fell through to
- * `default: break` on both, so nothing on disk could answer "which lane is on
- * which box". That is why `odu ci status` dialled the checkout's
- * `.ci/odu.sock` — the live coordinator was the only thing that could be
- * asked, so one public command had to keep a run authority of its own.
- * Answered from the journal, the same question outlives the coordinator that
- * once had to be alive for it.
- */
 describe("the run environment", () => {
   it("folds the lanes and the phase the journal has always carried", () => {
     const w = open();
@@ -448,7 +369,6 @@ describe("the run environment", () => {
     registry.refresh();
     const env = registry.env(run.runId);
     expect(env?.phase).toBe("lanes");
-    // Platform order, so two reads of one journal paint the same matrix.
     expect(env?.lanes).toEqual([
       { state: "claiming", platform: "aarch64-darwin", pool: ["mac-1"] },
       { state: "leased", platform: "x86_64-linux", host: "builder-1" },
@@ -478,12 +398,6 @@ describe("the run environment", () => {
   });
 
   it("still folds an OLD lane line that carries no pool or hosts file", () => {
-    // The compatibility case the journal schema's `optionalKey` exists for. The
-    // reader SKIPS a line it cannot parse and counts it, so a required `pool`
-    // would not have failed loudly — it would have silently erased every lane
-    // of every run written before the field existed. An empty pool reads
-    // honestly as "not recorded" and a null source says the same; neither is a
-    // claim that the lane had no candidates.
     const w = open();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "a1".repeat(20) });
     writeLane(run.handle, run.token, {
@@ -501,8 +415,6 @@ describe("the run environment", () => {
   });
 
   it("keeps the hosts file a newer line omits", () => {
-    // A mixed journal — old lines, then new — must not lose the source it has
-    // just learned to a later line that simply does not carry one.
     const w = open();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "a2".repeat(20) });
     writeLane(run.handle, run.token, {
@@ -523,10 +435,6 @@ describe("the run environment", () => {
   });
 
   it("reports a leased lane with no host as still claiming", () => {
-    // A TORN record: the state says the lane landed and the field naming the
-    // machine is missing. Reported as the weaker claim, because the alternative
-    // is telling a reader the work is on a machine that nothing in the journal
-    // names.
     const w = open();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "a3".repeat(20) });
     writeLane(run.handle, run.token, {
@@ -552,9 +460,6 @@ describe("the run environment", () => {
     writeRoster(run.handle, run.token, ["unit@x86_64-linux"]);
     writeNode(w, run.handle, run.token, { id: "unit@x86_64-linux", status: "ok" });
     registry.refresh();
-    // Never `no_lanes` — that is the coordinator's own word for "the selection
-    // matched nothing", and inferring it from a silent record would invent a
-    // reason the journal never gave.
     expect(registry.env(run.runId)?.phase).toBe("lanes");
   });
 
@@ -568,8 +473,6 @@ describe("the run environment", () => {
     });
     const registry = createRegistry({ root: w.catalogRoot });
 
-    // Still going: the clock is the reader's, so it advances between two reads
-    // with nothing on disk having moved.
     registry.refresh(at + 5_000);
     expect(registry.env(run.runId, at + 5_000)?.elapsedMs).toBe(5_000);
     expect(registry.env(run.runId, at + 90_000)?.elapsedMs).toBe(90_000);
@@ -583,8 +486,6 @@ describe("the run environment", () => {
     finalizeRun(run.handle, run.token, "passed", [], at + 60_000);
     registry.refresh(at + 90_000);
 
-    // Settled. A settled run's age must not be a function of when somebody
-    // looked at it, so this is the same number a week from now.
     expect(registry.env(run.runId, at + 90_000)?.elapsedMs).toBe(60_000);
     expect(registry.env(run.runId, at + 9_000_000)?.elapsedMs).toBe(60_000);
   });
@@ -610,9 +511,6 @@ describe("the run environment", () => {
     finalizeRun(run.handle, run.token, "passed", [], at + 60_000);
     registry.refresh(at + 90_000);
 
-    // The verdict's own instant, so a face that never dials this service — a
-    // browser board, kolu's inspector — can say how long the run took without
-    // subtracting against its own clock.
     expect(registry.row(run.runId)?.finishedAt).toBe(at + 60_000);
   });
 
@@ -633,8 +531,6 @@ describe("the run environment", () => {
     expect(registry.env(linked.runId)?.commitUrl).toBe(
       `https://github.com/juspay/odu/commit/${sha}`,
     );
-    // Not an empty string and not a URL that 404s: a checkout with no GitHub
-    // remote has no forge page, and saying so is the answer.
     expect(registry.env(local.runId)?.commitUrl).toBeNull();
   });
 
@@ -648,8 +544,6 @@ describe("the run environment", () => {
     });
     const registry = createRegistry({ root: w.catalogRoot });
     registry.refresh();
-    // The count tells an operator something is wrong; this tells them which
-    // context and why.
     expect(registry.row(run.runId)?.reportingDebt).toBe(1);
     expect(registry.env(run.runId)?.owed).toEqual([
       { context: "odu/unit", lastError: "403 from api.github.com", attempts: 3 },
@@ -657,8 +551,6 @@ describe("the run environment", () => {
   });
 
   it("says nothing at all about a run it has never seen", () => {
-    // `undefined`, not `UNKNOWN_ENV`: "no such run here" and "a run whose
-    // environment is not established yet" call for opposite next moves.
     const w = open();
     const registry = createRegistry({ root: w.catalogRoot });
     registry.refresh();
@@ -687,22 +579,8 @@ describe("the run environment", () => {
   });
 });
 
-/**
- * A LARGE CATALOG — what juspay/odu#113 was about.
- *
- * The poller walked every run's manifest, owner record, verdict and whole
- * journal on every 250 ms tick, and only then compared the fingerprint that
- * existed to skip the unchanged ones. Seven hundred runs kept the daemon's loop
- * busy full-time and every RPC queued behind it. These pin the fix as a
- * requirement — a warm tick parses nothing — and the cases the cheaper
- * fingerprint must still see.
- */
 describe("the registry over a large catalog", () => {
   it("re-reads no journal on a warm tick, however long the journals are", () => {
-    // 200 settled runs with ~1 500-line journals: 300 000 lines, which a cold
-    // refresh takes seconds to parse. A warm tick that parsed even a fraction
-    // of them would blow the bound below by an order of magnitude, so this
-    // cannot pass by luck — only by not reading.
     const w = open();
     const checkouts = ["/code/a", "/code/b", "/code/c"];
     for (let i = 0; i < 200; i += 1) {
@@ -727,27 +605,10 @@ describe("the registry over a large catalog", () => {
   }, 120_000);
 
   it("stops asking a RELEASED settled run's fence, and still follows it if it resumes", () => {
-    // `releaseOwnership` keeps owner.json, so every finished run's heartbeat
-    // goes stale and the fence's answer flips once the grace passes. For a
-    // settled row that has let its ENDPOINT go, that answer cannot change
-    // anything a reader sees — the fold decides `settled` first and nothing
-    // is serving the run — so re-projecting on it was pure cost: a journal
-    // re-parse per finished run, and a `kill(pid, 0)` per tick for ever
-    // after.
-    //
-    // A settled row that still NAMES an endpoint is the exception, and it is
-    // asserted where it matters (`pushRevoke.test.ts`): `--linger` leaves
-    // exactly that shape, the run's write token is held while something is
-    // serving the run, and a coordinator killed after `finalized` never
-    // releases the endpoint. Skipping it on `settled` alone computed that
-    // liveness once, while it was still true, and never asked again.
     const w = open();
     const at = Date.now();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "5e".repeat(20), now: at });
     finalizeRun(run.handle, run.token, "passed", [], at);
-    // RELEASED, then gone: the endpoint is nulled by the clean exit, and the
-    // process behind it is not there any more. Together they are the shape a
-    // drained run leaves on disk.
     releaseOwnership(run.token);
     crashOwner(run.handle, { heartbeatAt: at });
     const registry = createRegistry({ root: w.catalogRoot });
@@ -758,8 +619,6 @@ describe("the registry over a large catalog", () => {
     expect(registry.refresh(later)).toEqual({ upserted: [], removed: [] });
     expect(registry.row(run.runId)?.state).toBe("settled");
 
-    // Resuming appends to the journal, which moves the fingerprint — so the
-    // run is projected again, and the (now provably lost) owner counts.
     appendEvent(run.handle, run.token, {
       kind: "attempt_started",
       node: "unit@x86_64-linux",
@@ -771,11 +630,6 @@ describe("the registry over a large catalog", () => {
   });
 
   it("re-projects a run when a takeover CLAIM appears and owner.json does not move", () => {
-    // `currentOwner` takes the highest epoch among owner.json AND the claim
-    // files. A successor that won epoch 2 and died before publishing leaves
-    // only `owner.2.claim` — so the owner changed while `owner.json`'s stat did
-    // not. The directory's own stat is what sees it; without it the cached
-    // owner would be served forever.
     const w = open();
     const at = Date.now();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "ab".repeat(20), now: at });
@@ -800,10 +654,6 @@ describe("the registry over a large catalog", () => {
   });
 
   it("follows a finalized run that resumed, and settles it again", () => {
-    // `verdict.json` is last generation's until the next finalize, so a
-    // resumed run has a verdict on disk and work in flight. The journal is the
-    // authority — which the projection's own fold reads, now that discovery no
-    // longer computes `resumed` for it.
     const w = open();
     const run = registerFixtureRun(w, { repoRoot: "/code/app", sha: "cd".repeat(20) });
     writeRoster(run.handle, run.token, ["unit@x86_64-linux"]);
@@ -858,8 +708,6 @@ describe("the registry over a large catalog", () => {
     expect(registry.refresh()).toEqual({ upserted: [], removed: [] });
     expect(registry.select({}).total).toBe(1);
 
-    // A manifest that disappears from a run on the board is a REMOVAL a
-    // subscriber must hear about, not a row that silently stops updating.
     rmSync(join(run.handle.dir, "manifest.json"));
     expect(registry.refresh().removed).toEqual([run.runId]);
     expect(registry.select({}).total).toBe(0);
@@ -905,7 +753,6 @@ describe("registry.select", () => {
       ids.a2,
       ids.a1,
     ]);
-    // Case-insensitive, and a PREFIX — the `<sha7>` a face prints.
     expect(registry.select({ sha: "ABCDEF1" }).rows.map((r) => r.runId)).toEqual([
       ids.a2,
       ids.b1,

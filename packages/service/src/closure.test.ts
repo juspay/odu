@@ -1,18 +1,3 @@
-/**
- * The WALL, enforced — what this package is allowed to import.
- *
- * The claim that is THIS package's own is the one the whole design rests on:
- * **the service does not import the engine.** `@odu/execution` knows how a run
- * happens — scheduling, the verdict gate, the retry closure, GitHub posting —
- * and the day this package imports it is the day the web face can no longer be
- * reasoned about, or tested, without a coordinator. What it reaches instead are
- * PORTS (`./ports`), which the composition root binds.
- *
- * Asserted from this side only, deliberately: `@odu/execution`'s own closure
- * test already refuses to import a face, so the pair of tests fences the arrow
- * from both ends without either one reaching into the other's directory.
- */
-
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -26,22 +11,13 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** What a consumer must satisfy, pinned as a literal set. Growing it is a
- *  decision every downstream pays for, so it is written down rather than
- *  derived from whatever the manifest happens to say today. */
 const EXPECTED_DEPENDENCIES = ["@odu/cordis", "@odu/run-client", "@odu/run-history", "@odu/service-client", "effect"];
 
-/** The `@kolu/*` sources a consumer must hydrate alongside this package. */
 const HYDRATED = new Set<string>([
-  // `@kolu/surface` for the server half (`implementRootedSurfaces`, the cell
-  // and collection stores, the abortable stream source) and
-  // `@kolu/surface-daemon` for the frozen control fragment this service mounts
-  // as a sibling so a supervisor can identify and drain it.
   "@kolu/surface",
   "@kolu/surface-daemon",
 ]);
 
-/** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
 function tsFilesUnder(dir: string): string[] {
@@ -58,9 +34,6 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
-/** Every module specifier a consumer's compiler would have to resolve: static
- *  imports and re-exports (`import type` included), `import x = require("…")`,
- *  dynamic `import()`, and `import("…").T` in type position. */
 function specifiersIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
@@ -95,7 +68,6 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
-/** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@")
@@ -114,8 +86,6 @@ const sources = tsFilesUnder(join(packageRoot, "src"))
 describe("@odu/service's import closure", () => {
   it("has sources to police", () => {
     expect(sources.length).toBeGreaterThan(0);
-    // A parser that silently returned nothing would make every assertion
-    // below vacuously true.
     expect(sources.flatMap((s) => s.specifiers).length).toBeGreaterThan(0);
   });
 
@@ -156,9 +126,6 @@ describe("@odu/service's import closure", () => {
   });
 
   it("never imports the engine", () => {
-    // THE claim. `@odu/execution` knows how a run happens; this package knows
-    // what a caller may ask about one. The three things it must CAUSE — launch,
-    // retry, cancel — arrive as ports the composition root binds.
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
       for (const spec of specifiers) {

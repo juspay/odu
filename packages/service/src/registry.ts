@@ -1,83 +1,3 @@
-/**
- * The BOARD — every registered run, projected once and kept fresh.
- *
- * The catalog is the truth. This is a projection of it, and the distinction is
- * load-bearing: nothing here is written, nothing here is authoritative, and a
- * row that disagrees with the run's own files is a bug in this file rather than
- * a second opinion a reader has to reconcile. The projection exists for one
- * reason — a surface `collection` is READ on every subscribe and every publish,
- * and re-folding forty runs' journals on each of those is a cost the browser
- * would pay in latency and the disk would pay in reads.
- *
- * **Freshness is a fingerprint, not a clock.** A run's row changes when its
- * files change, so the refresh compares a cheap `stat` of what can move — the
- * journal, the verdict, the ownership record, and the run directory itself —
- * and re-folds only the runs whose fingerprint moved. A settled run from last
- * week is stat'd and skipped; a run that is executing is re-folded every tick.
- * That is what keeps a large catalog affordable without a cache that can go
- * stale, because there is nothing to invalidate: the fingerprint IS the
- * invalidation.
- *
- * **The fingerprint comes BEFORE any read, and it is only `stat`s.** It used to
- * be taken after `listRuns` had already opened every run's manifest, owner
- * record, verdict and whole journal — so the check that existed to skip an
- * unchanged run ran after the run had been fully parsed. At seven hundred runs
- * that was a second of synchronous work per 250 ms tick, a daemon loop busy
- * full-time, and every RPC queued behind it (juspay/odu#113). Discovery is now
- * `listRunIds` (a directory listing) and an unchanged run costs four `stat`s.
- *
- * The directory's own stat is what lets the owner record be skipped too.
- * `currentOwner` is a function of `owner.json` AND the set of epoch claim files
- * (`owner.<epoch>.claim`, created exclusively and never rewritten). The first
- * has its own stat; the second can only change by an entry appearing in or
- * leaving the directory, which moves the directory's mtime. So a run whose four
- * stats are unchanged has the same `currentOwner` it had when it was projected,
- * and the decoded record is cached on the entry rather than re-read per tick.
- *
- * **And OWNER LIVENESS is re-asked every tick while it can matter, because it
- * is not a file.**
- * A coordinator that crashes stops writing — which means it stops moving the
- * very files a "did anything change?" check reads. Its heartbeat then ages past
- * the ownership grace and the run becomes `owner_lost`, and nothing on disk
- * moved to say so. Fingerprinting the files alone left such a row reading
- * `running` forever. So each tick recomputes the fence's answer from the CACHED
- * owner record — arithmetic on its heartbeat, plus one `kill(pid, 0)` once the
- * grace has passed — and a changed answer re-projects the run like a moved file
- * would.
- *
- * "While it can matter" is a row that is not `settled`/`expired`, PLUS a
- * settled row that still holds an endpoint. The attention fold decides
- * settlement and expiry BEFORE it consults the fence, so for a finished run
- * that has let its endpoint go the answer cannot change the row — and asking
- * anyway was not free: `releaseOwnership` keeps `owner.json` with a heartbeat
- * that goes stale, so every finished run on this host reached
- * `kill(pid, 0)` four times a second, and a reused pid re-parsed a journal
- * whose run could not change.
- *
- * A settled row that still NAMES an endpoint is the exception, and it is not
- * cosmetic: `--linger` leaves exactly that shape, the run's write token is
- * held for as long as something is serving the run (PLAN 4.1), and a
- * coordinator killed -9 after `finalized` never releases the endpoint. Skip
- * it on the strength of `settled` alone and the liveness is computed once,
- * while it is still true, and never asked again.
- *
- * A settled run that resumes appends to its journal, and an expiry writes a
- * file, so either moves the fingerprint and brings the run back into the
- * question regardless.
- *
- * **No partial or time-budgeted refresh, on purpose.** A warm tick over ten
- * thousand runs is forty thousand `stat`s — tens of milliseconds. Chunking the
- * walk would buy nothing measurable and cost a board that is sometimes half
- * fresh; measure before adding it. The poller (`./poller`) guarantees an idle
- * gap between ticks regardless, so a slow disk degrades freshness, never RPCs.
- *
- * **Discovery is the catalog and only the catalog.** `listRunIds` walks the
- * per-user run directory, so a run started by `odu ci run` in a terminal before
- * this service existed appears on the board the moment the service starts —
- * without scanning arbitrary filesystem paths for `.ci` directories, which is
- * the thing a per-user catalog was introduced to stop anyone having to do.
- */
-
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { attentionFor, type AttemptState, foldJournal } from "@odu/run-history/attention";
@@ -112,20 +32,6 @@ import type {
   RunRow,
 } from "@odu/service-client/surface";
 
-/**
- * The fold's push, as the WIRE says it.
- *
- * TWO TYPES OF THE SAME NAME, on purpose. The fold's (`@odu/run-history`) is
- * what the journal recorded, keyed by the bucket a node pushed to; the wire's
- * (`@odu/run-client/surface`) is what a node row needs to PAINT. Narrowing
- * happens here, once, rather than in each reader — and it is a narrowing
- * rather than a rename, which is why the two types are not shared.
- *
- * What the narrowing drops is the BUCKET: it is a property of the run, named
- * once on the header, and repeating it on every node would be a per-node
- * claim nobody made. A failure's message is the wire's own field — the lane
- * stamps it on the cell — so it crosses unchanged.
- */
 function wirePush(push: FoldNodePush): NodePush {
   switch (push.state) {
     case "pushing":
@@ -143,20 +49,12 @@ function wirePush(push: FoldNodePush): NodePush {
   }
 }
 
-/** The files whose mtime+size decide whether a row is still current. Nothing
- *  else in a run directory can change a row: attempt logs grow, but a row says
- *  nothing about log CONTENT, and the journal is what records that a log was
- *  finalized. The directory itself is stat'd beside them — see the module
- *  header on the claim files it stands in for. */
 const FINGERPRINTED = [
   RUN_FILES.events,
   RUN_FILES.verdict,
   RUN_FILES.owner,
 ] as const;
 
-/** A run directory's observable state, from `stat`s alone — no file is opened.
- *  Missing files contribute a fixed marker rather than being skipped, so a
- *  verdict APPEARING moves the fingerprint just as much as one changing. */
 function fingerprint(dir: string): string {
   const parts: string[] = [statPart(dir)];
   for (const file of FINGERPRINTED) parts.push(statPart(join(dir, file)));
@@ -172,51 +70,16 @@ function statPart(path: string): string {
   }
 }
 
-/** One run's projection, plus what it was projected from. */
 interface Entry {
-  /** The `stat`s taken BEFORE the files were read. Before, not after: a write
-   *  landing between the two then leaves a stale stamp beside fresh content,
-   *  which the next tick re-reads — rather than a fresh stamp beside stale
-   *  content, which no tick ever would. */
   fingerprint: string;
-  /** The ownership record the row was folded against, decoded once. Re-asked
-   *  for liveness on every tick without re-reading it — see the module header
-   *  on why an unchanged fingerprint means an unchanged owner. */
   owner: Owner | null;
-  /** The fence's answer the row was projected with. A tick whose answer
-   *  differs re-projects, which is how a dead coordinator's silence reaches
-   *  the board. */
   alive: boolean | null;
   row: RunRow;
-  /** The run's node list, folded from the same journal read that built the row.
-   *  Held beside it because a detail view and a board row are two views of ONE
-   *  fold — reading the journal twice would let them disagree about which
-   *  attempt a node is on. */
   nodes: RunNode[];
-  /** Where the run's work is placed, from that same fold. Held here for the
-   *  same reason the nodes are: the environment and the node list are two
-   *  readings of one journal, and a caller that got them from two reads could
-   *  hold a lane that has landed beside a node that has not started. */
   env: RunEnv;
-  /** THE RUN'S PUSH TOKEN ID (PLAN 4.1), off the manifest and deliberately
-   *  NOT on the row: a revocation handle is this process's business, not every
-   *  browser's. Read through {@link RunRegistry.pushTokenOf}. */
   pushTokenId: string | null;
 }
 
-/**
- * Where a run stands, as a board says it.
- *
- * `provisioning` is the one state the attention fold does not name, and it is
- * not a new fact: a run is provisioning when it is still_running and no node
- * has started yet, which is precisely the window where a lane is claiming a
- * machine. Told apart HERE rather than stored, because it is derived from the
- * fold and a stored copy would be a second thing that could disagree with it.
- *
- * On a cold host that window is a multi-minute `nix copy` with nothing
- * executing behind it, and reporting "running" about a run with nothing running
- * is how a slow provision reads as a hang.
- */
 function boardState(
   attentionState: "still_running" | "settled" | "owner_lost" | "expired" | "unknown_run",
   latest: ReadonlyMap<string, AttemptState>,
@@ -234,17 +97,12 @@ function boardState(
   }
 }
 
-/** The node list, from the fold the row was built from. */
 function nodesOf(
   runId: string,
   roster: readonly string[],
   latest: ReadonlyMap<string, AttemptState>,
   push: ReadonlyMap<string, FoldNodePush>,
 ): RunNode[] {
-  // The ROSTER's order, because that is the schedule a dashboard paints. A node
-  // the fold saw but the roster does not list is appended: a run whose roster
-  // event is missing (a torn journal, or a build older than the roster event)
-  // still has its work shown rather than an empty detail view.
   const ordered = [...roster];
   const seen = new Set(ordered);
   for (const node of latest.keys()) if (!seen.has(node)) ordered.push(node);
@@ -252,8 +110,6 @@ function nodesOf(
   for (const id of ordered) {
     const attempt = latest.get(id);
     if (attempt === undefined) {
-      // On the roster, never started. A `pending` row with attempt 0 — not a
-      // fabricated attempt 1, which would name evidence that does not exist.
       out.push({
         id,
         status: "pending",
@@ -269,10 +125,6 @@ function nodesOf(
     const pushed = push.get(id);
     out.push({
       id,
-      // A started attempt with no status line yet IS running: the journal's
-      // `attempt_started` is what "it began" means, and calling it pending
-      // until the first status would show a node as not-yet-started while its
-      // process is producing output.
       status: attempt.status ?? "running",
       attempt: attempt.attempt,
       exitCode: attempt.exitCode,
@@ -280,68 +132,26 @@ function nodesOf(
       durationMs: attempt.durationMs,
       host: attempt.placement.host,
       logKey: formatLogKey({ runId, node: id, attempt: attempt.attempt }),
-      // WHAT THIS NODE'S PUSH IS DOING — its own state, beside the recipe's.
-      // Absent rather than a zeroed `pushed`, for the reason the schema gives:
-      // a node whose outputs were never pushed and a run with nowhere to push
-      // them are the same absence to a reader, and an absence is cheaper to
-      // read than a sentinel.
-      //
-      // THE FOLD KNOWS MORE THAN THE NODE SAYS, deliberately. Its `bucket` is
-      // the RUN's — the row carries it once rather than once per node — and
-      // its `message` is the first line of a push log a reader can open at the
-      // same address. Repeating either here would be a second place the same
-      // fact could be stale, and a failure message truncated into a node row
-      // is the worst of both.
       ...(pushed === undefined ? {} : { push: wirePush(pushed) }),
     });
   }
   return out;
 }
 
-/**
- * The run's ENVIRONMENT, folded out of the same journal the row came from.
- *
- * Every field here used to be answerable only by dialling the checkout's
- * `.ci/odu.sock`: the coordinator journalled `lane` and `phase` lines all along
- * and `foldJournal` hit `default: break` on both arms, so the live process was
- * the only thing that could say which lane was on which box. Read from the
- * catalog instead, the same answer survives the coordinator — a run that
- * finished last week, or whose owner was killed, still says where it ran.
- */
 function envOf(
   fold: ReturnType<typeof foldJournal>,
-  /** The ROW this environment belongs to — the ONE source of the run's own
-   *  facts here. Its clock pair is what `runElapsedMs` subtracts, so the
-   *  elapsed time on a projected frame and the one `RunRegistry.env` recomputes
-   *  per read come from one object; and its `repo`/`sha` are the same two the
-   *  manifest carries, so reading them off the row rather than taking the
-   *  manifest alongside leaves nothing here that could describe a different
-   *  run than the row does. */
   row: RunRow,
   now: number,
 ): RunEnv {
   return {
-    // A record written before odu journalled phases says nothing about its own
-    // lifecycle, and the fallback is the SAME reading `boardState` makes:
-    // nothing started yet is a provision, anything else means work was placed.
-    // Never `no_lanes` — that is the coordinator's own word for "the selection
-    // matched nothing", and inferring it from silence would invent a reason the
-    // journal never gave.
     phase: fold.phase ?? fallbackPhase(fold.latest),
     elapsedMs: runElapsedMs(row, now),
     lanes: lanesOf(fold.lanes),
     hostsSource: fold.hostsSource,
-    // `owner/repo` or null — the manifest the row was projected from records
-    // the slug the coordinator parsed from the origin, so a checkout with no
-    // GitHub remote has no forge page and says so rather than assembling a URL
-    // that 404s.
     commitUrl:
       row.repo === null
         ? null
         : `https://github.com/${row.repo}/commit/${row.sha}`,
-    // In the journal's own order — the order the posts were attempted — which
-    // is the order an operator reads them in. The same debt `reportingDebt`
-    // counts: a count says something is wrong, this says which context and why.
     owed: [...fold.debt.values()].map((debt) => ({
       context: debt.context,
       lastError: debt.lastError,
@@ -350,27 +160,10 @@ function envOf(
   };
 }
 
-/** The phase of a run that never journalled one. One rule, spelled once, and
- *  the same one `boardState` uses to tell `provisioning` from `running`. */
 function fallbackPhase(latest: ReadonlyMap<string, AttemptState>): RunPhase {
   return latest.size === 0 ? "provisioning" : "lanes";
 }
 
-/**
- * The lane map, on the wire's two-arm union.
- *
- * Sorted by platform so two reads of one journal paint the same matrix — the
- * fold's map is in first-seen order, which is the order lanes happened to be
- * claimed in and is not stable across a resumed run.
- *
- * **A `leased` lane with no host is a TORN record** — the state says the lane
- * landed and the field naming the machine is missing — and it is reported as
- * `claiming`. That is the weaker of the two claims and the only honest one: the
- * union's `leased` arm requires a host, and inventing one (or spelling it as
- * the empty string) would tell a reader the work is on a machine that nothing
- * in the journal names. Whatever pool the line carried is kept, because that is
- * still evidence about where the lane may be.
- */
 function lanesOf(
   lanes: ReadonlyMap<
     string,
@@ -390,9 +183,7 @@ function lanesOf(
   return out;
 }
 
-/** Project one run. Reads the journal ONCE and folds it twice — for the row's
- *  counts and for the node list — which is what keeps the two views of one run
- *  from being two readings of it. */
+/** Project one run. */
 function project(
   handle: RunHandle,
   manifest: RunManifest,
@@ -401,13 +192,7 @@ function project(
 ): Entry {
   const journal = readJournal(handle);
   const owner = currentOwner(handle.dir);
-  // Computed ONCE from the record just read, and stored beside it: the row a
-  // reader sees and the answer the next tick compares against are one answer
-  // rather than two reads that can straddle the grace boundary.
   const alive = ownerAlive(owner, now);
-  // Read ONCE and shared with the environment below: the row's settlement and
-  // the moment the elapsed clock stops are the same fact, and two reads of the
-  // verdict could straddle the instant it is written.
   const verdict = readVerdict(handle);
   const attention = attentionFor(
     {
@@ -419,14 +204,8 @@ function project(
       expiry: readExpiry(handle),
       ownerAlive: alive,
       endpoint: owner?.endpoint ?? null,
-      // A BOARD ROW carries no excerpts, so the log is never opened: a refresh
-      // that read forty failing runs' tails to produce four counters would be
-      // paying the whole diagnosis bill to draw a badge. The excerpt belongs to
-      // `run.wait`, which is the call that was asked for one.
       readExcerpt: () => null,
     },
-    // One event is the floor the fold enforces anyway; the row wants none of
-    // them, only the counts and the state around them.
     { limit: 1, excerptBytes: 0 },
   );
   const fold = foldJournal(journal.entries);
@@ -442,11 +221,6 @@ function project(
     seq: manifest.seq,
     pipeline: manifest.pipeline,
     createdAt: manifest.createdAt,
-    // When the run stopped, from the verdict read once above — null while it
-    // has not. On the ROW rather than held beside it, because how long a run
-    // took is a fact every face needs and only this process could produce:
-    // `RunEnv` carries the elapsed number for the live view, and a board
-    // reading a settled row a week later has no journal to ask.
     finishedAt: verdict?.finishedAt ?? null,
     state,
     settled: attention.settled,
@@ -458,21 +232,8 @@ function project(
     reportingDebt: fold.debt.size,
     endpoint: attention.endpoint,
     parentRunId: manifest.parentRunId,
-    // WHO STARTED IT (PLAN 4.4) — the manifest's own stamp, not a second
-    // derivation: the row, `run_read` and the browser all read one field.
     ...(manifest.actor === undefined ? {} : { actor: manifest.actor }),
-    // The cursor a caller resumes from if it starts watching HERE. The
-    // journal's highest sequence rather than the attention payload's own
-    // cursor: that one advances only through events actually delivered, and
-    // this read delivered none.
     cursor: formatCursor({ runId: handle.runId, seq: journal.highestSeq }),
-    // WHERE THIS RUN PUSHES (PLAN 4.1) — the projection `attentionFor` just
-    // made, not a second one off the same manifest. It is already the public
-    // shape (the token id stripped: the service revokes by that, and a board
-    // row is read by every client that can list runs), and a second
-    // derivation is the place where two readers of one record can disagree.
-    // A record written before the field simply has no key, which is what lets
-    // a board show nothing rather than claim the run pushed nowhere.
     ...(attention.push === undefined
       ? {}
       : {
@@ -489,43 +250,23 @@ function project(
     alive,
     row,
     nodes: nodesOf(handle.runId, fold.roster, fold.latest, fold.push),
-    // The ROW just built, so the elapsed time on this frame and the one every
-    // later read recomputes come from one pair.
     env: envOf(fold, row, now),
     pushTokenId: manifest.push?.target?.tokenId ?? null,
   };
 }
 
-/** A row whose STATE the fence's answer can no longer change — see the module
- *  header, and note that the liveness behind a settled row's endpoint can
- *  still change even though its state cannot. */
 function terminal(row: RunRow): boolean {
   return row.state === "settled" || row.state === "expired";
 }
 
 /** What a refresh changed, so a caller can publish deltas rather than a whole
- *  collection.
- *
- *  ROWS ONLY. A run whose NODES moved is not reported here, and the absence is
- *  deliberate: the nodes stream is per-run and already compares the list it
- *  last sent against the one it is about to (`./nodes`). A second comparison
- *  here would be a second answer to "did this run's work move", kept in step by
- *  nothing — and the subscription's own is the one that can be right, because
- *  it knows what that subscriber has actually seen. */
+ *  collection. */
 export interface RegistryDelta {
   upserted: RunRow[];
   removed: string[];
 }
 
-/**
- * The board, kept fresh.
- *
- * Deliberately NOT an Effect service and NOT reactive: it is a plain object
- * whose `refresh` is called by whoever owns the clock (the service's poller in
- * production, a test's own loop in a suite). Time is the one thing a projection
- * must not own, because a projection that ticked on its own could not be
- * asked "what would you say about this catalog right now".
- */
+/** The board, kept fresh. */
 export interface RunRegistry {
   /** Every row, newest run first. */
   rows: () => RunRow[];
@@ -533,44 +274,29 @@ export interface RunRegistry {
   row: (runId: string) => RunRow | undefined;
   /** One run's node list, or undefined for a run this registry has not seen. */
   nodes: (runId: string) => RunNode[] | undefined;
-  /** THE RUN'S PUSH TOKEN ID, or `null` (PLAN 4.1). Separate from `row`
-   *  because the row is the WIRE and a revocation handle is not published:
-   *  only this process, which minted it, has a use for it. */
+  /** THE RUN'S PUSH TOKEN ID, or `null` (PLAN 4.1). */
   pushTokenOf: (runId: string) => string | null;
-  /** IS THE PROCESS THAT OWNS THIS RUN STILL THERE — the liveness this
-   *  projection already computed for the row, published because `endpoint` on
-   *  the wire is the RECORDED one and cannot tell a lingering coordinator
-   *  from a killed one. A run this registry has not seen is not alive. */
+  /** IS THE PROCESS THAT OWNS THIS RUN STILL THERE. A run this registry has
+   *  not seen is not alive. */
   ownerAliveOf: (runId: string) => boolean;
   /**
    * Where one run's work is placed, or undefined for a run this registry has
    * not seen. `undefined` rather than `UNKNOWN_ENV`, so a caller can tell "no
-   * such run here" from "a run whose environment is not established yet" —
-   * those call for opposite next moves.
-   *
-   * Takes the clock the way `refresh` does, and for one reason: `elapsedMs` is
-   * the only field here that moves without any file moving. A run in a cold
-   * host's multi-minute `nix copy` writes NOTHING, so its fingerprint does not
-   * change and it is never re-folded — and an elapsed time captured at the last
-   * fold would sit still for exactly the window a reader is watching it
-   * hardest. So the fold is cached and the clock is not.
+   * such run here" from "a run whose environment is not established yet".
    */
   env: (runId: string, now?: number) => RunEnv | undefined;
   /**
    * The board, FILTERED — what `run.list` answers from.
    *
    * One pass over the projection in board order (newest first). Filters are
-   * ANDed; `rows` is cut at `limit` and `total` counts every match, so a caller
-   * asking for one row still learns how many there were. Validation of the
-   * query is the procedure's job, not this one's: this matches what it is given.
+   * ANDed; `rows` is cut at `limit` and `total` counts every match.
    */
   select: (query: RunQuery) => { rows: RunRow[]; total: number };
   /** Re-read the catalog and report what moved. */
   refresh: (now?: number) => RegistryDelta;
   /** How many runs are on the board — without building the rows to count. */
   size: () => number;
-  /** The catalog directory this registry is a face onto — what an identity
-   *  cell reports, so a caller can see WHICH catalog it is looking at. */
+  /** The catalog directory this registry is a face onto. */
   catalog: string;
 }
 
@@ -585,40 +311,14 @@ export interface RunQuery {
 }
 
 export interface RegistryOptions extends CatalogOptions {
-  /** Cap the board. Absent means every run in the catalog; retention already
-   *  bounds that, and a face that silently showed a prefix would report a
-   *  missing run as a missing run rather than as a truncated list. */
+  /** Cap the board. Absent means every run in the catalog. */
   limit?: number;
 }
 
-/**
- * Where one run id stands on the board this tick — ONE value per id.
- *
- * `run` is projected. `torn` is a directory with no readable manifest,
- * remembered by the fingerprint it was skipped at — so a torn directory costs
- * its `stat`s per tick like any other unchanged run, rather than a manifest
- * read; a manifest appearing moves the directory's mtime, which is what brings
- * it back. An id in neither state is simply absent from the map. One map rather
- * than two keyed alike, so "never both" is a property of the type instead of a
- * pairing every mutation below would have to remember.
- */
 type Slot = { kind: "run"; entry: Entry } | { kind: "torn"; stamp: string };
 
 export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
   const slots = new Map<string, Slot>();
-  /**
-   * Every projected run, NEWEST FIRST — the order every reader of this
-   * registry sees, refreshed whole on every pass so a new run appears at the
-   * top rather than at the end.
-   *
-   * Ordered by the ROWS and not by the catalog's directory listing. An id
-   * encodes the instant its run started, but not at one width: a minted id
-   * pads its base36 timestamp to nine digits and an IMPORTED one to eight
-   * (`mintRunId` vs `importedRunId`), so a lexicographic listing sorts every
-   * imported run above every minted one and "newest first" quietly becomes
-   * "imported first". A board reading `rows[0]` as the run a checkout stands
-   * for would then name an ancient import as what is happening now.
-   */
   let order: string[] = [];
 
   const entryOf = (runId: string): Entry | undefined => {
@@ -640,19 +340,6 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       const stamp = fingerprint(handle.dir);
       const held = slots.get(runId);
       if (held?.kind === "torn" && held.stamp === stamp) continue;
-      // THE SKIP: nothing on disk moved, AND nothing this projection computes
-      // from the clock did either.
-      //
-      // A terminal row is normally immune to the fence's answer — its state
-      // is already `settled`, and re-reading a journal to learn that again
-      // would be the whole catalog's work on every tick. But a settled row
-      // STILL SERVING carries a live endpoint, and whether a process is
-      // behind that endpoint is exactly what the clock changes: a `--linger`
-      // coordinator projected alive and then killed -9 would never be asked
-      // again, and its run's write token would live to its 24 h expiry on a
-      // daemon one `kill(0)` away from knowing. So a terminal row is only
-      // immune once it has RELEASED its endpoint; while it holds one,
-      // liveness is re-asked like any other row's.
       if (
         held?.kind === "run" &&
         held.entry.fingerprint === stamp &&
@@ -661,10 +348,6 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       ) {
         continue;
       }
-      // A row without a manifest is barely a row: the run id exists, but
-      // nothing can be said about which commit it is or where it ran. Skipped
-      // rather than shown as a row of blanks — `odu ci history list` over the
-      // catalog is the face that reports a torn record as one.
       const manifest = readManifest(handle);
       if (manifest === null) {
         if (held?.kind === "run") removed.push(runId);
@@ -731,9 +414,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
   };
 }
 
-/** Read one run's shape on demand, for a run the registry has not projected
- *  (a detail view opened on a run that arrived between refreshes). Same fold,
- *  so a run read this way and one read off the board agree. */
+/** Read one run's shape on demand, for a run the registry has not projected. */
 export function projectRun(
   runId: string,
   opts: CatalogOptions = {},

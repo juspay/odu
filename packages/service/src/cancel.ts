@@ -1,37 +1,3 @@
-/**
- * `run.cancel` — stop a run, a node, or a lane, and say which.
- *
- * **Cancelling is a DOMAIN act, and it is the only one here.** An HTTP client
- * disconnecting, an MCP request being cancelled and a CLI taking a Ctrl-C all
- * end an OBSERVATION: the caller stops watching, and the run carries on. That
- * asymmetry is deliberate and it is the difference between a tool that is safe
- * to interrupt and one where closing a tab kills CI. Nothing in this module is
- * reachable from a dropped connection; it is reachable only from a call that
- * explicitly asked for it.
- *
- * **The endpoint comes from the ownership record, never from the manifest.**
- * `.ci/odu.sock` is scoped to a CHECKOUT, and a checkout serves one run after
- * another — so dialling the address a finished run registered under would
- * cancel whatever is serving that path NOW, while answering with the id of the
- * run the caller named. The manifest's `registeredBy` is stamped once and never
- * cleared; `owner.json` is the copy a heartbeat refreshes and a clean exit
- * clears, so it is the one that can say "nothing is serving this".
- *
- * **And an endpoint is still not an identity.** `owner.json` is refreshed by a
- * heartbeat, so a coordinator that CRASHED keeps its recorded endpoint for the
- * length of the ownership grace — during which a new run can start in that same
- * checkout and bind that same socket. Dialling it then reaches a live stranger.
- * So the run's `<sha>#<seq>` travels with the request and the adapter compares
- * it against what the coordinator publishes BEFORE it mutates anything; the
- * same rule, and for the same reason, as the retry policy's live path.
- *
- * **A run with no live coordinator is an ANSWER, not a failure.** There is
- * nothing to stop, the caller is told so with `effective: "nothing"` and the
- * reason, and the exit is a success — because the request was understood and
- * answered. A refusal is for a request odu declines, or for one whose effect it
- * cannot vouch for.
- */
-
 import { currentOwner, ownerProvablyAlive } from "@odu/run-history/owner";
 import { type CatalogOptions, handleFor, readExpiry, readManifest } from "@odu/run-history/store";
 import {
@@ -77,25 +43,6 @@ export function cancelRun(
   );
 }
 
-/**
- * STOP A RUN AND WAIT UNTIL IT IS STOPPED — the whole-run cancel, without a
- * receipt of its own.
- *
- * `run.start` needs this when it is about to MOVE a checkout out from under a
- * live run the caller said to supersede. The coordinator's own
- * cancel-then-claim is no use there: it happens after the launch, and by then
- * the tree has already been moved under a process still reading it.
- *
- * It is this module's and not `start.ts`'s because both rules it keeps are
- * stated here — the endpoint comes off the ownership record, and the run's
- * `<sha>#<seq>` travels with the request so a crashed run's recycled socket
- * address cannot be used to tear down a live stranger.
- *
- * Three answers: `stopped` (it took the cancel, or nothing was serving the
- * run), `declined` and `unresolved`. The last two are the same to a caller
- * that must not move anything — but only one of them is safe to repeat, so
- * they stay apart.
- */
 export async function stopLiveRun(
   runId: string,
   deps: { cancel: RunCanceller; catalog?: CatalogOptions; now: () => number },
@@ -108,8 +55,6 @@ export async function stopLiveRun(
   const manifest = readManifest(handle);
   const owner = currentOwner(handle.dir);
   if (manifest === null || owner === null || owner.endpoint === null) {
-    // Nothing is serving it. The checkout is free, which is what the caller
-    // asked about.
     return { kind: "stopped" };
   }
   if (ownerProvablyAlive(handle.dir, deps.now()) === false) return { kind: "stopped" };
@@ -167,11 +112,6 @@ async function run(
     requestId: input.requestId,
     kind: "cancel",
     digest,
-    // A cancel never creates a run, so there is nothing to pre-mint. The field
-    // is required by the receipt record (a retry's whole reconciliation rests
-    // on it), and the empty string is what "this request could never have
-    // produced a run" looks like — which is also what stops a reconciler
-    // looking for one.
     plannedRunId: "",
     now: deps.now(),
   });
@@ -197,10 +137,6 @@ async function run(
   if (claim.kind === "replay" || claim.kind === "in_flight") {
     const replayed = replayOf(claim.receipt.result, input.requestId);
     if (replayed !== null) return { result: replayed };
-    // An in-flight cancel whose answer was lost. Unlike a start, re-issuing is
-    // SAFE — cancelling twice cancels once — so the honest move is to fall
-    // through and ask again rather than to refuse a caller who is trying to
-    // stop something.
   }
 
   const owner = currentOwner(handle.dir);
@@ -226,16 +162,10 @@ async function run(
   const outcome = await deps.cancel({
     endpoint: owner.endpoint,
     runId: input.runId,
-    // WHO the socket must be serving. Read from the durable record, which is
-    // the only copy that cannot have been overwritten by whatever took the
-    // checkout next.
     expect: { sha: manifest.sha, seq: manifest.seq },
     scope: input.scope,
   });
   if (outcome.kind === "unresolved") {
-    // NOT completed. The receipt stays in flight so a repeat asks again —
-    // which is safe, because cancelling twice cancels once, and is the only
-    // honest thing to record about a mutation whose effect is unknown.
     return {
       refusal: refuse(
         "request_unresolved",
@@ -250,10 +180,6 @@ async function run(
     runId: input.runId,
     requestId: input.requestId,
     replayed: false,
-    // What was ACTUALLY cancelled, echoed rather than assumed. A lane cancel
-    // that the coordinator declined (a platform it has no lane for) says
-    // `nothing` and why — a cheerful ok there would leave a caller believing it
-    // had stopped work that is still running.
     effective: outcome.kind === "cancelled" ? input.scope.kind : "nothing",
     detail: outcome.detail,
   };
@@ -261,7 +187,6 @@ async function run(
   return { result };
 }
 
-/** Rebuild a recorded answer, or `null` when this build cannot read it. */
 function replayOf(stored: unknown, requestId: string): CancelResult | null {
   if (stored === null || typeof stored !== "object") return null;
   const value = stored as Partial<CancelResult>;

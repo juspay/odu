@@ -1,18 +1,3 @@
-/**
- * A catalog on disk, and a service over it — the world these tests state.
- *
- * Every test here drives REAL FILES: `registerRun`, `openJournal` and the
- * attempt store are the catalog's own writers, so what a projection reads is
- * what a coordinator would have written. Faking the catalog would make these
- * tests about a stand-in, and the whole class of bug this package can have is a
- * disagreement between a projection and the records it projects.
- *
- * What IS stubbed is the three PORTS — launching, retrying, cancelling — for
- * the reason the ports exist: none of them can be exercised without a process,
- * and every path through acceptance, receipts and reconciliation can be
- * exercised without one.
- */
-
 import {
   appendFileSync,
   mkdtempSync,
@@ -52,7 +37,6 @@ import type {
   ServicePorts,
 } from "./ports";
 
-/** A throwaway world: a catalog root, a service state root, and a cleanup. */
 export interface World {
   catalogRoot: string;
   requestsRoot: string;
@@ -70,15 +54,11 @@ export function makeWorld(): World {
 
 const SCOPE: RunScope = { selectors: [], platforms: [], noDeps: false };
 
-/** Register a run the way a coordinator does, and hand back its writer. */
 export function registerFixtureRun(
   world: World,
   opts: {
     repoRoot: string;
     sha: string;
-    /** The `owner/repo` slug the coordinator parsed from the origin, or null
-     *  for a checkout with no GitHub remote — which is what makes the run's
-     *  commit link derivable, or honestly absent. */
     repo?: string | null;
     seq?: number | null;
     branch?: string;
@@ -87,9 +67,7 @@ export function registerFixtureRun(
     now?: number;
     scope?: RunScope;
     parentRunId?: string | null;
-    /** Who started it, when a suite is about PLAN 4.4's record. */
     actor?: string;
-    /** Where this run pushed, when a suite is about PLAN 4.1's record. */
     push?: {
       target: { substituter: string; bucket: string; tokenId: string } | null;
       skipped: string | null;
@@ -132,15 +110,6 @@ export function registerFixtureRun(
   return { handle: registered.handle, token: registered.token, runId };
 }
 
-/**
- * Rewrite a run's ownership record as a coordinator that CRASHED.
- *
- * A pid on this host that is not running, and a heartbeat as old as the caller
- * says. This is the one state a projection cannot see by watching files: a dead
- * coordinator writes nothing, so nothing about the run's directory changes when
- * its grace runs out — the ownership fence's answer is the only thing that
- * moves, and a board that did not ask would show it running forever.
- */
 export function crashOwner(
   handle: RunHandle,
   opts: { heartbeatAt: number; pid?: number },
@@ -152,8 +121,6 @@ export function crashOwner(
     `${JSON.stringify(
       {
         ...owner,
-        // A pid that cannot be alive. `kill(0)` on it answers ESRCH, which is
-        // what the fence requires before it will call an owner gone.
         pid: opts.pid ?? 0x7ffffff0,
         host: hostname(),
         heartbeatAt: opts.heartbeatAt,
@@ -165,12 +132,9 @@ export function crashOwner(
 }
 
 /**
- * Write one node's whole life: started, output, sealed at a status.
- *
  * The journal and the attempt store are written in the coordinator's own order
  * — `attempt_started`, then the log, then `node_status`, then `log_finalized` —
- * because the attention fold reads exactly that ordering and a fixture that
- * wrote it differently would be testing a shape nothing produces.
+ * because the attention fold reads exactly that ordering.
  */
 export function writeNode(
   world: World,
@@ -229,14 +193,6 @@ export function writeNode(
   });
 }
 
-/**
- * Journal a lane's whole state, the way the coordinator does.
- *
- * `pool` and `hostsSource` are OMITTED when not given rather than spelled as
- * empty, because that is the shape a run written before those fields existed
- * has on disk — and "an old record still folds" is a property a fixture that
- * always wrote them could not state.
- */
 export function writeLane(
   handle: RunHandle,
   token: OwnershipToken,
@@ -264,7 +220,6 @@ export function writeLane(
   );
 }
 
-/** Journal where the run is in its lifecycle. */
 export function writePhase(
   handle: RunHandle,
   token: OwnershipToken,
@@ -274,7 +229,6 @@ export function writePhase(
   appendEvent(handle, token, { kind: "phase", phase }, at);
 }
 
-/** Journal a GitHub context this run owes — the debt `RunEnv.owed` itemises. */
 export function writeDebt(
   handle: RunHandle,
   token: OwnershipToken,
@@ -284,14 +238,6 @@ export function writeDebt(
   appendEvent(handle, token, { kind: "posting_debt", ...debt }, at);
 }
 
-/**
- * Append `lines` journal entries in ONE write — a long run's history, cheaply.
- *
- * `appendEvent` re-derives the sequence floor from the file on every call, so
- * a fixture that wrote fifteen hundred events through it would be quadratic in
- * the thing it is trying to make big. The lines are `phase` events: well-formed,
- * decoded by every reader, and neutral to a row's state.
- */
 export function writeBulkJournal(
   handle: RunHandle,
   lines: number,
@@ -305,7 +251,6 @@ export function writeBulkJournal(
   appendFileSync(join(handle.dir, RUN_FILES.events), `${out.join("\n")}\n`);
 }
 
-/** Publish a roster, which is what makes "is this settled" answerable. */
 export function writeRoster(
   handle: RunHandle,
   token: OwnershipToken,
@@ -315,9 +260,6 @@ export function writeRoster(
   appendEvent(handle, token, { kind: "roster", order: [...order] }, at);
 }
 
-/** Finalize a run the way `finalize` does — the journal line AND the verdict,
- *  because a reader that trusted only one of them is exactly the bug the
- *  catalog's own `resumedSinceFinal` exists to prevent. */
 export function finalizeRun(
   handle: RunHandle,
   token: OwnershipToken,
@@ -338,23 +280,15 @@ export function finalizeRun(
   });
 }
 
-/** Ports that record rather than act. */
 export interface RecordingPorts extends ServicePorts {
   launches: LaunchRequest[];
   retries: RetryRequest[];
   cancels: CancelRequest[];
-  /** Every checkout the service asked to have MOVED, in order — the
-   *  assertion for "it moved nothing", which is what most of these tests are
-   *  about. */
   moves: CheckoutMoveRequest[];
-  /** Every probe, hold, release and protect the service ASKED FOR. A repeat
-   *  that replays leaves these unchanged, which is the assertion. */
   probes: VenueProbeRequest[];
   holds: VenueHoldRequest[];
   releases: VenueReleaseRequest[];
   protects: ProtectRequest[];
-  /** Every push target this service RESOLVED, every grant it minted and every
-   *  token it let go — the three a suite asserts PLAN 4.1 against. */
   pushResolves: string[];
   pushGrants: { bucket: string; runId: string }[];
   pushRevokes: string[];
@@ -372,25 +306,13 @@ type ProtectOutcome = Awaited<ReturnType<ServicePorts["protect"]>>;
 
 export function recordingPorts(opts: {
   checkout?: (path: string) => CheckoutFacts;
-  /** What moving that checkout comes to. The default MOVES it — to the sha
-   *  it was asked for — because the interesting cases are the refusals, and
-   *  a suite states each of those by naming it here. Pair it with a
-   *  `checkout` stub that answers the new head on its second call. */
   move?: (request: CheckoutMoveRequest) => CheckoutMoveOutcome;
   launch?: (request: LaunchRequest) => LaunchReceipt;
   retry?: (request: RetryRequest) => RetryOutcome;
-  /** What the stub coordinator says back. `false` is the declined arm; a whole
-   *  outcome is how a suite states `unresolved` without a socket. */
   cancelOk?: boolean | CancelOutcome;
-  /** The three shared-daemon mutations, when a suite is about THEM rather than
-   *  about a run. Each records what it was asked, so a test can assert that a
-   *  repeat performed nothing — which is the only way to see the difference
-   *  between a replayed answer and a second act. */
   hold?: (request: VenueHoldRequest) => VenueHoldOutcome;
   release?: (request: VenueReleaseRequest) => { results: readonly VenueReleaseResult[] };
   protect?: (request: ProtectRequest) => ProtectOutcome;
-  /** Where a checkout pushes. The default is the ordinary world of a unit
-   *  suite: nothing resolves, so no run pushes and no token is minted. */
   push?: (checkout: string) => PushResolution;
 } = {}): RecordingPorts {
   const launches: LaunchRequest[] = [];
@@ -487,10 +409,6 @@ export function recordingPorts(opts: {
         branch: "main",
         liveRunId: null,
       },
-    // The four ports below reach a machine, a checkout's justfile, or GitHub —
-    // none of which a unit suite has. They refuse rather than answering a
-    // plausible empty inventory, so a test that reaches one by accident says so
-    // instead of asserting against a fiction.
     pipeline: () => ({ ok: false, message: "the stub reads no pipeline" }),
     probeVenues: async (request) => {
       probes.push(request);

@@ -1,20 +1,3 @@
-/**
- * `catalog.import` and `catalog.prune` — the catalog as operations, and ONE
- * EXECUTION PER REQUEST ID.
- *
- * Both of these used to run in the caller's own process, beside a daemon that
- * reads and writes the same files. Routed through the service there is one
- * writer, which is the point — and the price of that is a request id, so most
- * of this file is about a caller that asks twice: because its reply was lost,
- * because it retried on a timeout, because a script ran again. A repeat must
- * replay what happened, not prune a second time.
- *
- * Every fixture drives REAL FILES on both sides: a legacy `.ci` checkout laid
- * out the way the old world wrote one, and a catalog written by the catalog's
- * own writers. The whole class of bug here is a disagreement between what a
- * report says and what is on disk.
- */
-
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,10 +42,6 @@ afterEach(() => {
   }
 });
 
-/** A checkout with the LEGACY layout: `.ci/<sha7>/runs/<seq>.json` beside
- *  `.ci/<sha7>/<platform>/<node>.log`. Nothing here is ever rewritten — the
- *  import is read-only over the checkout, which is the compatibility half of
- *  the whole feature. */
 function legacyCheckout(seqs: readonly number[] = [1]): string {
   const repoRoot = mkdtempSync(join(tmpdir(), "odu-catalog-checkout-"));
   checkouts.push(repoRoot);
@@ -117,9 +96,6 @@ const pruneDeps = (w: World, now: () => number = Date.now) => ({
 
 describe("catalog.import", () => {
   it("brings a checkout's legacy records into the catalog the SERVICE serves", async () => {
-    // Which is the point of routing it through the daemon at all: a caller
-    // cannot import into a catalog nobody is serving and then wonder why the
-    // board never showed the runs.
     const w = open();
     const checkout = legacyCheckout();
     const { deps } = importDeps(w);
@@ -133,14 +109,11 @@ describe("catalog.import", () => {
     expect(answer.success.imported[0]?.reason).toBeNull();
     expect(answer.success.catalog).toBe(w.catalogRoot);
     expect(answer.success.replayed).toBe(false);
-    // And the run is really there, addressable by the id the report named.
     const runId = answer.success.imported[0]?.runId ?? "";
     expect(readManifest(handleFor(runId, { root: w.catalogRoot }))).not.toBeNull();
   });
 
   it("skips a record it already imported, and says why", async () => {
-    // The run id is derived from the source record's identity, so a second pass
-    // finds the directory rather than doubling a checkout's history.
     const w = open();
     const checkout = legacyCheckout();
     const { deps } = importDeps(w);
@@ -153,7 +126,6 @@ describe("catalog.import", () => {
     expect(again.success.imported).toEqual([]);
     expect(again.success.skipped).toHaveLength(1);
     expect(again.success.skipped[0]?.reason).toContain("already in the catalog");
-    // A FRESH request id, so this is a real second pass rather than a replay.
     expect(again.success.replayed).toBe(false);
   });
 
@@ -165,9 +137,6 @@ describe("catalog.import", () => {
     expect(first._tag).toBe("Success");
     if (first._tag !== "Success") return;
 
-    // A second record appears in the checkout between the two calls. A replay
-    // must report what the FIRST call did — anything else would be a fresh
-    // pass wearing a receipt's clothes.
     legacyCheckoutAppend(checkout, 2);
     const again = await run(importCatalog({ checkout, requestId: "i-3" }, deps));
     expect(again._tag).toBe("Success");
@@ -176,7 +145,6 @@ describe("catalog.import", () => {
     expect(again.success.imported.map((r) => r.ref)).toEqual(
       first.success.imported.map((r) => r.ref),
     );
-    // And the second record was NOT imported by the replay.
     expect(again.success.imported).toHaveLength(1);
   });
 
@@ -219,8 +187,6 @@ describe("catalog.import", () => {
     if (answer._tag !== "Failure") return;
     expect((answer.failure as ServiceRefused).code).toBe("checkout_refused");
 
-    // A refusal is an ANSWER, and it is recorded: repeating the request gets
-    // the same sentence rather than a fresh probe of a world that has moved.
     const again = await run(
       importCatalog({ checkout: "/code/not-a-repo", requestId: "i-6" }, deps),
     );
@@ -249,7 +215,6 @@ describe("catalog.prune", () => {
   const OLD = 1_600_000_000_000;
   const NOW = OLD + 400 * 24 * 60 * 60 * 1000;
 
-  /** A run that finished long ago — old enough for any retention window. */
   function ancientRun(w: World, sha: string) {
     const fixture = registerFixtureRun(w, {
       repoRoot: "/code/app",
@@ -267,9 +232,6 @@ describe("catalog.prune", () => {
   }
 
   it("expires a finished run past the window, as a tombstone", async () => {
-    // Expiry is a tombstone rather than an `rm -rf`: an agent holding a
-    // month-old id deserves to be told the run existed and its evidence aged
-    // out, which is a different answer from the one a typo gets.
     const w = open();
     const old = ancientRun(w, "a".repeat(40));
     const answer = await run(
@@ -292,14 +254,10 @@ describe("catalog.prune", () => {
     expect(answer._tag).toBe("Success");
     if (answer._tag !== "Success") return;
     expect(answer.success.expired).toEqual([]);
-    // Carried with the reason, so "why is this still here" is answerable
-    // without a second call.
     expect(answer.success.kept[0]?.reason).toBe("still running");
   });
 
   it("keeps an un-finalized run whose coordinator died, and says so", async () => {
-    // Its evidence is the ONLY account of how it ended, which is precisely when
-    // it is worth most.
     const w = open();
     const orphan = registerFixtureRun(w, {
       repoRoot: "/code/app",
@@ -317,10 +275,6 @@ describe("catalog.prune", () => {
   });
 
   it("does NOT prune twice for a repeated request id", async () => {
-    // The property the whole receipt machinery is here for. A second run
-    // becomes eligible between the two calls, and the replay must not touch it
-    // — a replay reports what happened, it does not do more work under an id
-    // that has already been answered.
     const w = open();
     const first = ancientRun(w, "d".repeat(40));
     const deps = pruneDeps(w, () => NOW);
@@ -335,7 +289,6 @@ describe("catalog.prune", () => {
     if (again._tag !== "Success") return;
     expect(again.success.replayed).toBe(true);
     expect(again.success.expired).toEqual([first.runId]);
-    // The run that appeared in between still has all of its evidence.
     expect(readExpiry(handleFor(second.runId, { root: w.catalogRoot }))).toBeNull();
   });
 
@@ -377,7 +330,6 @@ describe("catalog.prune", () => {
     crashOwner(recent.handle, { heartbeatAt: at - 10 * 24 * 60 * 60 * 1000 });
 
     const deps = pruneDeps(w);
-    // Inside the default 30-day window, so the default pass keeps it.
     const wide = await run(pruneCatalog({ requestId: "p-7" }, deps));
     expect(wide._tag).toBe("Success");
     if (wide._tag !== "Success") return;
@@ -393,17 +345,9 @@ describe("catalog.prune", () => {
   });
 
   it("finishes a prune a crash left in flight, rather than refusing it", async () => {
-    // The asymmetry with `run.start`, and the reason for it: a start that may
-    // have spawned a coordinator must never be re-issued, because a second
-    // start is a second run. A prune has no such hazard — expiry is a tombstone
-    // and an already-tombstoned run is skipped — so an unfinished claim is
-    // finished rather than left as an unresolved mutation somebody has to go
-    // and investigate.
     const w = open();
     const old = ancientRun(w, "2".repeat(40));
     const store = requestStore({ root: w.requestsRoot });
-    // A claim with no recorded answer: the process that made it died before it
-    // could write one.
     claimReceipt(store, {
       requestId: "p-9",
       kind: "cancel",
@@ -434,7 +378,6 @@ describe("catalog.prune", () => {
   });
 });
 
-/** Add another legacy record to an existing checkout, mid-test. */
 function legacyCheckoutAppend(repoRoot: string, seq: number): void {
   const sha7 = LEGACY_SHA.slice(0, 7);
   writeRunRecord(repoRoot, sha7, {

@@ -1,22 +1,3 @@
-/**
- * THE CALLER, ASSEMBLED — five verbs, one value.
- *
- * `hostsFile` used to travel as a loose field on every port signature, with the
- * same sentence copied onto each: the service is a per-user singleton, so its
- * environment is a fact about the shell that started it and never about the
- * person asking. The value those ports received was always `input.hostsFile ??
- * null`; this suite pins that READING at all five doors, because the three
- * spellings are not interchangeable:
- *
- *   - a path names a fleet,
- *   - `""` says the caller's shell had none, and
- *   - absent says the caller has no shell at all (an agent, a browser) and the
- *     service's own configuration stands.
- *
- * If assembly ever moves — to the connection, as a later PR does — these are
- * the assertions that see it move, and the only ones that have to.
- */
-
 import { afterEach, describe, expect, it } from "bun:test";
 import { Effect, Stream } from "effect";
 import { buildSurfaceFace } from "@kolu/surface/client";
@@ -54,9 +35,6 @@ afterEach(() => {
   world = null;
 });
 
-/** A dispatch that provides ONE principal to every handler — what the daemon's
- *  per-connection services do, spelled here so this suite can state the claim
- *  without importing the host. */
 function dispatchedAs(handlers: SurfaceHandlers, principal: Principal): SurfaceDispatch {
   const base = directDispatch({ handlers });
   const admission = requestAdmission(principal);
@@ -89,16 +67,10 @@ function serve(ports: RecordingPorts, principal?: Principal) {
   return { face, close: () => built.close() };
 }
 
-/** A procedure whose outcome this suite does not care about — only that it
- *  reached its port. The stubs refuse several of these verbs on purpose, and a
- *  refusal is still proof the caller was carried there. */
 function asked<A>(effect: Effect.Effect<A, unknown>): Promise<unknown> {
   return Effect.runPromise(Effect.result(effect));
 }
 
-/** The field, only when the caller sent one — an explicit `undefined` would be
- *  the same as absent on the wire, but spelling it would hide which reading a
- *  case is stating. */
 function sent(hostsFile: string | undefined): { hostsFile?: string } {
   return hostsFile === undefined ? {} : { hostsFile };
 }
@@ -168,9 +140,6 @@ describe("the caller is assembled once per call", () => {
             }),
           ),
         ]);
-        // THE claim: one recorded request per port, each carrying the caller.
-        // What the stubs ANSWERED is their own business — asserting a pattern
-        // of successes and refusals here would be testing the stubs.
         expect(ports.launches).toHaveLength(1);
         expect(ports.probes).toHaveLength(1);
         expect(ports.holds).toHaveLength(1);
@@ -187,15 +156,6 @@ describe("the caller is assembled once per call", () => {
     });
   }
 
-  /**
-   * THE OTHER HALF OF THE SAME CONTRACT: the principal is the CONNECTION's.
-   *
-   * Nothing on the wire can say who is asking — the verb inputs carry no such
-   * field — so the only way a port learns it is from the context the call
-   * arrived in. This provides one, and reads it back at the port that carries a
-   * `Caller` furthest from the door (a venue HOLD, which is also a state change
-   * and therefore the verb whose rule is "signed in").
-   */
   it("carries the connection's principal to the ports, and takes none from input", async () => {
     const signedIn: Principal = { kind: "user", login: "srid", role: "member" };
     const ports = recordingPorts();
@@ -214,11 +174,6 @@ describe("the caller is assembled once per call", () => {
     }
   });
 
-  /**
-   * AND THE ROW'S RULE, SEEN FROM THE ROW: a signed-in MEMBER may start a run.
-   * The refusal this asserts is the one an identity provider's lowest role must
-   * NOT meet; a higher role is the next test's business.
-   */
   it("lets a member change a run", async () => {
     const ports = recordingPorts();
     const { face, close } = serve(ports, { kind: "user", login: "srid", role: "member" });
@@ -230,7 +185,6 @@ describe("the caller is assembled once per call", () => {
           requestId: "caller-start-member",
         }),
       );
-      // The port is the proof: a refusal never reaches it.
       expect(ports.launches).toHaveLength(1);
     } finally {
       await close();
@@ -238,25 +192,10 @@ describe("the caller is assembled once per call", () => {
   });
 });
 
-/**
- * WHO THE RUN RECORDS (PLAN 4.4).
- *
- * `actorOf` is the one reading of a principal that reaches a durable record,
- * and the two faces that show it ("started by …" on a run header and in the
- * runs table) read that record rather than deriving a second answer. What is
- * pinned here is the reading itself, and that a start reaches its port with
- * the principal that reading is taken from — the root binds the two together,
- * and the e2e drives the whole chain against a real daemon.
- */
 describe("the actor a run is recorded with", () => {
   it("is a signed-in person's login, and a RESERVED word for the machine's own owner", () => {
     expect(actorOf({ kind: "user", login: "srid", role: "member" })).toBe("srid");
     expect(actorOf({ kind: "user", login: "octo", role: "owner" })).toBe("octo");
-    // `local` has no login to give: it is not a person, and inventing a name
-    // for it would put a second spelling of one fact into every manifest. The
-    // word carries an `@`, which a GitHub login cannot — so a user called
-    // `local` can never be mistaken for the loopback owner in a record that
-    // is already on disk and cannot be migrated.
     expect(actorOf(LOCAL_OWNER)).toBe(LOCAL_ACTOR);
     expect(LOCAL_ACTOR).toContain("@");
   });

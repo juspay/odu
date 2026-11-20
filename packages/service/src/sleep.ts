@@ -1,11 +1,7 @@
 /** The wait a polling stream source does between reads.
  *
  *  Resolves on the deadline OR on the subscription's interrupt, whichever comes
- *  first, and detaches its listener either way — a poll loop holding a listener
- *  per iteration on a long-lived signal is a leak that only shows up on the
- *  subscriptions that matter most (the ones nobody closed). Every stream source
- *  in this package takes it as an injected seam so a suite can advance at the
- *  speed of its assertions. */
+ *  first, and detaches its listener either way. */
 export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   const done = (): void => {
