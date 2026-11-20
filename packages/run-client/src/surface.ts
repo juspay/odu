@@ -474,5 +474,5 @@ export type OduClient = SurfaceClientOf<typeof oduSurface.spec>;
 
 /** Build the fan-in face over any dispatch. */
 export function oduClientOver(dispatch: SurfaceDispatch): OduClient {
-  return buildSurfaceFace(oduSurface, dispatch) as unknown as OduClient;
+  return buildSurfaceFace(oduSurface, dispatch) as OduClient;
 }

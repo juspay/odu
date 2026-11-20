@@ -9,17 +9,23 @@
  * listener exists, and an EventEmitter with no `'error'` listener throws.
  */
 
-import { Socket } from "node:net";
+import { Socket, type SocketConnectOpts } from "node:net";
 
-type Connect = (this: Socket, ...args: any[]) => Socket;
+type ConnectArgs =
+  | [options: SocketConnectOpts, connectionListener?: () => void]
+  | [port: number, host: string, connectionListener?: () => void]
+  | [port: number, connectionListener?: () => void]
+  | [path: string, connectionListener?: () => void];
 
-const nativeConnect = Socket.prototype.connect as Connect;
+const nativeConnect = Socket.prototype.connect;
 
 Socket.prototype.connect = function connect(
   this: Socket,
-  ...args: Parameters<Connect>
+  ...args: ConnectArgs
 ): Socket {
-  if (this.listenerCount("error") > 0) return nativeConnect.apply(this, args);
+  if (this.listenerCount("error") > 0) {
+    return Reflect.apply(nativeConnect, this, args);
+  }
 
   let premature: Error | undefined;
   const capture = (err: Error): void => {
@@ -27,7 +33,7 @@ Socket.prototype.connect = function connect(
   };
   this.on("error", capture);
   try {
-    return nativeConnect.apply(this, args);
+    return Reflect.apply(nativeConnect, this, args);
   } finally {
     this.off("error", capture);
     if (premature !== undefined) {

@@ -58,9 +58,22 @@ function mtimeOf(path: string): number | null {
   }
 }
 
-/** The lock file's answer: `live`, `foreign` (EPERM — a process exists at that
- *  pid under another uid), `stale` (no live process proven) or `absent`. */
-function lockHolder(lockPath: string): "live" | "foreign" | "stale" | "absent" {
+/** What a pid answers to signal 0: `live` (ours and running), `foreign`
+ *  (EPERM — a process exists at that pid under another uid) or `dead`. */
+export type PidLiveness = "live" | "foreign" | "dead";
+
+export function pidLiveness(pid: number): PidLiveness {
+  try {
+    process.kill(pid, 0);
+    return "live";
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM" ? "foreign" : "dead";
+  }
+}
+
+/** The lock file's answer: the holder's `PidLiveness`, or `stale` (no live
+ *  process proven) or `absent`. */
+function lockHolder(lockPath: string): PidLiveness | "stale" | "absent" {
   let pid: number | null = null;
   try {
     const parsed = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
@@ -69,13 +82,8 @@ function lockHolder(lockPath: string): "live" | "foreign" | "stale" | "absent" {
     return "absent";
   }
   if (pid === null) return "stale";
-  try {
-    process.kill(pid, 0);
-    return "live";
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EPERM") return "foreign";
-    return "stale";
-  }
+  const liveness = pidLiveness(pid);
+  return liveness === "dead" ? "stale" : liveness;
 }
 
 /** The newest reservation sentinel across `.ci/<sha7>/runs/` — an unfinished
