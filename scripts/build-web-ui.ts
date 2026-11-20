@@ -13,9 +13,7 @@
  */
 
 import { buildSurfaceClient, type SurfaceClientExtraAsset } from "@kolu/surface-app/bun";
-import { transformAsync } from "@babel/core";
-import solid from "babel-preset-solid";
-import typescript from "@babel/preset-typescript";
+import { compileSolidAsync } from "./solidJsx";
 import type { BunPlugin } from "bun";
 import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
@@ -118,20 +116,7 @@ const solidJsx: BunPlugin = {
   setup(build) {
     build.onLoad({ filter: /\.tsx$/ }, async (args) => {
       const source = await readFile(args.path, "utf-8");
-      const out = await transformAsync(source, {
-        filename: args.path,
-        babelrc: false,
-        configFile: false,
-        sourceMaps: "inline",
-        presets: [
-          [typescript, { isTSX: true, allExtensions: true }],
-          [solid, {}],
-        ],
-      });
-      if (out?.code == null) {
-        throw new Error(`build-web-ui: the Solid compiler produced nothing for ${args.path}`);
-      }
-      return { contents: out.code, loader: "js" };
+      return { contents: await compileSolidAsync(source, args.path), loader: "js" };
     });
   },
 };

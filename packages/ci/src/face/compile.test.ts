@@ -1,34 +1,9 @@
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
-
-const require_ = createRequire(import.meta.url);
-const babel = require_("@babel/core") as {
-  transformSync: (
-    code: string,
-    options: Record<string, unknown>,
-  ) => { code?: string | null } | null;
-};
-const solidPreset: unknown = require_("babel-preset-solid");
-const typescriptPreset: unknown = require_("@babel/preset-typescript");
+import { compileSolid as compile } from "../../../../scripts/solidJsx";
 
 const SRC = import.meta.dirname;
-
-function compile(source: string, filename: string): string {
-  const out = babel.transformSync(source, {
-    filename,
-    babelrc: false,
-    configFile: false,
-    presets: [
-      [typescriptPreset, { isTSX: true, allExtensions: true }],
-      [solidPreset, {}],
-    ],
-  });
-  const code = out?.code;
-  if (code == null) throw new Error(`the Solid compiler produced nothing for ${filename}`);
-  return code;
-}
 
 const VIEWS = [
   "ci.tsx",
