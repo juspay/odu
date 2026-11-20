@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible terminal evidence for juspay/odu#87 — a lane node's durable log
-# losing its end. Recorded with asciinema and rendered to a gif with agg; see
-# dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a throwaway
-# noisy fixture, pinned to a localhost lane.
+# Reproducible terminal evidence for juspay/odu#87 — see dev/skills/pr-evidence/SKILL.md.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 100x24 -i 2 --overwrite \
@@ -25,7 +22,7 @@ cp "$WT/tests/e2e/fixtures/noisy/justfile" "$D/"
   git -c user.email=a@b.c -c user.name=x commit -qm fix ) >/dev/null 2>&1
 cd "$D"
 
-P='\033[1;32m$\033[0m'                                   # green prompt
+P='\033[1;32m$\033[0m'
 say() { printf "\033[2;37m# %s\033[0m\n" "$1"; sleep 1.4; }
 cmd() { printf "$P %s\n" "$1"; sleep 0.7; }
 

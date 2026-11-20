@@ -1,27 +1,10 @@
 #!/usr/bin/env bash
-# Reproducible evidence for "odu exports its thin client": an OUT-OF-REPO
-# consumer subscribes a live run's cells through `@odu/run-client` alone —
-# no odu source, no odu install, no @kolu/* beyond the one this package's
-# closure test pins.
-#
-# The consumer is built the way a downstream really consumes odu: a scratch
-# directory outside the checkout, whose node_modules holds a COPY of
-# packages/run-client (not the workspace symlink — a symlink would resolve
-# odu's own tree and prove nothing) plus exactly what that package's manifest,
-# its hydration note, and the one library it hydrates ask for — the four names
-# listed at the consumer's setup below. If the package reached back into
-# `src/`, or named a dependency the manifest does not, this script is where it
-# fails — the same wall packages/run-client/src/closure.test.ts asserts
-# statically.
+# Reproducible evidence for "odu exports its thin client".
 #
 # Run from odu's dev shell (it needs `bun` and $ODU_KOLU_SURFACE):
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   nix develop -c bash tests/evidence/thin-client-demo.sh "$odu" "$PWD"
-#
-# The lane is localhost and the fixture is tests/e2e/fixtures/fast-slow, whose
-# DAG finishes eight nodes and then blocks on a long sleep — so the transcript
-# shows a run mid-flight: terminal nodes beside a running one.
 set -eu
 
 ODU="$1"   # path to the nix-built odu binary
@@ -30,9 +13,6 @@ WT="$2"    # the odu checkout (source of packages/run-client and the fixture)
 : "${ODU_KOLU_SURFACE:?run this inside the odu dev shell (nix develop)}"
 command -v bun >/dev/null || { echo "bun not on PATH — run inside nix develop" >&2; exit 1; }
 
-# Poll a predicate to a deadline. Returns non-zero on timeout rather than
-# deciding what that means: "the socket never came up" and "the run is still
-# alive" want different words, and `set -e` would take the choice away.
 wait_until() {   # $1 = attempts, 250ms apart; the rest is the predicate
   attempts="$1"; shift
   while [ "$attempts" -gt 0 ]; do
@@ -51,13 +31,9 @@ RUN_PID=""
 socket_live() { [ -S "$FIXTURE/.ci/odu.sock" ]; }
 socket_gone() { [ ! -S "$FIXTURE/.ci/odu.sock" ]; }
 run_gone()    { ! kill -0 "$RUN_PID" 2>/dev/null; }
-# The wait that ends either way: the socket came up, or the run died trying.
 serving_or_dead() { socket_live || run_gone; }
 
 cleanup() {
-  # EXPLICIT pid only — never a pkill. The coordinator is asked to stop
-  # through its own surface first; the signal is the fallback for a run that
-  # is already gone or never came up.
   if [ -n "$RUN_PID" ] && ! run_gone; then
     (cd "$FIXTURE" && "$ODU" ci cancel >/dev/null 2>&1) || true
     wait_until 40 run_gone || kill "$RUN_PID" 2>/dev/null || true
@@ -66,26 +42,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── The consumer: a package that has never heard of odu's src ────────────────
-# Its node_modules holds exactly four names, and each is there for a reason it
-# can state:
-#
-#   @odu/run-client   a COPY of packages/run-client (never the workspace
-#                     symlink, which would resolve odu's own tree and prove
-#                     nothing)
-#   @kolu/surface     the one hydrated source that package's manifest note and
-#                     closure test admit
-#   effect            the one npm dependency that manifest declares
-#   @effect/platform-node
-#                     what hydrating @kolu/surface COSTS — its wire link imports
-#                     it — declared by a consumer at its own root exactly as odu
-#                     does (see the root package.json note)
-#
-# The two npm names are taken from odu's own isolated store WITH their
-# transitive closure, rather than installed: this harness has no network, and a
-# store copy is the same tree "bun install effect @effect/platform-node" would
-# lay down, at the versions odu pins. Only the four top-level links resolve;
-# the rest of odu's npm tier is not copied at all.
 STORE="$WT/node_modules/.bun"
 mkdir -p "$CONSUMER/node_modules/.bun" "$CONSUMER/node_modules/@effect" \
          "$CONSUMER/node_modules/@odu" "$CONSUMER/node_modules/@kolu"
@@ -124,12 +80,6 @@ JSON
 cp -rL "$WT/packages/run-client" "$CONSUMER/node_modules/@odu/run-client"
 cp -rL "$ODU_KOLU_SURFACE"       "$CONSUMER/node_modules/@kolu/surface"
 chmod -R u+w "$CONSUMER/node_modules/@odu" "$CONSUMER/node_modules/@kolu"
-# The workspace member has a node_modules of its OWN in a live checkout (the
-# isolated linker put its declared deps there). A real consumer copies from a
-# content-addressed store path, which has none — and it matters: a nested
-# effect/ would give the package a SECOND Effect instance while @kolu/surface
-# resolved the top-level one, and two Schema realms decode each other frames as
-# garbage. Dropping it is what makes this copy the store copy.
 rm -rf "$CONSUMER/node_modules/@odu/run-client/node_modules"
 
 cat > "$CONSUMER/watch.ts" <<'TS'
@@ -205,7 +155,6 @@ if (finished !== undefined) {
 await run.close();
 TS
 
-# ── A live run to dial ──────────────────────────────────────────────────────
 mkdir -p "$FIXTURE"
 cp -r "$WT/tests/e2e/fixtures/fast-slow/." "$FIXTURE/"
 (cd "$FIXTURE" && git init -q && git add -A && git -c user.email=demo@odu -c user.name=demo commit -qm fixture)
@@ -225,7 +174,6 @@ if ! socket_live; then
   cat "$SCRATCH/run.log" >&2
   exit 1
 fi
-# Give the fast nodes a moment to finish so the matrix shows both states.
 sleep 3
 
 echo

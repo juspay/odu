@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 # Evidence for per-node / per-platform cancel (juspay/odu#68).
-# Drives the real odu binary against a sleep fixture with --linger so a
-# mid-run cancel can land, then shows the cancelled status and that the
-# coordinator stays up for a full-run cancel afterwards.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 92x20 -i 2 --overwrite \
@@ -30,7 +27,6 @@ say "Start a long-running pipeline with --linger (keeps the coordinator up)."
 cmd "odu ci status"
 "$ODU" ci status 2>&1 || true; sleep 1.4
 
-# Pick the first running node id if any, else the first non-ok id.
 NODE=$("$ODU" ci status -o json 2>/dev/null | bun -e '
   let s=""; process.stdin.on("data",d=>s+=d); process.stdin.on("end",()=>{
     try {

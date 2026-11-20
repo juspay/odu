@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Reproducible terminal evidence for the opentui live view (juspay/odu#73).
-# Recorded with asciinema and rendered to a gif with agg — see dev/skills/pr-evidence/SKILL.md.
-# Drives the real odu binary against a throwaway fixture pinned
-# to a localhost lane.
-#
-# What it has to show, because these are the claims the PR makes:
-#   1. the run takes the whole terminal — matrix, events lane, log pane;
-#   2. a red node lands in the events lane INSIDE the frame, not in scrollback;
-#   3. on exit the shell history above the run is exactly where it was, with
-#      one verdict line added. That is the whole point: attach stops scrolling.
+# Reproducible terminal evidence for the opentui live view (juspay/odu#73) —
+# see dev/skills/pr-evidence/SKILL.md.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 92x24 -i 2 --overwrite \
@@ -29,9 +21,6 @@ SYSTEM=$(nix eval --impure --raw --expr builtins.currentSystem) || exit 1
 printf '{"%s":"localhost"}' "$SYSTEM" > "$ODU_HOSTS"
 
 D=$(mktemp -d /tmp/odu-tui-demo-XXXX)
-# A DAG paced for a recording: long enough that the spinners, the elapsed
-# clocks and the streaming log pane are legible, with one node that goes red so
-# the events lane has something to hold.
 cat > "$D/justfile" <<'JUSTFILE'
 [parallel]
 [metadata("ci")]
@@ -73,8 +62,6 @@ ls; sleep 1.8
 say "Now a live run. It takes the terminal: matrix, events, and the focused log."
 say "The log pane is a real VT — watch the progress bar redraw in place."
 cmd "odu ci run --no-strict"
-# The fixture ends red on purpose — that is the point of the demo — so a
-# non-zero exit here is success, not a failure to swallow.
 "$ODU" ci run --no-strict || true
 sleep 1
 

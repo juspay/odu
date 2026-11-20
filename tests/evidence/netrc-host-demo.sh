@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for the netrc line odu prints.
 #
-# One throwaway service with a private bucket holding one built path. The
-# build before this change and the build after it each print the bucket's
-# netrc line with `odu cache use`; the line, with the read token filled in,
-# is the whole netrc a `nix build` then reads from. Before, the line names
-# `host:port` and Nix sends no credential, so the bucket answers "not found".
-# After, it names the host and the path is fetched. Then a public bucket, for
-# which the after build prints no netrc lines at all.
-#
 # Recorded with asciinema, rendered to a gif with agg (the pr-evidence skill):
 #
 #   before=$(nix build github:juspay/odu/<rev>#odu --no-link --print-out-paths)/bin/odu
@@ -17,8 +9,7 @@
 #     -c "bash tests/evidence/netrc-host-demo.sh $before $after" /tmp/netrc-host.cast
 #
 # Linux only: the path is built into a diverted store, and every client store
-# is a chroot under one temp dir. Nothing here touches your store or your own
-# `odu web`.
+# is a chroot under one temp dir.
 set -u
 BEFORE="$1"       # odu from the commit before this change
 AFTER="$2"        # odu from this change (it also serves the buckets)
@@ -57,7 +48,6 @@ APP=$(nix build --store "$BUILDER" --no-link --print-out-paths --impure --expr \
   'derivation { name = "netrc-demo"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "echo private > $out" ]; }' 2>/dev/null)
 NIX_REMOTE="$BUILDER" ODU_CACHE_TOKEN="$TOKEN" "$AFTER" cache push main "$APP" >/dev/null 2>&1
 
-# ONE CLIENT: the netrc line this build of odu prints, and a fetch with it.
 fetch_with() {
   local label="$1" odu="$2"
   cmd "ODU_TOKEN=<read token> odu cache use main | grep ^machine"

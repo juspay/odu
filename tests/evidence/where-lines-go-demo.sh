@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for where a bucket's two lines go.
 #
-# One throwaway service and one public bucket. `odu cache use` is run twice,
-# by the build before this change and by the build after it: the block is
-# printed by the CLIENT, from the facts the bucket publishes, so the same
-# bucket shows both. Then the bucket's own page, as `curl` sees it.
-#
 # Recorded with asciinema, rendered to a gif with agg — see the pr-evidence
 # skill:
 #
@@ -13,8 +8,6 @@
 #   after=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 100x40 -i 2 --overwrite \
 #     -c "bash tests/evidence/where-lines-go-demo.sh $before $after" /tmp/where-lines-go.cast
-#
-# Nothing here touches your own `odu web`: everything is under one temp dir.
 set -u
 BEFORE="$1"       # odu from the commit before this change
 AFTER="$2"        # odu from this change (it also serves the bucket)

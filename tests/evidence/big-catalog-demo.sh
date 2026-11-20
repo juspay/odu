@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible terminal evidence for juspay/odu#113 — `odu ci status` / `ci attach`
-# against a THOUSAND-RUN catalog, before and after. Recorded with asciinema,
-# rendered to a gif with agg — see dev/skills/pr-evidence/SKILL.md.
-#
-# Two private worlds (own catalog, own daemon, own port), each seeded with the
-# same 1 000 cloned runs: one served by the build BEFORE the fix, one by the
-# build after. Nothing here touches your real catalog or your own `odu web`.
+# Reproducible terminal evidence for juspay/odu#113 — see dev/skills/pr-evidence/SKILL.md.
 #
 #   new=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   old=$(nix build "git+file://$PWD?rev=<base>#odu" --no-link --print-out-paths)/bin/odu
@@ -16,8 +10,6 @@ NEW="$1"   # the odu under test
 OLD="$2"   # the odu before the fix
 WT="$3"    # the odu checkout (fixture source)
 CLONES="${CLONES:-1000}"
-# Journal lines per clone. A real run's journal is long, and the parse the
-# fix removes is proportional to it; a toy fixture's twenty lines hide the cost.
 JOURNAL="${JOURNAL:-1500}"
 
 ROOT=$(mktemp -d /tmp/odu-big-catalog-XXXX)
@@ -29,7 +21,6 @@ world() {   # $1 = name, $2 = port → exports the three variables odu owns
   export ODU_WEB_ORIGIN="http://127.0.0.1:$2"
 }
 daemon_pid() { "$1" surface get service 2>/dev/null | grep -o '"pid": *[0-9]*' | grep -o '[0-9]*$'; }
-# CPU the daemon burns over two idle seconds, as a percentage of one core.
 cpu_now() {
   a=$(awk '{print $14+$15}' "/proc/$1/stat"); sleep 2; b=$(awk '{print $14+$15}' "/proc/$1/stat")
   echo "$(( (b - a) * 100 / ($(getconf CLK_TCK) * 2) ))% of a core"
@@ -48,7 +39,6 @@ P='\033[1;32m$\033[0m'
 say() { printf "\033[2;37m# %s\033[0m\n" "$1"; sleep 1.2; }
 cmd() { printf "$P %s\n" "$1"; sleep 0.6; }
 
-# ── setup: one real run, cloned ───────────────────────────────────────────────
 D="$ROOT/checkout"; mkdir -p "$D"
 cp "$WT/tests/e2e/fixtures/pass/justfile" "$D/"
 printf '.ci/\n' > "$D/.gitignore"
@@ -59,8 +49,6 @@ D=$(cd "$D" && pwd -P)
 world new 18792
 cd "$D"
 SRC=$("$NEW" ci run --no-strict --no-post -o json 2>/dev/null | grep -o '"runId": *"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
-# Clones are OLDER than the real run (ids encode their start instant), so the
-# real one stays this checkout's newest.
 python3 - "$ODU_STATE_DIR/runs" "$SRC" "$CLONES" "$JOURNAL" <<'PY'
 import json, os, shutil, sys
 runs, src, clones, journal = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
@@ -87,7 +75,6 @@ for i in range(clones):
     open(events, "a").write("\n".join(pad) + "\n")
 PY
 mkdir -p "$ROOT/old/state/runs" && cp -r "$ROOT/new/state/runs/." "$ROOT/old/state/runs/"
-# A fresh daemon per world, so each starts on the catalog as it now stands.
 kill "$(daemon_pid "$NEW")" 2>/dev/null; sleep 1
 
 clear

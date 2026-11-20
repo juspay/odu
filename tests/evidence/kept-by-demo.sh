@@ -1,21 +1,12 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for the Paths tab's "kept by" column (cache 4.9).
 #
-# Two paths are pushed to a bucket and one of them is pinned. `bucket_paths`
-# then says, per path, what keeps it — `pin` for the pinned one, `retention`
-# with the day its clock runs out for the other — and, once the bucket's
-# retention is set to zero, `nothing` for the unpinned one: exactly the path
-# the dry run says the next collection takes.
-#
 # Recorded with asciinema, rendered to a gif with agg — see
 # dev/skills/pr-evidence/SKILL.md:
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 100x30 -i 2 --overwrite \
 #     -c "bash tests/evidence/kept-by-demo.sh $odu $PWD" /tmp/kept-by.cast
-#
-# Nothing here touches your store or your own `odu web`: the daemon's state and
-# the builder store are under one temp dir.
 set -u
 ODU="$1"          # the odu under test (nix-built: the wrapper bakes ODU_SELF)
 WT="$2"           # the odu checkout
@@ -45,8 +36,6 @@ say() { printf "\033[2;37m# %s\033[0m\n" "$1"; sleep 1.2; }
 cmd() { printf "$P %s\n" "$1"; sleep 0.5; }
 admin() { printf '{"rootToken":"%s",%s}' "$ODU_ROOT_TOKEN" "$1"; }
 
-# What the Paths tab's column reads: one line per path, its name and its verdict,
-# with `until` as a date a person reads.
 PATHS_JQ='.paths[] | "\(.storePath | sub("^/nix/store/[a-z0-9]+-"; ""))  \(.keptBy.kind)'
 PATHS_JQ+='\(if (.keptBy.pins | length) > 0 then " " + (.keptBy.pins | join(",")) else "" end)'
 PATHS_JQ+='  until \(.keptBy.until / 1000 | strftime("%Y-%m-%d"))"'
@@ -57,7 +46,6 @@ kept_by() {
   sleep 2.5
 }
 
-# ── the service, a bucket, two paths ─────────────────────────────────────────
 say "odu web: one service, and the cache it serves."
 cmd "odu web --background"
 "$ODU" web --background 2>&1 | grep -E "started|http"; sleep 1.5
@@ -86,7 +74,6 @@ cmd "odu surface cache pin_create --input '{…\"name\":\"release\",\"paths\":[\
   --json | "$JQ" -r '"  pinned \(.name): \(.rootPaths | length) path"'
 sleep 1
 
-# ── what keeps each path ─────────────────────────────────────────────────────
 say "Why is each path still here, and when does it go?"
 kept_by
 

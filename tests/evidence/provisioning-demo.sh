@@ -2,21 +2,6 @@
 # Reproducible terminal evidence for "a run you can watch before it has lanes"
 # (PR #85, issue #84). Recorded with asciinema, rendered to a gif with agg —
 # see dev/skills/pr-evidence/SKILL.md.
-#
-# The window under demonstration is the one between `odu ci run` starting and its
-# first lane existing: the coordinator holds the checkout and is claiming a
-# machine, which on a cold host is minutes of `nix copy`. Before #84 the socket
-# came up only after the claim resolved, so for all of it `odu ci status` said
-# "no run in progress in this checkout" — the same words it uses for a run that
-# died or never started.
-#
-# Making that window deterministic without a cold host: this machine is used as
-# a REAL remote venue (its hostname is not isLocalHost, so odu dials ssh and
-# takes a flock), and the demo occupies that flock first — exactly what a
-# concurrent run would do. The new run then queues in the claim for as long as
-# we hold it, which is the same "exists, has no lanes" state a slow closure copy
-# produces, reached in one second instead of ten minutes.
-#
 # Requires: passwordless `ssh $USER@$(hostname -s)` and odu's Nix-built
 # odu-runner (the lease is an agent surface RPC; flock ships on the runner
 # PATH). Same preconditions as tests/evidence/venue-pools-demo.sh.
@@ -34,12 +19,6 @@ SYS="$(nix eval --impure --raw --expr builtins.currentSystem)"
 export ODU_HOSTS="$(mktemp -d)/hosts.json"
 printf '{"%s":["%s"]}' "$SYS" "$VENUE" > "$ODU_HOSTS"
 
-# The venue lock is the AGENT's, not this shell's: odu-runner resolves it from
-# its own `ODU_LEASE_LOCK`/default on the box being claimed, and `odu ci run`
-# passes no override. So a private path here would be a lock nobody contends
-# for, and the run would sail straight past the hold this demo is built on.
-# Hold the real one. Safe because this is the same machine, the hold is seconds,
-# and `release_venue` runs from an EXIT trap.
 LOCK="/tmp/odu.lease"
 
 drop_lock() {
@@ -49,9 +28,6 @@ drop_lock() {
 drop_lock
 
 D=$(mktemp -d /tmp/odu-provisioning-demo-XXXX)
-# A real origin the lane can fetch the pushed SHA from — the venue is this same
-# machine, so a bare repo on disk is a genuine remote for it. Without one the
-# lane's `_ci-setup` dies on the fetch and the demo ends on a red herring.
 ORIGIN="$D.origin"
 git init -q --bare "$ORIGIN"
 cp "$WT/tests/e2e/fixtures/pass/justfile" "$D/"
@@ -109,7 +85,6 @@ say "Start a run anyway. It queues in the claim — no lane exists yet."
 cmd "odu ci run --no-strict --no-post --linger &"
 "$ODU" ci run --no-strict --no-post --linger >/dev/null 2>&1 &
 RUN_PID=$!
-# The socket now comes up BEFORE the claim, so it is dialable within a moment.
 for _ in $(seq 1 40); do
   "$ODU" ci status >/dev/null 2>&1 && break
   sleep 0.25
@@ -140,7 +115,6 @@ release_venue
 sleep 0.6
 cmd "# (holder exits → ssh closes → flock drops)"
 
-# The queued claim polls every 5s; give it a poll plus the lane handshake.
 for _ in $(seq 1 60); do
   "$ODU" ci status -o json 2>/dev/null | jq -e '.run.phase == "lanes"' >/dev/null 2>&1 && break
   sleep 0.5

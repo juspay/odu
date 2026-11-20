@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for `odu ci protect` platform enumeration
-# (PR #53, issue #52). Recorded with asciinema, rendered to a gif with agg —
-# see dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a
-# throwaway fixture; protect --dry-run never dials a host, which is the point.
+# (PR #53, issue #52) — see dev/skills/pr-evidence/SKILL.md.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 92x26 -i 2 --overwrite \
@@ -21,7 +19,7 @@ cp "$WT/tests/e2e/fixtures/pass/justfile" "$D/"
   git -c user.email=a@b.c -c user.name=x commit -qm pass ) >/dev/null 2>&1
 cd "$D"
 
-P='\033[1;32m$\033[0m'                                   # green prompt
+P='\033[1;32m$\033[0m'
 say() { printf "\033[2;37m# %s\033[0m\n" "$1"; sleep 1.4; }
 cmd() { printf "$P %s\n" "$1"; sleep 0.7; }
 

@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Reproducible terminal evidence for `odu ci history list` — the durable run ledger
-# (PR #28). Recorded with asciinema, rendered to a gif with agg — see
-# dev/skills/pr-evidence/SKILL.md. Drives the real odu binary against a throwaway
-# fixture, pinned to a localhost lane; the run output is hidden so the gif stays
-# about the ledger, not the matrix.
+# Reproducible terminal evidence for `odu ci history list` — the durable run
+# ledger (PR #28), see dev/skills/pr-evidence/SKILL.md.
 #
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 92x26 -i 2 --overwrite \

@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for lazy pool-locality (PR #67, issue #66).
 # Recorded with asciinema, rendered to a gif with agg — see dev/skills/pr-evidence/SKILL.md.
-# Drives the real odu binary against a throwaway fixture with a
-# hosts file whose x86_64-linux pool illegally mixes localhost with remotes:
-# the shape that used to kill EVERY run in the checkout at config-load time.
-#
-# Nothing here leases or dials: every run is refused or resolved before odu
-# reaches a machine, which is the point — the difference this PR makes is
-# visible before the first packet.
-#
 #   odu=$(nix build .#odu --no-link --print-out-paths)/bin/odu
 #   asciinema rec --headless --window-size 100x24 -i 2 --overwrite \
 #     -c "bash tests/evidence/pool-locality-demo.sh $odu $PWD" /tmp/pool-locality.cast
@@ -32,7 +24,7 @@ cp "$WT/tests/e2e/fixtures/pass/justfile" "$D/"
 ) >/dev/null 2>&1
 cd "$D"
 
-P='\033[1;32m$\033[0m'                                   # green prompt
+P='\033[1;32m$\033[0m'
 say() { printf "\033[2;37m# %s\033[0m\n" "$1"; sleep 1.4; }
 cmd() { printf "$P %s\n" "$1"; sleep 0.7; }
 

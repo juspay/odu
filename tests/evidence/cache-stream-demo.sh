@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible terminal evidence for juspay/odu#132 — the cache STREAMS.
 #
-# One 2 GiB generated path is pushed to a bucket and then read back by four
-# concurrent clients, while the service's RSS is sampled once a second. The
-# claim on screen: the daemon's memory does not follow the size of the NAR. A
-# cache that buffered an upload or a read would show RSS climbing toward the
-# NAR's size; this one sits at its own baseline the whole way.
-#
 # Recorded with asciinema, rendered to a gif with agg — see
 # dev/skills/pr-evidence/SKILL.md:
 #
@@ -14,10 +8,8 @@
 #   asciinema rec --headless --window-size 92x24 -i 2 --overwrite \
 #     -c "bash tests/evidence/cache-stream-demo.sh $odu $PWD" /tmp/cache-stream.cast
 #
-# Nothing here touches your store or your own `odu web`: the daemon's cache and
-# the builder are chroots under one temp dir, exactly as the e2e suite sets them
-# up. SIZE=2G is the brief's number; SIZE=256M runs the same story in a tenth of
-# the time when you are editing the script rather than recording it.
+# SIZE=2G is the brief's number; SIZE=256M runs the same story in a tenth of
+# the time.
 set -u
 ODU="$1"          # the odu under test (nix-built: the wrapper bakes ODU_SELF)
 WT="$2"           # the odu checkout
@@ -54,13 +46,9 @@ trap cleanup EXIT
 P='\033[1;32m$\033[0m'
 say() { printf "\033[2;37m# %s\033[0m\n" "$1"; sleep 1.2; }
 cmd() { printf "$P %s\n" "$1"; sleep 0.5; }
-# RSS in MiB — the unit `ps` does not use.
 rss_mib() { awk -v k="$1" 'BEGIN { printf "%d", k / 1024 }'; }
 now_rss() { rss_mib "$(ps -o rss= -p "$PID" 2>/dev/null || echo 0)"; }
 
-# A live line the recorder can show while something long runs. Driven by a flag
-# FILE rather than by `kill`, so the loop stops at a sleep boundary and nothing
-# is left sampling a daemon that has gone.
 watch_rss() {
   : > "$ROOT/watching"
   ( while [ -e "$ROOT/watching" ]; do
@@ -75,7 +63,6 @@ unwatch() {
   printf '\r  daemon RSS %s MiB   \n' "$(now_rss)"
 }
 
-# ── a 2 GiB path, built into a store the cache has never seen ────────────────
 say "A private world: the cache and the builder are chroot stores, so nothing touches the host store."
 cmd "nix build --store $BUILDER … 'head -c $SIZE /dev/urandom > \$out'"
 # The chroot's own `/nix/store` is where the output lands, so the host sees it
@@ -89,7 +76,6 @@ echo "  $BIG"; sleep 1
 cmd "du -h --apparent-size \$BUILDER$BIG"
 du -h --apparent-size "$ROOT/builder$BIG"; sleep 1
 
-# ── the service, with its cache ──────────────────────────────────────────────
 say "odu web: one service, and the cache it serves. Administration needs \$ODU_ROOT_TOKEN."
 cmd "odu web --background"
 "$ODU" web --background 2>&1 | grep -E "started|http"; sleep 2
@@ -107,8 +93,6 @@ TOKEN=$("$ODU" surface cache token_mint \
   --input '{"rootToken":"'"$ODU_ROOT_TOKEN"'","bucket":"main","scope":"write"}' \
   --json | grep -o '"token": *"[^"]*"' | cut -d'"' -f4)
 
-# One sample a second, into the file of the phase being run, so each phase has
-# its own peak and the push cannot hide behind the reads.
 SAMPLES="$ROOT/rss"
 phase() { : > "$ROOT/rss"; PHASE="$1"; }
 ( while kill -0 "$PID" 2>/dev/null; do
@@ -117,7 +101,6 @@ phase() { : > "$ROOT/rss"; PHASE="$1"; }
 SAMPLER=$!
 peak() { rss_mib "$(sort -n "$SAMPLES" | tail -1)"; }
 
-# ── push ─────────────────────────────────────────────────────────────────────
 say "PUSH: the NAR is streamed through the daemon, never held. Watch RSS, not the clock."
 phase push
 cmd "odu cache push main $BIG"
@@ -137,7 +120,6 @@ echo "$NARINFO" | grep -E "^(StorePath|NarHash|NarSize|Compression|URL|Sig):"; s
 NARSIZE=$(echo "$NARINFO" | awk '/^NarSize:/ { print $2 }')
 NARURL="$BUCKET/$(echo "$NARINFO" | awk '/^URL:/ { print $2 }')"
 
-# ── four concurrent reads ────────────────────────────────────────────────────
 say "READ: four clients fetch that NAR at the same time."
 cmd "for i in 1 2 3 4; do curl -s -o /dev/null -w '%{size_download}\\n' $NARURL & done; wait"
 phase read
@@ -153,7 +135,6 @@ READ_PEAK=$(peak)
 printf '  4 × %s bytes in %ss, daemon RSS %s MiB\n' "$NARSIZE" "$((END - START))" "$(now_rss)"
 sleep 1.2
 
-# ── the claim ────────────────────────────────────────────────────────────────
 kill "$SAMPLER" 2>/dev/null; wait "$SAMPLER" 2>/dev/null
 MAX=$((PUSH_PEAK > READ_PEAK ? PUSH_PEAK : READ_PEAK))
 MIB=$((NARSIZE / 1024 / 1024))

@@ -38,7 +38,6 @@ run_case() {
   jq '{runId,sha,contentSha,dirty,settled,passed}' "$world/answer.json"
   run_id=$(jq -r .runId "$world/answer.json")
   rg 'captured in' "$ODU_STATE_DIR/runs/$run_id/coordinator.log"
-  # This fixture runs each node exactly once; the public CLI takes ONE log key.
   key="$run_id/_ci-setup~40$system/1"
   cmd "odu ci logs $key"
   "$odu" ci logs "$key" > "$world/setup.log"
@@ -70,7 +69,6 @@ git status --short
 say 'Local-only, no origin, one-byte transport ceiling: snapshot still runs'
 service=$("$odu" surface get service)
 kill "$(printf '%s' "$service" | jq -r .identity.pid)"
-# A fresh private daemon takes the changed launch environment.
 export ODU_STATE_DIR="$world/local-state"
 mkdir -p "$ODU_STATE_DIR"
 unset ODU_SNAPSHOT_TRANSPORT
