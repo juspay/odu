@@ -74,6 +74,17 @@ async function rowSheets(): Promise<string[]> {
   return found.sort();
 }
 
+type Sheet = { readonly file: string; readonly text: string };
+
+async function orderedSheets(): Promise<Sheet[]> {
+  const read = async (file: string): Promise<Sheet> => ({
+    file,
+    text: await readFile(file, "utf-8"),
+  });
+  const theme = await read(join(faceDir, "theme.css"));
+  return [theme, ...(await Promise.all((await rowSheets()).map(read)))];
+}
+
 /**
  * A SHEET WHOSE COMMENTS END WHERE THEY SAY THEY DO.
  *
@@ -145,22 +156,19 @@ const report = await buildSurfaceClient({
       name: "styles",
       ext: "css",
       build: async (): Promise<Uint8Array> => {
-        const sheets = [join(faceDir, "theme.css"), ...(await rowSheets())];
-        let css = (
-          await Promise.all(
-            sheets.map(async (file) => {
-              const text = await readFile(file, "utf-8");
-              if (!commentsClose(text)) {
-                throw new Error(
-                  `build-web-ui: ${relative(repoRoot, file)} has a comment that ` +
-                    "closes early — the rule after it would be eaten by the " +
-                    "parser and the whole block would go missing silently.",
-                );
-              }
-              return `/* ── ${relative(repoRoot, file)} ── */\n${text}`;
-            }),
-          )
-        ).join("\n");
+        const sheets = await orderedSheets();
+        let css = sheets
+          .map(({ file, text }) => {
+            if (!commentsClose(text)) {
+              throw new Error(
+                `build-web-ui: ${relative(repoRoot, file)} has a comment that ` +
+                  "closes early — the rule after it would be eaten by the " +
+                  "parser and the whole block would go missing silently.",
+              );
+            }
+            return `/* ── ${relative(repoRoot, file)} ── */\n${text}`;
+          })
+          .join("\n");
         for (const [name, href] of fontHrefs) {
           const placeholder = `url("./${name}.woff2")`;
           if (!css.includes(placeholder)) {
@@ -173,7 +181,7 @@ const report = await buildSurfaceClient({
           css = css.replaceAll(placeholder, `url("${href}")`);
         }
         process.stdout.write(
-          `  stylesheet: ${sheets.map((file) => relative(repoRoot, file)).join(", ")}\n`,
+          `  stylesheet: ${sheets.map(({ file }) => relative(repoRoot, file)).join(", ")}\n`,
         );
         return new TextEncoder().encode(css);
       },

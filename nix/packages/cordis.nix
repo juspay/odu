@@ -39,7 +39,7 @@ let
   core = asTypescript "cordis-core-src" "${npins.cordis}/packages/core";
 in
 {
-  hydrateArgs = "${core} cordis";
+  hydratePairs = [{ src = core; dest = "cordis"; }];
 
   externals = (manifestOf "core").dependencies;
 

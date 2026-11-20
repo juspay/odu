@@ -1,5 +1,16 @@
 { pkgs ? import ./nix/nixpkgs.nix { }, b2n ? null, selfFlake ? null, selfRev ? null }:
 let
+  renderHydratePairs = import ./nix/hydrate-pairs.nix { inherit (pkgs) lib; };
+
+  linkWorkspaceMembers = ''
+    for member in packages/*; do
+      [ -d "$member/node_modules" ] || continue
+      target=$out/workspaces/$(basename "$member")
+      mkdir -p "$target"
+      cp -a "$member/node_modules" "$target/node_modules"
+    done
+  '';
+
   version = (pkgs.lib.importJSON ./package.json).version;
   sources = import ./npins;
 
@@ -123,19 +134,14 @@ let
             ${pkgs.kolu-surface-daemon} @kolu/surface-daemon \
             ${pkgs.osfacts-client} osfacts-client \
             ${pkgs.olai-effect-cordis} @olai/effect-cordis \
-            ${pkgs.cordis.hydrateArgs}
+            ${renderHydratePairs pkgs.cordis.hydratePairs}
         '';
 
         installPhase = ''
           runHook preInstall
           mkdir -p $out
           cp -a node_modules $out/node_modules
-          for member in packages/*; do
-            [ -d "$member/node_modules" ] || continue
-            target=$out/workspaces/$(basename "$member")
-            mkdir -p "$target"
-            cp -a "$member/node_modules" "$target/node_modules"
-          done
+          ${linkWorkspaceMembers}
           runHook postInstall
         '';
       };

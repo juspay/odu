@@ -1,4 +1,7 @@
 { pkgs }:
+let
+  renderHydratePairs = import ./hydrate-pairs.nix { inherit (pkgs) lib; };
+in
 {
   ODU_KOLU_SURFACE = pkgs.kolu-surface;
   ODU_KOLU_SURFACE_MCP = pkgs.kolu-surface-mcp;
@@ -14,7 +17,7 @@
   ODU_KOLU_SURFACE_DAEMON = pkgs.kolu-surface-daemon;
   ODU_OSFACTS_CLIENT = pkgs.osfacts-client;
   ODU_OLAI_EFFECT_CORDIS = pkgs.olai-effect-cordis;
-  ODU_CORDIS_HYDRATE = pkgs.cordis.hydrateArgs;
+  ODU_CORDIS_HYDRATE = renderHydratePairs pkgs.cordis.hydratePairs;
   ODU_CORDIS_REVISION = pkgs.cordis.revision;
   ODU_GEIST_FONTS = pkgs.odu-geist-fonts;
 }

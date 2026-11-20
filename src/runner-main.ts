@@ -10,6 +10,14 @@ const USAGE = "usage: odu-runner --stdio   (spawned by the odu coordinator)";
 
 let disposeRunner: (() => void) | null = null;
 
+const withReapedExit =
+  (dispose: () => void) =>
+  (reason: string, exitCode?: number): void => {
+    dispose();
+    log(`odu-runner: ${reason} — recipe process groups reaped, exiting`);
+    if (exitCode !== undefined) process.exit(exitCode);
+  };
+
 async function main(): Promise<void> {
   const { values } = parseArgs({
     args: process.argv.slice(2),
@@ -36,12 +44,11 @@ async function main(): Promise<void> {
 
   const runner = createLaneRunner();
   disposeRunner = runner.dispose;
+  const reapAndExit = withReapedExit(runner.dispose);
   const signalExitCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 } as const;
   for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
-      runner.dispose();
-      log(`odu-runner: ${signal} — recipe process groups reaped, exiting`);
-      process.exit(signalExitCodes[signal]);
+      reapAndExit(signal, signalExitCodes[signal]);
     });
   }
   log("odu-runner: idle — waiting for run.configure over stdio");
@@ -57,8 +64,7 @@ async function main(): Promise<void> {
   // (0 on a clean end, 1 on a transport error), so a live handle can no
   // longer leave an orphaned lane agent on a CI box (the T/odu/kolu/*
   // leaves). These synchronous lines run before that exit.
-  runner.dispose();
-  log(`odu-runner: stdin closed (${end.reason}) — exiting`);
+  reapAndExit(`stdin closed (${end.reason})`);
 }
 
 main().catch((err: unknown) => {
