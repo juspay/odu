@@ -5,7 +5,7 @@ import { authRoutes } from "@odu/auth/server";
 import { cacheRoutes } from "@odu/cache/server";
 import type { ClaimedRoutes, RowRoutes } from "@odu/cordis/services";
 import { METRICS_PATH } from "@odu/cordis/metricsSurface";
-import { isReserved, reservedPaths } from "./reserved";
+import { isReserved, reservedClaims } from "./reserved";
 
 async function registered(layer: RowRoutes): Promise<string[]> {
   const paths: string[] = [];
@@ -45,7 +45,7 @@ const ROWS: ReadonlyArray<readonly [string, ClaimedRoutes]> = [
 ];
 
 describe("the door gate's reserved set", () => {
-  const reserved = reservedPaths(ROWS.map(([, row]) => row));
+  const reserved = reservedClaims(ROWS.map(([, row]) => row));
 
   for (const [name, row] of ROWS) {
     it(`claims every route the ${name} row registers`, async () => {
@@ -61,7 +61,7 @@ describe("the door gate's reserved set", () => {
   });
 
   it("reserves the host's own scrape, so a door never answers it with the sign-in page", () => {
-    expect(isReserved(METRICS_PATH, reservedPaths([]))).toBe(true);
+    expect(isReserved(METRICS_PATH, reservedClaims([]))).toBe(true);
   });
 
   it("claims a bucket domain's root-level protocol paths", () => {

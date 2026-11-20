@@ -34,7 +34,12 @@ import {
   NOBODY_ADMISSION,
   PrincipalBroker,
 } from "@odu/cordis/principal";
-import { authRowRecord, readGithubConfig, signInPageHtml } from "@odu/auth/server";
+import {
+  authRowRecord,
+  readGithubConfig,
+  signInPageHtml,
+  type GithubConfigReading,
+} from "@odu/auth/server";
 import { cloudflareRowRecord, readCloudflareConfig } from "@odu/cloudflare/server";
 import { TAGS_OPEN_TO_A_SESSIONLESS_CONNECTION } from "@odu/auth/surface";
 import {
@@ -51,7 +56,7 @@ import {
 import type { SurfaceHandlers } from "@kolu/surface/server";
 import { SERVICE_MCP_PATH } from "@odu/service-client/endpoint";
 import { bucketDomainGate } from "./bucketDomain";
-import { reservedPaths } from "./reserved";
+import { reservedClaims } from "./reserved";
 import { servingOptions } from "./serving";
 import { ciRowRecord } from "@odu/ci/row";
 import { cacheRowRecord, readCacheStores, storeConfigMessage } from "@odu/cache/server";
@@ -122,77 +127,77 @@ function exitCodeOf(exit: DaemonExit): number {
 
 export interface Tenure {
   log: Logger;
-  onHeld: (pid: number) => Promise<number> | number;
+  onGateHeldElsewhere: (pid: number) => Promise<number> | number;
   onServing: (origin: string, pid: number) => void;
-  stopOn?: readonly NodeJS.Signals[];
+  endingSignals?: readonly NodeJS.Signals[];
 }
 
-export async function serveWebService(tenure: Tenure): Promise<number> {
+type GithubReading = Exclude<GithubConfigReading, { kind: "refused" }>;
+type CloudflareReading = Exclude<ReturnType<typeof readCloudflareConfig>, { kind: "refused" }>;
+type CacheStoresReading = Exclude<ReturnType<typeof readCacheStores>, { kind: "refused" }>;
+
+interface HostConfig {
+  readonly dist: string;
+  readonly origin: string;
+  readonly home: ReturnType<typeof webHome>;
+  readonly bindHost: string;
+  readonly port: number;
+  readonly allowedOrigins: ReadonlyArray<string>;
+  readonly publicOrigin: string | null;
+  readonly github: GithubReading;
+  readonly cloudflare: CloudflareReading;
+  readonly cacheStores: CacheStoresReading;
+}
+
+function configured(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed === "" ? null : trimmed;
+}
+
+function readHostConfig():
+  | { kind: "config"; config: HostConfig }
+  | { kind: "refused"; message: string } {
   assertPackaged();
   const dist = process.env.ODU_WEB_DIST as string;
   const origin = serviceOrigin();
   const home = webHome(origin);
   const { host: bindHost, port } = serviceBind(origin);
-  const log = tenure.log;
-  const controller = new AbortController();
   const allowedOrigins = parseAllowedOrigins(process.env.ODU_WEB_ALLOWED_ORIGINS);
-  const configured = (value: string | undefined): string | null => {
-    const trimmed = value?.trim();
-    return trimmed === undefined || trimmed === "" ? null : trimmed;
-  };
   const published = readPublicOrigin(process.env);
-  if (!published.ok) {
-    process.stderr.write(`odu: ${published.message}\n`);
-    return 1;
-  }
+  if (!published.ok) return { kind: "refused", message: `odu: ${published.message}` };
   const github = readGithubConfig(process.env, {
     publicOrigin: published.origin,
     boundOrigin: origin,
   });
-  if (github.kind === "refused") {
-    process.stderr.write(`${github.message}\n`);
-    return 1;
-  }
+  if (github.kind === "refused") return { kind: "refused", message: github.message };
   const cloudflare = readCloudflareConfig(process.env);
-  if (cloudflare.kind === "refused") {
-    process.stderr.write(`${cloudflare.message}\n`);
-    return 1;
-  }
-
+  if (cloudflare.kind === "refused") return { kind: "refused", message: cloudflare.message };
   const cacheStores = readCacheStores(process.env);
   if (cacheStores.kind === "refused") {
-    process.stderr.write(`${storeConfigMessage(cacheStores.refusal)}\n`);
-    return 1;
+    return { kind: "refused", message: storeConfigMessage(cacheStores.refusal) };
   }
+  return {
+    kind: "config",
+    config: {
+      dist,
+      origin,
+      home,
+      bindHost,
+      port,
+      allowedOrigins,
+      publicOrigin: published.origin,
+      github,
+      cloudflare,
+      cacheStores,
+    },
+  };
+}
 
-  const gate = await claimPidGate(
-    home.gatePath,
-    home.socketPath,
-    selfProcessIdentity(),
-    readProcessIdentity,
-  );
-  if (gate.kind === "held") return tenure.onHeld(gate.pid);
-  if (gate.kind === "dir-not-private") {
-    process.stderr.write(
-      `odu: ${gate.dir} is not a private owner-only directory — the web ` +
-        "service's home must be yours alone (mode 0700)\n",
-    );
-    return 1;
-  }
-
-  const stopHandlers: (() => void)[] = [];
-  for (const signal of tenure.stopOn ?? []) {
-    const onSignal = (): void => controller.abort();
-    process.on(signal, onSignal);
-    stopHandlers.push(() => process.off(signal, onSignal));
-  }
-
-  const unhandled = installUnhandledGuard({ log });
-  stopHandlers.push(unhandled.remove);
-
-  const ROWS: ReadonlyArray<Row> = [
+function buildRoster(config: HostConfig): ReadonlyArray<Row> {
+  const { github, cloudflare } = config;
+  return [
     ciRowRecord,
-    cacheRowRecord(cacheStores.stores),
+    cacheRowRecord(config.cacheStores.stores),
     ...(github.kind === "config" ? [authRowRecord(github.config)] : []),
     ...(cloudflare.kind === "config"
       ? [
@@ -206,11 +211,67 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
         ]
       : []),
   ];
-  const coreAgent = (): RowAgent => {
-    const root = ROWS.find((row) => row.key === null);
-    if (root === undefined) throw new Error("odu: the roster has no root row");
-    return root.agent;
-  };
+}
+
+function coreAgentOf(rows: ReadonlyArray<Row>): RowAgent {
+  const root = rows.find((row) => row.key === null);
+  if (root === undefined) throw new Error("odu: the roster has no root row");
+  return root.agent;
+}
+
+async function tearDown(parts: {
+  readonly stopHandlers: ReadonlyArray<() => void>;
+  readonly mcp: { close: () => unknown } | null;
+  readonly metricsMounted: { drop: () => Promise<void> } | null;
+  readonly scope: Scope.Closeable;
+  readonly closeHost: () => Promise<void>;
+  readonly gate: { release: () => void };
+}): Promise<void> {
+  for (const stop of parts.stopHandlers) stop();
+  await parts.mcp?.close();
+  await parts.metricsMounted?.drop();
+  await Effect.runPromise(Scope.close(parts.scope, Exit.void));
+  await parts.closeHost();
+  parts.gate.release();
+}
+
+export async function serveWebService(tenure: Tenure): Promise<number> {
+  const reading = readHostConfig();
+  if (reading.kind === "refused") {
+    process.stderr.write(`${reading.message}\n`);
+    return 1;
+  }
+  const config = reading.config;
+  const { dist, origin, home, bindHost, port, allowedOrigins, github } = config;
+  const log = tenure.log;
+  const controller = new AbortController();
+
+  const gate = await claimPidGate(
+    home.gatePath,
+    home.socketPath,
+    selfProcessIdentity(),
+    readProcessIdentity,
+  );
+  if (gate.kind === "held") return tenure.onGateHeldElsewhere(gate.pid);
+  if (gate.kind === "dir-not-private") {
+    process.stderr.write(
+      `odu: ${gate.dir} is not a private owner-only directory — the web ` +
+        "service's home must be yours alone (mode 0700)\n",
+    );
+    return 1;
+  }
+
+  const stopHandlers: (() => void)[] = [];
+  for (const signal of tenure.endingSignals ?? []) {
+    const onSignal = (): void => controller.abort();
+    process.on(signal, onSignal);
+    stopHandlers.push(() => process.off(signal, onSignal));
+  }
+
+  const unhandled = installUnhandledGuard({ log });
+  stopHandlers.push(unhandled.remove);
+
+  const ROWS: ReadonlyArray<Row> = buildRoster(config);
 
   const run = standing();
   const host = await run(openHost);
@@ -257,7 +318,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await run(provide(host, NixStore, () => configured(process.env.ODU_CACHE_STORE)));
     await run(provide(host, DaemonHome, () => home.dir));
     await run(provide(host, BoundOrigin, () => origin));
-    await run(provide(host, PublicOrigin, () => published.origin));
+    await run(provide(host, PublicOrigin, () => config.publicOrigin));
     await run(provide(host, Build, () => build));
     await run(provide(host, Log, () => log));
     await run(provide(host, Shutdown, () => () => controller.abort()));
@@ -326,7 +387,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       ),
       version: build.oduVersion,
       transport,
-      core: coreAgent(),
+      core: coreAgentOf(ROWS),
       siblings: {
         ...Object.fromEntries(
           ROWS.filter((row) => row.key !== null).map((row) => [row.key as string, row.agent]),
@@ -362,7 +423,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       bound = await Effect.runPromise(
         serveSurfaceApp(
           servingOptions({
-            live: served,
+            handlersPerAccept: served,
             dist,
             host: bindHost,
             port,
@@ -376,7 +437,7 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
                   broker: principals,
                   mcpPath: SERVICE_MCP_PATH,
                   signInPage: () => signInPageHtml(),
-                  reservedPaths: reservedPaths(routes.layers()),
+                  reserved: reservedClaims(routes.layers()),
                 })(app),
               ),
           }),
@@ -408,22 +469,24 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     });
     return exitCodeOf(exit);
   } finally {
-    for (const stop of stopHandlers) stop();
-    await mcp?.close();
-    await metricsMounted?.drop();
-    await Effect.runPromise(Scope.close(scope, Exit.void));
-    await closeHostOnce();
-    gate.release();
+    await tearDown({
+      stopHandlers,
+      mcp,
+      metricsMounted,
+      scope,
+      closeHost: closeHostOnce,
+      gate,
+    });
   }
 }
 
 /** The daemon `odu web --background` spawns: quiet, and ended only by `drain`. */
 export async function webDaemonCommand(): Promise<number> {
-  standOnSolidGround();
+  detachFromInheritedCwd();
   const log = stderrLogger();
   return serveWebService({
     log,
-    onHeld: (pid) => {
+    onGateHeldElsewhere: (pid) => {
       log.info({ pid }, "odu web: a service is already running; yielding");
       return 0;
     },
@@ -456,11 +519,16 @@ function quietLogger(): Logger {
   };
 }
 
+function rowEventPrefix(key: string): string {
+  return `odu ${key}:`;
+}
+
 export function foregroundLogger(sink: Logger = stderrLogger()): Logger {
   return {
     debug: () => {},
     info: (fields, message, ...rest) => {
-      if (typeof message !== "string" || !message.startsWith(`odu ${CACHE_KEY}:`)) return;
+      if (typeof message !== "string") return;
+      if (!message.startsWith(rowEventPrefix(CACHE_KEY))) return;
       sink.info(fields, message, ...rest);
     },
     warn: sink.warn,
@@ -489,8 +557,8 @@ async function foregroundWeb(opts: {
   }
   return serveWebService({
     log: foregroundLogger(),
-    stopOn: ["SIGINT", "SIGTERM"],
-    onHeld: async (pid) => {
+    endingSignals: ["SIGINT", "SIGTERM"],
+    onGateHeldElsewhere: async (pid) => {
       const running = await readService(origin);
       process.stderr.write(
         running === null
@@ -568,7 +636,7 @@ function describe(outcome: Extract<EnsureOutcome, { ok: true }>): string {
 }
 
 
-function standOnSolidGround(): void {
+function detachFromInheritedCwd(): void {
   try {
     process.chdir("/");
   } catch {

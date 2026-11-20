@@ -35,28 +35,67 @@ interface Pending {
 
 export const MCP_SESSION_HEADER = "mcp-session-id";
 
+class MintedIds {
+  readonly #waiting = new Map<string, Pending>();
+  readonly #bySession = new Map<string, string>();
+  #next = 0;
+
+  mint(pending: Pending): string {
+    this.#next += 1;
+    const minted = `odu-${this.#next}`;
+    this.#waiting.set(minted, pending);
+    if (pending.session !== null) {
+      this.#bySession.set(MintedIds.#key(pending.session, pending.callerId), minted);
+    }
+    return minted;
+  }
+
+  settle(minted: string): Pending | undefined {
+    const pending = this.#waiting.get(minted);
+    if (pending === undefined) return undefined;
+    this.#waiting.delete(minted);
+    if (pending.session !== null) {
+      this.#bySession.delete(MintedIds.#key(pending.session, pending.callerId));
+    }
+    return pending;
+  }
+
+  scopedTo(session: string | null, callerId: unknown): string | undefined {
+    if (session === null) return undefined;
+    if (typeof callerId !== "string" && typeof callerId !== "number") return undefined;
+    return this.#bySession.get(MintedIds.#key(session, callerId));
+  }
+
+  drain(): ReadonlyArray<Pending> {
+    const all = [...this.#waiting.values()];
+    this.#waiting.clear();
+    this.#bySession.clear();
+    return all;
+  }
+
+  static #key(session: string, callerId: string | number): string {
+    return `${session}\0${String(callerId)}`;
+  }
+}
+
 export class RouteTransport implements Transport {
   onmessage?: <T extends JSONRPCMessage>(message: T) => void;
   onclose?: () => void;
   onerror?: (error: Error) => void;
 
-  readonly #waiting = new Map<string, Pending>();
-  readonly #byCaller = new Map<string, string>();
-  #next = 0;
+  readonly #ids = new MintedIds();
 
   async start(): Promise<void> {}
 
   async close(): Promise<void> {
-    for (const [, pending] of this.#waiting) pending.resolve(null);
-    this.#waiting.clear();
-    this.#byCaller.clear();
+    for (const pending of this.#ids.drain()) pending.resolve(null);
     this.onclose?.();
   }
 
   async send(message: JSONRPCMessage): Promise<void> {
     const id = (message as Message).id;
     if (id === undefined || id === null) return;
-    const pending = this.#settle(String(id));
+    const pending = this.#ids.settle(String(id));
     if (pending === undefined) return;
     pending.resolve({ ...(message as object), id: pending.callerId });
   }
@@ -71,36 +110,20 @@ export class RouteTransport implements Transport {
       this.#notify(message as Message, session);
       return Promise.resolve(null);
     }
-    this.#next += 1;
-    const minted = `odu-${this.#next}`;
-    const callerKey = `${session ?? ""}\0${String(id)}`;
-    return new Promise<unknown>((resolve) => {
-      this.#waiting.set(minted, { resolve, callerId: id, session });
-      if (session !== null) this.#byCaller.set(callerKey, minted);
-      const withdraw = (): void => {
-        const pending = this.#settle(minted);
-        if (pending === undefined) return;
-        this.#cancel(minted, "the caller disconnected");
-        pending.resolve(null);
-      };
-      if (ctx.signal !== undefined) {
-        if (ctx.signal.aborted) withdraw();
-        else ctx.signal.addEventListener("abort", withdraw, { once: true });
-      }
-      this.onmessage?.({ ...(message as object), id: minted } as JSONRPCMessage);
-    });
-  }
-
-  #settle(minted: string): Pending | undefined {
-    const pending = this.#waiting.get(minted);
-    if (pending === undefined) return undefined;
-    this.#waiting.delete(minted);
-    if (pending.session !== null) {
-      this.#byCaller.delete(
-        `${pending.session}\0${String(pending.callerId)}`,
-      );
+    const { promise, resolve } = Promise.withResolvers<unknown>();
+    const minted = this.#ids.mint({ resolve, callerId: id, session });
+    const withdraw = (): void => {
+      const pending = this.#ids.settle(minted);
+      if (pending === undefined) return;
+      this.#cancel(minted, "the caller disconnected");
+      pending.resolve(null);
+    };
+    if (ctx.signal !== undefined) {
+      if (ctx.signal.aborted) withdraw();
+      else ctx.signal.addEventListener("abort", withdraw, { once: true });
     }
-    return pending;
+    this.onmessage?.({ ...(message as object), id: minted } as JSONRPCMessage);
+    return promise;
   }
 
   #cancel(minted: string, reason: string): void {
@@ -117,13 +140,9 @@ export class RouteTransport implements Transport {
       return;
     }
     const params = (message as { params?: { requestId?: unknown } }).params;
-    const named = params?.requestId;
-    if (session === null || (typeof named !== "string" && typeof named !== "number")) {
-      return;
-    }
-    const minted = this.#byCaller.get(`${session}\0${String(named)}`);
+    const minted = this.#ids.scopedTo(session, params?.requestId);
     if (minted === undefined) return;
-    const pending = this.#settle(minted);
+    const pending = this.#ids.settle(minted);
     this.#cancel(minted, "the client cancelled the request");
     pending?.resolve(null);
   }
@@ -192,12 +211,27 @@ export type McpGateVerdict =
   | { ok: true }
   | { ok: false; status: number; message: string };
 
+function requiresPreflightContentType(headers: Record<string, string | undefined>): boolean {
+  const offered = (headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
+  return offered !== "application/json";
+}
+
+function originAllowed(
+  headers: Record<string, string | undefined>,
+  allowedOrigins: readonly string[],
+): boolean {
+  return isAllowedWsOrigin({
+    origin: headers["origin"],
+    host: headers["host"],
+    allowedOrigins,
+  });
+}
+
 export function gateMcpRequest(
   headers: Record<string, string | undefined>,
   allowedOrigins: readonly string[],
 ): McpGateVerdict {
-  const contentType = (headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
-  if (contentType !== "application/json") {
+  if (requiresPreflightContentType(headers)) {
     return {
       ok: false,
       status: 415,
@@ -206,13 +240,7 @@ export function gateMcpRequest(
         "something that meant to talk to odu",
     };
   }
-  if (
-    !isAllowedWsOrigin({
-      origin: headers["origin"],
-      host: headers["host"],
-      allowedOrigins,
-    })
-  ) {
+  if (!originAllowed(headers, allowedOrigins)) {
     return {
       ok: false,
       status: 403,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { SurfaceHandler, SurfaceHandlers } from "@kolu/surface/server";
+import { claimsOf } from "./reserved";
 import {
   admissionFor,
   CurrentPrincipal,
@@ -145,7 +146,7 @@ async function through(
     broker,
     mcpPath: "/mcp",
     signInPage: () => "<title>Sign in to odu</title>",
-    reservedPaths: ["/mcp", "/cache/*", "/auth/*", "/assets/*"],
+    reserved: claimsOf(["/mcp", "/cache/*", "/auth/*", "/assets/*"]),
   });
   return Effect.runPromise(
     Effect.provideService(

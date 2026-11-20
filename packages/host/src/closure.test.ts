@@ -46,13 +46,16 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
+const scriptKindFor = (fileName: string): ts.ScriptKind =>
+  fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+
 function specifiersIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
     false,
-    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    scriptKindFor(fileName),
   );
   const out: string[] = [];
   const literal = (node: ts.Node | undefined): void => {

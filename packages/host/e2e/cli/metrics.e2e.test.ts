@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
   BIG,
   buildOduBinary,
-  cleanup,
+  removeNow,
   scratchDir,
   suitePortFor,
 } from "../../../../tests/e2e/harness";
@@ -104,7 +104,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   world?.dispose();
-  for (const dir of dirs.splice(0)) cleanup(dir);
+  for (const dir of dirs.splice(0)) removeNow(dir);
 });
 
 describe("the scrape", () => {

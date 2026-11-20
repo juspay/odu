@@ -7,7 +7,7 @@ import type {
 } from "@kolu/surface-app/serve";
 import type { SurfaceDispatch } from "@kolu/surface/link";
 import { SERVICE_DOOR_PATH, SERVICE_ROWS_PATH } from "@odu/cordis/services";
-import { isReserved } from "./reserved";
+import { isReserved, type RouteClaim } from "./reserved";
 import type { SurfaceHandler, SurfaceHandlers } from "@kolu/surface/server";
 import {
   admissionFor,
@@ -20,12 +20,20 @@ import {
   type PrincipalBroker,
 } from "@odu/cordis/principal";
 
-export const IDENTITY_TAGS: Readonly<Record<string, true>> = {
+const HOST_IDENTITY_TAGS = {
   "surface/service/get": true,
   "surface/control/hello": true,
+} as const;
+
+const FRAMEWORK_RESERVED_TAGS = {
   "surface/system/live": true,
   "surface/system/identity": true,
   "surface/system/clockNow": true,
+} as const;
+
+export const IDENTITY_TAGS: Readonly<Record<string, true>> = {
+  ...HOST_IDENTITY_TAGS,
+  ...FRAMEWORK_RESERVED_TAGS,
 };
 
 export const UPGRADE_HEADERS = ["cookie", "authorization"] as const;
@@ -68,8 +76,8 @@ export function connectionLayer(
   );
 }
 
-function serves(admission: Admission, allowed: boolean): boolean {
-  if (admission.principal === null) return allowed;
+function admissionAdmits(admission: Admission, withoutPrincipal: boolean): boolean {
+  if (admission.principal === null) return withoutPrincipal;
   return admission.live();
 }
 
@@ -85,14 +93,14 @@ export function gatedHandlers(
       if (Stream.isStream(produced)) {
         return Stream.unwrap(
           Effect.map(admissionOf, (admission) =>
-            serves(admission, allowed)
+            admissionAdmits(admission, allowed)
               ? Stream.interruptWhen(produced, admission.ended)
               : Stream.die(new NoPrincipal()),
           ),
         );
       }
       return Effect.flatMap(admissionOf, (admission) =>
-        serves(admission, allowed) ? produced : Effect.die(new NoPrincipal()),
+        admissionAdmits(admission, allowed) ? produced : Effect.die(new NoPrincipal()),
       );
     };
     gated[tag] = wrapped;
@@ -151,7 +159,7 @@ export interface DoorGateOptions {
   readonly broker: PrincipalBroker;
   readonly mcpPath: string;
   readonly signInPage: () => string;
-  readonly reservedPaths: ReadonlyArray<string>;
+  readonly reserved: ReadonlyArray<RouteClaim>;
 }
 
 export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
@@ -180,7 +188,7 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
           status: 200,
           headers: { "cache-control": "no-store" },
         });
-      if (isReserved(path, options.reservedPaths)) return httpApp;
+      if (isReserved(path, options.reserved)) return httpApp;
       return Effect.succeed(signIn());
     });
 }
