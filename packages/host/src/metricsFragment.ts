@@ -1,13 +1,3 @@
-/**
- * **The authority rule is the cache row's, deliberately.** Administering a
- * daemon means the same thing whichever administrative verb you reach for: a
- * signed-in `admin` may, a signed-in `member` may not, and a caller with no
- * identity — which is every caller on a daemon with no door — presents the
- * operator's root token. Copying the rule rather than inventing a second one is
- * what makes "the root token administers this server" a sentence that stays
- * true.
- */
-
 import { Effect } from "effect";
 import type { ImplementSurfaceDeps } from "@kolu/surface/server";
 import { may, principalOf } from "@odu/cordis/principal";

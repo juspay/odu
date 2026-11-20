@@ -1,10 +1,3 @@
-/**
- * A session that ends must close the socket it was on — "the lease's end ends
- * what the lease admitted". `serveSurfaceApp` hands the app a
- * `SurfaceAppConnection` whose `close(code?, reason?)` is that call (kolu
- * PR #2330, pinned); the lease's watch calls it, once, before releasing.
- */
-
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -35,11 +28,6 @@ export const IDENTITY_TAGS: Readonly<Record<string, true>> = {
   "surface/system/clockNow": true,
 };
 
-/** The request headers a websocket connection is read under, named here because
- *  the per-connection layer's type and the listener's allowlist must agree: a
- *  browser carries a session COOKIE, and the CLI and the MCP bridge carry a
- *  personal token as `Authorization: Bearer`. Nothing else off the upgrade is
- *  reachable from the connection. */
 export const UPGRADE_HEADERS = ["cookie", "authorization"] as const;
 export type UpgradeHeader = (typeof UPGRADE_HEADERS)[number];
 
@@ -52,15 +40,6 @@ export type DoorConnection = SurfaceAppConnection<UpgradeHeader>;
  *  client redial, present the dead cookie, and land on the sign-in page. */
 const CLOSE_SESSION_ENDED = 1000;
 
-/** The admission a connection runs under, from the broker's lease.
- *
- *  ACQUISITION AND RELEASE IN ONE STEP: the lease is taken inside
- *  `Effect.acquireRelease`, the release is arranged beside it, and an
- *  interrupted bind therefore cannot leave a lease with no owner. A lease that
- *  ENDS — logout, revocation, expiry, a role change — closes the connection
- *  through the closer and then releases, in that order: the socket goes first,
- *  because a frame arriving between the two would be served on a session that
- *  is over. */
 export function connectionLayer(
   broker: PrincipalBroker,
   connection: DoorConnection,
@@ -94,12 +73,6 @@ function serves(admission: Admission, allowed: boolean): boolean {
   return admission.live();
 }
 
-/**
- * An ended session takes effect on
- * the NEXT call; a subscription that is already open is interrupted at the
- * moment it ends, which is what stops a board from being pushed to a tab whose
- * session was revoked.
- */
 export function gatedHandlers(
   handlers: SurfaceHandlers,
   alsoAllowed: ReadonlySet<string> = new Set(),
@@ -207,18 +180,6 @@ export function doorGate(options: DoorGateOptions): SurfaceAppHttpMiddleware {
           status: 200,
           headers: { "cache-control": "no-store" },
         });
-      // EVERYTHING THE DAEMON DOES NOT RESERVE IS THE SHELL, so for an
-      // anonymous connection it is the page the server renders. The reserved
-      // set is COMPOSED (`./reserved`): the host's own paths plus the claim
-      // each row registers beside its routes, so a new route cannot drift
-      // from the gate.
-      //
-      // WHY A LIST AND NOT "REPLACE THE SHELL'S ANSWER": the middleware seam
-      // runs the app and may REPLACE its response only by NOT running it. The
-      // static layer writes its own answer, so a mapped replacement is ignored
-      // (measured: a debug build logged the replaced response and the shell
-      // still went out). A short-circuit is the one mechanism the seam has, so
-      // the gate must know the boundary before the request is made.
       if (isReserved(path, options.reservedPaths)) return httpApp;
       return Effect.succeed(signIn());
     });

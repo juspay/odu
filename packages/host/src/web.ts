@@ -1,15 +1,3 @@
-/**
- * **The gate is claimed BEFORE the port is bound**, and the ordering is the one
- * thing this file must not get wrong. `daemonMain` claims the gate itself, but
- * it does so after the caller has done whatever else it needs — so a daemon
- * that bound 18440 first and then lost the gate race would have taken the port
- * from the winner. Claiming first means a loser never binds anything.
- *
- * Capture → drain → reattach, in that order:
- * nothing is killed, the running service is asked, and the caller reattaches by
- * dialling the successor.
- */
-
 import { spawnSync } from "node:child_process";
 import {
   claimPidGate,
@@ -139,21 +127,9 @@ export interface Tenure {
   stopOn?: readonly NodeJS.Signals[];
 }
 
-/**
- * The order is: gate → service runtime → HTTP/WS listener → `daemonMain` (which
- * adds the control socket and owns the tenure). Everything started here is torn
- * down in the `finally`, because this function's return is the process's last
- * act and a live handle would keep it alive after its tenure ended — the
- * lingering-daemon class.
- */
 export async function serveWebService(tenure: Tenure): Promise<number> {
-  // BEFORE ANYTHING IS CLAIMED OR BOUND. A misbuilt package must not take the
-  // singleton's gate, bind the port, and then serve an application with no page
-  // — which is exactly what the old `ODU_WEB_DIST`-absent branch did.
   assertPackaged();
   const dist = process.env.ODU_WEB_DIST as string;
-  // The origin FIRST, because the home is derived from it: one address, one
-  // gate, and never two readings of `ODU_WEB_ORIGIN` that could disagree.
   const origin = serviceOrigin();
   const home = webHome(origin);
   const { host: bindHost, port } = serviceBind(origin);
@@ -189,9 +165,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     return 1;
   }
 
-  // Claimed FIRST, so a launcher that lost the race never binds the port. The
-  // framework's own gate: one atomic link, a liveness-proved holder, and a
-  // stale gate reaped rather than waited on.
   const gate = await claimPidGate(
     home.gatePath,
     home.socketPath,
@@ -207,9 +180,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     return 1;
   }
 
-  // Ctrl-C, for a tenure that has one. Installed AFTER the gate is claimed and
-  // removed in the `finally`, so a signal can never abort a process that is not
-  // yet serving and never outlive the tenure it belongs to.
   const stopHandlers: (() => void)[] = [];
   for (const signal of tenure.stopOn ?? []) {
     const onSignal = (): void => controller.abort();
@@ -224,9 +194,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     ciRowRecord,
     cacheRowRecord(cacheStores.stores),
     ...(github.kind === "config" ? [authRowRecord(github.config)] : []),
-    // THE TUNNEL, when a token file is configured. It reacts to the cache row's
-    // published domains; the roster order is the mount order, so the cache (and
-    // its `BucketDomains` offer) is standing before this row asks for it.
     ...(cloudflare.kind === "config"
       ? [
           cloudflareRowRecord({
@@ -239,9 +206,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
         ]
       : []),
   ];
-  // THE ROOT ROW, read off its own record rather than off its POSITION: `key:
-  // null` is what makes a row the root, and a roster that grew a row above this
-  // one would otherwise hand the `/mcp` door the wrong surface as its core.
   const coreAgent = (): RowAgent => {
     const root = ROWS.find((row) => row.key === null);
     if (root === undefined) throw new Error("odu: the roster has no root row");
@@ -277,9 +241,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     const principals = localBroker({ door: hasDoor });
     const admissions = admissionStore(hasDoor ? NOBODY_ADMISSION : LOCAL_ADMISSION);
     const purges = purgeBroker();
-    // AND WHERE A RUN ASKS FOR ITS WRITE TOKEN (PLAN 4.1) — the same shape,
-    // the other direction: the runs' row asks, the cache row answers, and the
-    // runs' row is mounted first.
     const grants = grantsBroker();
     const metrics = metricsBroker();
     stopHandlers.push(
@@ -305,21 +266,11 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     await run(
       provide(host, RowContracts, () => ({
         ...Object.fromEntries(ROWS.map((row) => [row.name, row.contract])),
-        // AND THE HOST'S OWN FRAGMENT, which is mounted on every daemon. Its
-        // record carries its version, like a row's — the roster never spells
-        // one, so that a version cannot be moved here without moving it where
-        // it is declared.
         [METRICS_ROW.name]: METRICS_ROW.contract,
       })),
     );
 
-    // EVERY ROW IS A PLUGIN, and the runs' row OWNS ITS BUNDLE: its `apply`
-    // builds the runtime and `offer`s it, the cache row is held PENDING on that
-    // offer until it arrives, and mounting both + `settled` is the whole boot.
     for (const row of ROWS) await run(mountPlugin(host, row.plugin));
-    // SETTLED, not merely mounted: a row provides services its siblings may
-    // name, and mounting returns as soon as a fibre exists rather than once its
-    // `apply` has finished.
     await run(settled(host, ROWS.map((row) => row.name)));
     const report = await run(rowReport(host, ROWS.map((row) => row.name)));
     const broken = [...report].filter(([, row]) => row.state !== "running");
@@ -343,23 +294,16 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       return 1;
     }
 
-    // The runtime the runs' row offered, read once the rows have settled.
     const runtime = offered(host, Bundle);
     if (runtime === undefined) {
       process.stderr.write("odu: the ci row offered no runtime — refusing to serve\n");
       return 1;
     }
-    // THE HOST'S OWN FRAGMENT, on the bundle the runs' row offered. Dropped in
-    // the teardown below, before the host closes.
     metricsMounted = runtime.mount(
       METRICS_KEY,
       oduMetricsSurface,
       metricsFragment({ tokens: metricsTokens, rootToken }),
     );
-    // READ AT EVERY ACCEPT, not frozen at bind: `runtime.handlers` is a live
-    // getter, and a row's mount replaces the record. `serving.ts` says the
-    // generation is read at each accept for exactly this reason, so the gated
-    // record is memoised on the IDENTITY of the record it wraps.
     const anonymousTags = hasDoor ? new Set(Object.keys(AUTH_ANONYMOUS_TAGS)) : new Set<string>();
     let gated: { readonly source: SurfaceHandlers; readonly handlers: SurfaceHandlers } | null =
       null;
@@ -447,8 +391,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
 
     const exit = await daemonMain({
       home,
-      // Pre-claimed above, so the spine adopts this claim rather than racing for
-      // a second one.
       gate,
       processIdentity: selfProcessIdentity(),
       readProcessIdentity,
@@ -465,9 +407,6 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
     return exitCodeOf(exit);
   } finally {
     for (const stop of stopHandlers) stop();
-    // THE LISTENER FIRST, THEN THE ROWS: a row's cleanup closes a database and
-    // stops a poller, and doing that under a listener still accepting would
-    // answer a call out of a runtime nobody drives any more.
     await mcp?.close();
     await metricsMounted?.drop();
     await Effect.runPromise(Scope.close(scope, Exit.void));
@@ -515,10 +454,6 @@ function quietLogger(): Logger {
   };
 }
 
-/**
- * The line
- * prefix is the contract: every cache row event is prefixed with its key.
- */
 export function foregroundLogger(sink: Logger = stderrLogger()): Logger {
   return {
     debug: () => {},

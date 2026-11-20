@@ -11,8 +11,6 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned so a package arriving or leaving is
- *  a diff somebody agrees to. */
 const EXPECTED_ODU_DEPENDENCIES = [
   "@odu/auth",
   "@odu/cache",

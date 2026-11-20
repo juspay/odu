@@ -1,10 +1,3 @@
-/**
- * An inbound id is REWRITTEN
- * to one this endpoint mints and rewritten back on the way out. The caller sees
- * its own id; the transport sees a unique one; neither has to know about the
- * other.
- */
-
 import { randomUUID } from "node:crypto";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
@@ -42,12 +35,6 @@ interface Pending {
 
 export const MCP_SESSION_HEADER = "mcp-session-id";
 
-/**
- * So the id issued at `initialize` is what scopes it: a
- * client that echoes `Mcp-Session-Id` can cancel its own calls, and a client
- * that does not has its cancellation DROPPED rather than applied to whichever
- * request happened to use that number.
- */
 export class RouteTransport implements Transport {
   onmessage?: <T extends JSONRPCMessage>(message: T) => void;
   onclose?: () => void;
@@ -237,11 +224,6 @@ export function gateMcpRequest(
   return { ok: true };
 }
 
-/**
- * Merged rather than ordered: `HttpRouter` ranks by specificity, so this
- * literal path beats the shell's `GET /*` catch-all whichever way round they go
- * in.
- */
 export function mcpRoute(
   transport: RouteTransport,
   allowedOrigins: readonly string[],

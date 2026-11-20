@@ -1,9 +1,3 @@
-/**
- * The path is RESERVED (`./reserved`'s `HOST_PATHS`), so a daemon with a door
- * does not answer a scrape with its sign-in page — the route and its claim are
- * declared together here for exactly that reason.
- */
-
 import { Effect } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { EXPOSITION_CONTENT_TYPE, scrape, type MetricsSources } from "@odu/cordis/metrics";

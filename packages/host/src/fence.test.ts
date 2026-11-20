@@ -17,10 +17,6 @@ const declaration = {
     { entry: "packages/web-ui/src/main.tsx", graph: "browser" as const },
     { entry: "packages/web-ui/src/app.tsx", graph: "browser" as const },
   ],
-  // WHERE A ROW'S WORD LEGITIMATELY APPEARS OUTSIDE ITS OWN PACKAGES, and how
-  // many times. A COUNT rather than a boolean, because "it is mentioned there"
-  // and "it is mentioned there twenty-nine times" are different dependencies on
-  // the same decision.
   collisions: {
     cache: {
       "packages/cli/src/serviceMcp.ts": 2,

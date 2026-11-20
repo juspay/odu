@@ -1,12 +1,3 @@
-/**
- * So these handlers log, count, and return, and nothing here calls
- * `process.exit`.
- *
- * The handlers are installed by the
- * web service's tenure and REMOVED with it (`remove()`), so a test process and a
- * CLI command that merely links this module never acquire them.
- */
-
 import type { MetricsReading } from "@odu/cordis/metrics";
 import type { Logger } from "@kolu/surface-daemon";
 
@@ -63,10 +54,6 @@ export function causeChain(value: unknown): CauseLink[] {
   return links;
 }
 
-/**
- * Note what is NOT here: no exit, no re-throw, no rate limit that could hide the
- * second fault, and no decision about which errors "deserve" survival.
- */
 export function installUnhandledGuard(options: UnhandledGuardOptions): UnhandledGuard {
   const { log } = options;
   const tally: Record<UnhandledKind, number> = { rejection: 0, exception: 0 };

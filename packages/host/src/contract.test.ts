@@ -1,9 +1,3 @@
-/**
- * `LEDGER` holds `HOST_CONTRACT_VERSION` to a fingerprint of exactly that
- * (append-only, as every row's is);
- * the rows hold their own beside their surfaces.
- */
-
 import { describe, expect, it } from "bun:test";
 import { controlCoreSurface } from "@kolu/surface-daemon/control-core";
 import {

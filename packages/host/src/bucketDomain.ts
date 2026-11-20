@@ -1,14 +1,3 @@
-/**
- * A Cloudflare Tunnel forwards EVERY path of `cache.kolu.dev` to the daemon, so
- * whatever answers there must be chosen by `Host`, before routing: the board,
- * `/mcp`, `/auth` and `/rpc/ws` must not be reachable on a name a client was
- * told is a substituter, and a world-readable bucket page must not become a
- * door to the control plane.
- *
- * It runs OUTSIDE the door gate: an anonymous visitor to a bucket name must see
- * the bucket's page, not the server's sign-in form.
- */
-
 import { Effect } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { SurfaceAppHttpMiddleware } from "@kolu/surface-app/serve";

@@ -176,7 +176,6 @@ describe("the connection layer", () => {
     },
   });
 
-  /** The broker and the lease behind it, plus a way to end it. */
   function leased() {
     const broker = localBroker({ door: true });
     const made = makeLease(MEMBER);

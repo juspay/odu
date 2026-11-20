@@ -11,9 +11,6 @@ import type { UpgradeHeadersSource } from "@kolu/surface-app/upgrade-headers";
 type ServeRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
 
 export interface ServingParts<Svc = never, H extends string = never> {
-  /** The served generation, read at EVERY accept: the rooted runtime's served
-   *  set moves when the control sibling mounts, and a snapshot taken at bind
-   *  would serve a roster that no longer matches the handlers. */
   live: () => ServedGeneration;
   /** The built browser bundle. NOT optional: `serveSurfaceApp` treats a missing
    *  `clientDist` as "no static route" and a nonexistent one as a 404 — it will
