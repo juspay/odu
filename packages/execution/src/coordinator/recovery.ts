@@ -227,21 +227,26 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
   const live = await tryLive(handle, manifest, input, digest, markDispatch, (message) =>
     input.warn?.(message),
   );
-  if (live !== null && "partial" in live) {
+  if (live.kind === "partial") {
     return finish(
       handle,
       input,
       {
         ok: false,
         code: "partial",
-        message: live.partial,
+        message: live.message,
         suggestion: ["odu", "ci", "history", "show", "--run", input.runId],
       },
       now,
     );
   }
-  if (live !== null) {
-    return finish(handle, input, { ok: true, receipt: live, replayed: false }, now);
+  if (live.kind === "applied") {
+    return finish(
+      handle,
+      input,
+      { ok: true, receipt: live.receipt, replayed: false },
+      now,
+    );
   }
   const relaunched = await relaunch(
     handle,
@@ -287,6 +292,11 @@ function finish(
   }
   return outcome;
 }
+type LiveRetryOutcome =
+  | { kind: "applied"; receipt: RetryReceipt }
+  | { kind: "partial"; message: string }
+  | { kind: "declined" };
+
 async function tryLive(
   handle: RunHandle,
   manifest: RunManifest,
@@ -294,24 +304,26 @@ async function tryLive(
   digest: string,
   onDispatch?: (roots: readonly string[]) => void,
   warn?: (message: string) => void,
-): Promise<RetryReceipt | { partial: string } | null> {
+): Promise<LiveRetryOutcome> {
   const owner = currentOwner(handle.dir);
-  if (owner === null || owner.endpoint === null) return null;
+  if (owner === null || owner.endpoint === null) return { kind: "declined" };
   const dial = input.dial ?? dialRun;
   const dialed = await dial(owner.endpoint);
-  if (dialed === null) return null;
+  if (dialed === null) return { kind: "declined" };
   try {
     const state = await firstFrame(dialed.client.surface.nodes.get(undefined));
-    if (state === undefined || state.order.length === 0) return null;
-    if (!isSameRun(manifest, state)) return null;
+    if (state === undefined || state.order.length === 0) {
+      return { kind: "declined" };
+    }
+    if (!isSameRun(manifest, state)) return { kind: "declined" };
     let targets: string[];
     try {
       targets = resolveRerunTargets(state, input.selector);
     } catch {
-      return null;
+      return { kind: "declined" };
     }
     const roots = minimalRerunRoots(state, targets);
-    if (roots.length === 0) return null;
+    if (roots.length === 0) return { kind: "declined" };
     onDispatch?.(roots);
     const accepted: string[] = [];
     let recorded = true;
@@ -329,7 +341,8 @@ async function tryLive(
       );
       if (result.refusal === "stale_attempt") {
         return {
-          partial:
+          kind: "partial",
+          message:
             `odu: ${id} is on attempt ${result.attempt ?? "another"}, not ` +
             `${input.expectAttempt?.attempt} — this run has moved on since you read it`,
         };
@@ -339,11 +352,12 @@ async function tryLive(
         if (result.recorded !== true) recorded = false;
       }
     }
-    if (accepted.length === 0) return null;
+    if (accepted.length === 0) return { kind: "declined" };
     const declined = roots.filter((id) => !accepted.includes(id));
     if (declined.length > 0) {
       return {
-        partial:
+        kind: "partial",
+        message:
           `odu: request applied in part — ${accepted.join(", ")} was re-run, ` +
           `${declined.join(", ")} was declined by its lane. The retry did not do ` +
           "everything it was asked for.",
@@ -356,22 +370,25 @@ async function tryLive(
       );
     }
     return {
-      request_id: input.requestId ?? null,
-      mode: "live",
-      effective_run: handle.runId,
-      parent_run: null,
-      roots: accepted,
-      reset_dependants: dependantsOf(state, accepted),
-      attempts: accepted.map((node) => ({
-        node,
-        attempt: attemptsFor(handle, node).at(-1) ?? 1,
-      })),
-      scope: manifest.scope,
-      sha: manifest.sha,
-      cursor: formatCursor({
-        runId: handle.runId,
-        seq: readJournal(handle).highestSeq,
-      }),
+      kind: "applied",
+      receipt: {
+        request_id: input.requestId ?? null,
+        mode: "live",
+        effective_run: handle.runId,
+        parent_run: null,
+        roots: accepted,
+        reset_dependants: dependantsOf(state, accepted),
+        attempts: accepted.map((node) => ({
+          node,
+          attempt: attemptsFor(handle, node).at(-1) ?? 1,
+        })),
+        scope: manifest.scope,
+        sha: manifest.sha,
+        cursor: formatCursor({
+          runId: handle.runId,
+          seq: readJournal(handle).highestSeq,
+        }),
+      },
     };
   } finally {
     await dialed.close();

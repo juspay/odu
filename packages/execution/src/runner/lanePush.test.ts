@@ -131,7 +131,7 @@ const announce = (hooks: PushHooks): void => {
   hooks.say(PUSH_LINE);
 };
 
-const occurrences = (haystack: string, needle: string): number =>
+const timesIn = (haystack: string, needle: string): number =>
   haystack.split(needle).length - 1;
 
 describe("a lane node that pushes what it built", () => {
@@ -316,8 +316,8 @@ describe("a lane node that pushes what it built", () => {
       () => pusher.calls.length === 2 && last(l).nodes.build?.push?.state === "pushed",
     );
     expect(last(l).nodes.build?.status).toBe("ok");
-    expect(occurrences(await l.logOf("build", "push"), PUSH_LINE)).toBe(1);
-    expect(occurrences(await l.logOf("build"), "built")).toBe(1);
+    expect(timesIn(await l.logOf("build", "push"), PUSH_LINE)).toBe(1);
+    expect(timesIn(await l.logOf("build"), "built")).toBe(1);
   });
 
   it("has NO push step when there was nothing fresh to send", async () => {

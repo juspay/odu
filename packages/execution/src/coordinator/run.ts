@@ -92,6 +92,7 @@ import {
   type UnpostedEntry,
 } from "@odu/run-history/legacy/record";
 import {
+  type CheckoutPaths,
   checkoutPaths,
   serveSocket,
   socketLogger,
@@ -175,7 +176,7 @@ export interface RunArgs {
 }
 
 export async function ensureCheckoutFree(
-  paths: { socketPath: string; lockPath: string },
+  paths: CheckoutPaths,
   supersede: boolean,
   deps: {
     cancel?: typeof cancelRun;
@@ -230,20 +231,19 @@ export async function ensureCheckoutFree(
 
 export type ReservationState =
   | { status: "unreserved" }
-  | { status: "reserved"; seq: number; published: boolean };
+  | { status: "reserved"; seq: number; identityServed: boolean };
 
 export function shouldReclaimReservation(
   reservation: ReservationState,
-): reservation is { status: "reserved"; seq: number; published: false } {
-  return reservation.status === "reserved" && !reservation.published;
+): reservation is { status: "reserved"; seq: number; identityServed: false } {
+  return reservation.status === "reserved" && !reservation.identityServed;
 }
 
-export function applyInterruptStopWork(
-  phase: "before-settle" | "after-settle",
+export function stopWorkIfExclusivityLost(
   exclusivityLost: boolean,
   stop: () => void,
 ): void {
-  if (phase === "after-settle" || exclusivityLost) stop();
+  if (exclusivityLost) stop();
 }
 
 export function sameCommit(observed: string, expected: string): boolean {
@@ -594,7 +594,7 @@ async function orchestrate(
 
   const seq = reserveNextSeq(repoRoot, sha7);
   if (seq !== null) {
-    reservation.current = { status: "reserved", seq, published: false };
+    reservation.current = { status: "reserved", seq, identityServed: false };
   }
 
   const history = openRunHistory({
@@ -1075,7 +1075,7 @@ async function orchestrate(
     await tick();
   };
 
-  function writeTimingSidecar(state: PipelineState): void {
+  const writeTimingSidecar = (state: PipelineState): void => {
     try {
       const timingLines = projectNodes(state).map((node) => {
         const { namepath, platform } = splitFanId(node.id);
@@ -1094,7 +1094,7 @@ async function orchestrate(
       writeFileSync(timingsFile, `${timingLines.join("\n")}\n`);
     } catch {
     }
-  }
+  };
 
   shutdown = (
     code: number,
@@ -1114,14 +1114,14 @@ async function orchestrate(
       for (const lease of acquiredLeases) lease.release();
       acquiredLeases.length = 0;
     };
-    applyInterruptStopWork("before-settle", exclusivityLost, stopWork);
+    stopWorkIfExclusivityLost(exclusivityLost, stopWork);
     const interruptedState = store.get();
     info(`odu: ${reason} — finalizing posted statuses before exit`);
     for (const context of poster.pendingContexts()) {
       poster.post(interruptStatus(context, reason, sha7));
     }
     void poster.finalize().then(async (unposted) => {
-      applyInterruptStopWork("after-settle", exclusivityLost, stopWork);
+      stopWork();
       writeTimingSidecar(interruptedState);
       finalizeRunRecord(interruptedState, unposted);
       await flushToReaders();
@@ -1232,7 +1232,7 @@ async function orchestrate(
     }
   };
 
-  const pushJournalled = new Map<string, string>();
+  const lastJournalledPush = new Map<string, string>();
   const notePush = (
     id: string,
     push: NodePush | undefined,
@@ -1240,14 +1240,14 @@ async function orchestrate(
   ): void => {
     if (push === undefined) {
       updateNode(id, {}, ["push"]);
-      pushJournalled.delete(id);
+      lastJournalledPush.delete(id);
       return;
     }
     updateNode(id, { push });
     if (pushing === null) return;
     const stamp = JSON.stringify(push);
-    if (pushJournalled.get(id) === stamp) return;
-    pushJournalled.set(id, stamp);
+    if (lastJournalledPush.get(id) === stamp) return;
+    lastJournalledPush.set(id, stamp);
     if (push.state === "pushing") {
       history.pushing({
         node: id,
@@ -1484,7 +1484,7 @@ async function orchestrate(
 
   closeSocket = await serveSocket(served, socketPath, socketLogger(info));
   if (reservation.current.status === "reserved") {
-    reservation.current = { ...reservation.current, published: true };
+    reservation.current = { ...reservation.current, identityServed: true };
   }
 
   process.once("SIGINT", () => shutdown(130));

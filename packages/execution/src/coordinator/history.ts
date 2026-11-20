@@ -225,9 +225,20 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
   let resumedSinceFinalized = false;
   const open = new Map<string, OpenAttempt>();
   const highest = new Map<string, number>();
-  const said = new Map<string, { complete: boolean; reason: string | null }>();
-  const attemptKey = (node: string, attempt: number): string =>
-    `${node}#${attempt}`;
+  const logWordByAttempt = new Map<
+    string,
+    { complete: boolean; reason: string | null }
+  >();
+  const claimFirstWord = (
+    node: string,
+    attempt: number,
+    word: { complete: boolean; reason: string | null },
+  ): boolean => {
+    const key = `${node}#${attempt}`;
+    if (logWordByAttempt.has(key)) return false;
+    logWordByAttempt.set(key, word);
+    return true;
+  };
 
   const emit = (event: RunEvent): void => {
     if (fenced) return;
@@ -376,9 +387,7 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       const current = open.get(node);
       const attempt = current?.attempt ?? highest.get(node);
       if (attempt === undefined) return;
-      const key = attemptKey(node, attempt);
-      if (said.has(key)) return;
-      said.set(key, { complete, reason });
+      if (!claimFirstWord(node, attempt, { complete, reason })) return;
       emit({ kind: "log_finalized", node, attempt, bytes: 0, complete, reason });
       if (current === undefined) {
         amendSealedLog(node, attempt, complete, reason);
@@ -393,24 +402,17 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       const attempt = open.get(node)?.attempt;
       if (attempt === undefined) return;
       const held = readAttemptLog(handle, node, attempt, {}, stream)?.text ?? "";
-      if (held !== "" && held.endsWith(text)) {
-        return;
-      }
-      const overlap = longestOverlap(held, text);
-      if (overlap > 0 || held === "") {
-        appendAttemptLog(handle, node, attempt, text.slice(overlap), stream);
+      const reconciled = reconcileSnapshot(held, text);
+      if (reconciled.kind === "held") return;
+      if (reconciled.kind === "append") {
+        appendAttemptLog(handle, node, attempt, reconciled.text, stream);
         return;
       }
       writeAttemptLog(
         handle,
         node,
         attempt,
-        held === ""
-          ? text
-          :
-            "[odu] log truncated: this node's output ran ahead of the recorder" +
-              " — what follows does not continue what precedes it\n" +
-              text,
+        TRUNCATION_NOTICE + reconciled.text,
         stream,
       );
     },
@@ -494,6 +496,26 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
       }
     },
   };
+}
+
+const TRUNCATION_NOTICE =
+  "[odu] log truncated: this node's output ran ahead of the recorder" +
+  " — what follows does not continue what precedes it\n";
+
+type SnapshotReconciliation =
+  | { kind: "held" }
+  | { kind: "append"; text: string }
+  | { kind: "truncated"; text: string };
+
+function reconcileSnapshot(
+  held: string,
+  snapshot: string,
+): SnapshotReconciliation {
+  if (held !== "" && held.endsWith(snapshot)) return { kind: "held" };
+  const overlap = longestOverlap(held, snapshot);
+  if (overlap > 0 || held === "")
+    return { kind: "append", text: snapshot.slice(overlap) };
+  return { kind: "truncated", text: snapshot };
 }
 
 export function longestOverlap(held: string, snapshot: string): number {

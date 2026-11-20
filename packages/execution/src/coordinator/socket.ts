@@ -19,10 +19,12 @@ import {
 } from "@odu/run-client/dial";
 import { RUN_LOCK_PATH } from "./checkoutLock";
 
-export function checkoutPaths(repoRoot: string): {
+export interface CheckoutPaths {
   socketPath: string;
   lockPath: string;
-} {
+}
+
+export function checkoutPaths(repoRoot: string): CheckoutPaths {
   return {
     socketPath: runSocketPath(repoRoot),
     lockPath: join(repoRoot, RUN_LOCK_PATH),

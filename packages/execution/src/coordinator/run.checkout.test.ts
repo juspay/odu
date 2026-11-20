@@ -3,12 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, jest } from "bun:test";
 import {
-  applyInterruptStopWork,
   ensureCheckoutFree,
   shouldReclaimReservation,
+  stopWorkIfExclusivityLost,
 } from "./run";
 import { acquireFromPool, type ClaimResult, type LeaseIdentity } from "./lease";
-import { checkoutPaths } from "./socket";
+import { type CheckoutPaths, checkoutPaths } from "./socket";
 
 const identity: LeaseIdentity = { holder: "me@desk", run: "abc1234" };
 
@@ -17,7 +17,7 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-function checkout(): { socketPath: string; lockPath: string } {
+function checkout(): CheckoutPaths {
   const dir = mkdtempSync(join(tmpdir(), "odu-checkout-"));
   dirs.push(dir);
   return checkoutPaths(dir);
@@ -155,9 +155,9 @@ describe("lease-lost interrupt stop-work ordering", () => {
     };
 
     const exclusivityLost = true;
-    applyInterruptStopWork("before-settle", exclusivityLost, stop);
+    stopWorkIfExclusivityLost(exclusivityLost, stop);
     void settle.then(() => {
-      applyInterruptStopWork("after-settle", exclusivityLost, stop);
+      stop();
       events.push("after-settle");
     });
 
@@ -179,9 +179,9 @@ describe("lease-lost interrupt stop-work ordering", () => {
     };
 
     const exclusivityLost = false;
-    applyInterruptStopWork("before-settle", exclusivityLost, stop);
+    stopWorkIfExclusivityLost(exclusivityLost, stop);
     void settle.then(() => {
-      applyInterruptStopWork("after-settle", exclusivityLost, stop);
+      stop();
       events.push("after-settle");
     });
 
@@ -196,13 +196,21 @@ describe("lease-lost interrupt stop-work ordering", () => {
 describe("reservation reclaim — only before the identity is observable", () => {
   it("reclaims an orphan that never served (early throw)", () => {
     expect(
-      shouldReclaimReservation({ status: "reserved", seq: 1, published: false }),
+      shouldReclaimReservation({
+        status: "reserved",
+        seq: 1,
+        identityServed: false,
+      }),
     ).toBe(true);
   });
 
   it("KEEPS the sentinel once the identity was served, even if finalize failed", () => {
     expect(
-      shouldReclaimReservation({ status: "reserved", seq: 1, published: true }),
+      shouldReclaimReservation({
+        status: "reserved",
+        seq: 1,
+        identityServed: true,
+      }),
     ).toBe(false);
   });
 

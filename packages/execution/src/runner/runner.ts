@@ -51,7 +51,7 @@ export interface LaneRunner {
   dispose(): void;
 }
 
-function recipeEnv(
+function envWithoutRunToken(
   env: Readonly<Record<string, string>> | undefined,
 ): Record<string, string> {
   if (env === undefined) return {};
@@ -63,6 +63,16 @@ function recipeEnv(
   return out;
 }
 
+function stopwatch(): { restart: () => void; elapsedMs: () => number } {
+  let startedAt = Date.now();
+  return {
+    restart: () => {
+      startedAt = Date.now();
+    },
+    elapsedMs: () => Date.now() - startedAt,
+  };
+}
+
 export function createLaneRunner(
   deps: {
     pusher?: LanePusher;
@@ -72,7 +82,7 @@ export function createLaneRunner(
   const pusher = deps.pusher ?? createLanePusher();
   const stateStore = inMemoryStore<PipelineState>(EMPTY_STATE);
   const tail = createLogTail();
-  const endNodeLogs = (id: string): void => {
+  const endRecipeAndPushLogs = (id: string): void => {
     tail.end(id);
     tail.end(logStreamKey(id, "push"));
   };
@@ -82,6 +92,28 @@ export function createLaneRunner(
     venueHold?.noteActivity();
   };
   process.stdin.on("data", onStdinPulse);
+
+  let disposed = false;
+  const cleanupWorkspaceIfAllGreen = (): void => {
+    const state = getState();
+    const settledGreen =
+      state.order.length > 0 &&
+      state.order.every((id) => state.nodes[id]?.status === "ok");
+    if (settledGreen) cleanupWorkspace?.();
+  };
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    uploads.dispose();
+    process.stdin.off("data", onStdinPulse);
+    if (venueHold !== null) {
+      venueHold.release();
+      venueHold = null;
+    }
+    invocations.clear();
+    reaper.reapAllAndWaitForDeath();
+    cleanupWorkspaceIfAllGreen();
+  };
 
   const runtime = implementSurface(laneSurface, {
     cells: {
@@ -164,7 +196,7 @@ export function createLaneRunner(
           Effect.sync(() => {
             const lockPath = agentLeaseLockPath(input.lockPath);
             const own = venueHold?.probe(lockPath);
-            if (own != null) return own;
+            if (own?.kind === "busy") return { state: "busy" as const, heldBy: own.heldBy };
             return probeLocal(lockPath);
           }),
         release: () =>
@@ -189,18 +221,17 @@ export function createLaneRunner(
   const isCurrent = (id: string, inv: Invocation): boolean =>
     !disposed && invocations.get(id) === inv;
   const beginInvocation = (id: string): Invocation => {
-    supersede(id);
+    retireInvocationAndKillGroup(id);
     const inv: Invocation = { phase: "running", child: null };
     invocations.set(id, inv);
     return inv;
   };
-  function supersede(id: string): void {
+  function retireInvocationAndKillGroup(id: string): void {
     const inv = invocations.get(id);
     if (inv === undefined) return;
     invocations.delete(id);
     if (inv.child !== null) killGroup(inv.child);
   }
-  let disposed = false;
   let config: ConfigureInput | undefined;
   let workspace: string | undefined;
   let cleanupWorkspace: (() => void) | undefined;
@@ -225,6 +256,9 @@ export function createLaneRunner(
       ...cur,
       nodes: { ...cur.nodes, [id]: next },
     });
+  };
+  const resetPush = (id: string, patch: Partial<NodeState>): void => {
+    setNode(id, patch, ["push"]);
   };
 
   const configure = (input: ConfigureInput): ConfigureOutput => {
@@ -342,7 +376,7 @@ export function createLaneRunner(
         if (node === undefined || node.status !== "pending") continue;
         if (blocked(node)) {
           setNode(id, { status: "skipped" });
-          endNodeLogs(id);
+          endRecipeAndPushLogs(id);
           changed = true;
         } else if (runnable(node) && invocations.get(id)?.phase !== "running") {
           if (id === SETUP_NODE_ID) runSetup();
@@ -368,7 +402,7 @@ export function createLaneRunner(
         durationMs: Date.now() - startedAt,
       });
       inv.phase = "closed";
-      endNodeLogs(SETUP_NODE_ID);
+      endRecipeAndPushLogs(SETUP_NODE_ID);
       tick();
     };
 
@@ -434,7 +468,7 @@ export function createLaneRunner(
         detached: true,
         env: {
           ...process.env,
-          ...recipeEnv(task?.env),
+          ...envWithoutRunToken(task?.env),
         },
       },
     );
@@ -451,13 +485,17 @@ export function createLaneRunner(
     const taskEnv = task?.env;
     let closeSeen = false;
     let pushing = false;
-    let pushStartedAt = 0;
+    const pushTimer = stopwatch();
     const endLog = (): void => {
       if (inv.phase === "closed") return;
       inv.phase = "closed";
-      endNodeLogs(node.id);
+      endRecipeAndPushLogs(node.id);
     };
-    const stamp = (
+    const endLogWhenPushSettles = (): void => {
+      if (pushing) return;
+      endLog();
+    };
+    const stampAfterPush = (
       status: NodeStatus,
       exitCode: number | null,
       push: NodePush | null,
@@ -473,6 +511,20 @@ export function createLaneRunner(
       if (closeSeen) endLog();
       tick();
     };
+    const refuseToPushOutsideWorkspace = (
+      status: NodeStatus,
+      exitCode: number | null,
+      durationMs: number,
+    ): void => {
+      if (current()) {
+        tail.append(
+          node.id,
+          `\n[odu] not pushing: this recipe runs in ${task?.workdir ?? ""} ` +
+            "(set working-directory), outside the run's workspace\n",
+        );
+      }
+      stampAfterPush(status, exitCode, null, durationMs);
+    };
     const finish = (status: NodeStatus, exitCode: number | null): void => {
       // `exit` and `error` can BOTH fire for one invocation (a child that fails
       // to spawn emits no exit; one that spawns and dies emits no error), so the
@@ -484,30 +536,23 @@ export function createLaneRunner(
       const durationMs = Date.now() - startedAt;
       const pushConfig = status === "ok" ? pushConfigOf(taskEnv) : null;
       if (pushConfig === null || workspace === undefined) {
-        stamp(status, exitCode, null, durationMs);
+        stampAfterPush(status, exitCode, null, durationMs);
         return;
       }
       if (runsOutsideWorkspace(task?.workdir)) {
-        if (current()) {
-          tail.append(
-            node.id,
-            `\n[odu] not pushing: this recipe runs in ${task?.workdir ?? ""} ` +
-              "(set working-directory), outside the run's workspace\n",
-          );
-        }
-        stamp(status, exitCode, null, durationMs);
+        refuseToPushOutsideWorkspace(status, exitCode, durationMs);
         return;
       }
       const workdir = task?.workdir === undefined ? workspace : join(workspace, task.workdir);
       pushing = true;
-      pushStartedAt = Date.now();
+      pushTimer.restart();
       void pusher
         .push(workdir, pushConfig, {
           note: (line) => {
             if (current()) tail.append(node.id, `${line}\n`);
           },
           begin: () => {
-            pushStartedAt = Date.now();
+            pushTimer.restart();
             if (current()) {
               setNode(node.id, { push: { state: "pushing" }, durationMs });
             }
@@ -518,12 +563,12 @@ export function createLaneRunner(
         })
         .then((pushed) => {
           pushing = false;
-          stamp(
+          stampAfterPush(
             "ok",
             exitCode,
             pushed === null
               ? null
-              : { state: "pushed", ...pushed, durationMs: Date.now() - pushStartedAt },
+              : { state: "pushed", ...pushed, durationMs: pushTimer.elapsedMs() },
             durationMs,
           );
         })
@@ -534,10 +579,10 @@ export function createLaneRunner(
           if (current()) {
             tail.append(logStreamKey(node.id, "push"), `\n[odu] push failed: ${detail}\n`);
           }
-          stamp(
+          stampAfterPush(
             "failed",
             exitCode,
-            { state: "failed", message, durationMs: Date.now() - pushStartedAt },
+            { state: "failed", message, durationMs: pushTimer.elapsedMs() },
             durationMs,
           );
         });
@@ -557,8 +602,7 @@ export function createLaneRunner(
     child.on("close", () => {
       if (!current() || inv.phase === "closed") return;
       closeSeen = true;
-      if (pushing) return;
-      endLog();
+      endLogWhenPushSettles();
     });
   };
 
@@ -580,19 +624,15 @@ export function createLaneRunner(
       ),
     ]);
     for (const rid of toReset) {
-      supersede(rid);
+      retireInvocationAndKillGroup(rid);
       tail.reset(rid, "");
       tail.reset(logStreamKey(rid, "push"), "");
-      setNode(
-        rid,
-        {
-          status: "pending",
-          exitCode: null,
-          startedAt: null,
-          durationMs: null,
-        },
-        ["push"],
-      );
+      resetPush(rid, {
+        status: "pending",
+        exitCode: null,
+        startedAt: null,
+        durationMs: null,
+      });
     }
     tick();
     return true;
@@ -604,7 +644,7 @@ export function createLaneRunner(
     if (disposed || node === undefined) return false;
     if (node.status === "cancelled") return true;
     if (node.status !== "pending" && node.status !== "running") return false;
-    supersede(id);
+    retireInvocationAndKillGroup(id);
     const startedAt = node.startedAt;
     const durationMs =
       startedAt !== null ? Date.now() - startedAt : null;
@@ -614,28 +654,10 @@ export function createLaneRunner(
       exitCode: null,
       durationMs,
     });
-    endNodeLogs(id);
+    endRecipeAndPushLogs(id);
     tick();
     return true;
   };
-
-  function dispose(): void {
-    if (disposed) return;
-    disposed = true;
-    uploads.dispose();
-    process.stdin.off("data", onStdinPulse);
-    if (venueHold !== null) {
-      venueHold.release();
-      venueHold = null;
-    }
-    invocations.clear();
-    reaper.reapAllSync();
-    const state = getState();
-    const settledGreen =
-      state.order.length > 0 &&
-      state.order.every((id) => state.nodes[id]?.status === "ok");
-    if (settledGreen) cleanupWorkspace?.();
-  }
 
   const { group, handlers } = runtime;
 

@@ -31,13 +31,24 @@ export interface ServeTestOptions {
   onCancel?: (close: () => void) => void;
 }
 
+function deferredClose(): {
+  arm: (close: () => void) => void;
+  close: () => void;
+} {
+  let armed: (() => void) | null = null;
+  return {
+    arm: (close) => {
+      armed = close;
+    },
+    close: () => armed?.(),
+  };
+}
+
 export async function serveTestSurface(
   initial: PipelineState,
   initialHeader: RunHeader = EMPTY_HEADER,
-  opts: string | ServeTestOptions = {},
+  options: ServeTestOptions = {},
 ): Promise<TestSurface> {
-  const options: ServeTestOptions =
-    typeof opts === "string" ? { socketPath: opts } : opts;
   const pinnedSocketPath = options.socketPath;
   const store = inMemoryStore<PipelineState>(initial);
   const headerStore = inMemoryStore<RunHeader>(initialHeader);
@@ -46,7 +57,7 @@ export async function serveTestSurface(
   const nodeCancels: string[] = [];
   const laneCancels: string[] = [];
   let cancels = 0;
-  let closeListener: () => void = () => {};
+  const listener = deferredClose();
 
   const runtime = implementSurface(oduSurface, {
     cells: { nodes: { store }, header: { store: headerStore } },
@@ -72,7 +83,7 @@ export async function serveTestSurface(
         cancel: () =>
           Effect.sync(() => {
             cancels += 1;
-            options.onCancel?.(() => closeListener());
+            options.onCancel?.(() => listener.close());
             return { ok: true };
           }),
       },
@@ -89,10 +100,12 @@ export async function serveTestSurface(
 
   const dir = pinnedSocketPath ? null : mkdtempSync(join(tmpdir(), "odu-mcp-test-"));
   const socketPath = pinnedSocketPath ?? join(dir as string, "odu.sock");
-  closeListener = await serveSocket(
-    served,
-    socketPath,
-    socketLogger((line) => process.stderr.write(`${line}\n`)),
+  listener.arm(
+    await serveSocket(
+      served,
+      socketPath,
+      socketLogger((line) => process.stderr.write(`${line}\n`)),
+    ),
   );
 
   return {
@@ -106,7 +119,7 @@ export async function serveTestSurface(
     laneCancels,
     cancels: () => cancels,
     close: () => {
-      closeListener();
+      listener.close();
       if (dir !== null) rmSync(dir, { recursive: true, force: true });
     },
   };

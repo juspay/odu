@@ -98,19 +98,22 @@ const SANCTIONED = new Map<string, string>([
 const IDENT = "[A-Za-z_$][A-Za-z0-9_$]*";
 const FACE = "(?:surface|procedures)";
 const DOT = String.raw`\s*\??\.\s*`;
-const REF = `${IDENT}(?:${DOT}${IDENT}|\\([^()]*\\))*`;
+const NO_NESTED_PARENS = String.raw`[^()]*`;
+const CALL_SEGMENT = String.raw`\(${NO_NESTED_PARENS}\)`;
+const REF = `${IDENT}(?:${DOT}${IDENT}|${CALL_SEGMENT})*`;
 
 const RUN_NS = "(?:Effect|Runtime|NodeRuntime)";
+const RUN_FN_NAME = String.raw`run[A-Z][A-Za-z]*\b`;
 
-const RUN_CALL = new RegExp(`\\b${RUN_NS}\\s*\\.\\s*run[A-Z][A-Za-z]*\\s*\\(`);
+const RUN_CALL = new RegExp(`\\b${RUN_NS}\\s*\\.\\s*${RUN_FN_NAME}\\s*\\(`);
 
 const UNCALLED_RUN = new RegExp(
-  `\\b${RUN_NS}\\s*\\.\\s*run[A-Z][A-Za-z]*\\b(?!\\s*\\()`,
+  `\\b${RUN_NS}\\s*\\.\\s*${RUN_FN_NAME}(?!\\s*\\()`,
   "g",
 );
 
 const DESTRUCTURED_RUN = new RegExp(
-  `\\{[^{}]*\\brun[A-Z][A-Za-z]*\\b[^{}]*\\}\\s*=\\s*${RUN_NS}\\b`,
+  `\\{[^{}]*\\b${RUN_FN_NAME}[^{}]*\\}\\s*=\\s*${RUN_NS}\\b`,
   "g",
 );
 
@@ -218,8 +221,8 @@ const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
 
 interface Scanned {
   readonly rel: string;
-  readonly code: string;
-  readonly codeWithStrings: string;
+  readonly codeStringsBlanked: string;
+  readonly codeStringsKept: string;
 }
 
 function scannedSources(): Scanned[] {
@@ -239,8 +242,8 @@ function scannedSources(): Scanned[] {
       const source = readFileSync(join(repoRoot, rel), "utf-8");
       return {
         rel,
-        code: blankNonCode(source),
-        codeWithStrings: blankNonCode(source, true),
+        codeStringsBlanked: blankNonCode(source),
+        codeStringsKept: blankNonCode(source, true),
       };
     });
 }
@@ -257,9 +260,9 @@ describe("Effect.run* edge discipline", () => {
 
   it("runs effects only at the sanctioned boundaries", () => {
     const offenders: string[] = [];
-    for (const { rel, code } of sources()) {
+    for (const { rel, codeStringsBlanked } of sources()) {
       if (isTestFile(rel)) continue;
-      if (!RUN_CALL.test(code)) continue;
+      if (!RUN_CALL.test(codeStringsBlanked)) continue;
       if (SANCTIONED.has(rel)) continue;
       offenders.push(rel);
     }
@@ -275,12 +278,14 @@ describe("Effect.run* edge discipline", () => {
 
   it("never names a run function without calling it — an alias travels", () => {
     const offenders: string[] = [];
-    for (const { rel, code, codeWithStrings } of sources()) {
+    for (const { rel, codeStringsBlanked, codeStringsKept } of sources()) {
       for (const pattern of [UNCALLED_RUN, DESTRUCTURED_RUN])
-        for (const match of code.matchAll(pattern))
-          offenders.push(cite(rel, code, match.index, match[0]));
-      for (const match of codeWithStrings.matchAll(BARE_RUN_IMPORT))
-        offenders.push(cite(rel, codeWithStrings, match.index, match[0]));
+        for (const match of codeStringsBlanked.matchAll(pattern))
+          offenders.push(
+            cite(rel, codeStringsBlanked, match.index, match[0]),
+          );
+      for (const match of codeStringsKept.matchAll(BARE_RUN_IMPORT))
+        offenders.push(cite(rel, codeStringsKept, match.index, match[0]));
     }
     expect(
       offenders,
@@ -293,7 +298,7 @@ describe("Effect.run* edge discipline", () => {
 
   it("never `await`s or `void`s a member-face call, directly or by alias", () => {
     const offenders: string[] = [];
-    for (const { rel, code } of sources()) {
+    for (const { rel, codeStringsBlanked: code } of sources()) {
       for (const match of code.matchAll(AWAITED_FACE_CALL))
         offenders.push(cite(rel, code, match.index, match[0]));
 
@@ -334,7 +339,9 @@ describe("Effect.run* edge discipline", () => {
   });
 
   it("every sanctioned entry still runs an Effect (no dead allowances)", () => {
-    const byPath = new Map(sources().map(({ rel, code }) => [rel, code]));
+    const byPath = new Map(
+      sources().map(({ rel, codeStringsBlanked }) => [rel, codeStringsBlanked]),
+    );
     const stale: string[] = [];
     for (const rel of SANCTIONED.keys()) {
       const code = byPath.get(rel);

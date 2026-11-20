@@ -18,8 +18,9 @@ export function deadManMs(): number {
   return envNumber("ODU_LEASE_DEAD_MAN_MS", 45_000, 1_000);
 }
 
-export function maxHoldMs(): number {
-  return envNumber("ODU_LEASE_MAX_HOLD_MS", 3_600_000, 0);
+export function maxHoldMs(): number | null {
+  const configured = envNumber("ODU_LEASE_MAX_HOLD_MS", 3_600_000, 0);
+  return configured === 0 ? null : configured;
 }
 
 function envNumber(name: string, fallback: number, min: number): number {
@@ -97,7 +98,7 @@ export interface LocalHold {
   isHeld: () => boolean;
   probe: (
     lockPath: string,
-  ) => { state: "busy"; heldBy: LeaseHolder } | null;
+  ) => { kind: "busy"; heldBy: LeaseHolder } | { kind: "not-mine" };
   release: () => void;
   noteActivity: () => void;
 }
@@ -109,7 +110,7 @@ export interface ClaimLocalOpts {
   setIntervalFn?: typeof setInterval;
   clearIntervalFn?: typeof clearInterval;
   deadManMs?: number;
-  maxHoldMs?: number;
+  maxHoldMs?: number | null;
   onSelfRelease?: (reason: "dead-man" | "max-hold" | "hold-exit") => void;
 }
 
@@ -128,7 +129,7 @@ export async function claimLocal(
   const setInt = opts.setIntervalFn ?? setInterval;
   const clearInt = opts.clearIntervalFn ?? clearInterval;
   const deadMs = opts.deadManMs ?? deadManMs();
-  const maxMs = opts.maxHoldMs ?? maxHoldMs();
+  const maxMs = opts.maxHoldMs === undefined ? maxHoldMs() : opts.maxHoldMs;
 
   const holderFile = `${lockPath}.holder`;
   const run = identity.run ?? "-";
@@ -184,7 +185,7 @@ export async function claimLocal(
     const watch = setInt(() => {
       if (released) return;
       const t = now();
-      if (maxMs > 0 && t - heldSince >= maxMs) {
+      if (maxMs !== null && t - heldSince >= maxMs) {
         doRelease();
         opts.onSelfRelease?.("max-hold");
         return;
@@ -193,10 +194,10 @@ export async function claimLocal(
         doRelease();
         opts.onSelfRelease?.("dead-man");
       }
-    }, Math.min(5_000, deadMs, maxMs > 0 ? maxMs : deadMs));
+    }, Math.min(5_000, deadMs, maxMs ?? deadMs));
     watch.unref?.();
 
-    child.once("close", () => {
+    const releaseOnHoldExit = (): void => {
       if (released) return;
       released = true;
       clearInt(watch);
@@ -205,7 +206,9 @@ export async function claimLocal(
       } catch {
       }
       opts.onSelfRelease?.("hold-exit");
-    });
+    };
+
+    child.once("close", releaseOnHoldExit);
 
     return {
       status: "held",
@@ -214,9 +217,9 @@ export async function claimLocal(
         heldBy,
         isHeld: () => !released,
         probe: (requestedPath) => {
-          if (released || requestedPath !== lockPath) return null;
+          if (released || requestedPath !== lockPath) return { kind: "not-mine" };
           lastActivity = now();
-          return { state: "busy", heldBy };
+          return { kind: "busy", heldBy };
         },
         release: doRelease,
         noteActivity: () => {

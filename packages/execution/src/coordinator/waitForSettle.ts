@@ -181,8 +181,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     else opts.signal.addEventListener("abort", onCallerAbort, { once: true });
   }
 
-  /** The last frame that described a LIVE run — never a no-run frame. */
-  let lastLive: AgentNodes | undefined;
+  let lastLiveRunFrame: AgentNodes | undefined;
   // The abort verdict (timeout vs caller-cancel), reused whether the read loop
   // throws on abort or ends cleanly — B's projected `nodes` stream (over A's
   // `nodes` cell) swallows the abort and ends the iterable rather than
@@ -195,7 +194,8 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
   };
   const abortedVerdict = (): SettleVerdict => {
     const cancelled = opts.signal?.aborted === true;
-    const red = lastLive !== undefined ? agentSummary(lastLive) : emptyRed;
+    const red =
+      lastLiveRunFrame !== undefined ? agentSummary(lastLiveRunFrame) : emptyRed;
     return {
       settled: false,
       passed: false,
@@ -206,15 +206,15 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
       timed_out: !cancelled,
       cancelled,
       duration_ms: now() - started,
-      ...identityOf(lastLive),
-      unposted: debtOf(lastLive),
+      ...identityOf(lastLiveRunFrame),
+      unposted: debtOf(lastLiveRunFrame),
     };
   };
 
   const streamEndedVerdict = async (): Promise<SettleVerdict> => {
     if (controller.signal.aborted) return abortedVerdict();
     const sock = opts.socketPath ?? SOCKET_PATH;
-    if (lastLive === undefined) {
+    if (lastLiveRunFrame === undefined) {
       const dead = await deadRun(dirname(dirname(sock)), { socketPath: sock });
       if (dead !== null) throw new NoLiveRunError(describeDeadRun(dead));
       throw new NoLiveRunError(
@@ -226,8 +226,8 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     const fromRecord = recordVerdict(
       ledgerRecord(
         opts.resolveRunContext ?? gitRunContext,
-        lastLive.sha7,
-        lastLive.seq,
+        lastLiveRunFrame.sha7,
+        lastLiveRunFrame.seq,
       ),
     );
     if (fromRecord !== null) {
@@ -241,13 +241,13 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
         timed_out: false,
         cancelled: false,
         duration_ms: now() - started,
-        ...identityOf(lastLive),
+        ...identityOf(lastLiveRunFrame),
         unposted: fromRecord.unposted,
       };
     }
     const dead = await deadRun(dirname(dirname(sock)), { socketPath: sock });
     if (dead !== null) throw new NoLiveRunError(describeDeadRun(dead));
-    const red = agentSummary(lastLive);
+    const red = agentSummary(lastLiveRunFrame);
     return {
       settled: red.done,
       passed:
@@ -261,8 +261,8 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
       timed_out: false,
       cancelled: false,
       duration_ms: now() - started,
-      ...identityOf(lastLive),
-      unposted: debtOf(lastLive),
+      ...identityOf(lastLiveRunFrame),
+      unposted: debtOf(lastLiveRunFrame),
     };
   };
 
@@ -282,7 +282,7 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
         )) {
           delivered = true;
           if (!snap.run) continue;
-          lastLive = snap;
+          lastLiveRunFrame = snap;
           if (
             opts.expectedSha !== undefined &&
             !shaMatches(snap.sha7, opts.expectedSha)

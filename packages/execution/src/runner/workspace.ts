@@ -4,6 +4,29 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const SNAPSHOT_IMPORT_SCRIPT = `set -eu
+cache=$ODU_SNAPSHOT_CACHE; origin=$ODU_SNAPSHOT_ORIGIN; commit=$ODU_SNAPSHOT_COMMIT; bundle=$ODU_SNAPSHOT_BUNDLE
+if ! git -C "$cache" rev-parse --git-dir >/dev/null 2>&1; then git init --bare "$cache"; fi
+has() { git -C "$cache" cat-file -e "$1^{commit}" 2>/dev/null; }
+if has "$commit"; then
+  echo "[odu] snapshot $commit: already in object cache"
+else
+  for required in $ODU_SNAPSHOT_REQUIRES; do
+    if ! has "$required"; then
+      echo "[odu] fetching snapshot prerequisite $required from $origin (if stale, git fetch --prune origin)"
+      git -C "$cache" fetch --no-tags "$origin" "$required"
+    fi
+  done
+  if ! has "$commit"; then
+    test -n "$bundle" || { echo "snapshot $commit is not in the object cache and no bundle was uploaded"; exit 1; }
+    git -C "$cache" bundle verify "$bundle"
+    git -C "$cache" fetch --no-tags "$bundle" HEAD
+    has "$commit" || { echo "bundle did not deliver $commit"; exit 1; }
+    echo "[odu] snapshot $commit: fetched from bundle ($(wc -c < "$bundle") bytes)"
+  fi
+fi
+`;
+
 export interface WorkspaceRequest {
   origin: string;
   sha: string;
@@ -79,7 +102,7 @@ export function narrateSnapshot(
   }
 }
 
-function watch(
+function drainChildOutput(
   child: ChildProcess,
   label: string,
   onOutput: (line: string) => void,
@@ -110,7 +133,18 @@ function run(
     cwd: opts.cwd,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  return watch(child, cmd, onOutput);
+  return drainChildOutput(child, cmd, onOutput);
+}
+
+// A fresh, unique worktree name per invocation — pid alone collides when the
+// same runner process prepares the same SHA twice (a `rerun(_ci-setup)` or a
+// same-SHA retry), and `git worktree add` refuses an existing directory.
+function freshWorktreePath(slug: string, sha: string): string {
+  return join(
+    process.env.ODU_WORK_DIR ?? join(tmpdir(), "odu"),
+    slug,
+    `${sha.slice(0, 7)}-${process.pid}-${randomBytes(4).toString("hex")}`,
+  );
 }
 
 export async function prepareWorkspace(
@@ -120,14 +154,7 @@ export async function prepareWorkspace(
   const slug = slugFor(req.origin);
   const cache = objectCacheFor(req.origin);
   const commit = req.snapshot?.commit ?? req.sha;
-  // A fresh, unique worktree name per invocation — pid alone collides when the
-  // same runner process prepares the same SHA twice (a `rerun(_ci-setup)` or a
-  // same-SHA retry), and `git worktree add` refuses an existing directory.
-  const workdir = join(
-    process.env.ODU_WORK_DIR ?? join(tmpdir(), "odu"),
-    slug,
-    `${req.sha.slice(0, 7)}-${process.pid}-${randomBytes(4).toString("hex")}`,
-  );
+  const workdir = freshWorktreePath(slug, req.sha);
   const fail = (msg: string): WorkspaceResult => {
     onOutput(`[odu] _ci-setup failed: ${msg}`);
     return { ok: false, workspace: null, cleanup: () => {} };
@@ -160,28 +187,6 @@ export async function prepareWorkspace(
       ![snap.commit, ...snap.requires].every((id) => /^[0-9a-f]{40}$/.test(id))
     )
       return fail("invalid snapshot commit");
-    const script = `set -eu
-cache=$ODU_SNAPSHOT_CACHE; origin=$ODU_SNAPSHOT_ORIGIN; commit=$ODU_SNAPSHOT_COMMIT; bundle=$ODU_SNAPSHOT_BUNDLE
-if ! git -C "$cache" rev-parse --git-dir >/dev/null 2>&1; then git init --bare "$cache"; fi
-has() { git -C "$cache" cat-file -e "$1^{commit}" 2>/dev/null; }
-if has "$commit"; then
-  echo "[odu] snapshot $commit: already in object cache"
-else
-  for required in $ODU_SNAPSHOT_REQUIRES; do
-    if ! has "$required"; then
-      echo "[odu] fetching snapshot prerequisite $required from $origin (if stale, git fetch --prune origin)"
-      git -C "$cache" fetch --no-tags "$origin" "$required"
-    fi
-  done
-  if ! has "$commit"; then
-    test -n "$bundle" || { echo "snapshot $commit is not in the object cache and no bundle was uploaded"; exit 1; }
-    git -C "$cache" bundle verify "$bundle"
-    git -C "$cache" fetch --no-tags "$bundle" HEAD
-    has "$commit" || { echo "bundle did not deliver $commit"; exit 1; }
-    echo "[odu] snapshot $commit: fetched from bundle ($(wc -c < "$bundle") bytes)"
-  fi
-fi
-`;
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       ODU_SNAPSHOT_CACHE: cache,
@@ -190,17 +195,21 @@ fi
       ODU_SNAPSHOT_BUNDLE: snap.bundlePath ?? "",
       ODU_SNAPSHOT_REQUIRES: snap.requires.join(" "),
     };
-    code = await watch(
-      spawn("flock", [join(cache, "odu-fetch.lock"), "sh", "-c", script], {
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-      }),
+    code = await drainChildOutput(
+      spawn(
+        "flock",
+        [join(cache, "odu-fetch.lock"), "sh", "-c", SNAPSHOT_IMPORT_SCRIPT],
+        { env, stdio: ["ignore", "pipe", "pipe"] },
+      ),
       "flock",
       onOutput,
     );
     if (code === 127) {
-      code = await watch(
-        spawn("sh", ["-c", script], { env, stdio: ["ignore", "pipe", "pipe"] }),
+      code = await drainChildOutput(
+        spawn("sh", ["-c", SNAPSHOT_IMPORT_SCRIPT], {
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+        }),
         "sh",
         onOutput,
       );

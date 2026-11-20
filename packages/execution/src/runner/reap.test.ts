@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { describe, expect, it } from "bun:test";
 import { createGroupReaper } from "./reap";
 
-const STUBBORN = "trap '' TERM; while :; do sleep 0.05; done";
+const IGNORES_TERM_RESPAWNS_CHILDREN = "trap '' TERM; while :; do sleep 0.05; done";
 
 const spawnGroup = (script: string): ChildProcess =>
   spawn("bash", ["-c", script], { detached: true, stdio: "ignore" });
@@ -39,7 +39,7 @@ describe("group reaper", () => {
 
   it("escalates a TERM-ignoring group to SIGKILL after the grace", async () => {
     const reaper = createGroupReaper({ graceMs: 200 });
-    const child = spawnGroup(STUBBORN);
+    const child = spawnGroup(IGNORES_TERM_RESPAWNS_CHILDREN);
     const pid = child.pid as number;
     reaper.track(pid);
     reaper.reap(pid);
@@ -56,14 +56,14 @@ describe("group reaper", () => {
     expect(() => reaper.reap(pid)).not.toThrow();
   });
 
-  it("reapAllSync SIGKILLs TERM-ignoring survivors before returning", async () => {
+  it("reapAllAndWaitForDeath SIGKILLs TERM-ignoring survivors before returning", async () => {
     const reaper = createGroupReaper({ graceMs: 300 });
-    const stubborn = spawnGroup(STUBBORN);
+    const stubborn = spawnGroup(IGNORES_TERM_RESPAWNS_CHILDREN);
     const meek = spawnGroup("sleep 30");
     for (const child of [stubborn, meek]) {
       reaper.track(child.pid as number);
     }
-    reaper.reapAllSync();
+    reaper.reapAllAndWaitForDeath();
     await until(() => !alive(stubborn.pid as number));
     await until(() => !alive(meek.pid as number));
   });

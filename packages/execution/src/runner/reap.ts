@@ -1,9 +1,13 @@
 export const TERM_GRACE_MS = 2000;
 
+export interface GroupReaperOptions {
+  graceMs?: number;
+}
+
 export interface GroupReaper {
-  track(pgid: number): void;
-  reap(pgid: number): void;
-  reapAllSync(): void;
+  track(childPid: number): void;
+  reap(childPid: number): void;
+  reapAllAndWaitForDeath(): void;
 }
 
 /** Falls back to the bare pid for the sliver where the child has forked but
@@ -30,55 +34,53 @@ function signalGroup(pgid: number, signal: NodeJS.Signals): void {
   }
 }
 
-function sleepSync(ms: number): void {
+function sleepSyncOnExitPath(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-export function createGroupReaper(
-  opts: {
-    graceMs?: number;
-  } = {},
-): GroupReaper {
+export function createGroupReaper(opts: GroupReaperOptions = {}): GroupReaper {
   const graceMs = opts.graceMs ?? TERM_GRACE_MS;
-  const tracked = new Map<number, ReturnType<typeof setTimeout> | null>();
+  const tracked = new Map<
+    number,
+    { escalation: ReturnType<typeof setTimeout> } | "idle"
+  >();
 
   return {
-    track: (pgid) => {
-      if (!tracked.has(pgid)) tracked.set(pgid, null);
+    track: (childPid) => {
+      if (!tracked.has(childPid)) tracked.set(childPid, "idle");
     },
 
-    reap: (pgid) => {
-      const timer = tracked.get(pgid);
-      if (timer === undefined || timer !== null) return;
-      if (!groupAlive(pgid)) {
-        tracked.delete(pgid);
+    reap: (childPid) => {
+      if (tracked.get(childPid) !== "idle") return;
+      if (!groupAlive(childPid)) {
+        tracked.delete(childPid);
         return;
       }
-      signalGroup(pgid, "SIGTERM");
+      signalGroup(childPid, "SIGTERM");
       const escalation = setTimeout(() => {
-        if (groupAlive(pgid)) signalGroup(pgid, "SIGKILL");
-        tracked.delete(pgid);
+        if (groupAlive(childPid)) signalGroup(childPid, "SIGKILL");
+        tracked.delete(childPid);
       }, graceMs);
       escalation.unref?.();
-      tracked.set(pgid, escalation);
+      tracked.set(childPid, { escalation });
     },
 
-    reapAllSync: () => {
+    reapAllAndWaitForDeath: () => {
       const live: number[] = [];
-      for (const [pgid, timer] of tracked) {
-        if (timer !== null) clearTimeout(timer);
-        if (!groupAlive(pgid)) continue;
-        signalGroup(pgid, "SIGTERM");
-        live.push(pgid);
+      for (const [childPid, state] of tracked) {
+        if (state !== "idle") clearTimeout(state.escalation);
+        if (!groupAlive(childPid)) continue;
+        signalGroup(childPid, "SIGTERM");
+        live.push(childPid);
       }
       tracked.clear();
       let survivors = live;
       const deadline = Date.now() + graceMs;
       while (survivors.length > 0 && Date.now() < deadline) {
-        sleepSync(50);
+        sleepSyncOnExitPath(50);
         survivors = survivors.filter(groupAlive);
       }
-      for (const pgid of survivors) signalGroup(pgid, "SIGKILL");
+      for (const childPid of survivors) signalGroup(childPid, "SIGKILL");
     },
   };
 }

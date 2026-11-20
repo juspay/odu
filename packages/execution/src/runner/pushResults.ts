@@ -65,25 +65,45 @@ export interface PushedFact {
 
 export function resultPathsIn(workspace: string, storeDir: string = nixStoreDir()): string[] {
   const entries = readdirSync(workspace);
-  const prefix = storeDir.endsWith("/") ? storeDir : `${storeDir}/`;
   const resolved: string[] = [];
   for (const entry of entries.sort()) {
     if (!entry.startsWith("result")) continue;
-    const link = join(workspace, entry);
-    try {
-      const target = realpathSync(link);
-      if (!target.startsWith(prefix)) continue;
-      if (!existsSync(target)) continue;
-      if (!resolved.includes(target)) resolved.push(target);
-    } catch {
-    }
+    const target = storePathOfLink(join(workspace, entry), storeDir);
+    if (target === null || resolved.includes(target)) continue;
+    resolved.push(target);
   }
   return resolved;
 }
 
+function storePathOfLink(link: string, storeDir: string): string | null {
+  const prefix = storeDir.endsWith("/") ? storeDir : `${storeDir}/`;
+  try {
+    const target = realpathSync(link);
+    if (!target.startsWith(prefix)) return null;
+    if (!existsSync(target)) return null;
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+const DEFAULT_NIX_STORE_DIR = "/nix/store";
+
 function nixStoreDir(): string {
   const declared = process.env.NIX_STORE_DIR?.trim();
-  return declared === undefined || declared === "" ? "/nix/store" : declared;
+  return declared === undefined || declared === ""
+    ? DEFAULT_NIX_STORE_DIR
+    : declared;
+}
+
+function pathsToSend(
+  config: PushConfig,
+  found: readonly string[],
+  sent: ReadonlySet<string>,
+): string[] {
+  return config.pin === undefined
+    ? found.filter((path) => !sent.has(path))
+    : [...found];
 }
 
 export interface LanePusher {
@@ -106,6 +126,9 @@ export function createLanePusher(
 ): LanePusher {
   const send = deps.push ?? pushToCache;
   const sent = new Set<string>();
+  const rememberServed = (summary: PushSummary): void => {
+    for (const path of summary.served) sent.add(path);
+  };
 
   return {
     async push(workdir, config, hooks) {
@@ -119,8 +142,7 @@ export function createLanePusher(
         );
         return null;
       }
-      const fresh = found.filter((path) => !sent.has(path));
-      const sending = config.pin === undefined ? fresh : found;
+      const sending = pathsToSend(config, found, sent);
       if (sending.length === 0) return null;
       hooks.begin();
       hooks.say(
@@ -147,17 +169,20 @@ export function createLanePusher(
           { cause: err },
         );
       }
-      for (const path of summary.served) sent.add(path);
-      if (summary.failed > 0) {
-        throw new Error(
-          `odu: ${summary.failed} path${summary.failed === 1 ? "" : "s"} could not be ` +
-            `pushed to ${config.bucket} at ${config.origin} — ` +
-            summary.failures.map(refusalLine).join("; "),
-        );
-      }
+      rememberServed(summary);
+      assertNoFailures(summary, config);
       return { stored: summary.pushed, present: summary.alreadyPresent, bytes: summary.bytes };
     },
   };
+}
+
+function assertNoFailures(summary: PushSummary, config: PushConfig): void {
+  if (summary.failed === 0) return;
+  throw new Error(
+    `odu: ${summary.failed} path${summary.failed === 1 ? "" : "s"} could not be ` +
+      `pushed to ${config.bucket} at ${config.origin} — ` +
+      summary.failures.map(refusalLine).join("; "),
+  );
 }
 
 function refusalLine(failure: PushFailure): string {

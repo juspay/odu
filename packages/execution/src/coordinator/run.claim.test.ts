@@ -21,6 +21,9 @@ const hasJust =
   spawnSync("just", ["--version"], { encoding: "utf-8" }).status === 0;
 
 const PLATFORM = process.platform === "darwin" ? "aarch64-darwin" : "x86_64-linux";
+const UNREACHABLE_HOST = "unreachable.invalid";
+const NON_FORGE_ORIGIN = "file:///nonexistent/origin.git";
+const UNRESOLVED_FLAKE_REF = "path:/nonexistent";
 
 interface Fixture {
   dir: string;
@@ -47,21 +50,21 @@ function fixture(): string {
   );
   writeFileSync(
     join(dir, "hosts.json"),
-    JSON.stringify({ [PLATFORM]: "unreachable.invalid" }),
+    JSON.stringify({ [PLATFORM]: UNREACHABLE_HOST }),
   );
   git("init", "-q");
   git("config", "user.email", "test@example.com");
   git("config", "user.name", "test");
   git("add", "-A");
   git("commit", "-qm", "fixture");
-  git("remote", "add", "origin", "file:///nonexistent/origin.git");
+  git("remote", "add", "origin", NON_FORGE_ORIGIN);
 
   const prevCwd = process.cwd();
   const prevHosts = process.env.ODU_HOSTS;
   const prevSource = process.env.SURFACE_AGENT_FLAKE_REF;
   process.chdir(dir);
   process.env.ODU_HOSTS = join(dir, "hosts.json");
-  process.env.SURFACE_AGENT_FLAKE_REF = "path:/nonexistent";
+  process.env.SURFACE_AGENT_FLAKE_REF = UNRESOLVED_FLAKE_REF;
   open.push({
     dir,
     restore: () => {

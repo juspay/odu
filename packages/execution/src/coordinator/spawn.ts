@@ -184,7 +184,7 @@ export function survivableSpawnPlan(
   };
 }
 
-export const ODU_CHILD_ENV_KEYS: readonly string[] = [
+const SESSION_ENV = [
   "HOME",
   "PATH",
   "SHELL",
@@ -200,9 +200,9 @@ export const ODU_CHILD_ENV_KEYS: readonly string[] = [
   "XDG_CACHE_HOME",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
-  // Nix. `NIX_CONF_DIR` / `NIX_USER_CONF_FILES` are where `experimental-features`
-  // lives on a single-user install, which is what a CI runner is; `NIX_PROFILES`
-  // and `NIX_USER_PROFILE_DIR` are how such an install finds itself at all.
+] as const;
+
+const NIX_ENV = [
   "NIX_PATH",
   "NIX_REMOTE",
   "NIX_CONFIG",
@@ -215,9 +215,11 @@ export const ODU_CHILD_ENV_KEYS: readonly string[] = [
   "NIX_SSL_CERT_FILE",
   "SSL_CERT_FILE",
   "LOCALE_ARCHIVE",
-  "GH_TOKEN",
-  "GH_HOST",
-  "GH_CONFIG_DIR",
+] as const;
+
+const GH_ENV = ["GH_TOKEN", "GH_HOST", "GH_CONFIG_DIR"] as const;
+
+const ODU_ENV = [
   "ODU_HOSTS",
   "ODU_STATE_DIR",
   SURFACE_AGENT_FLAKE_REF_ENV,
@@ -227,6 +229,13 @@ export const ODU_CHILD_ENV_KEYS: readonly string[] = [
   "ODU_SNAPSHOT_MAX_BYTES",
   "ODU_SNAPSHOT_TRANSPORT",
   "ODU_NO_SYSTEMD_RUN",
+] as const;
+
+export const ODU_CHILD_ENV_KEYS: readonly string[] = [
+  ...SESSION_ENV,
+  ...NIX_ENV,
+  ...GH_ENV,
+  ...ODU_ENV,
 ];
 
 /** Pick the named variables out of an environment. An empty value is UNSET,

@@ -17,6 +17,7 @@ import { runUnary, subscribe } from "../common/effectEdge";
 import { type LaneClient, laneSurface } from "../common/laneSurface";
 import type { ResolveRunnerDrv } from "./runnerFlake";
 import { withTimeout } from "../common/withTimeout";
+import type { LogTarget } from "./nodeLogSink";
 import { localhostSpawnEnv, pinLaneFace } from "./surfaceRemoteOpts";
 
 import { uploadSnapshot, type LaneSnapshot } from "./snapshotTransport";
@@ -82,20 +83,19 @@ export function reportLogStreamDeath(opts: {
   transportDown: boolean;
   die: (error: string) => void;
   onLogFrame: (nodeId: string, frame: NodeLogFrame, stream: LogStream) => void;
-  nodeId: string;
-  stream: LogStream;
+  target: LogTarget;
   error: unknown;
 }): void {
   if (opts.silenced) return;
   const message = (opts.error as Error).message;
   if (opts.transportDown) {
-    opts.die(`log stream died (${opts.nodeId}): ${message}`);
+    opts.die(`log stream died (${opts.target.nodeId}): ${message}`);
   }
   try {
     opts.onLogFrame(
-      opts.nodeId,
+      opts.target.nodeId,
       { kind: "append", text: `\n[odu] log stream error: ${message}\n` },
-      opts.stream,
+      opts.target.stream,
     );
   } catch (err) {
     absorbSealedLogAppend(err);
@@ -251,8 +251,7 @@ export function startLane(opts: LaneOptions): Lane {
               transportDown: phase === "disconnected" || phase === "failed",
               die,
               onLogFrame: opts.onLogFrame,
-              nodeId: id,
-              stream,
+              target: { nodeId: id, stream },
               error: err,
             });
             return;

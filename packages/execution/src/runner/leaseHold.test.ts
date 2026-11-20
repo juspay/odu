@@ -60,7 +60,7 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     expect(probeLocal(lock).state).toBe("free");
     const c = await claimLocal(lock, { holder: "t@h", run: "abc#1" }, {
       nowMs: 1_000,
-      maxHoldMs: 0,
+      maxHoldMs: null,
       deadManMs: 60_000,
     });
     expect(c.status).toBe("held");
@@ -74,10 +74,10 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     });
     expect(c.hold.isHeld()).toBe(true);
     expect(c.hold.probe(lock)).toEqual({
-      state: "busy",
+      kind: "busy",
       heldBy: { holder: "t@h", run: "abc#1", sinceMs: 1_000 },
     });
-    expect(c.hold.probe(`${lock}-different`)).toBeNull();
+    expect(c.hold.probe(`${lock}-different`)).toEqual({ kind: "not-mine" });
 
     const p = probeLocal(lock);
     expect(p.state).toBe("busy");
@@ -88,7 +88,7 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
 
     c.hold.release();
     expect(c.hold.isHeld()).toBe(false);
-    expect(c.hold.probe(lock)).toBeNull();
+    expect(c.hold.probe(lock)).toEqual({ kind: "not-mine" });
     await new Promise((r) => setTimeout(r, 200));
     expect(probeLocal(lock).state).toBe("free");
   });
@@ -96,14 +96,14 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
   it("second concurrent claim is busy", async () => {
     const lock = tmpLock();
     const a = await claimLocal(lock, { holder: "a@h", run: null }, {
-      maxHoldMs: 0,
+      maxHoldMs: null,
       deadManMs: 60_000,
     });
     expect(a.status).toBe("held");
     if (a.status !== "held") return;
 
     const b = await claimLocal(lock, { holder: "b@h", run: null }, {
-      maxHoldMs: 0,
+      maxHoldMs: null,
       deadManMs: 60_000,
     });
     expect(b.status).toBe("busy");
@@ -124,7 +124,7 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
         now: () => clock,
         nowMs: clock,
         deadManMs: 45_000,
-        maxHoldMs: 0,
+        maxHoldMs: null,
         setIntervalFn: ((cb: () => void, ms: number) => {
           const id = { cb, ms, at: clock + ms };
           timers.push(id);
@@ -159,7 +159,7 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
         now: () => clock,
         nowMs: clock,
         deadManMs: 45_000,
-        maxHoldMs: 0,
+        maxHoldMs: null,
         setIntervalFn: ((cb: () => void) => {
           const id = { cb };
           timers.push(id);

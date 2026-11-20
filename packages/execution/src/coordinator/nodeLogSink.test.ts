@@ -20,7 +20,11 @@ describe("appendIfOpen", () => {
     sink.end(id);
 
     expect(() =>
-      appendIfOpen(sink, id, "log stream error: EPIPE\n"),
+      appendIfOpen(
+        sink,
+        { nodeId: id, stream: "recipe" },
+        "log stream error: EPIPE\n",
+      ),
     ).not.toThrow();
     expect(readFileSync(join(dir, logPathFor("abc1234", id)), "utf-8")).toBe(
       "hello\n",
@@ -34,7 +38,7 @@ describe("appendIfOpen", () => {
     dirs.push(dir);
     const sink = createNodeLogSink(dir, "abc1234");
     const id = "slow@x86_64-linux";
-    appendIfOpen(sink, id, "running\n");
+    appendIfOpen(sink, { nodeId: id, stream: "recipe" }, "running\n");
     expect(readFileSync(join(dir, logPathFor("abc1234", id)), "utf-8")).toBe(
       "running\n",
     );
@@ -69,8 +73,8 @@ describe("a node's two durable logs", () => {
     expect(sink.isEnded(id)).toBe(true);
     expect(sink.isEnded(id, "push")).toBe(false);
 
-    appendIfOpen(sink, id, "too late\n");
-    appendIfOpen(sink, id, "[odu] 4 paths sent\n", "push");
+    appendIfOpen(sink, { nodeId: id, stream: "recipe" }, "too late\n");
+    appendIfOpen(sink, { nodeId: id, stream: "push" }, "[odu] 4 paths sent\n");
     expect(
       readFileSync(join(dir, logPathFor("abc1234", id, "push")), "utf-8"),
     ).toBe("[odu] 4 paths sent\n");

@@ -33,6 +33,18 @@ export interface CreateLogTailResult {
   streamSource: (input: { id: string }) => Stream.Stream<NodeLogMessage>;
 }
 
+const stillEndedAfterSnapshot = (log: LogTail, endedAtSubscribe: boolean): boolean =>
+  endedAtSubscribe && log.ended;
+
+export class SealedLogAppendError extends Error {
+  constructor(readonly id: string) {
+    super(
+      `logTail: append to ${id} after its log ended — a terminal frame promises no further bytes; call reset() to re-open the log instead`,
+    );
+    this.name = "SealedLogAppendError";
+  }
+}
+
 export function createLogTail(): CreateLogTailResult {
   const logs = new Map<string, LogTail>();
   const logFor = (id: string): LogTail => {
@@ -46,11 +58,7 @@ export function createLogTail(): CreateLogTailResult {
 
   const append = (id: string, text: string): void => {
     const log = logFor(id);
-    if (log.ended) {
-      throw new Error(
-        `logTail: append to ${id} after its log ended — a terminal frame promises no further bytes; call reset() to re-open the log instead`,
-      );
-    }
+    if (log.ended) throw new SealedLogAppendError(id);
     log.buffer = clampLog(log.buffer + text);
     log.bus.publish({ kind: "append", text });
   };
@@ -83,15 +91,18 @@ export function createLogTail(): CreateLogTailResult {
       const snapshot = log.buffer;
       const alreadyEnded = log.ended;
       yield { kind: "snapshot", text: snapshot } satisfies NodeLogMessage;
-      if (alreadyEnded && log.ended) yield { kind: "end" } satisfies NodeLogMessage;
+      if (stillEndedAfterSnapshot(log, alreadyEnded))
+        yield { kind: "end" } satisfies NodeLogMessage;
       yield* deltas;
     });
 
   return { append, reset, end, isEnded, isNoopReset, streamSource };
 }
 
-export function isSealedLogAppendError(err: unknown): err is Error {
-  return err instanceof Error && err.message.includes("after its log ended");
+export function isSealedLogAppendError(
+  err: unknown,
+): err is SealedLogAppendError {
+  return err instanceof SealedLogAppendError;
 }
 
 export function absorbSealedLogAppend(err: unknown): void {

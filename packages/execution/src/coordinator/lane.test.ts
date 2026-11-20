@@ -1,10 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { SealedLogAppendError } from "../common/logTail";
 import { reportLogStreamDeath, runLaneDeath } from "./lane";
-
-const sealed = (id: string): Error =>
-  new Error(
-    `logTail: append to ${id} after its log ended — a terminal frame promises no further bytes; call reset() to re-open the log instead`,
-  );
 
 describe("runLaneDeath", () => {
   it("runs teardown and onDead even when announce throws, then propagates", () => {
@@ -80,8 +76,7 @@ describe("reportLogStreamDeath", () => {
       onLogFrame: (nodeId, frame, stream) => {
         order.push(`append:${nodeId}:${stream}:${frame.kind}`);
       },
-      nodeId: "fast",
-      stream: "push",
+      target: { nodeId: "fast", stream: "push" },
       error: new Error("EPIPE"),
     });
     expect(order).toEqual([
@@ -102,8 +97,7 @@ describe("reportLogStreamDeath", () => {
       onLogFrame: () => {
         appended = true;
       },
-      nodeId: "fast",
-      stream: "recipe",
+      target: { nodeId: "fast", stream: "recipe" },
       error: new Error("EPIPE"),
     });
     expect(died).toBe(false);
@@ -119,10 +113,9 @@ describe("reportLogStreamDeath", () => {
           throw new Error("die must not run");
         },
         onLogFrame: (nodeId) => {
-          throw sealed(nodeId);
+          throw new SealedLogAppendError(nodeId);
         },
-        nodeId: "fast",
-        stream: "recipe",
+        target: { nodeId: "fast", stream: "recipe" },
         error: new Error("EPIPE"),
       }),
     ).not.toThrow();
@@ -135,8 +128,7 @@ describe("reportLogStreamDeath", () => {
         onLogFrame: () => {
           throw new Error("handler boom");
         },
-        nodeId: "fast",
-        stream: "recipe",
+        target: { nodeId: "fast", stream: "recipe" },
         error: new Error("EPIPE"),
       }),
     ).toThrow("handler boom");
@@ -153,8 +145,7 @@ describe("reportLogStreamDeath", () => {
         onLogFrame: () => {
           throw new Error("must not run");
         },
-        nodeId: "slow",
-        stream: "recipe",
+        target: { nodeId: "slow", stream: "recipe" },
         error: new Error("EPIPE"),
       }),
     ).toThrow("onDead boom");
@@ -172,8 +163,7 @@ describe("reportLogStreamDeath", () => {
       onLogFrame: () => {
         appended = true;
       },
-      nodeId: "fast",
-      stream: "recipe",
+      target: { nodeId: "fast", stream: "recipe" },
       error: new Error("EPIPE"),
     });
     expect(died).toBe(false);

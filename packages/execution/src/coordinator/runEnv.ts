@@ -83,7 +83,7 @@ export interface ClaimVenuesOpts {
   claim?: LeaseLanesOpts["claim"];
 }
 
-function bookkeep(what: string, write: () => void, warn: Warn): void {
+function bookkeepNeverThrows(what: string, write: () => void, warn: Warn): void {
   try {
     write();
   } catch (err) {
@@ -101,7 +101,7 @@ async function withWaitingRecords<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   for (const platform of platforms) {
-    bookkeep(
+    bookkeepNeverThrows(
       `mark ${platform} waiting`,
       () =>
         upsertPlatformLease(repoRoot, platform, {
@@ -119,12 +119,25 @@ async function withWaitingRecords<T>(
     return await fn();
   } finally {
     for (const platform of platforms) {
-      bookkeep(
+      bookkeepNeverThrows(
         `clear ${platform}`,
         () => removePlatformLease(repoRoot, platform),
         warn,
       );
     }
+  }
+}
+
+async function attemptClaim(
+  claim: () => Promise<ClaimOutcome>,
+): Promise<ClaimOutcome> {
+  try {
+    return await claim();
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err : new Error(String(err)),
+    };
   }
 }
 
@@ -134,18 +147,16 @@ export async function claimVenues(
   if (opts.platforms.length === 0) {
     return { ok: true, lanes: {}, leases: [] };
   }
-  const asError = (err: unknown): Error =>
-    err instanceof Error ? err : new Error(String(err));
   const warn: Warn = (msg) => opts.onLine?.(msg, opts.platforms[0] ?? "");
-  try {
+  return await attemptClaim(async () => {
     assertLeasePools(opts.pools, opts.validatePlatforms ?? opts.platforms);
     return await withWaitingRecords(
       opts.repoRoot,
       opts.platforms,
       opts.runLabel,
       warn,
-      async (): Promise<ClaimOutcome> => {
-        try {
+      () =>
+        attemptClaim(async () => {
           const claimed = await leaseLanes({
             pools: opts.pools,
             platforms: opts.platforms,
@@ -156,14 +167,9 @@ export async function claimVenues(
             ...(opts.claim === undefined ? {} : { claim: opts.claim }),
           });
           return { ok: true, lanes: claimed.lanes, leases: claimed.leases };
-        } catch (err) {
-          return { ok: false, error: asError(err) };
-        }
-      },
+        }),
     );
-  } catch (err) {
-    return { ok: false, error: asError(err) };
-  }
+  });
 }
 
 export async function prepareVenues(

@@ -33,6 +33,14 @@ function readLockPid(lockPath: string): number | null {
   }
 }
 
+function unlinkIfOwned(lockPath: string, pid: number): void {
+  if (readLockPid(lockPath) !== pid) return;
+  try {
+    unlinkSync(lockPath);
+  } catch {
+  }
+}
+
 export function liveRunLockPid(lockPath: string): number | null {
   const pid = readLockPid(lockPath);
   if (pid === null) return null;
@@ -90,12 +98,7 @@ export function tryAcquireRunLock(lockPath: string): RunLockHandle | null {
       closeSync(fd);
     } catch {
     }
-    if (readLockPid(lockPath) === process.pid) {
-      try {
-        unlinkSync(lockPath);
-      } catch {
-      }
-    }
+    unlinkIfOwned(lockPath, process.pid);
   };
 
   process.once("exit", release);

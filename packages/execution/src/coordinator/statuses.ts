@@ -251,6 +251,17 @@ export class StatusPoster {
     }
   }
 
+  private dropStaleNonTerminalDesired(
+    context: string,
+    post: ContextPost,
+    payload: StatusPayload,
+  ): void {
+    const stale = post.desired;
+    if (stale === undefined) return;
+    if (!payloadEqual(stale, payload) && stale.state !== "pending") return;
+    this.settleDesired(context, post);
+  }
+
   post(payload: StatusPayload): void {
     if (!this.opts.enabled || this.phase === "closed") return;
     const post = this.entry(payload.context);
@@ -260,16 +271,7 @@ export class StatusPoster {
       post.confirmed !== undefined &&
       payloadEqual(post.confirmed, payload)
     ) {
-      // A terminal desired stays: it may be a failure waiting behind a
-      // redundant success re-post, and dropping that would report a red node
-      // green.
-      const stale = post.desired;
-      if (
-        stale !== undefined &&
-        (payloadEqual(stale, payload) || stale.state === "pending")
-      ) {
-        this.settleDesired(payload.context, post);
-      }
+      this.dropStaleNonTerminalDesired(payload.context, post, payload);
       return;
     }
     post.desired = payload;

@@ -60,12 +60,16 @@ export function createNodeLogSink(repoRoot: string, sha7: string): NodeLogSink {
   };
 }
 
+export interface LogTarget {
+  nodeId: string;
+  stream: LogStream;
+}
+
 export function appendIfOpen(
   sink: Pick<NodeLogSink, "append" | "isEnded">,
-  id: string,
+  target: LogTarget,
   text: string,
-  stream: LogStream = "recipe",
 ): void {
-  if (sink.isEnded(id, stream)) return;
-  sink.append(id, text, stream);
+  if (sink.isEnded(target.nodeId, target.stream)) return;
+  sink.append(target.nodeId, text, target.stream);
 }
