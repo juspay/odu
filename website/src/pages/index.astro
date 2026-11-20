@@ -7,7 +7,6 @@ import SiteChrome from "../components/SiteChrome.astro";
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const github = "https://github.com/juspay/odu";
-// The try-it command, typed once: the hero and the "Run a lane" step style its two halves apart.
 const runVerb = "nix run github:juspay/odu -- ci run";
 const runFlags = "--host x86_64-linux=localhost --no-post";
 const runCmd = `${runVerb} ${runFlags}`;

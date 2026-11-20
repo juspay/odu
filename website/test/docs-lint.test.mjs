@@ -1,6 +1,3 @@
-// There is no exemption list and no per-page override: every page is held to
-// every limit.
-
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
