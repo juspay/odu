@@ -1,8 +1,4 @@
 Feature: Reading a node's output
-  # A log is where a red run stops being a colour and becomes a diagnosis, so
-  # what is graded here is that a person can get to the RIGHT one: this node,
-  # this attempt, this part of it — and that the address they end up with is the
-  # same string an agent would echo.
 
   Scenario: Selecting a node opens its output and puts the log key in the address
     Given a settled red run of the failing fixture
@@ -47,12 +43,6 @@ Feature: Reading a node's output
     And "attempt 1" is the chosen attempt
     And the output holds "BOOM: the quick lane failed"
 
-  # THE CLOSING PAGE CARRIES UNREAD BYTES. A read is bounded, so a producer that
-  # finishes after appending more than one page hands the follower a page that
-  # says "this log can no longer grow" with output still behind it. Ending
-  # there — which the browser and the TUI both did — throws away the end of the
-  # log, which for a failure is the diagnosis. Nothing here navigates or pages:
-  # the assertion is that the final marker arrives on its own.
   Scenario: A live log that bursts past one page and closes is drained to its last line
     Given a live run of the fixture whose node bursts and then stops
     And I open that run
@@ -61,12 +51,6 @@ Feature: Reading a node's output
     And the output holds "__BURST_END__"
     And there should be no page errors
 
-  # AND THE FOLLOW SURVIVES LOSING THE WIRE. The loop used to exit on any read
-  # error, and its effect is keyed on the log key — so a reader who dropped
-  # their connection and got it back, without changing node, watched a frozen
-  # pane while the header and the board recovered around them. The producer
-  # keeps writing across the outage, so what is graded is that the missing bytes
-  # arrive and arrive ONCE.
   Scenario: Losing the connection mid-log does not stop the follow
     Given a live run of the fixture whose node bursts and then stops
     And I open that run
@@ -78,9 +62,3 @@ Feature: Reading a node's output
     Then the output holds "__BURST_END__"
     And every line of the output appears exactly once
     And the wire reads "live"
-    # NO "no page errors" here, and that is not an exemption. Taking the network
-    # away makes the browser log a failed WebSocket connection — that IS the
-    # outage this scenario arranges, reported by the browser rather than by odu.
-    # `connection.feature` leaves the step off for the same reason. What is
-    # asserted instead is that the wire came back, which is the fact that would
-    # otherwise hide behind a tolerated error.

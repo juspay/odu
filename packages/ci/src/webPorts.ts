@@ -1,36 +1,3 @@
-/**
- * HOW THE WEB FACE REACHES THE ENGINE — the ports, implemented.
- *
- * `@odu/service` owns cross-run authority and cannot import `@odu/execution`;
- * everything it must CAUSE arrives as a function type. This module is what
- * those types are bound to, and it is the only place on the web face's side of
- * the wall that knows what a coordinator is.
- *
- * The set grew from four to nine when the public commands stopped doing their
- * own work: reading a checkout's pipeline, probing the venues, taking and
- * dropping a hold, and writing a branch's ruleset are all things `odu ci dump`,
- * `odu ci graph`, `odu ci hosts`, `odu ci lease`, `odu ci release` and `odu ci
- * protect` used to do from whatever process the operator typed in. Each of
- * those has an
- * adapter of its own next door — `./pipelinePort`, `./venuePort`,
- * `./protectPort` — because each moves when a different piece of the engine
- * does; this file's job is to be the ONE list of what the service is wired to.
- *
- * It sits apart from `./web` on purpose. That file is a COMPOSITION ROOT and a
- * process lifecycle — claim the gate, bind the listener, serve, tear down — and
- * an adapter that has to reason about ownership records, run identity and
- * teardown confirmation is not lifecycle. Their reasons to change are different
- * ones: this file moves when the engine's contract does, that one when the
- * daemon's does.
- *
- * It is NOT where the cache is constructed any more: the cache is a row, it
- * constructs itself from the services the host provides, and the engine this
- * file binds has never heard of a bucket.
- *
- * The interesting half is `cancel`, and the note on {@link cancelThroughSocket}
- * is why.
- */
-
 import { existsSync } from "node:fs";
 import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -67,22 +34,8 @@ import { preparePush } from "@odu/service/pushGrant";
 const execFileAsync = promisify(execFile);
 
 /**
- * What the service can learn about a checkout without running anything.
- *
- * The live-run question is asked of the CATALOG, not of the checkout: a socket
- * file is not a run (it outlives the coordinator that made it), and the
- * ownership record is the copy a heartbeat refreshes and a clean exit clears.
- * Asking the catalog also means the answer is a run ID a caller can address,
- * rather than "something is listening over there".
- *
- * **The catalog is asked with GIT'S OWN NAME for the checkout**, not with the
- * path the caller typed. A run records `repoRoot` from the coordinator's
- * `--show-toplevel`, which is resolved; a caller's path need not be. On macOS
- * `/tmp` is a symlink to `/private/tmp`, so the two are routinely different
- * strings for one directory — and comparing them as given made a busy checkout
- * look free. The service then launched, the coordinator refused the checkout it
- * could see was busy, and the caller got `launch_failed` where the answer was
- * "that run is already there".
+ * macOS resolves `/tmp` to `/private/tmp`, so the path a caller typed and the
+ * `--show-toplevel` a run recorded are routinely two strings for one directory.
  */
 export function probeCheckout(
   checkout: string,
@@ -105,12 +58,8 @@ export function probeCheckout(
   const live = listRuns({ ...catalog, repoRoot: top.stdout.trim() }).find(
     (row) => row.liveness === "owned" && row.endpoint !== null,
   );
-  // AN EMPTY ANSWER IS NOT AN ANSWER. `git rev-parse HEAD` that exits 0 and
-  // says nothing has told us nothing, and reporting `""` as the head made the
-  // refusal downstream read "this checkout is at , not 7ba435e" — a sentence
-  // asserting a commit odu never read, seen on a loaded runner where the daemon
-  // could not get output back from its subprocesses at all. `null` is what "we
-  // do not know" looks like, and every reader already handles it.
+  // `git rev-parse HEAD` that exits 0 and says nothing has told us nothing:
+  // `null` is what "we do not know" looks like.
   const said = head.status === 0 ? head.stdout.trim() : "";
   return {
     isRepo: true,
@@ -123,12 +72,8 @@ export function probeCheckout(
 /**
  * One git command, off the event loop, as TWO shapes.
  *
- * An answer and a complaint are different things and were one field: `out`
- * held `rev-parse`'s sha on the way out and git's stderr on the way down, and
- * the EXIT CODE — the only bit that tells a plumbing command's "no" from its
- * "I could not look" — was thrown away. `merge-base --is-ancestor` exits 1 for
- * the first and 128 for the second, and a caller holding one boolean has to
- * word them the same.
+ * `merge-base --is-ancestor` exits 1 for a plumbing command's "no" and 128 for
+ * "I could not look", so the EXIT CODE is carried beside the output.
  */
 type GitRan =
   | { readonly ok: true; readonly value: string }
@@ -160,14 +105,8 @@ async function runGit(checkout: string, args: readonly string[]): Promise<GitRan
   }
 }
 
-/** What one git command may say back. Generous for a fetch's progress, far
- *  short of anything that could hold the daemon's memory. */
 const GIT_OUTPUT_MAX = 1024 * 1024;
 
-/** How much of git's own sentence a REFUSAL carries. `GIT_OUTPUT_MAX` bounds
- *  what the daemon reads; this bounds what a board row, a receipt and an
- *  agent's answer are made to hold — a megabyte of fetch progress is not a
- *  reason, and the first lines are where the reason is. */
 const GIT_SAID_MAX = 400;
 
 function gitSaid(out: string): string {
@@ -176,36 +115,12 @@ function gitSaid(out: string): string {
 }
 
 /**
- * PUT A SERVICE-SIDE CLONE ON THE BRANCH AND COMMIT A START ASKED FOR.
+ * The fetched tip is read from `FETCH_HEAD` — what THIS fetch brought back.
+ * `origin/<branch>` is the same commit in an ordinary clone and is not updated
+ * at all in one whose remote has no fetch refspec.
  *
- * Only reached when `run.start` carried a `branch` and the clone is not
- * already on the commit — a workflow handing the service the sha it has just
- * pushed, which this clone has never heard of. Four steps, and each refusal
- * is a different thing to go and do:
- *
- *   1. **Dirty is a refusal.** Tracked changes only, deliberately: a clone
- *      that has run CI is full of untracked `result` links and `.ci` records,
- *      and refusing on those would refuse every second run. Tracked edits are
- *      somebody's work and odu does not discard work it did not make.
- *   2. **`git fetch origin <branch>`**, whose tip is read from `FETCH_HEAD` —
- *      what THIS fetch brought back. `origin/<branch>` is the same commit in
- *      an ordinary clone and is not updated at all in one whose remote has no
- *      fetch refspec, which is a clone this would then move to a stale tip.
- *   3. **The commit must be ON that branch** — present after that fetch, and
- *      an ancestor of the tip. A sha from another branch, or one force-pushed
- *      away, is refused with both shas rather than checked out anyway: a run
- *      is about a commit the branch contains, and a pin written from a
- *      detached clone pins nothing. Both halves are measured — `cat-file -e`
- *      for "the fetch did not bring it", `merge-base --is-ancestor`'s exit 1
- *      for "it is not reachable" — because anything else from `merge-base`
- *      means it could not look, which is a failure and not a verdict.
- *   4. **`git checkout -B <branch> <sha>`** — the branch, pointed at that
- *      commit, and HEAD on the branch rather than detached, which is what
- *      `gitBranch` has to be able to answer for the run's pins.
- *
- * It is reached with `branch` and `sha` ALREADY held to their grammars by
- * `run.start` — a name git would read as an option never gets this far — and
- * every call that takes `--` is given it anyway.
+ * `merge-base --is-ancestor` exits 1 for "not reachable" and anything else for
+ * "could not look", so `cat-file -e` and that exit code are read apart.
  */
 export async function moveCheckout({
   checkout,
@@ -215,24 +130,14 @@ export async function moveCheckout({
   const dirty = await runGit(checkout, ["status", "--porcelain", "--untracked-files=no"]);
   if (!dirty.ok) return { kind: "failed", detail: dirty.said };
   if (dirty.value !== "") return { kind: "dirty", detail: gitSaid(dirty.value) };
-  // `--` BEFORE THE REF, wherever git takes it: the service has already held
-  // `branch` to git's own grammar, and an end-of-options marker is the second
-  // lock on the same door. `checkout -B` is the one that cannot have it — a
-  // `--` there begins PATHS, not a start-point — so that call rests on the
-  // name having been checked.
+  // `checkout -B` cannot take `--`: a `--` there begins PATHS, not a
+  // start-point.
   const fetched = await runGit(checkout, ["fetch", "origin", "--", branch]);
   if (!fetched.ok) return { kind: "fetch_failed", detail: fetched.said };
-  // NOT `fetch_failed`: the fetch landed and this is odu unable to read what
-  // it brought back, which is a different thing to go and do.
   const tip = await runGit(checkout, ["rev-parse", "FETCH_HEAD"]);
   if (!tip.ok) return { kind: "failed", detail: tip.said };
-  // IS THE COMMIT EVEN HERE? The ordinary way a caller names a sha that is
-  // not on this branch is a sha from ANOTHER branch — which the fetch above
-  // did not bring, so the object does not exist locally and `merge-base`
-  // cannot compare it. That is still the measured answer "what we fetched of
-  // this branch does not contain it", so it is `not_on_branch` and not a
-  // failure; what it must not be is `merge-base` exiting 128 and being read
-  // as a verdict.
+  // A sha from another branch is one the fetch above did not bring, so the
+  // object does not exist locally and `merge-base` cannot compare it.
   const present = await runGit(checkout, ["cat-file", "-e", `${sha}^{commit}`]);
   if (!present.ok) return { kind: "not_on_branch", tip: tip.value };
   const contains = await runGit(checkout, [
@@ -242,9 +147,6 @@ export async function moveCheckout({
     sha,
     tip.value,
   ]);
-  // EXIT 1 is git's answer "no"; anything else is git unable to look, and a
-  // refusal naming two shas would be a sentence about a comparison that never
-  // ran.
   if (!contains.ok && contains.code !== 1) {
     return { kind: "failed", detail: contains.said };
   }
@@ -257,48 +159,9 @@ export async function moveCheckout({
   return { kind: "moved", head: head.value };
 }
 
-/**
- * WHERE A CHECKOUT'S RUN PUSHES — the resolution PLAN 4.1 turns on, and the
- * one port that reads a repository's Nix configuration.
- *
- * Two steps, and the second is the whole security argument:
- *
- *   1. **The repository's own declaration.** `flake.nix`'s `nixConfig`, which
- *      a consumer already keeps because it is how it READS from the cache.
- *      Nothing else is asked of the repo — no recipe step, no token, no key.
- *      Evaluated under restraint, in a scratch environment with
- *      `restrict-eval`: see `@odu/cache/push`'s `nixEvalFlakeConfig`.
- *   2. **Which of those substituter URLs THIS DAEMON SERVES.** Asked of the
- *      cache row through `bucketAt`, which matches the URL against the set
- *      this daemon advertises and dials nothing.
- *
- * **Nothing a repository says about a cache is believed.** The first shape of
- * this asked each substituter for its `nix-cache-info` and took the grant out
- * of the `Odu-Origin` / `Odu-Bucket` lines in the body — so a flake naming an
- * attacker's host, answering with any bucket name served here, collected a
- * write token for that bucket and then had it posted to the attacker's own
- * server as a Bearer header. A URL match cannot be forged, costs no request,
- * and resolves a PRIVATE bucket (whose `nix-cache-info` is a 404 to an
- * anonymous reader) exactly as well as a public one.
- *
- * **The interim bound, until orgs land in PLAN 3.1, is the OPERATOR's.** Any
- * checkout this daemon runs can push to any bucket this daemon serves, because
- * there is no row yet that says which repository owns which bucket. That is
- * the reason `run.start` only ever reaches here for a checkout the operator
- * already handed it, and it is stated in `PLAN.md`'s `[^runpush]`, the docs
- * and the skill rather than left to be discovered.
- *
- * Two grantable caches REFUSE the run, with both URLs. A repository builds for
- * one cache; choosing between two would be this port inventing a policy, and
- * the override key stays unwritten until somebody hits the case.
- */
 export function resolvePush(
   checkout: string,
   grants: CacheGrants,
-  /** The daemon's own environment, HANDED IN — this module reads none. The
-   *  evaluator forwards only the names that LOCATE a Nix store out of it,
-   *  which is what keeps `$ODU_ROOT_TOKEN` out of reach of a
-   *  `builtins.getEnv` in somebody's `flake.nix`. */
   env: NodeJS.ProcessEnv,
 ): Promise<PushResolution> {
   return resolvePushWith(checkout, grants, (dir) =>
@@ -306,21 +169,13 @@ export function resolvePush(
   );
 }
 
-/** How many `nixConfig` substituters a resolution will look at. A flake that
- *  reads from more caches than this is not a flake; it is an argument for
- *  spending the daemon's event loop. */
 const RESOLVE_SUBSTITUTER_MAX = 16;
 
-/** The resolution, with its one reading of the world injected — the seam a
- *  suite states a flake through. */
 export async function resolvePushWith(
   checkout: string,
   grants: CacheGrants,
   readConfig: (checkout: string) => Promise<FlakeNixConfigOutcome>,
 ): Promise<PushResolution> {
-  // BEFORE THE FLAKE IS READ AT ALL. A daemon serving no cache can grant
-  // nothing, and evaluating every repository's Nix to find that out would be
-  // a cost — and an exposure — paid for an answer that is already known.
   if (!grants.serves()) {
     return { kind: "skipped", reason: "this daemon serves no cache" };
   }
@@ -329,11 +184,6 @@ export async function resolvePushWith(
   if (config.config.substituters.length === 0) {
     return { kind: "skipped", reason: "flake.nix nixConfig names no substituters" };
   }
-  // AS MANY AS A REAL FLAKE HAS, AND NO MORE. The list is a repository's, the
-  // loop below runs on the daemon's single event loop during `run.start`, and
-  // the eval's 64 KiB stdout cap is the only other bound on its length — so a
-  // branch declaring ten thousand substituters would be a repeatable way to
-  // spend the daemon's time on a question whose answer is in the first few.
   const substituters = config.config.substituters.slice(0, RESOLVE_SUBSTITUTER_MAX);
   const grantable: PushTarget[] = [];
   for (const substituter of substituters) {
@@ -343,9 +193,6 @@ export async function resolvePushWith(
       substituter: bucket.substituter,
       origin: bucket.origin,
       bucket: bucket.name,
-      // A REPOSITORY THAT CANNOT VERIFY WHAT IT READS is still worth pushing
-      // for — the bytes are correct and the next machine may trust the key —
-      // so this is a warning and never a refusal.
       keyWarning: config.config.trustedPublicKeys.includes(bucket.publicKey)
         ? null
         : `${bucket.substituter} is pushed to, but its key is missing from ` +
@@ -354,9 +201,6 @@ export async function resolvePushWith(
     });
   }
   if (grantable.length === 0) {
-    // ONE SENTENCE, and it says what odu knows: a substituter this daemon
-    // does not serve is indistinguishable here from `cache.nixos.org`, and
-    // guessing which it was would be the body-trusting resolution again.
     return {
       kind: "skipped",
       reason:
@@ -373,40 +217,20 @@ export async function resolvePushWith(
   return { kind: "target", target: grantable[0] as PushTarget };
 }
 
-/** What the web face needs from its root: the ports, and nothing else — the
- *  cache is a row that constructs itself. */
 export interface WebPorts {
   ports: ServicePorts;
 }
 
-/** An environment variable's value, or `null` when it is unset or blank. A
- *  blank `$ODU_ROOT_TOKEN=` is the same absence as no variable at all, and
- *  reading it as a real token would make an empty string a credential. */
 export function configured(value: string | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed === undefined || trimmed === "" ? null : trimmed;
 }
 
-/**
- * The ports the service is bound to — the ONE place the web face is wired to
- * the engine. Everything below this line knows what a coordinator is;
- * `@odu/service` does not.
- *
- * Nothing is read from the environment here: every fact the ports need arrives
- * from the host, which is the one place that reads one.
- */
 export function webPorts(
   grants: CacheGrants,
-  /** The daemon's environment, for the ONE thing below that needs one: the
-   *  parent environment a `flake.nix` evaluation is given a minimal slice of.
-   *  A parameter, so the sentence above stays true of this module. */
   env: NodeJS.ProcessEnv,
 ): WebPorts {
   const launcher = packagedLauncher();
-  // ONE forge for this service's life, and the SAME implementation the
-  // coordinator constructs for its statuses. Two constructions of `gh` in one
-  // product is two places a credential decision would have to be threaded
-  // through, which is exactly what the port exists to stop.
   const forge = ghForge();
   const push: PushPort = {
     resolve: (checkout) => resolvePush(checkout, grants, env),
@@ -416,21 +240,8 @@ export function webPorts(
     },
     revoke: (tokenId) => grants.revoke(tokenId),
   };
-  /**
-   * The launcher a REPLAY goes through — the same one, with the push target
-   * resolved again from the checkout it is about to run in.
-   *
-   * A replay is a new run, with a new id and a new token, and the cache its
-   * checkout reads from is a fact about the world rather than about the run
-   * being replayed. Freezing the parent's bucket into it would be the same
-   * mistake recording a resolved host pool would be, and replaying its TOKEN
-   * is not even possible: that one was revoked when the parent settled.
-   */
   const replayLauncher: typeof launcher = async (request) => {
     const prepared = await preparePush(push, request.checkout, request.runId);
-    // AMBIGUITY IS NOT A REFUSAL HERE, where a `run.start` refuses it: a
-    // replay of a recorded run must not be turned away by a fact about the
-    // world that changed after the run it replays. It runs, and says so.
     const launched =
       prepared.kind === "ambiguous"
         ? await launcher({
@@ -447,22 +258,11 @@ export function webPorts(
             pushSkipped: prepared.skipped,
             pushKeyWarning: prepared.keyWarning,
           });
-    // THE TOKEN GOES BACK when nothing was started, exactly as `run.start`
-    // does on its own failed launch: a credential with no run behind it is
-    // one that only its expiry would ever take away. The FILE the launcher
-    // wrote is the launcher's own to remove, and it does.
     const minted = prepared.kind === "prepared" ? prepared.push : null;
     if (!launched.ok && minted !== null) push.revoke(minted.tokenId);
     return launched;
   };
   const ports: ServicePorts = {
-    // The engine's `LaunchRequest` still spells the caller's inventory as the
-    // flat `hostsFile` it has always taken; the port hands it a Caller. The
-    // adaptation belongs HERE, at the root, because `@odu/service` cannot name
-    // the engine's type and `@odu/execution` cannot name the service's. The
-    // ACTOR (PLAN 4.4) is the second reading of that same caller: the
-    // principal the connection carried, flattened to the one word a manifest
-    // and a board row record.
     launch: ({ caller, ...request }) =>
       launcher({
         ...request,
@@ -486,11 +286,6 @@ export function webPorts(
     probeCheckout,
     moveCheckout,
     push,
-    // The five that made `odu ci hosts`, `odu ci lease`, `odu ci release`,
-    // `odu ci dump`, `odu ci graph` and `odu ci protect` clients of the shared
-    // authority rather than six programs doing their own work in whatever
-    // process the operator typed in. Bound by reference where the shape allows
-    // it: a lambda here would be a second place their contract could drift.
     pipeline: readPipeline,
     probeVenues,
     holdVenue,
@@ -500,14 +295,8 @@ export function webPorts(
   return { ports };
 }
 
-/** How long a whole-run cancel waits for the socket to go away before it says
- *  it does not know. Teardown finalizes posted statuses and closes lanes, so it
- *  is not instant; bounded, because a caller must eventually be answered. */
 const TEARDOWN_CONFIRM_MS = 10_000;
 
-/** Has the coordinator let go of this socket? The run surface's own documented
- *  confirmation for a cancel — the ack may never flush, the socket always
- *  goes. */
 async function socketGone(endpoint: string): Promise<boolean> {
   const dialed = await dialRun(endpoint).catch(() => null);
   if (dialed === null) return true;
@@ -515,25 +304,11 @@ async function socketGone(endpoint: string): Promise<boolean> {
   return false;
 }
 
-/**
- * Reach the coordinator serving a run and stop what the caller named — after
- * proving it is that run.
- *
- * The identity check is not a nicety. `owner.json` keeps a crashed
- * coordinator's endpoint for the ownership grace, and a checkout serves one run
- * after another on one socket path, so the window where "the address the dead
- * run recorded" and "the address the live run is on" are the same string is a
- * real one. `isSameRun` is the retry policy's own comparison, reused rather
- * than re-derived: one answer to "is this the run I mean".
- */
 async function cancelThroughSocket(
   request: CancelRequest,
 ): Promise<CancelOutcome> {
   const dispatched = await dispatchCancel(request);
   if (dispatched.kind !== "await-teardown") return dispatched;
-  // The whole-run case, and the connection is CLOSED before this: the caller
-  // confirms teardown by the socket going away, and a dial this process is
-  // still holding open is not a socket that has gone away.
   const deadline = Date.now() + TEARDOWN_CONFIRM_MS;
   for (;;) {
     if (await socketGone(request.endpoint)) {
@@ -544,8 +319,6 @@ async function cancelThroughSocket(
   }
   return dispatched.acked
     ? {
-        // It said yes. Teardown finalizes posted statuses and closes lanes, and
-        // a slow one is not a failed one.
         kind: "cancelled",
         detail: "the coordinator accepted the cancel and is still shutting down",
       }
@@ -557,8 +330,6 @@ async function cancelThroughSocket(
       };
 }
 
-/** Dial, prove it is the right run, mutate, and let go. `await-teardown` is the
- *  whole-run arm, which cannot be settled from this side of the connection. */
 async function dispatchCancel({
   endpoint,
   runId,
@@ -568,8 +339,6 @@ async function dispatchCancel({
   CancelOutcome | { kind: "await-teardown"; acked: boolean }
 > {
   const dialed = await dialRun(endpoint);
-  // Nothing serving that path. An ANSWER, not a failure: the run the caller
-  // named has no coordinator to stop, and saying so beats a cheerful ok.
   if (dialed === null) {
     return { kind: "declined", detail: "nothing is serving this run's socket" };
   }
@@ -586,10 +355,6 @@ async function dispatchCancel({
     }
     switch (scope.kind) {
       case "run": {
-        // The reply may never arrive: this call routes into the same teardown a
-        // SIGINT takes, and the coordinator may exit before it flushes. So the
-        // ack is not what is believed — the socket is — and this arm carries the
-        // ack out only as a tiebreaker for the case where the socket stays up.
         const acked = await runUnary(dialed.client.surface.run.cancel({}))
           .then(() => true)
           .catch(() => false);
@@ -619,9 +384,6 @@ async function dispatchCancel({
       }
     }
   } catch (err) {
-    // A node or lane cancel whose reply was lost. Those do NOT tear the socket
-    // down, so there is no second signal to confirm them by — and a mutation
-    // with no confirmation is exactly what `unresolved` is for.
     return {
       kind: "unresolved",
       detail: `the call to the coordinator failed — ${errorMessage(err)}`,

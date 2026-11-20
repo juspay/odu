@@ -1,27 +1,3 @@
-/**
- * THE VENUE PORTS — the refusals, and the one invariant the move broke if it
- * broke anything.
- *
- * Two things are worth a suite here.
- *
- * The first is the refusal shape. "No hosts are configured" and "every host is
- * busy" are the same empty table and opposite actions — write a hosts file
- * versus wait — so the first is `ok: false` and the second is `ok: true` with
- * no free row. A face that got an empty list for both would tell an operator to
- * wait for machines that do not exist.
- *
- * The second is the one this PR actually put at risk. `odu ci lease` used to
- * fork its holder from the operator's shell; through the service the holder is
- * the DAEMON's child, so `holderPid` in `.ci/odu-lease.json` is now a pid in a
- * different process tree. Three readers depend on that pid — `pidAlive`,
- * `heldHostForPlatform` (which the COORDINATOR consults at run time to consume
- * an agent's hold) and `releaseVenues` — and all three would have failed
- * silently, as "your hold vanished", if that pid had stopped meaning anything.
- * The tests below use a real, unrelated child process for exactly that reason:
- * a pid this test's own tree did not parent is the case that matters, and
- * `process.pid` would have proved nothing.
- */
-
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -42,11 +18,6 @@ const BUILD_WAS = {
   SURFACE_AGENT_FLAKE_REF: process.env.SURFACE_AGENT_FLAKE_REF,
 };
 
-// The probe refuses a coordinator whose wrapper baked no agent source as a
-// MISBUILT PACKAGE rather than a mode. A real `odu` carries one baked onto its
-// wrapper; a bun test process does not, so the suite supplies one. The source
-// deliberately does not exist: nothing below is meant to provision, and a
-// pointer that resolves would let a slip reach the network.
 process.env.SURFACE_AGENT_FLAKE_REF = "path:/nonexistent";
 
 afterEach(() => {
@@ -65,8 +36,6 @@ afterAll(() => {
   }
 });
 
-/** Point `loadHosts` at exactly this inventory, hermetically — the dev
- *  machine's own `~/.config/odu/hosts.json` must never decide a test. */
 function hosts(config: Record<string, unknown>): string {
   const dir = mkdtempSync(join(tmpdir(), "odu-venue-hosts-"));
   trash.push(dir);
@@ -82,11 +51,6 @@ function checkout(): string {
   return dir;
 }
 
-/**
- * A live process this test did not fork from itself in any meaningful sense —
- * the stand-in for a holder the daemon parented. It is a real pid: `pidAlive`
- * signals it, and `releaseVenues` can actually kill it.
- */
 function stranger(): number {
   const child = spawn("sh", ["-c", "sleep 60"], { stdio: "ignore" });
   strays.push(child);
@@ -94,9 +58,6 @@ function stranger(): number {
   return child.pid;
 }
 
-/** Write `.ci/odu-lease.json` by hand, in the format and at the location the
- *  holder, the coordinator and `odu ci release` all already agree on — which
- *  this change deliberately did not move. */
 function writeRecord(
   repoRoot: string,
   record: Record<string, PlatformLeaseRecord>,
@@ -107,8 +68,6 @@ function writeRecord(
 
 describe("probeVenues", () => {
   it("REFUSES an inventory of nothing, naming the file that decided it", async () => {
-    // Not `ok: true` with zero rows: a face showing an empty table would tell
-    // the operator to wait for machines nobody has declared.
     const file = hosts({});
     const outcome = await probeVenues({ platforms: [], caller: { hostsFile: null, principal: LOCAL_OWNER } });
     expect(outcome.ok).toBe(false);
@@ -126,20 +85,13 @@ describe("probeVenues", () => {
     expect(outcome.rows).toHaveLength(1);
     const row = outcome.rows[0];
     expect(row?.platform).toBe("x86_64-linux");
-    // A local venue is never leased — the checkout socket already serializes
-    // local runs — so it reports `local` rather than free or busy.
     expect(row?.state).toBe("local");
     expect(row?.heldBy).toBeNull();
-    // Known to be fine, not "no error field": absence and zero stay apart.
     expect(row?.error).toBeNull();
     expect(row?.slots).toBe(1);
   });
 
   it("reports a mixed pool as a WARNING and still answers", async () => {
-    // juspay/odu#66: refusing here would refuse an inventory over a pool the
-    // operator is not running. It is this view's business to report the rule,
-    // not to enforce it — and through the service the report cannot be stderr,
-    // because there is no terminal attached to a browser.
     const file = hosts({ "x86_64-linux": ["localhost", "nope.invalid"] });
     const outcome = await probeVenues({ platforms: [], caller: { hostsFile: null, principal: LOCAL_OWNER } });
     if (!outcome.ok) throw new Error(outcome.message);
@@ -150,10 +102,6 @@ describe("probeVenues", () => {
   });
 
   it("says `down`, not `unreachable`, and keeps the probe's own sentence", async () => {
-    // The rename `odu ci hosts` has always made, carried into the port rather
-    // repeated at each face — three faces choosing three words for one state is
-    // how a vocabulary stops being shared. Nothing is lost by the shorter
-    // label: `error` on the same row is where the reason lives.
     hosts({ "x86_64-linux": "nope.invalid" });
     const outcome = await probeVenues({ platforms: [], caller: { hostsFile: null, principal: LOCAL_OWNER } });
     if (!outcome.ok) throw new Error(outcome.message);
@@ -164,10 +112,6 @@ describe("probeVenues", () => {
   });
 
   it("dials only the platforms asked for, and leaves the rest alone", async () => {
-    // The filter has to bite BEFORE the dial, not after: a probe ssh's every
-    // machine, so filtering the rows afterwards would still cost the round trip
-    // this exists to avoid. `nope.invalid` is unreachable and would show as a
-    // `down` row if it had been probed at all — its absence is the assertion.
     hosts({ "x86_64-linux": "localhost", "aarch64-darwin": "nope.invalid" });
     const outcome = await probeVenues({ platforms: ["x86_64-linux"], caller: { hostsFile: null, principal: LOCAL_OWNER } });
     if (!outcome.ok) throw new Error(outcome.message);
@@ -177,8 +121,6 @@ describe("probeVenues", () => {
   });
 
   it("REFUSES when nothing the caller named is configured, listing what is", async () => {
-    // A typo must not read as an empty fleet: zero rows cannot say whether the
-    // machines are missing or the name is, and the two have opposite fixes.
     hosts({ "x86_64-linux": "localhost" });
     const outcome = await probeVenues({ platforms: ["x86_54-linux"], caller: { hostsFile: null, principal: LOCAL_OWNER } });
     expect(outcome.ok).toBe(false);
@@ -188,8 +130,6 @@ describe("probeVenues", () => {
   });
 
   it("answers the answerable part when only SOME named platforms exist", async () => {
-    // Refusing the whole request over one typo would throw away an answer the
-    // caller can use; a warning names the part that went unprobed.
     hosts({ "x86_64-linux": "localhost" });
     const outcome = await probeVenues({
       platforms: ["x86_64-linux", "riscv64-linux"], caller: { hostsFile: null, principal: LOCAL_OWNER },
@@ -211,15 +151,11 @@ describe("holdVenue", () => {
     });
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
-    // The engine's own sentence — it knows the platform has no host and what
-    // the operator can pass instead; this layer only has to not swallow it.
     expect(outcome.message).toContain("aarch64-darwin");
     expect(outcome.message).toContain("--host");
   });
 
   it("refuses an empty inventory rather than holding nothing successfully", async () => {
-    // `{ ok: true, results: [] }` would read to a face as "held everything you
-    // asked for", which is exactly true and completely wrong.
     const file = hosts({});
     const outcome = await holdVenue({
       checkout: checkout(),
@@ -233,11 +169,6 @@ describe("holdVenue", () => {
   });
 
   it("sees a hold whose holder is in ANOTHER process tree, and spawns nothing", async () => {
-    // The daemon-parenting change in one assertion. The record names a pid this
-    // process did not fork; `heldHostForPlatform` must still read it as held,
-    // or every hold taken through the service would look vanished to the very
-    // next caller — and to the coordinator, which consults the same function
-    // at run time to consume the hold.
     hosts({ "x86_64-linux": "some-box" });
     const repo = checkout();
     const pid = stranger();
@@ -263,16 +194,12 @@ describe("holdVenue", () => {
     expect(result?.status).toBe("already");
     expect(result?.host).toBe("some-box");
     expect(result?.holderPid).toBe(pid);
-    // The record is untouched — asking for a hold you already have must not
-    // fork a second holder onto the same box.
     expect(readLeaseRecord(repo)["x86_64-linux"]?.holderPid).toBe(pid);
   });
 });
 
 describe("releaseVenue", () => {
   it("answers `nothing` for a checkout that holds nothing", async () => {
-    // No refusal arm on purpose: releasing what is not held is what a caller
-    // who lost the first reply will do, and it must be safe.
     const { results } = await releaseVenue({
       checkout: checkout(),
       platforms: ["x86_64-linux"], caller: { hostsFile: null, principal: LOCAL_OWNER },
@@ -301,8 +228,6 @@ describe("releaseVenue", () => {
     expect(results[0]?.effective).toBe("released");
     expect(results[0]?.host).toBe("some-box");
     expect(results[0]?.detail).toContain(String(pid));
-    // Our side of the record goes whatever the holder does, so a second release
-    // is a no-op rather than a second signal at a recycled pid.
     expect(readLeaseRecord(repo)["x86_64-linux"]).toBeUndefined();
   });
 
@@ -327,8 +252,6 @@ describe("releaseVenue", () => {
       platforms: ["x86_64-linux"], caller: { hostsFile: null, principal: LOCAL_OWNER },
     });
     expect(results).toHaveLength(1);
-    // NOT `released`: nothing was holding, so nothing was let go. Saying
-    // `released` would tell an operator a box came free that never was.
     expect(results[0]?.effective).toBe("nothing");
     expect(readLeaseRecord(repo)["x86_64-linux"]).toBeUndefined();
   });

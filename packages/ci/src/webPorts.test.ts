@@ -1,16 +1,7 @@
 /**
- * WHAT THE SERVICE SEES WHEN IT LOOKS AT A CHECKOUT.
- *
- * One property, and it is the one that only shows up on somebody else's
- * machine: a path is not a directory's identity. macOS resolves `/tmp` to
- * `/private/tmp`, so the string a caller types and the string a run records for
- * the same directory routinely differ — and comparing them as given made a busy
- * checkout look free, launched a second coordinator into it, and turned "that
- * run is already there" into `launch_failed`.
- *
- * It cost two CI cycles to find because Linux has no such symlink, which is
- * exactly why the test builds one rather than trusting the platform to provide
- * it.
+ * macOS resolves `/tmp` to `/private/tmp`, so the string a caller types and the
+ * string a run records for the same directory routinely differ. Linux has no
+ * such symlink, which is why this test builds one.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -26,7 +17,6 @@ afterEach(() => {
   for (const dir of trash.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A git repo at a REAL path, plus a symlink that names the same directory. */
 function checkout(): { real: string; linked: string; sha: string } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "odu-probe-")));
   trash.push(root);
@@ -48,7 +38,6 @@ function checkout(): { real: string; linked: string; sha: string } {
   return { real, linked, sha };
 }
 
-/** A registered, still-owned run in a throwaway catalog. */
 function liveRun(repoRoot: string, sha: string): { root: string; runId: string } {
   const root = mkdtempSync(join(tmpdir(), "odu-probe-catalog-"));
   trash.push(root);
@@ -76,8 +65,6 @@ function liveRun(repoRoot: string, sha: string): { root: string; runId: string }
 
 describe("probeCheckout", () => {
   it("finds the live run when the caller names the checkout by a SYMLINK", () => {
-    // The run recorded git's resolved toplevel. The caller typed the link.
-    // Same directory, two strings.
     const repo = checkout();
     const catalog = liveRun(repo.real, repo.sha);
     const facts = probeCheckout(repo.linked, { root: catalog.root });

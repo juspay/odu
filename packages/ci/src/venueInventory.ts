@@ -1,15 +1,3 @@
-/**
- * THE INVENTORY behind `odu ci hosts` — every configured machine and whether
- * its venue lock is free or held (and by whom). Dials odu-runner on each host
- * (surface-remote) and calls `lease.probe`; does not acquire.
- *
- * It RETURNS the inventory rather than printing it, and that is the whole
- * change: `odu ci hosts` is a public command, so its answer comes from the
- * shared service, and a function whose only output was `process.stdout` could
- * be called by exactly one face. The table an operator reads is now rendered by
- * whichever face asked — `@odu/cli`'s terminal projection, or a browser.
- */
-
 import { asHostSlot, type HostPool, loadHosts } from "@odu/execution/coordinator/hosts";
 import {
   isMixedPool,
@@ -26,17 +14,6 @@ import type {
   VenueRowFacts,
 } from "@odu/service/ports";
 
-/**
- * The wire says `unreachable`; the port says `down`.
- *
- * This rename is not new — `odu ci hosts` has printed `down` since it had a
- * STATE column, because the column is five characters wide and an operator
- * reading an inventory wants the machine's condition, not the verb for what the
- * failed to do. Carrying it here rather than at each face is what keeps the
- * browser, the terminal and an agent from choosing three different words for
- * one state; `error` on the same row is where the probe's own sentence lives,
- * so nothing is lost by the shorter label.
- */
 function venueState(probe: ProbeResult): VenueRowFacts["state"] {
   return probe.state === "unreachable" ? "down" : probe.state;
 }
@@ -48,9 +25,6 @@ function rowFacts(platform: string, probe: ProbeResult): VenueRowFacts {
     slot: probe.slot,
     slots: probe.slots,
     state: venueState(probe),
-    // Structurally `LeaseHolder` — `{ holder, run, sinceMs }` — spelled out so
-    // the compiler proves the engine's shape and the port's are still the same
-    // one, at the seam that is the only place both are in scope.
     heldBy:
       probe.heldBy === null
         ? null
@@ -63,22 +37,10 @@ function rowFacts(platform: string, probe: ProbeResult): VenueRowFacts {
   };
 }
 
-/** ONE SLOT'S IDENTITY — platform, host and slot number. The key a partial
- *  reading replaces a row by: a pool may hold the same host twice (two slots),
- *  and the host alone would make one answer overwrite the other. */
 function slotKey(row: { platform: string; host: string; slot: number }): string {
   return `${row.platform}\u0000${row.host}\u0000${row.slot}`;
 }
 
-/**
- * A ROW FOR A MACHINE NOBODY HAS DIALLED YET.
- *
- * The inventory is known the moment the hosts file is read; the states are
- * not, and a probe is as slow as the slowest dead box in it. So the rows go
- * out first, every one of them `probing`, and each is replaced as its host
- * answers — rather than a page saying nothing for thirty seconds and then
- * everything at once.
- */
 function pendingFacts(platform: string, entry: HostPool[number]): VenueRowFacts {
   const slot = asHostSlot(entry);
   return {
@@ -92,36 +54,9 @@ function pendingFacts(platform: string, entry: HostPool[number]): VenueRowFacts 
   };
 }
 
-/**
- * Probe the configured venues — every one, or only the platforms asked for.
- *
- * The filter is not a convenience. A probe SSH-dials each machine, so an
- * unsliced inventory costs as long as the slowest box in it; an operator asking
- * about one platform should not wait on a datacentre they did not mention. An
- * EMPTY request means every platform, because "tell me everything" is the
- * question `odu ci hosts` with no argument has always asked.
- *
- * Two refusals, and both are the same rule: an empty table cannot say WHY it is
- * empty, and the two whys call for opposite actions.
- *
- *   - Nothing is configured at all — write a hosts file, versus wait.
- *   - Nothing the caller NAMED is configured — fix the name, versus wait. A
- *     face that got zero rows for `odu ci hosts x86_54-linux` would show an
- *     empty fleet rather than a typo.
- *
- * A request naming some platforms that exist and some that do not is neither:
- * the ones that exist are probed and the rest are reported as warnings, because
- * answering the answerable part beats refusing all of it over one typo.
- */
 export async function venueInventory(request: {
   platforms: readonly string[];
-  /** WHO the caller is. This runs in the service, whose environment is a fact
-   *  about the shell that started it — so without this, `odu ci hosts` reported
-   *  the daemon's fleet while `odu ci run` used the caller's. See
-   *  {@link Caller}. */
   caller: Caller;
-  /** WHAT IS KNOWN SO FAR — the inventory before any dial, then each host as
-   *  it answers. See {@link VenueProber}. */
   onReading?: (partial: {
     source: string | null;
     warnings: readonly string[];
@@ -160,15 +95,6 @@ export async function venueInventory(request: {
         `${config.source ?? "hosts config"} declares no "${platform}", so it` +
         " was not probed",
     );
-  // A mixed pool is illegal at the lease seam, but refusing HERE would be the
-  // juspay/odu#66 defect again: this probe never leases, so an illegal pool for
-  // a platform you are not running is none of its business to refuse. It IS its
-  // business to report — the inventory view is where an operator diagnoses
-  // their hosts file, and before this warning the rule's only messenger was a
-  // run that refused later. A WARNING and not stderr, because through the
-  // service the operator is not necessarily attached to a terminal at all.
-  // Only over the SLICE that was probed: warning about a pool this answer does
-  // not contain would be diagnosing a file the caller did not ask about.
   for (const platform of platforms.filter((p) =>
     isMixedPool(config.hosts[p] ?? []),
   )) {
@@ -179,20 +105,11 @@ export async function venueInventory(request: {
     );
   }
 
-  // The slice is what gets DIALLED, not what gets filtered afterwards — the
-  // whole point of the filter is the round trips it does not make.
   const pools = Object.fromEntries(
     platforms.map((platform) => [platform, config.hosts[platform] ?? []]),
   );
-  // Refuse a binary with no baked agent source here, once, rather than once per
-  // host: the dial below would otherwise report the same misbuilt-package
-  // fault against every machine in the inventory.
   requireBakedRunnerSource();
 
-  // THE INVENTORY GOES OUT BEFORE THE FIRST DIAL. Everything above this line
-  // is a read of a config file; everything below is one ssh timeout wide. A
-  // watcher gets the machines, their platforms and the file that named them
-  // immediately, and each row resolves in place.
   const pending = new Map<string, VenueRowFacts>(
     Object.entries(pools).flatMap(([platform, pool]) =>
       pool.map((entry) => {
@@ -217,9 +134,6 @@ export async function venueInventory(request: {
     ok: true,
     source: config.source,
     warnings,
-    // The SORTED answer, not the map: `probeAllHosts` orders by platform,
-    // host and slot, and a reader of the final value should not have to
-    // re-derive an order the port already decided.
     rows: probed.map(({ platform, probe }) => rowFacts(platform, probe)),
   };
 }

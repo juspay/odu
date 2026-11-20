@@ -1,13 +1,3 @@
-/**
- * The board's rows, its filters and its three empty states.
- *
- * The filters are reached through the group they live in — `role="group"` with
- * `aria-label="Filter runs"` — rather than by class, because that grouping is
- * the thing that makes three buttons read as one control to anybody not looking
- * at the screen. A step that found them by `.filters button` would keep passing
- * after the grouping was lost.
- */
-
 import * as assert from "node:assert";
 import { basename } from "node:path";
 import { Then, When } from "@cucumber/cucumber";
@@ -21,8 +11,6 @@ function filter(world: OduWorld, label: string): Locator {
     .getByRole("button", { name: label, exact: true });
 }
 
-/** The row for the run this scenario arranged, found by its project — the last
- *  segment of the checkout, which is what `projectOf` draws. */
 function projectRow(world: OduWorld): Locator {
   const checkout = world.checkout;
   assert.ok(checkout !== undefined, "no fixture checkout has been made yet");
@@ -33,8 +21,6 @@ Then("a row names the fixture project", async function (this: OduWorld) {
   await projectRow(this).first().waitFor({ timeout: 60_000 });
 });
 
-/** `<sha7>#<seq>` — the same ref every other odu face prints, which is what
- *  makes a row a thing a person can match against a terminal they left open. */
 Then("that row shows the run's short commit ref", async function (this: OduWorld) {
   const checkout = this.checkout;
   assert.ok(checkout !== undefined, "no fixture checkout has been made yet");
@@ -45,9 +31,6 @@ Then("that row shows the run's short commit ref", async function (this: OduWorld
   );
 });
 
-/** The row's ONE status cell. A run that has reached a verdict draws the
- *  verdict there and nothing else, so a red "failed" in `.row-status` is both
- *  "the outcome is drawn" and "it is the only thing the column claims". */
 Then("that row shows a red {string} outcome", async function (this: OduWorld, label: string) {
   const pill = projectRow(this).first().locator(".row-status .pill");
   await this.saysThat(pill, "the run row's outcome", label);
@@ -66,9 +49,6 @@ Then("that row shows {string}", async function (this: OduWorld, text: string) {
   );
 });
 
-/** "N earlier" — how many runs of this checkout the default board folded away.
- *  Reading it is two assertions at once: the checkout is drawn as ONE row, and
- *  the row says how many runs it stands for. */
 Then(
   "that row shows {string} in the age cell",
   async function (this: OduWorld, text: string) {
@@ -100,15 +80,6 @@ Then("the {string} filter is not pressed", async function (this: OduWorld, label
   );
 });
 
-/**
- * Press History and wait until the board says it is showing it.
- *
- * The board is one row per CHECKOUT by default — the latest run of each — so a
- * scenario about two runs of one fixture sees one row until this is pressed.
- * Waited on `aria-pressed` rather than on a row count: the toggle's own state is
- * the thing that has to have landed, and a count would be a wait on whichever
- * rows the live collection happened to have delivered.
- */
 When("I show the history", async function (this: OduWorld) {
   const history = this.page.getByRole("button", { name: "History", exact: true });
   await history.click();
@@ -119,8 +90,6 @@ When("I show the history", async function (this: OduWorld) {
 });
 
 Then("that run is not listed", async function (this: OduWorld) {
-  // Retried, because a filter is applied to a LIVE collection: a row that is on
-  // its way out has not necessarily gone by the time the click returns.
   await this.waitUntil(
     async () => (await projectRow(this).count()) === 0,
     "the settled run to drop out of the filtered board",
@@ -131,10 +100,6 @@ Then("that run is listed", async function (this: OduWorld) {
   await projectRow(this).first().waitFor({ timeout: 30_000 });
 });
 
-/** The three empty states are three different answers, and telling them apart is
- *  the point: "nothing yet" sends a person to start a run, "nothing matching"
- *  sends them to another filter, and a board that showed one blank panel for
- *  both would send them looking for a run that is right there. */
 Then("the board reads {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.page.locator(".board-body"), "the board", text, 60_000);
 });

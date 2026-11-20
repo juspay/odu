@@ -1,17 +1,3 @@
-/**
- * THE VENUES, TAKEN AND DROPPED — the engine half of `odu ci lease` / `odu ci
- * release`, on the daemon's side of the wall.
- *
- * `odu ci lease` and `odu ci release` are clients of the shared service now, so
- * the work they used to do in whatever process the operator typed in belongs to
- * the daemon: resolving a platform set against the CALLER's inventory, spawning
- * a detached holder, and answering as soon as each holder is running.
- *
- * `lease-hold` itself — the detached worker a holder IS — stayed in `@odu/cli`
- * beside the other argv entry points (`./leaseCmd`), because it is a process a
- * launcher types and never a library anybody calls.
- */
-
 import { spawn } from "node:child_process";
 import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
@@ -69,10 +55,6 @@ function spawnLeaseHold(opts: {
   const child = spawn(argv[0]!, argv.slice(1), {
     detached: true,
     stdio: ["ignore", logFd, logFd],
-    // The CALLER's inventory, carried to the holder. A hold outlives the shell
-    // that asked for it and resolves its own pool, so a holder started from a
-    // service whose `$ODU_HOSTS` differs from the caller's would queue for a
-    // machine in a fleet the caller never named.
     env:
       opts.hostsFile === undefined || opts.hostsFile === null
         ? process.env
@@ -114,9 +96,6 @@ function resolvePlatforms(
   return [...requested].sort();
 }
 
-/** A holder's identity as the port spells it. Structurally `HolderInfo`,
- *  written out so the compiler proves the two spellings are one shape here,
- *  where both are in scope. */
 function holderFacts(
   info: HolderInfo | null,
 ): VenueHoldResult["waitingBehind"] {
@@ -127,30 +106,11 @@ function holderFacts(
 
 export interface LeaseOptions {
   platforms: readonly string[];
-  /** WHO the hold is for. Resolved here, in the service's process, whose own
-   *  environment is a fact about the shell that started it. See {@link Caller}. */
   caller: Caller;
-  /** Try once and let the holder exit rather than queueing. The HOLDER's
-   *  persistence, not this call's — this call never waits either way. */
   noWait: boolean;
   repoRoot?: string;
 }
 
-/**
- * Ensure platforms are leased, spawning holders as needed.
- *
- * It ANSWERS AS SOON AS EACH HOLDER IS RUNNING and never polls for the box.
- * `odu ci lease` used to block, printing progress, because it was a terminal
- * command with a person watching it; through the service the queue it joins is
- * somebody else's run and can be an hour long, so `waiting` — with
- * `waitingBehind` naming who is ahead — is the complete answer, and
- * `venue.probe` is where a caller watches it land.
- *
- * A platform set that resolves to nothing — no hosts config, or a name that is
- * not in one — is a REFUSAL and not an empty result list, for the reason
- * `VenueProbeOutcome` gives: "nothing is configured" and "nothing was free"
- * call for opposite actions.
- */
 export async function leaseVenues(
   opts: LeaseOptions,
 ): Promise<VenueHoldOutcome> {
@@ -211,11 +171,6 @@ export async function leaseVenues(
       run: null,
     });
 
-    // A short grace, because a FREE box is claimed almost immediately and
-    // answering `waiting` for one that is already ours would send every caller
-    // round the polling loop for nothing. `--no-wait` gets longer: it is the
-    // caller who said "tell me now whether this worked", and its holder exits
-    // rather than queueing, so this window is the only chance to see it.
     await asyncSleep(opts.noWait ? 400 : 150);
     const held = heldHostForPlatform(repoRoot, platform);
     if (held !== null) {
@@ -255,13 +210,6 @@ function waitingMessage(
   return `${platform}: waiting — queueing for a free host`;
 }
 
-/**
- * Drop this checkout's holds.
- *
- * There is no refusal arm. Releasing what is not held is not an error — it is
- * the outcome `nothing`, and saying so is what makes `odu ci release` safe to
- * run twice, which is exactly what a caller who lost the first reply will do.
- */
 export function releaseVenues(opts: {
   platforms: readonly string[];
   repoRoot?: string;
@@ -284,8 +232,6 @@ export function releaseVenues(opts: {
       continue;
     }
     if (!pidAlive(e.holderPid)) {
-      // The record outlived its holder. Nothing was released because nothing
-      // was holding — but the stale record still goes, below.
       results.push({
         platform,
         effective: "nothing",
@@ -310,8 +256,6 @@ export function releaseVenues(opts: {
         });
       }
     }
-    // Holder cleans the record on SIGTERM; always drop our side so release
-    // is idempotent even if the holder was already gone.
     removePlatformLease(repoRoot, platform);
   }
   return { results };

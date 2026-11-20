@@ -1,9 +1,3 @@
-/**
- * The ruleset decisions `odu ci protect` writes through. Every case here is one
- * the classic-protection code could not even express: it had a single endpoint
- * and no notion of *which* protection object owned a branch's checks.
- */
-
 import { describe, expect, it } from "bun:test";
 import { Schema } from "effect";
 import {
@@ -18,7 +12,6 @@ import {
   updateBody,
 } from "./rulesets";
 
-/** A `rules/branches/{branch}` entry. */
 const branchRule = (
   type: string,
   rulesetId: number,
@@ -41,8 +34,6 @@ describe("chooseRuleset", () => {
   });
 
   it("picks the one ruleset covering the branch, checks rule or not", () => {
-    // A ruleset governing the branch with only a pull_request rule is still
-    // the home for a required_status_checks rule protect adds.
     expect(chooseRuleset(parseRules([branchRule("pull_request", 7)]))).toEqual({
       kind: "ruleset",
       id: 7,
@@ -60,9 +51,6 @@ describe("chooseRuleset", () => {
   });
 
   it("prefers the ruleset that already owns the checks over a bare neighbour", () => {
-    // Two rulesets cover the branch but only one requires checks — that one
-    // owns them. Adding a second checks rule elsewhere would make GitHub
-    // require the union and block on whatever the first still lists.
     const rules = parseRules([
       branchRule("deletion", 1),
       branchRule("required_status_checks", 2),
@@ -103,8 +91,6 @@ describe("chooseRuleset", () => {
   });
 
   it("treats an unlabelled source as the repo's own", () => {
-    // `ruleset_source_type` is absent on some responses; defaulting to
-    // Organization would refuse every ordinary repo.
     expect(chooseRuleset(parseRules([branchRule("deletion", 8)]))).toEqual({
       kind: "ruleset",
       id: 8,
@@ -123,8 +109,6 @@ describe("requireContexts", () => {
   });
 
   it("replaces the required contexts wholesale", () => {
-    // The stale GitHub Actions contexts that outlive a move to odu are exactly
-    // what must not survive: they block merges on checks nothing posts.
     const rules = [
       checksRule(["build-and-test (ubuntu-latest)"]),
     ];
@@ -142,8 +126,6 @@ describe("requireContexts", () => {
   });
 
   it("leaves every other rule byte-for-byte intact", () => {
-    // The write replaces the whole rules array, so an unmodelled rule that
-    // does not round-trip is a rule silently deleted from the repo's policy.
     const pullRequest: Rule = {
       type: "pull_request",
       parameters: {
@@ -157,9 +139,6 @@ describe("requireContexts", () => {
   });
 
   it("carries the operator's enforcement policy across the rewrite", () => {
-    // odu owns which checks are required; strictness and the create exemption
-    // are the operator's, and resetting them would be protect changing policy
-    // it was never asked about.
     const rules: Rule[] = [
       {
         type: "required_status_checks",
@@ -196,9 +175,6 @@ describe("createBody", () => {
     ) as Record<string, unknown>;
 
   it("requires the contexts and nothing else", () => {
-    // A `pull_request` or `deletion` rule here would be protect deciding the
-    // repo's review and history policy on the strength of being asked about
-    // status checks.
     const rules = made({ branch: "master", isDefault: true }).rules as Rule[];
     expect(rules.map((r) => r.type)).toEqual(["required_status_checks"]);
     expect(rules[0]?.parameters?.required_status_checks).toEqual([
@@ -207,8 +183,6 @@ describe("createBody", () => {
   });
 
   it("follows a later rename when the branch came from the repo's default", () => {
-    // "Protect the default branch" stays true across a rename; pinning the name
-    // odu happened to resolve today would quietly stop covering anything.
     expect(made({ branch: "master", isDefault: true }).conditions).toEqual({
       ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] },
     });
@@ -221,8 +195,6 @@ describe("createBody", () => {
   });
 
   it("enforces for real, and exempts nobody", () => {
-    // `evaluate` would create a gate that never gates; a bypass actor would be
-    // protect granting a permission it was never asked to grant.
     const body = made({ branch: "master", isDefault: true });
     expect(body.enforcement).toBe("active");
     expect(body.target).toBe("branch");
@@ -243,16 +215,12 @@ describe("rulesetId", () => {
   });
 
   it("is null, not a throw, when the answer is unmodelled", () => {
-    // The create already happened by then — failing here would report a
-    // successful write as an error.
     expect(rulesetId("not json {{{")).toBeNull();
     expect(rulesetId('{"unexpected":true}')).toBeNull();
   });
 });
 
 describe("updateBody", () => {
-  // Verbatim from `GET /repos/juspay/olai/rulesets/20468764`, trimmed to the
-  // fields the write echoes — the shape that made `odu ci protect` 404.
   const ruleset = Schema.decodeUnknownSync(RulesetSchema)({
     id: 20468764,
     name: "master: PRs + green CI",
@@ -281,8 +249,6 @@ describe("updateBody", () => {
   });
 
   it("echoes back the ruleset's identity, conditions and bypass actors", () => {
-    // A PUT that omitted these would leave them to whatever an absent key means
-    // on the day; a dropped bypass actor locks maintainers out of the branch.
     const body: Record<string, unknown> = JSON.parse(
       updateBody(ruleset, ["alpha@x86_64-linux"]),
     );

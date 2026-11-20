@@ -1,8 +1,4 @@
 Feature: The board answers "what is my CI doing"
-  # The view the whole service exists for. What is graded here is that a person
-  # can CHOOSE a run without opening it, and that the three empty states stay
-  # apart — "nothing yet" and "nothing matching" send somebody looking in very
-  # different places.
 
   Scenario: A run carries the facts needed to choose it
     Given a settled red run of the failing fixture
@@ -24,11 +20,6 @@ Feature: The board answers "what is my CI doing"
     When I press the "Needs attention" filter
     Then that run is listed
 
-  # One row per CHECKOUT is the default, because "what is my CI doing" is a
-  # question about checkouts and a superseded run's verdict is history. What is
-  # graded here is that the folded rows are ANNOUNCED rather than silently
-  # dropped — a board that quietly hid a run would be worse than one that
-  # listed forty.
   Scenario: History shows every run of a checkout
     Given a fresh settled red run of the failing fixture
     And I open that run

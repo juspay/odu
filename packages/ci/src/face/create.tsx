@@ -1,31 +1,3 @@
-/**
- * STARTING A RUN from the browser.
- *
- * Two fields are required and neither has a default, which is the whole design
- * of this form:
- *
- *   - **The checkout is explicit.** An absolute path, typed or pasted. The
- *     service has no cwd to fall back on and must not acquire one: a web page
- *     that could start a run "here" would be a page whose meaning depends on
- *     which process happens to be serving it.
- *   - **The commit is explicit.** `expectedSha` is what the caller BELIEVES the
- *     checkout is on, and a checkout that has moved on is refused rather than
- *     run. Without it, "start a run" quietly means "run whatever is checked out
- *     right now", which is how a run of the wrong commit gets reported as a run
- *     of the right one.
- *
- * The refusal is the feature. Every way this can fail — not a repository, a
- * commit that moved, a checkout that already has a live run — comes back as a
- * sentence with a recovery, and the form shows it rather than clearing itself.
- *
- * **Every option `run.start` takes is a field here**, because the board does
- * everything `odu ci run` does: selectors, platforms, host pins, the justfile
- * root, no-deps, no-strict, no-post, supersede, linger and the hosts file. And
- * `pipeline.read` sits beside them as **Preview pipeline** — `odu ci dump` for
- * the checkout typed above, so a person sees what a start would run before it
- * runs.
- */
-
 import { createSignal, For, Show, type JSX } from "solid-js";
 import {
   BackLink,
@@ -39,19 +11,13 @@ import {
 } from "@odu/face/ui";
 import type { Pipeline } from "./types";
 
-/** What the caller filled in. Every optional field is left ABSENT rather than
- *  sent empty: the wire's optional keys mean "not said", and an empty array
- *  would be a caller asserting "no selectors" where they meant "I did not
- *  choose". */
 export interface StartForm {
   checkout: string;
   expectedSha: string;
   selectors: string[];
   platforms: string[];
   hostPins: string[];
-  /** `--root NAMEPATH`: which justfile module the DAG is read from. */
   root: string;
-  /** The service's `$ODU_HOSTS` reading — empty means "use the service's own". */
   hostsFile: string;
   noDeps: boolean;
   noStrict: boolean;
@@ -60,22 +26,12 @@ export interface StartForm {
   linger: boolean;
 }
 
-/** What the pipeline preview is showing. */
 export type PreviewState =
   | { kind: "idle" }
   | { kind: "reading" }
   | { kind: "read"; pipeline: Pipeline }
   | { kind: "refused"; message: string };
 
-/** What the form is doing. `existing` is not an error: the caller asked for a
- *  checkout that already has a live run, and being shown that run is almost
- *  certainly what they wanted.
- *
- *  `starting` is BOUNDED BY ITS OWNER, and this form relies on that: the
- *  submit is disabled while it holds, so a state that could be entered and
- *  never left is a dead button and a reload. Whoever sets it owes a deadline
- *  that takes it off again — `ci.tsx`'s `START_DEADLINE_MS` — and the answer
- *  it leaves behind, refusal included, is drawn directly under the control. */
 export type CreateState =
   | { kind: "idle" }
   | { kind: "starting" }
@@ -83,8 +39,6 @@ export type CreateState =
   | { kind: "existing"; runId: string; sha: string }
   | { kind: "refused"; message: string };
 
-/** Split a space-separated field into tokens, dropping the empties a person's
- *  trailing space leaves behind. */
 function tokens(raw: string): string[] {
   return raw.split(/\s+/).filter((token) => token !== "");
 }
@@ -92,12 +46,8 @@ function tokens(raw: string): string[] {
 export function Create(props: {
   state: CreateState;
   onStart: (form: StartForm) => void;
-  /** `pipeline.read` for the checkout and root typed so far. A READ, so it is
-   *  offered to anyone who may see the board. */
   preview: PreviewState;
   onPreview: (checkout: string, root: string) => void;
-  /** The runs' floor is `member`; a principal below it may read a run and not
-   *  start one, so the submit is not drawn at all. */
   canRun: boolean;
   onOpen: (runId: string) => void;
   onBack: () => void;
@@ -134,10 +84,6 @@ export function Create(props: {
 
   return (
     <section class="screen create">
-      {/* The way out, then the title — "All runs" rather than "Runs" because
-          the shell's rail already offers a control by that name, and one
-          accessible name on two buttons is ambiguous to a person and
-          unaddressable to anything that finds a control by what it says. */}
       <BackLink onClick={props.onBack}>All runs</BackLink>
       <PageHead
         title="New run"
@@ -174,9 +120,6 @@ export function Create(props: {
             onValue={setSha}
           />
         </Field>
-        {/* PAIRED, where two fields are short and read together — what to run
-            and where to run it. `.form-pair` folds to one column the moment
-            there is not room for two, so nothing is squeezed on a phone. */}
         <div class="form-pair">
           <Field
             id="selectors"
@@ -254,20 +197,10 @@ export function Create(props: {
             Keep the run answerable after it settles (linger)
           </Toggle>
         </fieldset>
-        {/* THE TWO CONTROLS, on one line. A read and a write: what this
-            checkout WOULD run, and the start itself — side by side rather
-            than stacked, because they are the same decision taken twice and a
-            form whose last two rows are each one button reads as two
-            unrelated endings. */}
         <div class="control-row">
           <Button onClick={() => props.onPreview(checkout().trim(), root().trim())}>
             {props.preview.kind === "reading" ? "Reading…" : "Preview pipeline"}
           </Button>
-          {/* A SUBMIT button, and with no click handler of its own — see
-              `@odu/face/ui`'s `ButtonAction`. The form's `onSubmit` above is
-              the single path a start takes, whether it was reached by a mouse
-              or by Enter in a field, so the two ways of asking cannot
-              disagree and one press cannot start two runs. */}
           <Show when={props.canRun}>
             <Button
               type="submit"
@@ -279,26 +212,6 @@ export function Create(props: {
           </Show>
         </div>
       </form>
-      {/* THE ANSWER TO THE PRESS, DIRECTLY UNDER THE BUTTON THAT ASKED.
-
-          These two used to sit at the BOTTOM of the section, below a pipeline
-          preview that is as tall as the checkout's DAG — so the refusal to a
-          start could be an entire panel away from the control a person had
-          just pressed, off the fold on any checkout with more than a handful
-          of recipes. A start that is bounded by a deadline (see `ci.tsx`'s
-          `START_DEADLINE_MS`) makes that worse rather than better: the button
-          coming back out of `Starting…` is only half the story, and the half
-          that says WHY was somewhere else on the page.
-
-          A refusal INTERRUPTS — `Receipt`'s `refused` tone announces it with
-          `alert` rather than `status` — because it is the answer to the thing
-          the person just pressed, and the form is still sitting there looking
-          ready.
-
-          NO receipt here is dismissable, unlike the run page's. There is
-          nothing to be stuck with: this form's one control replaces its answer
-          the moment it is pressed again, so a Dismiss button would be a second
-          way to clear something one press already clears. */}
       <Show when={props.state.kind === "refused" ? props.state : null}>
         {(refused) => <Receipt tone="refused">{refused().message}</Receipt>}
       </Show>
@@ -313,16 +226,9 @@ export function Create(props: {
           </Receipt>
         )}
       </Show>
-      {/* The PREVIEW's own refusal, beside the panel it would have filled. */}
       <Show when={props.preview.kind === "refused" ? props.preview : null}>
         {(refused) => <Receipt tone="refused">{refused().message}</Receipt>}
       </Show>
-      {/* WHAT THIS CHECKOUT WOULD RUN — `odu dump`, before anything runs. A
-          panel rather than a bare section: it is an answer the form produced,
-          and a surface with an edge is how this design says "this block is a
-          thing somebody asked for". `.pipeline-preview` and its `ul.tokens`
-          stay — the stylesheet reads them as a paragraph of chips, and the
-          acceptance suite reads the recipes out of them. */}
       <Show when={props.preview.kind === "read" ? props.preview.pipeline : null}>
         {(pipeline) => (
           <Panel

@@ -1,20 +1,3 @@
-/**
- * Arranging a run, opening it, and asserting on its nodes.
- *
- * **What the wire is allowed to do here.** The `Given` steps below start runs
- * through `run_start` rather than through the form. That is ARRANGEMENT: a
- * scenario about the retry button needs a failed node to press it on, and
- * spending forty seconds driving the create form to get one would be testing the
- * form again in every feature. Nothing below ACTS through the wire — every
- * retry, cancel and selection in this suite goes through a control, because
- * "clicking through these workflows" is the acceptance criterion and a verb call
- * dressed as a step would quietly not meet it.
- *
- * **Shared versus fresh.** "a settled red run" is the worker's cached one and is
- * READ ONLY; "a fresh settled red run" builds its own and may be mutated. See
- * `support/corpus.ts` for the guard that catches the mistake.
- */
-
 import * as assert from "node:assert";
 import { basename } from "node:path";
 import { Given, Then, When } from "@cucumber/cucumber";
@@ -34,15 +17,12 @@ import {
 } from "../../../web-acceptance/support/service.ts";
 import { RUN_SETUP_TIMEOUT, type OduWorld } from "../../../web-acceptance/support/world.ts";
 
-/** A private fixture, remembered so `After` removes it. */
 function ownFixture(world: OduWorld, justfile: string): string {
   const dir = makeFixture(justfile);
   world.ownFixtures.push(dir);
   world.checkout = dir;
   return dir;
 }
-
-// ── arranging ───────────────────────────────────────────────────────────────
 
 Given(
   "a settled red run of the failing fixture",
@@ -99,11 +79,6 @@ Given(
     });
     this.ownRuns.push(runId);
     this.runId = runId;
-    // No wait here. The run is live by construction — `slow` sleeps for two
-    // minutes — and every assertion that follows is made in the browser, which
-    // is where the coordinator's progress is supposed to show up. A wait on the
-    // wire before opening the page would be this suite checking the service and
-    // then hoping the browser agreed.
   },
 );
 
@@ -119,10 +94,6 @@ Given(
     });
     this.ownRuns.push(runId);
     this.runId = runId;
-    // Not waited on: the shapes exist only WHILE the run is going, and the
-    // browser is where they are supposed to appear. The fixture also holds a
-    // lane that FAILS, because that — not a lane that merely stopped — is the
-    // row a Retry is drawn on, which is the widest of the controls cells.
   },
 );
 
@@ -138,9 +109,6 @@ Given(
     });
     this.ownRuns.push(runId);
     this.runId = runId;
-    // NOT waited on. The scenarios that use this are about a log while it is
-    // still being written — one loses the connection in the middle of it — so
-    // settling here first would remove the only condition being tested.
   },
 );
 
@@ -168,23 +136,10 @@ Given(
   },
 );
 
-// ── opening ─────────────────────────────────────────────────────────────────
-
 Given("I open that run", { timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld) {
   assert.ok(this.runId !== undefined, "no run has been arranged for this scenario");
   await this.open(`#/run/${this.runId}`);
   await this.page.locator("section.detail").waitFor();
-  // The `<sha7>#<seq>` ref this run is KNOWN BY, remembered while it is on
-  // screen. It is the only handle a board row offers — rows carry no run id —
-  // so a later step that has to tell two runs of one checkout apart needs it.
-  //
-  // WAITED FOR, not read on arrival. The detail view renders as soon as the
-  // route moves and leaves this element EMPTY until the row itself lands, so an
-  // immediate read captures "" — and a later step addressing a board row by it
-  // would match every row and click whichever came first. (It used to read the
-  // `h1`, which drew the placeholder word "run" in the same gap, with the same
-  // result.) The `h1` now names the PROJECT and its branch; the ref a person
-  // copies lives in `.detail-ref` beside it.
   const header = this.page.locator(".detail-ref");
   await this.waitUntil(
     async () => /^[0-9a-f]{7}/.test((await header.innerText()).trim()),
@@ -193,20 +148,6 @@ Given("I open that run", { timeout: RUN_SETUP_TIMEOUT }, async function (this: O
   this.runRef = (await header.innerText()).trim();
 });
 
-/**
- * Open the OTHER run of this checkout.
- *
- * Not "the newest", and not by POSITION either. Both were tried and both were
- * wrong for the same underlying reason: the board is a live collection sorted by
- * creation time, and a linked replay lands in it while the page is open. "The
- * newest" picked the parent. Reading row 1's ref and then clicking row 1 read
- * one run and clicked another, because the rows had re-sorted in between —
- * which is exactly the race a positional selector cannot see.
- *
- * So the ref is read first and then used to ADDRESS the row. The two runs of one
- * checkout differ in the ordinal half of their `<sha7>#<seq>` ref, which is what
- * a person telling them apart on the board would use too.
- */
 When("I open the run on the board that is not this one", async function (this: OduWorld) {
   const ref = this.runRef;
   assert.ok(ref !== undefined, "no run was opened first, so there is no 'this one'");
@@ -220,11 +161,6 @@ When("I open the run on the board that is not this one", async function (this: O
   await this.page.locator("section.detail").waitFor();
 });
 
-// ── asserting ───────────────────────────────────────────────────────────────
-
-/** Wait for one node's row to carry a status class, and say what it carried
- *  instead. The class is `node-<status>` and the status comes straight off the
- *  wire, so this is an assertion about what the SERVICE said, drawn. */
 async function nodeStatus(world: OduWorld, id: string, status: string): Promise<void> {
   const row = world.nodeRow(id);
   let last = "(the row was never there)";
@@ -254,10 +190,6 @@ Then("the node {string} is ok", async function (this: OduWorld, id: string) {
   await nodeStatus(this, id, "ok");
 });
 
-/** No outcome pill in the header. The detail header renders one only when the
- *  run HAS reached a verdict, so its absence is the run still being live —
- *  asserted on the page rather than on a stopwatch, because "the sibling had not
- *  finished yet" is a claim about state and never about elapsed time. */
 Then("the run has reached no outcome", async function (this: OduWorld) {
   const pills = await this.page.locator(".detail-head .pill").count();
   assert.strictEqual(
@@ -278,10 +210,6 @@ When(
   },
 );
 
-/** A node's attempt ordinal, drawn as `attempt N` beside its id — which the row
- *  only renders past the first, because "attempt 1" on every node would be
- *  noise. Registered once and read as either keyword: logs.feature uses it as an
- *  `And` in the middle of a When block, and cucumber matches on TEXT. */
 Then(
   "the node {string} reaches {string}",
   async function (this: OduWorld, id: string, text: string) {
@@ -294,15 +222,6 @@ Then(
   },
 );
 
-/**
- * The per-lane cancel button.
- *
- * Its label is `Cancel <platform>`, and the platform is the `@…` half of a node
- * id — which the coordinator mints from `builtins.currentSystem`. So the name is
- * asked of Nix rather than spelled here: a suite that hardcoded `x86_64-linux`
- * would pass on one runner and fail on the other for a reason having nothing to
- * do with the button.
- */
 When("I press the cancel button for this machine's lane", async function (this: OduWorld) {
   await this.page
     .getByRole("button", { name: `Cancel ${currentNixSystem()}`, exact: true })

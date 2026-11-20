@@ -1,8 +1,4 @@
 Feature: Starting a run from the browser
-  # Every scenario here TYPES into the real form and presses the real button.
-  # The refusals are the feature: each one is a sentence the service wrote for a
-  # person, and what is graded is that the browser shows it — with the recovery
-  # — rather than clearing the form and going quiet.
 
   Scenario: The form starts a run and lands on it
     Given a fixture checkout whose pipeline fails

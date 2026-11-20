@@ -1,43 +1,13 @@
-/**
- * What the browser's log pane promises about terminal output.
- *
- * Two kinds of claim live here, and they fail for different reasons.
- *
- * **The subset is the subset.** Colour and weight survive; cursor motion,
- * erase-line, screen modes and hyperlink URIs are removed; backgrounds are
- * read and dropped. Each of these is a decision rather than an accident, so
- * each gets a case — including the ones that assert something is GONE, which
- * are the ones a "just strip `\x1b[` up to a letter" rewrite would quietly
- * break.
- *
- * **Nothing is lost that was not escape.** The join property is the real
- * safety net: for any input without a carriage return, the span texts
- * concatenated back together are the input with its escapes removed and not
- * one character else — no dropped byte, no swallowed newline, no partial
- * sequence left on screen. A parser that lost a character in some corner
- * would pass every hand-written case above and fail this one.
- *
- * And a size bound, because this runs on a megabyte of log in a tab: the
- * timing case is not a benchmark, it is a tripwire for the quadratic rewrite —
- * a carriage return that re-slices everything committed so far, or a scan that
- * restarts from the beginning.
- */
-
 import { describe, expect, it } from "bun:test";
 import { ansiSpans } from "./ansi";
 
 const ESC = "\u001b";
 const BEL = "\u0007";
 
-/** The spans as tuples, which is how the cases below want to read: the text, an
- *  inline colour where there is one, and the class list. That IS the span now —
- *  the module hands a view something ready to draw rather than an `fg` union and
- *  two decoders to run over it. */
 function shape(text: string): Array<[string, string | null, string]> {
   return ansiSpans(text).map((s) => [s.text, s.color ?? null, s.class]);
 }
 
-/** Just the text, which is what a `<pre>`'s `innerText` would come out as. */
 function flat(text: string): string {
   return ansiSpans(text)
     .map((s) => s.text)
@@ -51,8 +21,6 @@ describe("ansiSpans — the plain page", () => {
   });
 
   it("returns nothing at all for empty input", () => {
-    // An empty span would render as an empty element in the pane and read as
-    // a run of output that happened. There was none.
     expect(ansiSpans("")).toEqual([]);
   });
 
@@ -103,14 +71,10 @@ describe("ansiSpans — SGR", () => {
   });
 
   it("folds a 256-colour index below 16 back onto the palette", () => {
-    // So `38;5;9` re-tints with the theme exactly like `91` does, rather than
-    // arriving as a hard-coded red the stylesheet cannot reach.
     expect(shape(`${ESC}[38;5;9mred`)).toEqual([["red", null, "ansi-9"]]);
   });
 
   it("resolves the 256-colour cube and greyscale ramp to hex", () => {
-    // The same arithmetic as the TUI's paletteHex: 196 is the cube's pure red,
-    // 244 is a mid grey off the ramp.
     expect(shape(`${ESC}[38;5;196mcube`)).toEqual([
       ["cube", "#ff0000", ""],
     ]);
@@ -146,8 +110,6 @@ describe("ansiSpans — SGR", () => {
   });
 
   it("ignores the attributes it does not draw", () => {
-    // 3 italic, 4 underline, 7 inverse, 53 overline — dropped without
-    // disturbing the colour around them.
     expect(shape(`${ESC}[31m${ESC}[3;4;7;53mtext`)).toEqual([
       ["text", null, "ansi-1"],
     ]);
@@ -183,13 +145,10 @@ describe("ansiSpans — everything else an escape can say", () => {
   });
 
   it("removes a charset selection, intermediate byte and all", () => {
-    // `ESC ( B` is three bytes; a parser that always skipped two would leave a
-    // stray B in the log.
     expect(flat(`${ESC}(Bplain`)).toBe("plain");
   });
 
   it("drops an escape left unterminated at the end of a page", () => {
-    // A log page can be split anywhere, and half a sequence on screen is junk.
     expect(flat(`done ${ESC}[3`)).toBe("done ");
     expect(flat(`done ${ESC}[`)).toBe("done ");
     expect(flat(`done ${ESC}`)).toBe("done ");
@@ -223,9 +182,6 @@ describe("ansiSpans — the carriage return", () => {
   });
 
   it("emits nothing for a page that ends on a bare \\r", () => {
-    // The documented loss: without an emulator there is no cursor to leave
-    // parked mid-line, so a follower rendering page-at-a-time loses the
-    // partial line. Re-parsing the whole log recovers it.
     expect(ansiSpans("progress 40%\r")).toEqual([]);
     expect(flat("progress 40%\rprogress 80%")).toBe("progress 80%");
   });
@@ -272,10 +228,6 @@ describe("ansiSpans — coalescing", () => {
 });
 
 describe("ansiSpans — the join property", () => {
-  /** Every escape sequence this module understands, as a stripper. Written
-   *  independently of the parser on purpose: if both had the same idea of
-   *  where a sequence ends, the property would only be asserting that a
-   *  function agrees with itself. */
   const STRIP = new RegExp(
     [
       "\\u001b\\[[\\u0020-\\u003f]*[\\u0040-\\u007e]", // CSI
@@ -304,7 +256,6 @@ describe("ansiSpans — the join property", () => {
   });
 
   it("is exact about what the stripper is comparing against", () => {
-    // A stripper that matched nothing would make the property vacuous.
     const stripped = INPUTS.map((i) => i.replace(STRIP, ""));
     expect(stripped.some((s, i) => s !== INPUTS[i])).toBe(true);
     expect(stripped.every((s) => !s.includes(ESC))).toBe(true);
@@ -318,9 +269,6 @@ describe("ansiSpans — a megabyte of log", () => {
     return unit.repeat(Math.ceil(size / unit.length));
   }
 
-  // Shared CI runners do not supply a stable wall-clock performance budget.
-  // Keep these as large-input correctness tests under the normal test timeout;
-  // a single cold parse taking 531 ms instead of 500 ms is not a regression.
   it("preserves a plain megabyte as one span", () => {
     const text = repeatTo("a line of perfectly ordinary build output\n", MIB);
     expect(ansiSpans(text)).toEqual([{ text, class: "" }]);
@@ -353,10 +301,6 @@ describe("ansiSpans — a megabyte of log", () => {
 });
 
 describe("ansiSpans — the span a view draws", () => {
-  /** The projection every case above reads through, asserted on its own: a view
-   *  sets `class` and `color` unconditionally and asks nothing about how the
-   *  colour was spelled, which is the whole reason the two decoders that used to
-   *  be exported are not. */
   const one = (text: string) => ansiSpans(text)[0];
 
   it("gives a plain span no class and no inline colour", () => {

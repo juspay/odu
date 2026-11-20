@@ -1,14 +1,4 @@
 Feature: The board does everything odu does for runs
-  # One scenario per verb the board could not reach before: the start options
-  # and the pipeline preview on the create form (pipeline.read), the machines
-  # page (venue.probe / hold / release) and the maintenance page
-  # (catalog.import / prune, protect.apply). Loopback: the local owner holds
-  # every floor, so every control is drawn, and the service still decides.
-  #
-  # Every write starts as a dry run where the verb has one, and these scenarios
-  # leave it that way — what is graded is that the control reaches the verb and
-  # the answer comes back as a sentence, not what the catalog or the forge holds
-  # afterwards.
 
   Scenario: Preview pipeline reads the checkout's recipes
     Given a fixture checkout whose pipeline fails
@@ -19,7 +9,6 @@ Feature: The board does everything odu does for runs
     And the pipeline preview names "beta"
     And there should be no page errors
 
-  # The empty field is SENT; the sentence is the service's own guard.
   Scenario: Preview pipeline with no checkout is refused by the service
     Given I open the create form
     When I press "Preview pipeline"
@@ -39,9 +28,6 @@ Feature: The board does everything odu does for runs
     And there should be no page errors
 
   Scenario: The machines page reads the last probe, and probes on request
-    # Opening the page draws the probe the service kept, and asks for one only
-    # when nothing has probed yet — the service has no verb that lists the
-    # configured machines without dialling them. The button refreshes it.
     Given I open the machines page
     When I press "Probe machines"
     Then the machines page lists this machine's platform
@@ -51,8 +37,6 @@ Feature: The board does everything odu does for runs
   Scenario: A hold is taken and released from the machines page
     Given a fixture checkout whose pipeline fails
     And I open the machines page
-    # The form is behind a disclosure under the table: it is a thing you reach
-    # for occasionally, under a fleet you read constantly.
     When I press "Hold a machine"
     And I fill "Checkout" with the fixture path
     And I fill "Platforms" with this machine's platform

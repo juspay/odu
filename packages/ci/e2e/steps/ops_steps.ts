@@ -1,19 +1,8 @@
-/**
- * The runs' operations — the machines page, the maintenance page, and the
- * create form's pipeline preview.
- *
- * Every field is reached by its LABEL and every control by its NAME, as the
- * create form's steps do, so a step that passes is also a page a screen reader
- * can operate. The platform is the service's own word for this machine
- * (`currentNixSystem`), the same one the harness pins a localhost lane to.
- */
-
 import { Given, Then, When } from "@cucumber/cucumber";
 import { currentNixSystem } from "../../../web-acceptance/support/service.ts";
 import type { OduWorld } from "../../../web-acceptance/support/world.ts";
 
 Given("I open the machines page", async function (this: OduWorld) {
-  // Through the board's control: being DRAWN there is half of the promise.
   await this.open("#/");
   await this.page.getByRole("button", { name: "Machines", exact: true }).click();
   await this.page.getByRole("heading", { name: "Machines", exact: true }).waitFor();
@@ -37,13 +26,6 @@ Then("the pipeline preview names {string}", async function (this: OduWorld, reci
 });
 
 Then("the machines page lists this machine's platform", async function (this: OduWorld) {
-  // The harness's hosts file pins this platform to a localhost lane, so its
-  // row is the answer the kept probe draws.
-  //
-  // `.venues` and not `ul.venues`: the machines are drawn as a TABLE now, and
-  // `.venues li` in the design system dresses a hairline list row — another
-  // presentation entirely. The hook rides the container either way, which is
-  // what this step is addressing.
   await this.saysThat(this.page.locator(".venues"), "the venue list", currentNixSystem());
 });
 
@@ -51,16 +33,10 @@ Then("the machines page says how old its reading is", async function (this: OduW
   await this.saysThat(this.page.locator(".venue-age"), "the probe's age", "Probed ");
 });
 
-/** A hold's answer depends on the lane (a localhost lane takes no remote lock),
- *  so what is graded is that the control reached the verb and came back with a
- *  sentence — an answer or a refusal — rather than going quiet. */
 Then("the page answers with a receipt", async function (this: OduWorld) {
   await this.receipt().first().waitFor({ timeout: 30_000 });
 });
 
-/** The RELEASE's own sentence, not merely the platform — the hold's receipt
- *  before it names the platform too, and a check that matched that would pass
- *  on a release that never answered. */
 Then("a status reports the release of this machine's platform", async function (this: OduWorld) {
   const platform = currentNixSystem();
   await this.waitUntil(async () => {

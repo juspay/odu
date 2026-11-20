@@ -1,12 +1,3 @@
-/**
- * Filling the create form.
- *
- * Every field is reached by its LABEL, which works because `packages/web-ui`'s
- * `field()` emits a `<label for=…>` bound to the input — so a step that finds
- * "Checkout" is asserting the same binding a screen reader depends on. A step
- * that reached for `#checkout` would pass just as well with the label removed.
- */
-
 import * as assert from "node:assert";
 import { Then, When } from "@cucumber/cucumber";
 import { headOf } from "../../../web-acceptance/support/service.ts";
@@ -28,19 +19,10 @@ When("I fill {string} with the fixture HEAD", async function (this: OduWorld, la
   await this.page.getByLabel(label, { exact: true }).fill(headOf(dir));
 });
 
-/** `check()` rather than `click()`: it asserts the box ended up ticked, so a
- *  label whose `for` stopped pointing at its input fails here rather than
- *  producing a run started without the option nobody noticed was dropped. */
 When("I tick {string}", async function (this: OduWorld, label: string) {
   await this.page.getByLabel(label, { exact: true }).check();
 });
 
-/**
- * The form KEPT what was typed.
- *
- * The refusal is the feature, and a form that cleared itself on one would make a
- * person retype an absolute path to find out they had made the same mistake.
- */
 Then(
   "the {string} field still holds {string}",
   async function (this: OduWorld, label: string, value: string) {

@@ -1,22 +1,3 @@
-/**
- * PROTECT AS A VALUE — the four refusals, and what a success reports.
- *
- * `protectCommand` used to answer with an exit code and a paragraph on stderr,
- * which is the whole reason it could only ever be run by a person at a
- * terminal. A browser cannot branch on prose. So every `stderr; return 1` here
- * became one of four codes, and the codes are the four DIFFERENT things an
- * operator has to do: fix the checkout, fix the justfile, log in, or say which
- * platforms. A suite that only checked `ok === false` would not notice them
- * collapsing back into one.
- *
- * `gh` is faked at the `$ODU_GH_BIN` seam rather than by stubbing a module, for
- * the reason the e2e suite gives: the argv the fake records is exactly the argv
- * that would have reached GitHub. It also means these tests can express "your
- * credential is not there", which is the refusal the daemon made newly reachable
- * — the daemon is where `gh` now runs, and a daemon that cannot find it must
- * say so with a recovery rather than fail as a 500.
- */
-
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -26,9 +7,6 @@ import { ghForge } from "@odu/execution/common/forge";
 import { LOCAL_OWNER } from "@odu/cordis/principal";
 import { protectBranch } from "./protectPort";
 
-/** The port with the forge every process binds: `ghForge` over the fake
- *  `$ODU_GH_BIN` each case installs. The binary is read at CALL time, so one
- *  construction serves every case. */
 const protect = protectBranch(ghForge());
 
 const trash: string[] = [];
@@ -64,7 +42,6 @@ beta: alpha
 
 const SLUG = "odu-unit-fixture/absent-repo";
 
-/** A checkout with a resolvable DAG, optionally with an `origin`. */
 function checkout(opts: { origin?: string; justfile?: string } = {}): string {
   const dir = temp("odu-protect-port-");
   if (opts.justfile !== "") {
@@ -77,8 +54,6 @@ function checkout(opts: { origin?: string; justfile?: string } = {}): string {
   return dir;
 }
 
-/** Point `loadHosts` somewhere hermetic — the dev machine's own hosts file must
- *  never decide which platforms a test protects. */
 function hosts(config: Record<string, unknown>): string {
   const file = join(temp("odu-protect-hosts-"), "hosts.json");
   writeFileSync(file, JSON.stringify(config));
@@ -86,12 +61,6 @@ function hosts(config: Record<string, unknown>): string {
   return file;
 }
 
-/**
- * Install a stand-in `gh`. `mode` picks how it answers:
- *  - `ok`: the reads GitHub would answer, and captured writes;
- *  - `unauthenticated`: what `gh` prints when nobody is logged in;
- *  - `absent`: no binary at all, which is the daemon's own failure mode.
- */
 function fakeGh(
   mode: "ok" | "unauthenticated" | "absent",
   opts: { branchRules?: unknown; ruleset?: unknown } = {},
@@ -147,9 +116,6 @@ describe("protectBranch refusals", () => {
   });
 
   it("refuses a checkout whose justfile does not resolve, with the ENGINE's sentence", async () => {
-    // `pipeline_refused` and not `checkout_refused`: the directory is fine, the
-    // DAG is not — and the required contexts ARE the DAG, so there is nothing
-    // to protect against. `just` names the recipe; this layer could not.
     const outcome = await protect({
       checkout: checkout({ justfile: "alpha:\n    echo hi\n" }),
       platforms: LINUX,
@@ -175,8 +141,6 @@ describe("protectBranch refusals", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.code).toBe("bad_input");
-    // An empty-but-PRESENT hosts file is diagnosed as such, rather than told to
-    // configure the one it already has.
     expect(outcome.message).toContain(file);
     expect(outcome.suggestion).toEqual([
       "odu",
@@ -201,10 +165,6 @@ describe("protectBranch refusals", () => {
   });
 
   it("refuses an origin that is not github.com — when it is about to write", async () => {
-    // `dryRun: false` is load-bearing. A dry run never asks the forge anything,
-    // so it has no origin to object to and answers happily in a repository
-    // hosted anywhere or nowhere. The refusal belongs to the WRITE, which is
-    // the only part that needs a GitHub API to exist.
     const outcome = await protect({
       checkout: checkout({ origin: "git@gitlab.com:someone/thing.git" }),
       platforms: LINUX,
@@ -229,15 +189,10 @@ describe("protectBranch refusals", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.code).toBe("no_credential");
-    // ARGV, never a string a face could be tempted to eval or a shell to glob.
     expect(outcome.suggestion).toEqual(["gh", "auth", "login"]);
   });
 
   it("refuses `no_credential` when there is no gh at all — the daemon's own case", async () => {
-    // The failure the `GH_TOKEN`/`GH_HOST`/`GH_CONFIG_DIR` forwarding exists to
-    // prevent. It is the same refusal as "not logged in" on purpose: both mean
-    // "this process cannot speak to GitHub as you", and they are told apart by
-    // the message rather than by a code nobody would branch on differently.
     fakeGh("absent");
     const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
@@ -264,9 +219,6 @@ describe("protectBranch refusals", () => {
     });
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
-    // NOT `no_credential`: logging in again changes nothing. The repository
-    // has no ruleset, and bringing merge-blocking policy into existence is a
-    // decision, not a recovery.
     expect(outcome.code).toBe("bad_input");
     expect(outcome.suggestion).toEqual(["odu", "ci", "protect", "--create"]);
   });
@@ -303,12 +255,6 @@ const RULES_ON_MASTER = RULESET.rules.map((rule) => ({
 
 describe("protectBranch successes", () => {
   it("previews the contexts without asking the forge anything at all", async () => {
-    // The required contexts are the checkout's recipes crossed with a platform
-    // set. Nothing in that depends on the origin or on which branch is the
-    // default, so a dry run does not go and find out — which is what keeps
-    // "show me what this would require" working in a repository that has no
-    // GitHub remote yet, and what keeps it from spending a network round trip
-    // to print a list that would be identical either way.
     const gh = fakeGh("ok");
     const outcome = await protect({
       checkout: checkout({ origin: `https://github.com/${SLUG}` }),
@@ -324,24 +270,16 @@ describe("protectBranch successes", () => {
       "beta@aarch64-darwin",
       "beta@x86_64-linux",
     ]);
-    // NOT KNOWN rather than not applicable: the forge was never asked, so
-    // there is no repo and no branch to name, and naming a guess would be
-    // worse than naming neither.
     expect(outcome.facts.repo).toBeNull();
     expect(outcome.facts.branch).toBeNull();
     expect(outcome.facts.applied).toBe(false);
     expect(outcome.facts.created).toBe(false);
     expect(outcome.facts.rulesetId).toBeNull();
-    // An explicit platform set is the caller's own decision, so there is no
-    // machine-local provenance to disclose.
     expect(outcome.facts.derivedFrom).toBeNull();
-    // THE ASSERTION THAT MATTERS: not one `gh` call.
     expect(gh.calls()).toEqual([]);
   });
 
   it("previews in a checkout with no origin remote at all", async () => {
-    // The case the forge round trip used to break, and the one a person is
-    // most likely to be in: a repository that is not on GitHub yet.
     fakeGh("ok");
     const outcome = await protect({
       checkout: checkout({}),
@@ -358,9 +296,6 @@ describe("protectBranch successes", () => {
   });
 
   it("reports a hosts-derived platform set in derivedFrom, not on stderr", async () => {
-    // Protection is repo-global and a hosts file is machine-local; deriving one
-    // from the other silently once halved a repo's required contexts. A face
-    // can refuse a derived set — but only if the answer says it was derived.
     const file = hosts({ "x86_64-linux": "some-box" });
     fakeGh("ok");
     const outcome = await protect({
@@ -397,7 +332,6 @@ describe("protectBranch successes", () => {
     expect(outcome.facts.created).toBe(false);
     expect(outcome.facts.rulesetId).toBe(RULESET.id);
     expect(gh.calls().some((c) => c.includes("--method PUT"))).toBe(true);
-    // A named branch means gh is never asked which the default is.
     expect(gh.calls().some((c) => c.includes(".default_branch"))).toBe(false);
   });
 
@@ -415,8 +349,6 @@ describe("protectBranch successes", () => {
     expect(outcome.facts.created).toBe(true);
     expect(outcome.facts.applied).toBe(true);
     expect(outcome.facts.rulesetId).toBe(777);
-    // The part that surprises people, carried as a fact rather than left on a
-    // terminal nobody was watching.
     expect(outcome.facts.detail).toContain("nobody bypasses it");
     expect(gh.calls().some((c) => c.includes("--method POST"))).toBe(true);
   });
