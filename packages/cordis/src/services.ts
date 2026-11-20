@@ -5,6 +5,7 @@ import type { RootedSurfacesRuntime } from "@kolu/surface/server";
 import type { ServeSurfaceAppOptions } from "@kolu/surface-app/serve";
 import { type Plugin, serviceTag } from "@olai/effect-cordis";
 import type { MetricsSources } from "./metrics";
+import { singleOwnerSlot } from "./slot";
 
 export const StateDir = serviceTag<string>("odu:stateDir");
 
@@ -137,21 +138,15 @@ export class PurgeClaimRefused extends Error {
 export const CachePurge = serviceTag<CachePurge>("odu:cachePurge");
 
 export function purgeBroker(): CachePurge {
-  let installed: { readonly purge: (urls: readonly string[]) => void } | null = null;
+  const slot = singleOwnerSlot<(urls: readonly string[]) => void>(() => new PurgeClaimRefused());
   return {
     announce(urls) {
-      if (installed === null || urls.length === 0) return;
-      installed.purge(urls);
+      const purge = slot.held();
+      if (purge === null || urls.length === 0) return;
+      purge(urls);
     },
-    register(purge) {
-      if (installed !== null) throw new PurgeClaimRefused();
-      const claim = { purge };
-      installed = claim;
-      return () => {
-        if (installed === claim) installed = null;
-      };
-    },
-    listening: () => installed !== null,
+    register: (purge) => slot.claim(purge),
+    listening: () => slot.held() !== null,
   };
 }
 
@@ -202,20 +197,13 @@ export class GrantClaimRefused extends Error {
 export const CacheGrants = serviceTag<CacheGrants>("odu:cacheGrants");
 
 export function grantsBroker(): CacheGrants {
-  let installed: { readonly grantor: CacheGrantor } | null = null;
+  const slot = singleOwnerSlot<CacheGrantor>(() => new GrantClaimRefused());
   return {
-    serves: () => installed !== null,
-    bucketAt: (substituter) => installed?.grantor.bucketAt(substituter) ?? null,
-    mint: (request) => installed?.grantor.mint(request) ?? null,
-    revoke: (id) => installed?.grantor.revoke(id),
-    register(grantor) {
-      if (installed !== null) throw new GrantClaimRefused();
-      const claim = { grantor };
-      installed = claim;
-      return () => {
-        if (installed === claim) installed = null;
-      };
-    },
+    serves: () => slot.held() !== null,
+    bucketAt: (substituter) => slot.held()?.bucketAt(substituter) ?? null,
+    mint: (request) => slot.held()?.mint(request) ?? null,
+    revoke: (id) => slot.held()?.revoke(id),
+    register: (grantor) => slot.claim(grantor),
   };
 }
 

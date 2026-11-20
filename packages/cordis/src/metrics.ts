@@ -86,16 +86,23 @@ function labelsText(labels: MetricLabels | undefined, extra?: readonly [string, 
   return pairs.length === 0 ? "" : `{${pairs.join(",")}}`;
 }
 
-/** Families of one kind, merged by NAME across contributors: two rows that both
- *  report `odu_build_info` would otherwise emit two `# HELP` lines for one name,
- *  which a scrape rejects. First help text wins; samples keep their order. */
-function mergeFamilies<F extends { name: string; help: string; points: readonly unknown[] }>(
+/** Two `# HELP` lines for one metric name make a scrape an error, so families
+ *  of one kind are merged by NAME across contributors. */
+type FamilyShape = { name: string; help: string; points: readonly unknown[] };
+
+interface MergedFamily<F extends FamilyShape> {
+  readonly firstReported: F;
+  readonly points: F["points"][number][];
+}
+
+function mergeFamiliesByName<F extends FamilyShape>(
   families: readonly F[],
-): Array<{ head: F; points: F["points"][number][] }> {
-  const byName = new Map<string, { head: F; points: F["points"][number][] }>();
+): Array<MergedFamily<F>> {
+  const byName = new Map<string, { firstReported: F; points: F["points"][number][] }>();
   for (const family of families) {
     const seen = byName.get(family.name);
-    if (seen === undefined) byName.set(family.name, { head: family, points: [...family.points] });
+    if (seen === undefined)
+      byName.set(family.name, { firstReported: family, points: [...family.points] });
     else seen.points.push(...family.points);
   }
   return [...byName.values()];
@@ -113,11 +120,11 @@ export function renderExposition(readings: readonly ContributorReading[]): strin
     kind: "counter" | "gauge",
     families: readonly MetricFamily[],
   ): void => {
-    for (const { head, points } of mergeFamilies(families)) {
-      lines.push(`# HELP ${head.name} ${escapeHelp(head.help)}`);
-      lines.push(`# TYPE ${head.name} ${kind}`);
+    for (const { firstReported, points } of mergeFamiliesByName(families)) {
+      lines.push(`# HELP ${firstReported.name} ${escapeHelp(firstReported.help)}`);
+      lines.push(`# TYPE ${firstReported.name} ${kind}`);
       for (const point of points) {
-        lines.push(`${head.name}${labelsText(point.labels)} ${numberText(point.value)}`);
+        lines.push(`${firstReported.name}${labelsText(point.labels)} ${numberText(point.value)}`);
       }
     }
   };
@@ -132,21 +139,25 @@ export function renderExposition(readings: readonly ContributorReading[]): strin
     ok.flatMap((one) => one.reading?.gauges ?? []),
   );
 
-  for (const { head, points } of mergeFamilies(ok.flatMap((one) => one.reading?.histograms ?? []))) {
-    lines.push(`# HELP ${head.name} ${escapeHelp(head.help)}`);
-    lines.push(`# TYPE ${head.name} histogram`);
+  for (const { firstReported, points } of mergeFamiliesByName(
+    ok.flatMap((one) => one.reading?.histograms ?? []),
+  )) {
+    lines.push(`# HELP ${firstReported.name} ${escapeHelp(firstReported.help)}`);
+    lines.push(`# TYPE ${firstReported.name} histogram`);
     for (const point of points) {
       let running = 0;
-      head.bounds.forEach((bound, at) => {
+      firstReported.bounds.forEach((bound, at) => {
         running += point.counts[at] ?? 0;
         lines.push(
-          `${head.name}_bucket${labelsText(point.labels, ["le", numberText(bound)])} ${running}`,
+          `${firstReported.name}_bucket${labelsText(point.labels, ["le", numberText(bound)])} ${running}`,
         );
       });
       running += point.overflow;
-      lines.push(`${head.name}_bucket${labelsText(point.labels, ["le", "+Inf"])} ${running}`);
-      lines.push(`${head.name}_sum${labelsText(point.labels)} ${numberText(point.sum)}`);
-      lines.push(`${head.name}_count${labelsText(point.labels)} ${running}`);
+      lines.push(
+        `${firstReported.name}_bucket${labelsText(point.labels, ["le", "+Inf"])} ${running}`,
+      );
+      lines.push(`${firstReported.name}_sum${labelsText(point.labels)} ${numberText(point.sum)}`);
+      lines.push(`${firstReported.name}_count${labelsText(point.labels)} ${running}`);
     }
   }
 

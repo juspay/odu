@@ -41,28 +41,31 @@ function pagesUnder(dir) {
     .sort();
 }
 
-function plain(node) {
-  if (node.type === "inlineCode")
-    return node.value
-      .split(/\s+/)
-      .filter(Boolean)
-      .map(() => "X")
-      .join(" ");
+const codeToken = (code) =>
+  code
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(() => "X")
+    .join(" ");
+
+const isRunningText = (node) => node.type !== "image" && node.type !== "html";
+
+function plainTextForCounting(node) {
+  if (node.type === "inlineCode") return codeToken(node.value);
   if (node.type === "text") return node.value;
   if (node.type === "break") return " ";
-  if (node.type === "image" || node.type === "html") return "";
+  if (!isRunningText(node)) return "";
   if (!node.children) return "";
-  return node.children.map(plain).join("");
+  return node.children.map(plainTextForCounting).join("");
 }
 
 const words = (text) =>
   text.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
 
+const capitalizedForSegmenter = (text) => text.replace(/\bodu\b/g, "Odu");
+
 function sentencesOf(text) {
-  const flat = text
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\bodu\b/g, "Odu");
+  const flat = capitalizedForSegmenter(text.replace(/\s+/g, " ").trim());
   return [...sentences.segment(flat)]
     .map((s) => s.segment.trim())
     .filter(Boolean);
@@ -146,7 +149,7 @@ function lintPage(source) {
     switch (node.type) {
       case "heading": {
         closeSection();
-        const title = plain(node).trim();
+        const title = plainTextForCounting(node).trim();
         section = { title, node, words: 0 };
         pageWords += words(title);
         checkSentences(node, title);
@@ -158,12 +161,12 @@ function lintPage(source) {
             node,
             "paragraph opens with a bold run-in — use a heading, a list or a table",
           );
-        block(node, plain(node));
+        block(node, plainTextForCounting(node));
         return;
       }
       case "listItem": {
         const isParagraph = (c) => c.type === "paragraph";
-        const text = node.children.filter(isParagraph).map(plain).join(" ");
+        const text = node.children.filter(isParagraph).map(plainTextForCounting).join(" ");
         block(node, text);
         for (const child of node.children)
           if (!isParagraph(child)) walk(child);
@@ -172,7 +175,7 @@ function lintPage(source) {
       case "table": {
         for (const row of node.children)
           for (const cell of row.children) {
-            const text = plain(cell);
+            const text = plainTextForCounting(cell);
             const n = words(text);
             pageWords += n;
             if (n > LIMITS.cellWords)

@@ -1,5 +1,6 @@
 import { Context, Effect, Option, Schema } from "effect";
 import { serviceTag } from "@olai/effect-cordis";
+import { singleOwnerSlot } from "./slot";
 
 export const RoleSchema = Schema.Literals(["owner", "admin", "member"]);
 export type Role = typeof RoleSchema.Type;
@@ -194,25 +195,20 @@ export const PrincipalBroker = serviceTag<PrincipalBroker>("odu:principal");
 
 export function localBroker(options: { readonly door?: boolean } = {}): PrincipalBroker {
   const door = options.door === true;
-  let installed: { readonly resolver: PrincipalResolver } | null = null;
+  const slot = singleOwnerSlot<PrincipalResolver>(() => new PrincipalClaimRefused());
   return {
-    register(next) {
-      if (installed !== null) throw new PrincipalClaimRefused();
-      const claim = { resolver: next };
-      installed = claim;
-      return () => {
-        if (installed === claim) installed = null;
-      };
-    },
+    register: (next) => slot.claim(next),
     acquire(headers) {
-      if (installed !== null) return installed.resolver.acquire(headers);
+      const resolver = slot.held();
+      if (resolver !== null) return resolver.acquire(headers);
       return door ? null : makeLease(LOCAL_OWNER).lease;
     },
     authorize(authorization) {
-      if (installed !== null) return installed.resolver.authorize(authorization);
+      const resolver = slot.held();
+      if (resolver !== null) return resolver.authorize(authorization);
       return door ? null : LOCAL_OWNER;
     },
-    mounted: () => installed !== null,
+    mounted: () => slot.held() !== null,
     hasDoor: () => door,
   };
 }
