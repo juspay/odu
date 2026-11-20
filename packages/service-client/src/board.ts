@@ -98,8 +98,8 @@ export function laneSpan(
   const stop = laneStop(lane, run, startedAt, now);
   if (stop === null) return null;
   const scale = runElapsedMs(run, now);
-  const startedAfterMs = clampMs(startedAt - run.createdAt, scale);
-  const tookMs = clampMs(stop.endedAt - startedAt, scale - startedAfterMs);
+  const startedAfterMs = clampIntoTrackMs(startedAt - run.createdAt, scale);
+  const tookMs = clampIntoTrackMs(stop.endedAt - startedAt, scale - startedAfterMs);
   return {
     kind: stop.kind,
     left: fractionOf(startedAfterMs, scale),
@@ -123,11 +123,13 @@ export function pushSpan(
   const recipe = laneSpan(node, run, now);
   if (recipe === null) return null;
   const scale = runElapsedMs(run, now);
-  const startedAfterMs = clampMs(recipe.startedAfterMs + recipe.tookMs, scale);
-  const room = scale - startedAfterMs;
-  if (room <= 0) return null;
+  const startedAfterMs = clampIntoTrackMs(recipe.startedAfterMs + recipe.tookMs, scale);
+  const remainingTrackMs = scale - startedAfterMs;
+  if (remainingTrackMs <= 0) return null;
   const tookMs =
-    push.state === "pushing" ? room : clampMs(push.durationMs, room);
+    push.state === "pushing"
+      ? remainingTrackMs
+      : clampIntoTrackMs(push.durationMs, remainingTrackMs);
   return {
     kind: push.state === "pushing" ? "running" : "settled",
     left: fractionOf(startedAfterMs, scale),
@@ -154,8 +156,8 @@ function laneStop(
     : { kind: "settled", endedAt: run.finishedAt };
 }
 
-function clampMs(value: number, ceiling: number): number {
-  return value > 0 ? Math.min(value, ceiling) : 0;
+function clampIntoTrackMs(value: number, ceilingMs: number): number {
+  return value > 0 ? Math.min(value, ceilingMs) : 0;
 }
 
 function fractionOf(ms: number, scale: number): number {

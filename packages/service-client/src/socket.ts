@@ -33,6 +33,13 @@ export function webAppNamespace(origin: string): string {
   return `${SERVICE_APP}-${digest}`;
 }
 
+function socketPathUnder(
+  app: string,
+  env: Record<string, string | undefined>,
+): string {
+  return join(stateRoot(env), app, `${app}.sock`);
+}
+
 /**
  * WHERE THE DAEMON'S HOME IS — the one answer, for the daemon and for every
  * client that has to dial it.
@@ -46,7 +53,7 @@ export function webHomeOptions(
   if (explicit === undefined || explicit === "") {
     return { app, placement: "state" };
   }
-  return { app, placement: "state", socketOverride: join(stateRoot(env), app, `${app}.sock`) };
+  return { app, placement: "state", socketOverride: socketPathUnder(app, env) };
 }
 
 /**

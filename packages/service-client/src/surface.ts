@@ -962,26 +962,14 @@ const AttentionAnswerSchema = Schema.Struct({
        *  only: a node still pushing, or one whose push failed, adds nothing
        *  to a count that claims the bucket serves it. */
       paths: Schema.Int,
-      /**
-       * Of `paths`, how many the bucket ALREADY served — so `paths - present`
-       * is what this run actually sent. The split is what lets a reader say
-       * "3 pushed · 66 present" instead of "69 paths", which claimed
-       * sixty-nine closures crossed the network when three did.
-       *
-       * Absent means "this daemon does not record the
-       * split"; read it as `0`.
-       */
+      /** Of `paths`, how many the bucket ALREADY served — so `paths - present`
+       *  is what this run sent. Absent when the daemon does not record the
+       *  split; read it as `0`. */
       present: Schema.optionalKey(Schema.Int),
       bytes: Schema.Int,
-      /**
-       * The nodes whose push FAILED, in roster order — empty when none did.
-       * Without it a reader of a red run cannot tell a recipe that failed
-       * from one that passed and could not reach the cache, which are
-       * different problems with different fixes.
-       *
-       * Absent means "this daemon does not record which
-       * node's push failed"; read it as `[]`, never as "none failed".
-       */
+      /** The nodes whose push FAILED, in roster order — empty when none did.
+       *  Absent when the daemon does not record it; read it as `[]`, never as
+       *  "none failed". */
       failedOn: Schema.optionalKey(Schema.Array(Schema.String)),
     }),
   ),

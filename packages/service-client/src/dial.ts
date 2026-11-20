@@ -27,8 +27,13 @@ export interface ServiceConnection {
   dispose: () => Promise<void>;
 }
 
-function webSocketCtor(): typeof WebSocket {
-  const ctor = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
+type WebSocketCtor = new (
+  url: string,
+  options?: { headers: Record<string, string> },
+) => WebSocket;
+
+function webSocketCtor(): WebSocketCtor {
+  const ctor = (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
   if (ctor === undefined) {
     throw new Error(
       "odu: this runtime has no global WebSocket — odu's faces dial the service " +
@@ -38,18 +43,12 @@ function webSocketCtor(): typeof WebSocket {
   return ctor;
 }
 
-type UpgradeableWebSocket = new (
-  url: string,
-  options: { headers: Record<string, string> },
-) => WebSocket;
-
-function withHeaders(
-  ctor: typeof WebSocket,
+function connectWithHeaders(
+  ctor: WebSocketCtor,
   url: string,
   headers: Record<string, string>,
 ): WebSocket {
-  const upgradeable = ctor as unknown as UpgradeableWebSocket;
-  return Object.keys(headers).length === 0 ? new ctor(url) : new upgradeable(url, { headers });
+  return Object.keys(headers).length === 0 ? new ctor(url) : new ctor(url, { headers });
 }
 
 /**
@@ -89,7 +88,7 @@ export async function dialService(
     group: opts.group ?? oduServiceSurface.group,
     url: () => url,
     isTerminalClose: (code) => code === STALE_PROCESS_CLOSE_CODE,
-    connect: (target) => withHeaders(ctor, target, headers),
+    connect: (target) => connectWithHeaders(ctor, target, headers),
   });
   const opened = await firstOpen(link, opts.readyMs ?? DIAL_READY_MS);
   if (!opened) {

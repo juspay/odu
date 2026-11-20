@@ -13,7 +13,7 @@ export const SERVICE_MCP_PATH = "/mcp";
 
 function withoutTrailingSlashes(origin: string): string {
   let end = origin.length;
-  while (end > 0 && origin.charCodeAt(end - 1) === 47) end -= 1;
+  while (end > 0 && origin[end - 1] === "/") end -= 1;
   return origin.slice(0, end);
 }
 
@@ -78,14 +78,16 @@ export function readPublicOrigin(
   return { ok: true, origin: `${url.protocol}//${url.host}` };
 }
 
+function unbracketedHost(url: URL): string {
+  const bracketed = url.hostname.startsWith("[") && url.hostname.endsWith("]");
+  return bracketed ? url.hostname.slice(1, -1) : url.hostname;
+}
+
 /** The host and port a listener binds, parsed out of an origin. */
 export function serviceBind(origin: string): { host: string; port: number } {
   const url = new URL(origin);
   const port = url.port === "" ? (url.protocol === "https:" ? 443 : 80) : Number(url.port);
-  const host = url.hostname.startsWith("[") && url.hostname.endsWith("]")
-    ? url.hostname.slice(1, -1)
-    : url.hostname;
-  return { host, port };
+  return { host: unbracketedHost(url), port };
 }
 
 export function serviceWsUrl(origin: string): string {
