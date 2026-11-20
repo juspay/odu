@@ -36,7 +36,7 @@ import {
 } from "@odu/cordis/principal";
 import { authRowRecord, readGithubConfig, signInPageHtml } from "@odu/auth/server";
 import { cloudflareRowRecord, readCloudflareConfig } from "@odu/cloudflare/server";
-import { AUTH_ANONYMOUS_TAGS } from "@odu/auth/surface";
+import { TAGS_OPEN_TO_A_SESSIONLESS_CONNECTION } from "@odu/auth/surface";
 import {
   admissionDispatch,
   admissionStore,
@@ -304,7 +304,9 @@ export async function serveWebService(tenure: Tenure): Promise<number> {
       oduMetricsSurface,
       metricsFragment({ tokens: metricsTokens, rootToken }),
     );
-    const anonymousTags = hasDoor ? new Set(Object.keys(AUTH_ANONYMOUS_TAGS)) : new Set<string>();
+    const anonymousTags = hasDoor
+      ? new Set(Object.keys(TAGS_OPEN_TO_A_SESSIONLESS_CONNECTION))
+      : new Set<string>();
     let gated: { readonly source: SurfaceHandlers; readonly handlers: SurfaceHandlers } | null =
       null;
     const served = (): { group: typeof runtime.group; handlers: SurfaceHandlers } => {

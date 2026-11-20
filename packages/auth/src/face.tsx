@@ -1,5 +1,6 @@
 import { createControl } from "@odu/face/control";
 import { ago } from "@odu/cordis/format";
+import type { Role } from "@odu/cordis/principal";
 import { refusalText } from "@odu/face/refusal";
 import {
   BackLink,
@@ -41,7 +42,7 @@ export type AuthClient = SurfaceClient<AuthSpec>;
 
 const SIGN_IN_CELLS = 216;
 
-const SIGN_IN_PATTERN: readonly string[] = Array.from(
+const STABLE_SIGN_IN_PATTERN: readonly string[] = Array.from(
   { length: SIGN_IN_CELLS },
   (_unused, index) => {
     const step = (index * 37 + (index % 7) * 11) % 23;
@@ -57,7 +58,7 @@ export function SignIn(): JSX.Element {
     <section class="signin" aria-label="sign in">
       <div class="signin-art" aria-hidden="true">
         <div class="signin-grid">
-          <For each={SIGN_IN_PATTERN}>{(hue) => <span class={`cell ${hue}`} />}</For>
+          <For each={STABLE_SIGN_IN_PATTERN}>{(hue) => <span class={`cell ${hue}`} />}</For>
         </div>
       </div>
       <div class="signin-main">
@@ -374,8 +375,11 @@ export function ProfileFace(props: ProfileFaceProps): JSX.Element {
   );
 }
 
-const ROLES = ["member", "admin", "owner"] as const;
-type RoleName = (typeof ROLES)[number];
+const ROLE_RANK = { member: 0, admin: 1, owner: 2 } as const satisfies Record<Role, number>;
+type RoleName = Role;
+const ROLES: ReadonlyArray<RoleName> = (Object.keys(ROLE_RANK) as RoleName[]).sort(
+  (a, b) => ROLE_RANK[a] - ROLE_RANK[b],
+);
 
 function isRole(value: string): value is RoleName {
   return (ROLES as readonly string[]).includes(value);

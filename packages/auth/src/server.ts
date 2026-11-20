@@ -44,6 +44,13 @@ export const SESSION_COOKIE = "odu_session";
 
 export const SESSION_DAYS = 30;
 
+export const sessionCookieOptions = (
+  secure: boolean,
+): { readonly secure: boolean; readonly maxAge: `${number} minutes` } => ({
+  secure,
+  maxAge: `${SESSION_DAYS * 24 * 60} minutes`,
+});
+
 const sha256 = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
 
@@ -100,7 +107,7 @@ export interface AuthServer {
   closeDatabase(): void;
 }
 
-interface Held {
+interface OpenLease {
   readonly login: string;
   readonly session: string | null;
   readonly token: string | null;
@@ -117,7 +124,7 @@ const tokenView = (row: TokenRow): AuthToken => ({
 });
 
 const sessionView = (row: SessionRow): AuthSession => ({
-  id: row.id,
+  id: row.cookieSha256,
   created: row.created,
   lastSeen: row.lastSeen,
   expires: row.expires,
@@ -138,7 +145,7 @@ const notPermitted = (what: string): AuthRefused =>
 export function authServer(opts: AuthServerOptions): AuthServer {
   const { repo, config } = opts;
   const now = opts.now ?? Date.now;
-  const held = new Set<Held>();
+  const openLeases = new Set<OpenLease>();
 
   const principalFor = (login: string): Principal => ({
     kind: "user",
@@ -146,18 +153,18 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     role: repo.grant(login)?.role ?? DEFAULT_ROLE,
   });
 
-  const endWhere = (match: (entry: Held) => boolean): void => {
-    for (const entry of [...held]) if (match(entry)) entry.end();
+  const endWhere = (match: (entry: OpenLease) => boolean): void => {
+    for (const entry of [...openLeases]) if (match(entry)) entry.end();
   };
 
   const endLogin = (login: string): void => {
     endWhere((entry) => entry.login === login);
   };
 
-  const hold = (owner: { login: string; session?: string; token?: string }): Lease => {
-    let entry: Held | null = null;
+  const leaseFor = (owner: { login: string; session?: string; token?: string }): Lease => {
+    let entry: OpenLease | null = null;
     const mine = makeLease(principalFor(owner.login), () => {
-      if (entry !== null) held.delete(entry);
+      if (entry !== null) openLeases.delete(entry);
     });
     entry = {
       login: owner.login,
@@ -165,27 +172,27 @@ export function authServer(opts: AuthServerOptions): AuthServer {
       token: owner.token ?? null,
       end: mine.end,
     };
-    held.add(entry);
+    openLeases.add(entry);
     return {
       principal: mine.lease.principal,
       watch: mine.lease.watch,
       release: () => {
-        if (entry !== null) held.delete(entry);
+        if (entry !== null) openLeases.delete(entry);
         mine.lease.release();
       },
     };
   };
 
-  const liveSession = (hash: string): SessionRow | null => {
-    const row = repo.session(hash);
+  const liveSession = (cookieSha256: string): SessionRow | null => {
+    const row = repo.sessionIgnoringExpiry(cookieSha256);
     if (row === null) return null;
     if (row.expires <= now()) {
-      repo.deleteSession(row.id);
-      endWhere((entry) => entry.session === row.id);
+      repo.deleteSession(row.cookieSha256);
+      endWhere((entry) => entry.session === row.cookieSha256);
       return null;
     }
-    repo.touchSession(row.id, now());
-    repo.touchPerson(row.login, now());
+    repo.touchSession(row.cookieSha256, now());
+    repo.recordPersonSeen(row.login, now());
     return row;
   };
 
@@ -194,7 +201,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     if (row === null || row.revoked) return null;
     if (row.expires !== null && row.expires <= now()) return null;
     repo.touchToken(row.id, now());
-    repo.touchPerson(row.login, now());
+    repo.recordPersonSeen(row.login, now());
     return row;
   };
 
@@ -203,12 +210,12 @@ export function authServer(opts: AuthServerOptions): AuthServer {
       const cookie = cookieValue(headers["cookie"], SESSION_COOKIE);
       if (cookie !== null) {
         const row = liveSession(sha256(cookie));
-        if (row !== null) return hold({ login: row.login, session: row.id });
+        if (row !== null) return leaseFor({ login: row.login, session: row.cookieSha256 });
       }
       const token = bearerValue(headers["authorization"]);
       if (token !== null) {
         const row = liveToken(sha256(token));
-        if (row !== null) return hold({ login: row.login, token: row.id });
+        if (row !== null) return leaseFor({ login: row.login, token: row.id });
       }
       return null;
     },
@@ -234,6 +241,50 @@ export function authServer(opts: AuthServerOptions): AuthServer {
   const owners = (): ReadonlyArray<string> =>
     repo.grants().filter((grant) => grant.role === "owner").map((grant) => grant.login);
 
+  const authorizeGrant = (
+    who: Principal | null,
+    input: { readonly role: Role; readonly rootToken: string },
+  ): AuthRefused | null => {
+    if (who !== null) {
+      return who.kind === "user" && who.role !== "owner"
+        ? notPermitted(`granting a role is an owner's verb — ${who.login} is a ${who.role}`)
+        : null;
+    }
+    if (!rootTokenMatches(input.rootToken)) {
+      return notPermitted(
+        "granting a role needs a signed-in owner — or, on a daemon with " +
+          "no owner yet, the operator's root token ($ODU_ROOT_TOKEN)",
+      );
+    }
+    const existing = owners();
+    if (existing.length > 0) {
+      return notPermitted(
+        `this daemon already has an owner (${existing.join(", ")}) — the ` +
+          "root token only bootstraps the first one; sign in as an owner " +
+          "to grant roles",
+      );
+    }
+    if (input.role !== "owner") {
+      return notPermitted(
+        `the root token bootstraps the first OWNER and nothing else — ` +
+          `sign in as that owner to grant "${input.role}"`,
+      );
+    }
+    return null;
+  };
+
+  const refuseLastOwnerDemotion = (
+    current: ReadonlyArray<string>,
+    login: string,
+    role: Role,
+  ): AuthRefused | null =>
+    role !== "owner" && current.length === 1 && current[0] === login
+      ? notPermitted(
+          `this would leave the daemon with no owner — ${login} is the only one; ` +
+            "grant another owner first",
+        )
+      : null;
+
   const deps: AuthSurfaceDeps = {
     procedures: {
       user: {
@@ -243,39 +294,8 @@ export function authServer(opts: AuthServerOptions): AuthServer {
           })),
         grant: ({ input }) =>
           Effect.flatMap(admissionOf, (admission) => {
-            const who = admission.principal;
-            if (who === null) {
-              if (!rootTokenMatches(input.rootToken)) {
-                return Effect.fail(
-                  notPermitted(
-                    "granting a role needs a signed-in owner — or, on a daemon with " +
-                      "no owner yet, the operator's root token ($ODU_ROOT_TOKEN)",
-                  ),
-                );
-              }
-              const existing = owners();
-              if (existing.length > 0) {
-                return Effect.fail(
-                  notPermitted(
-                    `this daemon already has an owner (${existing.join(", ")}) — the ` +
-                      "root token only bootstraps the first one; sign in as an owner " +
-                      "to grant roles",
-                  ),
-                );
-              }
-              if (input.role !== "owner") {
-                return Effect.fail(
-                  notPermitted(
-                    `the root token bootstraps the first OWNER and nothing else — ` +
-                      `sign in as that owner to grant "${input.role}"`,
-                  ),
-                );
-              }
-            } else if (who.kind === "user" && who.role !== "owner") {
-              return Effect.fail(
-                notPermitted(`granting a role is an owner's verb — ${who.login} is a ${who.role}`),
-              );
-            }
+            const refused = authorizeGrant(admission.principal, input);
+            if (refused !== null) return Effect.fail(refused);
             const login = normalizeLogin(input.login);
             if (login === "") {
               return Effect.fail(
@@ -285,15 +305,8 @@ export function authServer(opts: AuthServerOptions): AuthServer {
                 }),
               );
             }
-            const current = owners();
-            if (input.role !== "owner" && current.length === 1 && current[0] === login) {
-              return Effect.fail(
-                notPermitted(
-                  `this would leave the daemon with no owner — ${login} is the only one; ` +
-                    "grant another owner first",
-                ),
-              );
-            }
+            const lastOwner = refuseLastOwnerDemotion(owners(), login, input.role);
+            if (lastOwner !== null) return Effect.fail(lastOwner);
             repo.setGrant({ login, role: input.role, created: now() });
             endLogin(login);
             return Effect.succeed({ login, role: input.role });
@@ -317,7 +330,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
                 lastSeen: null,
               });
             }
-            for (const seen of repo.people()) {
+            for (const seen of repo.everySignedInLogin()) {
               const granted = people.get(seen.login);
               people.set(seen.login, {
                 login: seen.login,
@@ -398,7 +411,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
           ),
         end: ({ input }) =>
           Effect.flatMap(signedIn(), ({ login }) => {
-            if (!repo.sessions(login).some((row) => row.id === input.id)) {
+            if (!repo.sessions(login).some((row) => row.cookieSha256 === input.id)) {
               return Effect.fail(
                 new AuthRefused({
                   code: "unknown",
@@ -418,7 +431,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     const cookie = randomBytes(32).toString("base64url");
     const at = now();
     const session: SessionRow = {
-      id: sha256(cookie),
+      cookieSha256: sha256(cookie),
       login,
       created: at,
       lastSeen: at,
@@ -426,7 +439,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
       agent,
     };
     repo.putSession(session);
-    repo.touchPerson(login, at);
+    repo.recordPersonSeen(login, at);
     return { cookie, session };
   };
 
@@ -437,11 +450,11 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     signIn,
     signOut(cookie) {
       if (cookie === null) return false;
-      const hash = sha256(cookie);
-      const row = repo.session(hash);
+      const cookieSha256 = sha256(cookie);
+      const row = repo.sessionIgnoringExpiry(cookieSha256);
       if (row === null) return false;
-      repo.deleteSession(hash);
-      endWhere((entry) => entry.session === hash);
+      repo.deleteSession(cookieSha256);
+      endWhere((entry) => entry.session === cookieSha256);
       return true;
     },
     endLogin(login) {
@@ -449,16 +462,23 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     },
     sweep() {
       for (const row of repo.expiredSessions(now())) {
-        repo.deleteSession(row.id);
-        endWhere((entry) => entry.session === row.id);
+        repo.deleteSession(row.cookieSha256);
+        endWhere((entry) => entry.session === row.cookieSha256);
       }
     },
     closeDatabase() {
-      for (const entry of [...held]) entry.end();
-      held.clear();
+      for (const entry of [...openLeases]) entry.end();
+      openLeases.clear();
       repo.close();
     },
   };
+}
+
+export function openAuthServer(
+  opts: Omit<AuthServerOptions, "repo"> & { readonly path: string },
+): AuthServer {
+  const { path, ...rest } = opts;
+  return authServer({ ...rest, repo: openAuthRepo(path) });
 }
 
 const SWEEP_MS = 60_000;
@@ -475,17 +495,17 @@ export const authRow = (config: GithubConfig) =>
       const rootToken = yield* RootToken;
       const broker: PrincipalBroker = yield* PrincipalBrokerTag;
 
-      const repo = openAuthRepo(join(stateDir, "auth", "auth.sqlite"));
-      let server: AuthServer | null = null;
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          if (server === null) repo.close();
-          else server.closeDatabase();
-        }),
+      const auth = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          openAuthServer({
+            config,
+            path: join(stateDir, "auth", "auth.sqlite"),
+            rootToken,
+            log,
+          }),
+        ),
+        (server) => Effect.sync(() => server.closeDatabase()),
       );
-
-      const auth = authServer({ config, repo, rootToken, log });
-      server = auth;
       const withdraw = broker.register(auth.resolver);
       yield* Effect.addFinalizer(() => Effect.sync(withdraw));
 
@@ -504,13 +524,13 @@ export const authRow = (config: GithubConfig) =>
       );
 
       log.info(
-        { origin: config.origin, publicOrigin: config.publicOrigin, allow: config.allow },
+        { origin: config.origin, publicOrigin: config.publicOrigin, allow: config.allowSpec },
         "odu web: the auth row is serving — this daemon has a door",
       );
     }),
   });
 
-export { AUTH_AGENT, AUTH_ANONYMOUS_TAGS, AUTH_KEY } from "./surface";
+export { AUTH_AGENT, AUTH_KEY, TAGS_OPEN_TO_A_SESSIONLESS_CONNECTION } from "./surface";
 
 export { readGithubConfig, type GithubConfig, type GithubConfigReading } from "./github";
 

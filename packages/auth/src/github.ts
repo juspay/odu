@@ -8,8 +8,8 @@ export function normalizeLogin(login: string): string {
 export interface GithubConfig {
   readonly clientId: string;
   readonly clientSecret: string;
-  readonly allow: string;
-  readonly rules: ReadonlyArray<AllowRule>;
+  readonly allowSpec: string;
+  readonly allowRules: ReadonlyArray<AllowRule>;
   readonly origin: string;
   readonly api: string;
   readonly publicOrigin: string;
@@ -80,8 +80,8 @@ export function readGithubConfig(
     config: {
       clientId: clientId as string,
       clientSecret,
-      allow: allowText as string,
-      rules: allow.rules,
+      allowSpec: allowText as string,
+      allowRules: allow.rules,
       origin: filled(env[ORIGIN]) ?? "https://github.com",
       api: filled(env[API]) ?? "https://api.github.com",
       publicOrigin: origins.publicOrigin ?? origins.boundOrigin,
@@ -292,47 +292,49 @@ export async function membership(
   login: string,
   request: typeof fetch = fetch,
 ): Promise<Membership> {
-  const rules = config.rules;
+  const rules = config.allowRules;
   if (rules.length === 0) {
     return {
       ok: false,
       message: `odu: $${ALLOW} names nobody, so nobody may sign in`,
     };
   }
-  let lastFailure = "";
-  for (const rule of rules) {
+  const found = await firstMatchingRule(rules, async (rule) => {
     if (rule.kind === "login") {
-      if (rule.login.toLowerCase() === login.toLowerCase()) return { ok: true, rule };
-      continue;
+      return rule.login.toLowerCase() === login.toLowerCase()
+        ? { kind: "member" }
+        : { kind: "no" };
     }
-    if (rule.kind === "org") {
-      const response = await ask(
-        new URL(`/user/memberships/orgs/${encodeURIComponent(rule.org)}`, config.api).toString(),
-        token,
-        request,
-      );
-      if (response.kind === "member") return { ok: true, rule };
-      lastFailure = response.kind === "no" ? lastFailure : response.message;
-      continue;
-    }
-    const response = await ask(
-      new URL(
-        `/orgs/${encodeURIComponent(rule.org)}/teams/${encodeURIComponent(rule.slug)}/memberships/${encodeURIComponent(login)}`,
-        config.api,
-      ).toString(),
-      token,
-      request,
-    );
-    if (response.kind === "member") return { ok: true, rule };
-    lastFailure = response.kind === "no" ? lastFailure : response.message;
-  }
+    const url =
+      rule.kind === "org"
+        ? new URL(`/user/memberships/orgs/${encodeURIComponent(rule.org)}`, config.api).toString()
+        : new URL(
+            `/orgs/${encodeURIComponent(rule.org)}/teams/${encodeURIComponent(rule.slug)}/memberships/${encodeURIComponent(login)}`,
+            config.api,
+          ).toString();
+    return ask(url, token, request);
+  });
+  if (found.rule !== null) return { ok: true, rule: found.rule };
   return {
     ok: false,
     message:
-      lastFailure !== ""
-        ? lastFailure
-        : `odu: ${login} is not in this daemon's allow-list (${describeAllow(config.allow)})`,
+      found.lastFailure !== ""
+        ? found.lastFailure
+        : `odu: ${login} is not in this daemon's allow-list (${describeAllow(config.allowSpec)})`,
   };
+}
+
+async function firstMatchingRule(
+  rules: ReadonlyArray<AllowRule>,
+  probe: (rule: AllowRule) => Promise<Probe>,
+): Promise<{ readonly rule: AllowRule | null; readonly lastFailure: string }> {
+  let lastFailure = "";
+  for (const rule of rules) {
+    const answer = await probe(rule);
+    if (answer.kind === "member") return { rule, lastFailure };
+    if (answer.kind === "error") lastFailure = answer.message;
+  }
+  return { rule: null, lastFailure };
 }
 
 type Probe =

@@ -37,8 +37,8 @@ const readAllowOrThrow = (spec: string) => {
 const CONFIG: GithubConfig = {
   clientId: "client-id",
   clientSecret: "client-secret",
-  allow: ALLOW,
-  rules: readAllowOrThrow(ALLOW),
+  allowSpec: ALLOW,
+  allowRules: readAllowOrThrow(ALLOW),
   origin: "https://github.test",
   api: "https://api.github.test",
   publicOrigin: "https://odu.test",
@@ -162,7 +162,7 @@ describe("the door's configuration", () => {
     expect(reading.config.publicOrigin).toBe("https://odu.test");
     expect(reading.config.origin).toBe("https://github.com");
     expect(reading.config.api).toBe("https://api.github.com");
-    expect(reading.config.rules).toEqual([
+    expect(reading.config.allowRules).toEqual([
       { kind: "org", org: "juspay" },
       { kind: "login", login: "srid" },
     ]);
@@ -221,8 +221,8 @@ describe("the GitHub App's flow", () => {
     const answer = await membership(
       {
         ...CONFIG,
-        allow: "org:other, team:juspay/platform",
-        rules: readAllowOrThrow("org:other, team:juspay/platform"),
+        allowSpec: "org:other, team:juspay/platform",
+        allowRules: readAllowOrThrow("org:other, team:juspay/platform"),
       },
       "user-token",
       "srid",

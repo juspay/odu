@@ -10,7 +10,7 @@ import {
   membership,
   type GithubConfig,
 } from "./github";
-import { cookieValue, SESSION_COOKIE, SESSION_DAYS, type AuthServer } from "./server";
+import { cookieValue, SESSION_COOKIE, sessionCookieOptions, type AuthServer } from "./server";
 import {
   AUTH_CALLBACK_PATH,
   AUTH_SIGN_IN_PATH,
@@ -32,25 +32,27 @@ export interface AuthRoutesOptions {
   readonly now?: () => number;
 }
 
-function signedState(secret: string, at: number): string {
-  const nonce = randomBytes(24).toString("base64url");
-  const mac = createHmac("sha256", secret).update(`${nonce}.${at}`).digest("base64url");
-  return `${nonce}.${at}.${mac}`;
-}
+const SignedState = {
+  mint(secret: string, at: number): string {
+    const nonce = randomBytes(24).toString("base64url");
+    const mac = createHmac("sha256", secret).update(`${nonce}.${at}`).digest("base64url");
+    return `${nonce}.${at}.${mac}`;
+  },
 
-function stateIsOurs(secret: string, value: string, now: number): boolean {
-  const parts = value.split(".");
-  if (parts.length !== 3) return false;
-  const [nonce, at, mac] = parts as [string, string, string];
-  const issued = Number(at);
-  if (!Number.isSafeInteger(issued)) return false;
-  if (now - issued > STATE_MINUTES * 60_000) return false;
-  const offered = Buffer.from(mac);
-  const expected = Buffer.from(
-    createHmac("sha256", secret).update(`${nonce}.${at}`).digest("base64url"),
-  );
-  return offered.length === expected.length && timingSafeEqual(offered, expected);
-}
+  verify(secret: string, value: string, now: number): boolean {
+    const parts = value.split(".");
+    if (parts.length !== 3) return false;
+    const [nonce, at, mac] = parts as [string, string, string];
+    const issuedAt = Number(at);
+    if (!Number.isSafeInteger(issuedAt)) return false;
+    if (now - issuedAt > STATE_MINUTES * 60_000) return false;
+    const offered = Buffer.from(mac);
+    const expected = Buffer.from(
+      createHmac("sha256", secret).update(`${nonce}.${at}`).digest("base64url"),
+    );
+    return offered.length === expected.length && timingSafeEqual(offered, expected);
+  },
+};
 
 function escapeHtml(text: string): string {
   return text
@@ -176,12 +178,12 @@ export function authRoutes(opts: AuthRoutesOptions): ClaimedRoutes {
   const request = opts.request ?? fetch;
   const now = opts.now ?? Date.now;
   const secure = config.publicOrigin.startsWith("https://");
-  const spent = (response: HttpServerResponse.HttpServerResponse) =>
+  const clearStateCookie = (response: HttpServerResponse.HttpServerResponse) =>
     withCookie(response, STATE_COOKIE, "", { secure, maxAge: "0 minutes" });
 
   const signIn = HttpRouter.add("GET", AUTH_SIGN_IN_PATH, () =>
     Effect.sync(() => {
-      const state = signedState(config.clientSecret, now());
+      const state = SignedState.mint(config.clientSecret, now());
       const response = HttpServerResponse.redirect(authorizeUrl(config, state), { status: 302 });
       return withCookie(response, STATE_COOKIE, state, {
         secure,
@@ -197,15 +199,15 @@ export function authRoutes(opts: AuthRoutesOptions): ClaimedRoutes {
       const code = url.searchParams.get("code");
       const carried = cookieValue(incoming.headers["cookie"], STATE_COOKIE);
       if (state === null || state === "" || carried === null) {
-        return spent(
+        return clearStateCookie(
           refusalPage(
             400,
             "This looks like a callback odu did not start — begin again from the sign-in page.",
           ),
         );
       }
-      if (state !== carried || !stateIsOurs(config.clientSecret, state, now())) {
-        return spent(
+      if (state !== carried || !SignedState.verify(config.clientSecret, state, now())) {
+        return clearStateCookie(
           refusalPage(
             400,
             "The sign-in state did not match this browser's cookie — begin again from the sign-in page.",
@@ -213,21 +215,23 @@ export function authRoutes(opts: AuthRoutesOptions): ClaimedRoutes {
         );
       }
       if (code === null || code === "") {
-        return spent(refusalPage(400, "GitHub sent no authorization code — begin again."));
+        return clearStateCookie(
+          refusalPage(400, "GitHub sent no authorization code — begin again."),
+        );
       }
 
       const exchanged = yield* Effect.promise(() => exchangeCode(config, code, request));
-      if (!exchanged.ok) return spent(refusalPage(403, exchanged.message));
+      if (!exchanged.ok) return clearStateCookie(refusalPage(403, exchanged.message));
 
       const user = yield* Effect.promise(() => fetchLogin(config, exchanged.token, request));
-      if (!user.ok) return spent(refusalPage(403, user.message));
+      if (!user.ok) return clearStateCookie(refusalPage(403, user.message));
 
       const entitled = yield* Effect.promise(() =>
         membership(config, exchanged.token, user.login, request),
       );
       if (!entitled.ok) {
         opts.log.warn({ login: user.login }, "odu web: a sign-in was refused by the allow-list");
-        return spent(
+        return clearStateCookie(
           refusalPage(
             403,
             `${user.login} is not allowed to sign in to this odu daemon. ${entitled.message}`,
@@ -241,11 +245,13 @@ export function authRoutes(opts: AuthRoutesOptions): ClaimedRoutes {
       });
       opts.log.warn({ login: user.login }, "odu web: a person signed in");
       const response = HttpServerResponse.redirect("/", { status: 302 });
-      const withSession = withCookie(response, SESSION_COOKIE, session.cookie, {
-        secure,
-        maxAge: `${SESSION_DAYS * 24 * 60} minutes`,
-      });
-      return spent(withSession);
+      const withSession = withCookie(
+        response,
+        SESSION_COOKIE,
+        session.cookie,
+        sessionCookieOptions(secure),
+      );
+      return clearStateCookie(withSession);
     }),
   );
 

@@ -152,10 +152,18 @@ export const ODU_AUTH_EXPOSE = {
   "session.end": { tool: { mutates: true } },
 } as const satisfies ExposeMap<(typeof oduAuthSurface)["spec"]>;
 
-export const AUTH_ANONYMOUS_TAGS: Readonly<Record<string, true>> = {
-  "surface/auth/user/whoami": true,
-  "surface/auth/user/grant": true,
-};
+const SESSIONLESS_PROCEDURES: ReadonlyArray<keyof typeof ODU_AUTH_EXPOSE> = [
+  "user.whoami",
+  "user.grant",
+];
+
+export const TAGS_OPEN_TO_A_SESSIONLESS_CONNECTION: Readonly<Record<string, true>> =
+  Object.fromEntries(
+    SESSIONLESS_PROCEDURES.map((path) => [
+      `surface/${AUTH_KEY}/${path.replace(".", "/")}`,
+      true as const,
+    ]),
+  );
 
 export const ODU_AUTH_MCP_INSTRUCTIONS = [
   "The auth verbs are this daemon's door, as their own row — they exist ONLY",

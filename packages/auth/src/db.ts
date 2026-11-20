@@ -5,7 +5,7 @@ import type { Role } from "@odu/cordis/principal";
 import { normalizeLogin } from "./github";
 
 export interface SessionRow {
-  id: string;
+  cookieSha256: string;
   login: string;
   created: number;
   lastSeen: number;
@@ -37,7 +37,7 @@ export interface GrantRow {
 }
 
 export interface AuthRepo {
-  session(id: string): SessionRow | null;
+  sessionIgnoringExpiry(cookieSha256: string): SessionRow | null;
   putSession(row: SessionRow): void;
   touchSession(id: string, at: number): void;
   deleteSession(id: string): void;
@@ -53,8 +53,8 @@ export interface AuthRepo {
   grant(login: string): GrantRow | null;
   setGrant(row: GrantRow): void;
   grants(): GrantRow[];
-  touchPerson(login: string, at: number): void;
-  people(): PersonRow[];
+  recordPersonSeen(login: string, at: number): void;
+  everySignedInLogin(): PersonRow[];
 
   close(): void;
 }
@@ -127,6 +127,12 @@ interface GrantDb {
   created: number;
 }
 
+function bestEffortChmod(path: string, mode: number): void {
+  try {
+    chmodSync(path, mode);
+  } catch {}
+}
+
 export function openAuthRepo(path: string): AuthRepo {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new Database(path, { create: true });
@@ -147,10 +153,7 @@ export function openAuthRepo(path: string): AuthRepo {
       db.exec(`PRAGMA user_version = ${next + 1}`);
     })();
   }
-  try {
-    chmodSync(path, 0o600);
-  } catch {
-  }
+  bestEffortChmod(path, 0o600);
 
   const lower = normalizeLogin;
 
@@ -158,7 +161,7 @@ export function openAuthRepo(path: string): AuthRepo {
     row === null
       ? null
       : {
-          id: row.id,
+          cookieSha256: row.id,
           login: row.login,
           created: row.created,
           lastSeen: row.last_seen,
@@ -178,11 +181,11 @@ export function openAuthRepo(path: string): AuthRepo {
   });
 
   return {
-    session: (id) =>
+    sessionIgnoringExpiry: (cookieSha256) =>
       sessionOf(
         db
           .query("SELECT * FROM session WHERE id = ?1")
-          .get(id) as SessionDb | null,
+          .get(cookieSha256) as SessionDb | null,
       ),
     putSession: (row) => {
       db.query(
@@ -191,7 +194,7 @@ export function openAuthRepo(path: string): AuthRepo {
          ON CONFLICT(id) DO UPDATE SET
            login = excluded.login, last_seen = excluded.last_seen,
            expires = excluded.expires, agent = excluded.agent`,
-      ).run(row.id, lower(row.login), row.created, row.lastSeen, row.expires, row.agent);
+      ).run(row.cookieSha256, lower(row.login), row.created, row.lastSeen, row.expires, row.agent);
     },
     touchSession: (id, at) => {
       db.query("UPDATE session SET last_seen = ?2 WHERE id = ?1").run(id, at);
@@ -205,7 +208,7 @@ export function openAuthRepo(path: string): AuthRepo {
           .query("SELECT * FROM session WHERE login = ?1 ORDER BY created DESC")
           .all(login) as SessionDb[]
       ).map((row) => ({
-        id: row.id,
+        cookieSha256: row.id,
         login: row.login,
         created: row.created,
         lastSeen: row.last_seen,
@@ -218,7 +221,7 @@ export function openAuthRepo(path: string): AuthRepo {
           .query("SELECT * FROM session WHERE expires <= ?1")
           .all(now) as SessionDb[]
       ).map((row) => ({
-        id: row.id,
+        cookieSha256: row.id,
         login: row.login,
         created: row.created,
         lastSeen: row.last_seen,
@@ -279,13 +282,13 @@ export function openAuthRepo(path: string): AuthRepo {
       (db.query("SELECT * FROM grant_row ORDER BY login").all() as GrantDb[]).map(
         (row) => ({ ...row, role: row.role as Role }),
       ),
-    touchPerson: (login, at) => {
+    recordPersonSeen: (login, at) => {
       db.query(
         `INSERT INTO person (login, first_seen, last_seen) VALUES (?1, ?2, ?2)
          ON CONFLICT(login) DO UPDATE SET last_seen = MAX(last_seen, excluded.last_seen)`,
       ).run(lower(login), at);
     },
-    people: () =>
+    everySignedInLogin: () =>
       db
         .query(
           "SELECT login, first_seen AS firstSeen, last_seen AS lastSeen FROM person ORDER BY login",

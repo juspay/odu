@@ -31,8 +31,8 @@ if (!allow.ok) throw new Error(allow.message);
 const CONFIG: GithubConfig = {
   clientId: "client-id",
   clientSecret: "client-secret",
-  allow: "org:juspay",
-  rules: allow.rules,
+  allowSpec: "org:juspay",
+  allowRules: allow.rules,
   origin: "https://github.test",
   api: "https://api.github.test",
   publicOrigin: "https://odu.test",
