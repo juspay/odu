@@ -25,6 +25,7 @@ const repoRoot = resolve(here, "..");
 const clientDir = join(repoRoot, "packages", "web-ui", "src");
 const faceDir = join(repoRoot, "packages", "face", "src");
 const distDir = resolve(process.argv[2] ?? join(repoRoot, "packages", "web-ui", "dist"));
+const ENTRY = "main.tsx";
 
 const fontDir = process.env.ODU_GEIST_FONTS;
 if (fontDir === undefined || fontDir.trim() === "") {
@@ -122,15 +123,11 @@ const solidJsx: BunPlugin = {
 };
 
 const report = await buildSurfaceClient({
-  entrypoint: join(clientDir, "main.tsx"),
+  entrypoint: join(clientDir, ENTRY),
   distDir,
   htmlTemplate: join(clientDir, "index.html"),
   plugins: [solidJsx],
-  // The exact substring the shell uses in dev. It MUST be present: a
-  // `replaceAll` that matched nothing would build "successfully" and ship a
-  // shell still pointing at a `.tsx` file no browser can load, which is exactly
-  // the staleness the contract exists to make impossible.
-  entryHtmlPlaceholder: 'src="./main.tsx"',
+  entryHtmlPlaceholder: `src="./${ENTRY}"`,
   extraAssets: [
     // THE FONTS FIRST, because the stylesheet below reads the hrefs their
     // `build()` records. `extraAssets` is walked in order, so this is an

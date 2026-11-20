@@ -3,10 +3,6 @@ import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import type { Service } from "./service.ts";
 import type { GithubStub } from "./githubStub.ts";
 
-export const RUN_SETUP_TIMEOUT = 600_000;
-
-export const STEP_TIMEOUT = 120_000;
-
 export type Identity =
   | { readonly kind: "loopback" }
   | { readonly kind: "anonymous" }

@@ -3,6 +3,7 @@ import { createServer } from "node:net";
 import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LANE_SLEEP_SECONDS, SLEEP_PAST_ANY_SCENARIO_SECONDS, STEP_TIMEOUT } from "./budgets.ts";
 
 const MAX_CLI_OUTPUT_BYTES = 256 * 1024 * 1024;
 
@@ -94,7 +95,7 @@ export function tunnelPort(): number {
 export async function until<T>(
   what: string,
   ask: () => Promise<T | null> | (T | null),
-  timeoutMs = 120_000,
+  timeoutMs = STEP_TIMEOUT,
   pollMs = 200,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -290,8 +291,6 @@ beta: alpha
     exit 3
 `;
 
-const SLEEP_PAST_ANY_SCENARIO_SECONDS = 300;
-const LANE_SLEEP_SECONDS = 120;
 const BURST_OPENING_LINES = 40;
 const BURST_OPENING_PACE_SECONDS = 0.15;
 const BURST_LINES = 12_000;

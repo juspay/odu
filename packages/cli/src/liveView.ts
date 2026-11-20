@@ -43,6 +43,7 @@ import {
 } from "@odu/execution/common/verdict";
 import { stripAnsi } from "./ansi";
 import { LogView } from "./logView";
+import { FrameClock } from "./frameClock";
 
 const TICK_MS = 100;
 
@@ -270,10 +271,19 @@ export class LiveView {
   private shapeMemo:
     | { order: readonly string[]; shape: ReturnType<typeof matrixShape> }
     | undefined;
-  private tick = 0;
-  private dirty = false;
-  private resized = false;
-  private timer: ReturnType<typeof setInterval> | undefined;
+  private readonly clock = new FrameClock(
+    {
+      status: () =>
+        this.state === undefined || this.renderer === undefined
+          ? "unmounted"
+          : summarize(this.state).running > 0
+            ? "animating"
+            : "still",
+      relayout: () => this.relayout(),
+      paint: () => this.paint(),
+    },
+    TICK_MS,
+  );
   private stopped = false;
   private torndown = false;
 
@@ -325,12 +335,12 @@ export class LiveView {
         `odu: live view unavailable (${errorMessage(err)}) — continuing without it\n`,
       );
     });
-    this.wake();
+    this.clock.arm();
   }
 
   setHeader(header: RunHeader): void {
     this.header = header;
-    this.wake();
+    this.clock.arm();
   }
 
   /** Open the terminal.
@@ -365,9 +375,7 @@ export class LiveView {
       renderer.keyInput.on("keypress", (key: ParsedKey) => this.onKey(key));
     }
     renderer.on("resize", () => {
-      this.resized = true;
-      this.dirty = true;
-      this.wake();
+      this.clock.resize();
     });
     this.relayout();
   }
@@ -398,7 +406,7 @@ export class LiveView {
 
   update(state: PipelineState): void {
     this.state = state;
-    this.wake();
+    this.clock.arm();
     this.seedFocus(state);
     this.paint();
   }
@@ -441,16 +449,13 @@ export class LiveView {
       } else this.replayBuffer[LiveView.RETAIN_MAX - 1] = text;
     }
     if (now) this.paint();
-    else {
-      this.dirty = true;
-      this.wake();
-    }
+    else this.clock.owed();
   }
 
   stop(state?: PipelineState): void {
     if (this.stopped) return;
     this.stopped = true;
-    this.sleep();
+    this.clock.stop();
     this.logSub?.abort();
     this.log?.dispose();
     this.log = undefined;
@@ -593,8 +598,7 @@ export class LiveView {
           this.withLog((l) =>
             l.scrollBy(scroll.direction === "up" ? -rows : rows),
           );
-          this.dirty = true;
-          this.wake();
+          this.clock.owed();
         },
       }),
     );
@@ -760,8 +764,7 @@ export class LiveView {
           if (frame.kind === "snapshot") this.log?.reset();
           await this.log?.write(frame.text);
           if (!live()) return;
-          this.dirty = true;
-          this.wake();
+          this.clock.owed();
         }
       } catch (err) {
         if (!live()) return;
@@ -849,45 +852,15 @@ export class LiveView {
     this.log?.setQuery(q);
   }
 
-  private wake(): void {
-    if (this.timer !== undefined || this.stopped) return;
-    this.timer = setInterval(() => this.onTick(), TICK_MS);
-    (this.timer as { unref?: () => void }).unref?.();
-  }
-
-  private sleep(): void {
-    if (this.timer === undefined) return;
-    clearInterval(this.timer);
-    this.timer = undefined;
-  }
-
-  private onTick(): void {
-    const s = this.state;
-    if (s === undefined || this.renderer === undefined) return;
-    const animating = summarize(s).running > 0;
-    if (!animating && !this.dirty) {
-      this.sleep();
-      return;
-    }
-    if (animating) this.tick += 1;
-    this.dirty = false;
-    if (this.resized) {
-      this.resized = false;
-      this.relayout();
-      return;
-    }
-    this.paint();
-  }
-
   private paint(): void {
     if (this.stopped || this.renderer === undefined) return;
     const state = this.state;
     const header = this.header;
     if (state === undefined || header === undefined) return;
-    this.dirty = false;
+    this.clock.painted();
 
     const s = summarize(state);
-    const spin = SPINNER[this.tick % SPINNER.length] ?? "⠋";
+    const spin = SPINNER[this.clock.spin() % SPINNER.length] ?? "⠋";
     const outcome = outcomeOf(s);
     const mark = outcome === "pending" ? spin : OUTCOME_MARK[outcome];
     const now = Date.now();
@@ -1151,8 +1124,7 @@ export class LiveView {
     const line = this.scrollbarRowToLine(y - box.y - this.grabOffset);
     if (line === undefined) return;
     this.withLog((l) => l.scrollTo(line));
-    this.dirty = true;
-    this.wake();
+    this.clock.owed();
   }
 
   private paintStatus(s: ReturnType<typeof summarize>): void {

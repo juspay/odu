@@ -86,6 +86,7 @@ let
       ./bun.nix
       (pkgs.lib.fileset.fileFilter (f: f.name == "package.json") ./packages)
       ./scripts/hydrate-kolu-packages.sh
+      ./scripts/build-cordis.sh
     ];
   };
 
@@ -135,6 +136,7 @@ let
             ${pkgs.osfacts-client} osfacts-client \
             ${pkgs.olai-effect-cordis} @olai/effect-cordis \
             ${renderHydratePairs pkgs.cordis.hydratePairs}
+          sh scripts/build-cordis.sh
         '';
 
         installPhase = ''

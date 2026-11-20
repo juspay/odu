@@ -196,42 +196,37 @@ function buildMatches(running: ServiceBuild, baked: ServiceBuild): boolean {
   );
 }
 
-export async function ensureService(
-  opts: EnsureOptions,
-): Promise<EnsureOutcome> {
-  const sleep = opts.sleep ?? ((ms: number) => delay(ms));
-  const pollMs = opts.pollMs ?? 100;
-  const readyMs = opts.readyMs ?? 60_000;
-  const drainMs = opts.drainMs ?? 15_000;
+type Decision =
+  | { kind: "adopt"; cell: ServiceCell }
+  | { kind: "upgrade"; pid: number }
+  | { kind: "refuse"; message: string }
+  | { kind: "spawn" };
 
+const adopted = (cell: ServiceCell): EnsureOutcome => ({
+  ok: true,
+  action: "adopted",
+  origin: cell.identity.origin,
+  pid: cell.identity.pid,
+  build: cell.build,
+  protocolVersion: cell.identity.protocolVersion,
+});
+
+async function decide(
+  opts: EnsureOptions,
+  sleep: (ms: number) => Promise<void>,
+  pollMs: number,
+  readyMs: number,
+): Promise<Decision> {
   const running = await readService(opts.origin);
   if (running !== null) {
     const verdict = contractVerdict(running, opts.origin, opts.needs);
     const compatible = verdict === null;
     const sameBuild = buildMatches(running.build, opts.baked);
     if (!opts.upgrade || (compatible && sameBuild)) {
-      if (!compatible) {
-        return { ok: false, message: verdict };
-      }
-      return {
-        ok: true,
-        action: "adopted",
-        origin: running.identity.origin,
-        pid: running.identity.pid,
-        build: running.build,
-        protocolVersion: running.identity.protocolVersion,
-      };
+      if (verdict !== null) return { kind: "refuse", message: verdict };
+      return { kind: "adopt", cell: running };
     }
-    const cleared = await clearTheGate({
-      origin: opts.origin,
-      home: opts.home,
-      pid: running.identity.pid,
-      drainMs,
-      pollMs,
-      sleep,
-    });
-    if (!cleared.ok) return cleared;
-    return spawnAndVerify(opts, sleep, pollMs, readyMs, "upgraded");
+    return { kind: "upgrade", pid: running.identity.pid };
   }
 
   if (!gateFree(opts.home)) {
@@ -243,19 +238,12 @@ export async function ensureService(
     );
     if (cell !== null) {
       const refusal = contractVerdict(cell, opts.origin, opts.needs);
-      if (refusal !== null) return { ok: false, message: refusal };
-      return {
-        ok: true,
-        action: "adopted",
-        origin: cell.identity.origin,
-        pid: cell.identity.pid,
-        build: cell.build,
-        protocolVersion: cell.identity.protocolVersion,
-      };
+      if (refusal !== null) return { kind: "refuse", message: refusal };
+      return { kind: "adopt", cell };
     }
     const holder = gateIdentity(opts.home.gatePath);
     return {
-      ok: false,
+      kind: "refuse",
       message:
         `odu: something holds the web service's gate (${opts.home.gatePath}` +
         `${holder === undefined ? "" : `, pid ${holder.pid}`}) but nothing is ` +
@@ -266,7 +254,7 @@ export async function ensureService(
   const occupiedPort = await whoeverIsListening(opts.origin);
   if (occupiedPort !== null) {
     return {
-      ok: false,
+      kind: "refuse",
       message:
         `odu: cannot serve ${opts.origin} — another program is already ` +
         `listening on port ${occupiedPort} and it is not an odu service. ` +
@@ -275,7 +263,38 @@ export async function ensureService(
         "$ODU_WEB_ORIGIN.",
     };
   }
-  return spawnAndVerify(opts, sleep, pollMs, readyMs, "spawned");
+  return { kind: "spawn" };
+}
+
+export async function ensureService(
+  opts: EnsureOptions,
+): Promise<EnsureOutcome> {
+  const sleep = opts.sleep ?? ((ms: number) => delay(ms));
+  const pollMs = opts.pollMs ?? 100;
+  const readyMs = opts.readyMs ?? 60_000;
+  const drainMs = opts.drainMs ?? 15_000;
+
+  const decision = await decide(opts, sleep, pollMs, readyMs);
+  switch (decision.kind) {
+    case "adopt":
+      return adopted(decision.cell);
+    case "refuse":
+      return { ok: false, message: decision.message };
+    case "upgrade": {
+      const cleared = await clearTheGate({
+        origin: opts.origin,
+        home: opts.home,
+        pid: decision.pid,
+        drainMs,
+        pollMs,
+        sleep,
+      });
+      if (!cleared.ok) return cleared;
+      return spawnAndVerify(opts, sleep, pollMs, readyMs, "upgraded");
+    }
+    case "spawn":
+      return spawnAndVerify(opts, sleep, pollMs, readyMs, "spawned");
+  }
 }
 
 export async function clearTheGate(opts: {

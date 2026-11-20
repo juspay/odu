@@ -1,0 +1,7 @@
+export const RUN_SETUP_TIMEOUT = 600_000;
+
+export const STEP_TIMEOUT = 120_000;
+
+export const SLEEP_PAST_ANY_SCENARIO_SECONDS = 300;
+
+export const LANE_SLEEP_SECONDS = 120;

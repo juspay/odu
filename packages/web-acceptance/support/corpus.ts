@@ -7,7 +7,7 @@ import {
   type NodeFailure,
   type Service,
 } from "./service.ts";
-import { RUN_SETUP_TIMEOUT } from "./world.ts";
+import { RUN_SETUP_TIMEOUT } from "./budgets.ts";
 
 export interface SharedRun {
   checkout: string;

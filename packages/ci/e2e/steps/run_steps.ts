@@ -15,7 +15,8 @@ import {
   startRun,
   waitSettled,
 } from "../../../web-acceptance/support/service.ts";
-import { RUN_SETUP_TIMEOUT, type OduWorld } from "../../../web-acceptance/support/world.ts";
+import { type OduWorld } from "../../../web-acceptance/support/world.ts";
+import { RUN_SETUP_TIMEOUT } from "../../../web-acceptance/support/budgets.ts";
 
 function ownFixture(world: OduWorld, justfile: string): string {
   const dir = makeFixture(justfile);

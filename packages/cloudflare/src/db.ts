@@ -11,9 +11,13 @@ export interface TunnelRow {
   created: number;
 }
 
+export type RouteTarget =
+  | { readonly kind: "server" }
+  | { readonly kind: "bucket"; readonly name: string };
+
 export interface RouteRow {
   domain: string;
-  bucket: string | null;
+  bucket: RouteTarget;
   zoneId: string;
   recordId: string | null;
   state: RouteState;
@@ -72,6 +76,14 @@ const writtenText = (row: Row, column: string): string | null => {
 };
 const integer = (row: Row, column: string): number => Number(row[column]);
 
+const targetOf = (row: Row): RouteTarget => {
+  const name = maybeText(row, "bucket");
+  return name === null ? { kind: "server" } : { kind: "bucket", name };
+};
+
+export const bucketColumn = (target: RouteTarget): string | null =>
+  target.kind === "server" ? null : target.name;
+
 const tunnelOf = (row: Row): TunnelRow => ({
   tunnelId: text(row, "tunnel_id"),
   name: text(row, "name"),
@@ -82,7 +94,7 @@ const tunnelOf = (row: Row): TunnelRow => ({
 
 const routeOf = (row: Row): RouteRow => ({
   domain: text(row, "domain"),
-  bucket: maybeText(row, "bucket"),
+  bucket: targetOf(row),
   zoneId: text(row, "zone_id"),
   recordId: writtenText(row, "record_id"),
   state: text(row, "state") as RouteState,
@@ -168,7 +180,7 @@ export function openCloudflareRepo(path: string): CloudflareRepo {
            updated = excluded.updated`,
         [
           row.domain,
-          row.bucket,
+          bucketColumn(row.bucket),
           row.zoneId,
           row.recordId ?? "",
           row.state,

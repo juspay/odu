@@ -25,7 +25,8 @@ import {
   type Service,
 } from "./service.ts";
 import { startCloudflareStub, type CloudflareStub } from "./cloudflareStub.ts";
-import { OduWorld, RUN_SETUP_TIMEOUT, STEP_TIMEOUT } from "./world.ts";
+import { OduWorld } from "./world.ts";
+import { RUN_SETUP_TIMEOUT, STEP_TIMEOUT } from "./budgets.ts";
 
 setDefaultTimeout(STEP_TIMEOUT);
 

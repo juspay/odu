@@ -18,9 +18,11 @@ import {
   type BucketDomains as BucketDomainFacts,
 } from "@odu/cordis/services";
 import {
+  bucketColumn,
   openCloudflareRepo,
   type CloudflareRepo,
   type RouteRow,
+  type RouteTarget,
   type TunnelRow,
 } from "./db";
 import {
@@ -192,7 +194,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   function readingOf(row: RouteRow): CloudflareRoute {
     return {
       domain: row.domain,
-      bucket: row.bucket,
+      bucket: bucketColumn(row.bucket),
       state: row.state,
       reason: row.reason,
       updated: row.updated,
@@ -329,11 +331,11 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     }
   }
 
-  function probeUrl(domain: string, bucket: string | null): string {
-    return `https://${domain}${bucket === null ? "/_odu/door" : "/nix-cache-info"}`;
+  function probeUrl(domain: string, bucket: RouteTarget): string {
+    return `https://${domain}${bucket.kind === "server" ? "/_odu/door" : "/nix-cache-info"}`;
   }
 
-  async function confirm(domain: string, bucket: string | null): Promise<void> {
+  async function confirm(domain: string, bucket: RouteTarget): Promise<void> {
     const epoch = supersede(domain);
     const url = probeUrl(domain, bucket);
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -352,7 +354,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     epoch.put({ ...row, state: "failed", reason: `${url} did not answer`, updated: now() });
   }
 
-  function startConfirm(domain: string, bucket: string | null): void {
+  function startConfirm(domain: string, bucket: RouteTarget): void {
     const running = confirm(domain, bucket).finally(() => {
       confirmations.delete(running);
     });
@@ -414,15 +416,17 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     }
   }
 
-  function failFrom(domain: string, bucket: string | null, err: unknown): void {
+  function failFrom(domain: string, bucket: RouteTarget, err: unknown): void {
     fail(domain, bucket, messageOf(err));
     if (!isRefusal(err)) scheduleRetry();
   }
 
   async function reconcileNow(): Promise<void> {
     if (closed) return;
-    const desired = new Map<string, string | null>();
-    for (const fact of domains.current()) desired.set(fact.domain, fact.bucket);
+    const desired = new Map<string, RouteTarget>();
+    for (const fact of domains.current()) {
+      desired.set(fact.domain, { kind: "bucket", name: fact.bucket });
+    }
 
     let publicZone: ZoneRef | null = null;
     if (options.publicHost !== null) {
@@ -436,7 +440,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
         if (!isRefusal(err)) scheduleRetry();
       }
       if (closed) return;
-      if (publicZone !== null) desired.set(options.publicHost, null);
+      if (publicZone !== null) desired.set(options.publicHost, { kind: "server" });
     }
 
     const tunnelBefore = repo?.tunnel() ?? null;
@@ -565,7 +569,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     publish();
   }
 
-  function fail(domain: string, bucket: string | null, reason: string): void {
+  function fail(domain: string, bucket: RouteTarget, reason: string): void {
     if (closed) return;
     const epoch = supersede(domain);
     const existing = db().route(domain);

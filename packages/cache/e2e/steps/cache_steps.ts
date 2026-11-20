@@ -16,7 +16,8 @@ import {
   stopService,
   until,
 } from "../../../web-acceptance/support/service.ts";
-import { type OduWorld, RUN_SETUP_TIMEOUT } from "../../../web-acceptance/support/world.ts";
+import { type OduWorld } from "../../../web-acceptance/support/world.ts";
+import { RUN_SETUP_TIMEOUT } from "../../../web-acceptance/support/budgets.ts";
 
 function unique(what: string): string {
   return `wa-${what}-${Math.random().toString(36).slice(2, 10)}`;

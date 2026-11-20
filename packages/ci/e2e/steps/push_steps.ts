@@ -1,7 +1,8 @@
 import * as assert from "node:assert";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { arrangePushingRun, type PushingRun } from "../support/pushFixture.ts";
-import { RUN_SETUP_TIMEOUT, type OduWorld } from "../../../web-acceptance/support/world.ts";
+import { type OduWorld } from "../../../web-acceptance/support/world.ts";
+import { RUN_SETUP_TIMEOUT } from "../../../web-acceptance/support/budgets.ts";
 
 function arranged(world: OduWorld): PushingRun {
   const state = world.rowState.get("ci.push");

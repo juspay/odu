@@ -6,7 +6,7 @@ if [ -z "${IN_NIX_SHELL:-}" ]; then
   exit 1
 fi
 
-exec sh "$(dirname "$0")/hydrate-kolu-packages.sh" \
+sh "$(dirname "$0")/hydrate-kolu-packages.sh" \
   "$ODU_KOLU_SURFACE" @kolu/surface \
   "$ODU_KOLU_SURFACE_MCP" @kolu/surface-mcp \
   "$ODU_KOLU_SURFACE_APP" @kolu/surface-app \
@@ -22,3 +22,5 @@ exec sh "$(dirname "$0")/hydrate-kolu-packages.sh" \
   "$ODU_OSFACTS_CLIENT" osfacts-client \
   "$ODU_OLAI_EFFECT_CORDIS" @olai/effect-cordis \
   $ODU_CORDIS_HYDRATE
+
+exec sh "$(dirname "$0")/build-cordis.sh"
