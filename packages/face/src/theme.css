@@ -1,91 +1,5 @@
-/*
- * NIGHT SHIFT — odu's design system, in one file.
- *
- * It lives in `@odu/face`, the package of NO row, for the reason the control
- * state machine does: every row's face draws with it and none of them owns it.
- * A row still draws its own screens (Cordis) — what it does not do is invent a
- * second idea of what a panel, a pill or a lane cell is.
- *
- * ── WHAT THE DESIGN IS ────────────────────────────────────────────────────
- *
- * A near-black ground (`#0A0D0C`) with one typeface for prose and one for
- * anything a person COPIES or COMPARES — a hash, a store path, a key, a
- * duration, a platform triple. Those two are Geist and Geist Mono, bundled
- * with the bundle (`scripts/build-web-ui.ts` reads them from nixpkgs and
- * content-hashes them beside the stylesheet) and never fetched from a font
- * CDN: a tailnet-only or air-gapped board must render exactly the same page.
- *
- * **COLOUR CARRIES STATUS, AND NOTHING ELSE.** Green passed, amber running,
- * red failed, violet errored, cyan is a link or a selection. Everything that
- * is not one of those — a store's name, a bucket's visibility, a token's
- * scope — is drawn in ink, grey and shape. Two consequences worth stating,
- * because both are departures somebody will otherwise "fix":
- *
- *   - the design canvas tints a bucket's STORE (orange for R2, blue for local
- *     disk). This file does not: where a path's bytes live is not a verdict
- *     about anything, and a page that spends amber on "R2" has spent the
- *     colour that means "running";
- *   - no status is carried by hue ALONE. Every pill says its state in words
- *     and carries a marker whose SHAPE differs per hue (✔ ✗ ● ◦ ◆); every lane
- *     cell has a title; every node row draws the TUI's own glyph. A reader who
- *     cannot tell this green from this red still reads the board correctly.
- *
- * **THE LANE STRIP is the signature element.** One cell per node, one line per
- * platform, on the board and on each run. It is the smallest drawing of "what
- * is this pipeline doing" that still answers the question from across a desk.
- *
- * ── THEME ─────────────────────────────────────────────────────────────────
- *
- * Dark is the product. Light is the SAME tokens re-valued, not a second
- * stylesheet: every colour is one `light-dark(light, dark)` line, so the two
- * halves cannot drift apart the way a token added to one media block and
- * forgotten in the other did.
- *
- * Which half resolves is `color-scheme`, and `:root` carries three states:
- *
- *   - no `data-theme`        → `dark light`: the OS decides, and a desktop with
- *                              NO preference gets dark, which is the default
- *                              this product is designed in;
- *   - `data-theme="dark"`    → pinned dark;
- *   - `data-theme="light"`   → pinned light.
- *
- * `./theme`'s `ThemeToggle` writes that attribute and persists the choice. The
- * attribute is written on `<html>` before the bundle paints (see `./theme`),
- * so a person who chose light never sees a dark frame first.
- *
- * ── HOW THIS FILE IS ORDERED ──────────────────────────────────────────────
- *
- * Four cascade layers, declared once on the next line so the order is a fact
- * you can read rather than one you infer from line numbers:
- *
- *   tokens      the palette and the two typefaces — nothing that paints
- *   base        the document: resets, the body, the focus ring
- *   components  what a thing LOOKS like — buttons, pills, cells, panels
- *   layout      where things GO — the frame, the grids, and the size queries
- *
- * A layer beats every layer named before it whatever the selectors say, which
- * is why `layout` can put a one-class rule over a component's without either
- * side counting specificity.
- *
- * ── THE TWO ACCEPTANCE GATES ──────────────────────────────────────────────
- *
- *   - **Every screen works down to phone width with no horizontal page
- *     scroll.** Grids reflow; nothing is hidden, because a fact hidden on the
- *     device somebody is holding is a fact they do not have. The two places
- *     that scroll sideways do it INSIDE their own box: a log line and a store
- *     path, both of which change meaning when wrapped.
- *   - **Focus is visible.** `:focus-visible` is styled up, never off, in the
- *     selection hue — never a status hue, because a ring that reads as "this
- *     node failed" is worse than no ring.
- */
-
 @layer tokens, base, components, layout;
 
-/*
- * The two `url()`s below are BUILD PLACEHOLDERS: `scripts/build-web-ui.ts`
- * replaces each with the content-hashed href it emitted, and fails the build
- * if either substring is missing.
- */
 @font-face {
   font-family: "Geist";
   src: url("./geist-sans.woff2") format("woff2");
@@ -186,7 +100,6 @@
   input[type="checkbox"],
   input[type="radio"] { accent-color: var(--select); }
 
-  /* NEVER removed */
   :focus-visible {
     outline: 2px solid var(--select);
     outline-offset: 2px;
@@ -976,15 +889,9 @@
     border-right: 1px solid var(--line);
   }
 
-  /* 55rem, NOT 52: the rail asks for 15rem and the screen for 40rem, so
-     `.app`'s wrap happens at their sum — below it the rail is a full-width
-     band. The breakpoint is the WRAP, not the narrow reflow below it.
-
-     And `max-height`, not `height`: a media query is measured against the
-     viewport INCLUDING a classic scrollbar while flexbox wraps on the
-     content box, so for a scrollbar's width the rail can be a band and still
-     match this query. A band told to be its own height is harmless there; a
-     band told to fill the viewport paints over the screen beside it. */
+  /* A media query is measured against the viewport INCLUDING a classic
+     scrollbar while flexbox wraps on the content box, so for a scrollbar's
+     width the rail can be a band and still match this query. */
   @media (min-width: 55rem) {
     .sidebar {
       position: sticky;

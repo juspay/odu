@@ -1,9 +1,3 @@
-/**
- * The attribute is also set by a four-line inline script in the shell's
- * `<head>` (`packages/web-ui/src/index.html`). That script and this module
- * must agree on the key.
- */
-
 import { createSignal, type JSX } from "solid-js";
 
 export type Theme = "system" | "light" | "dark";

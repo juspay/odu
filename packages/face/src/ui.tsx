@@ -463,10 +463,6 @@ export function PageHead(props: {
   );
 }
 
-/**
- * **`confirmLabel` must never repeat the trigger's own words.** Name the
- * trigger for the thing and the confirmation for the act.
- */
 export function Confirm(props: {
   open: boolean;
   title: string;
@@ -500,9 +496,6 @@ export function Confirm(props: {
     >
       <h2>{props.title}</h2>
       <p>{props.body}</p>
-      {/* Cancel FIRST: the dialog focuses its first focusable child on open, so
-          the button under the keyboard at the moment it appears is the one
-          that changes nothing. */}
       <form method="dialog" class="confirm-actions">
         <Button type="submit" value="cancel">
           {props.cancelLabel}

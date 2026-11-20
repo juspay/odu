@@ -15,7 +15,6 @@ const typescriptPreset: unknown = require_("@babel/preset-typescript");
 
 const SRC = import.meta.dirname;
 
-/** THE SAME presets, in the same order, as `scripts/build-web-ui.ts`. */
 function compile(source: string, filename: string): string {
   const out = babel.transformSync(source, {
     filename,
@@ -31,9 +30,6 @@ function compile(source: string, filename: string): string {
   return code;
 }
 
-/** Every view this package ships. Listed rather than globbed: a file that
- *  stops being a `.tsx` should be a decision somebody made here, not a silent
- *  drop from the set this test polices. */
 const VIEWS = ["ui.tsx", "theme.tsx"];
 
 describe("the Solid compiler that builds the shared primitives", () => {
