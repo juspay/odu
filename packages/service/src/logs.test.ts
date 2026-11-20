@@ -21,7 +21,7 @@ import {
   type World,
   writeRoster,
 } from "./fixture.testlib";
-import { readLog, readTail } from "./logs";
+import { readLog, readRecipeTail } from "./logs";
 
 let world: World | null = null;
 const open = (): World => {
@@ -252,11 +252,11 @@ describe("open on the tail", () => {
   it("says a running node's tail is open and a killed one's is not", () => {
     const w = open();
     const live = writing(w, "working\n");
-    expect(readTail(live.key, live.catalog)?.open).toBe(true);
+    expect(readRecipeTail(live.key, live.catalog)?.open).toBe(true);
 
     seal(live, false);
     finalize(live);
-    const dead = readTail(live.key, live.catalog);
+    const dead = readRecipeTail(live.key, live.catalog);
     expect(dead?.open).toBe(false);
     expect(dead?.complete).toBe(false);
   });

@@ -110,6 +110,8 @@ export function registerFixtureRun(
   return { handle: registered.handle, token: registered.token, runId };
 }
 
+const PID_THAT_CANNOT_EXIST = 0x7ffffff0;
+
 export function crashOwner(
   handle: RunHandle,
   opts: { heartbeatAt: number; pid?: number },
@@ -121,7 +123,7 @@ export function crashOwner(
     `${JSON.stringify(
       {
         ...owner,
-        pid: opts.pid ?? 0x7ffffff0,
+        pid: opts.pid ?? PID_THAT_CANNOT_EXIST,
         host: hostname(),
         heartbeatAt: opts.heartbeatAt,
       },

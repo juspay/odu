@@ -33,7 +33,7 @@ import {
 import { Effect } from "effect";
 import { cancelRun } from "./cancel";
 import { importCatalog, pruneCatalog } from "./catalog";
-import { readLog, readTail } from "./logs";
+import { readLog, readRecipeTail } from "./logs";
 import { checkoutSource } from "./checkout";
 import { nodesSource } from "./nodes";
 import { callerOf } from "./caller";
@@ -153,7 +153,7 @@ export function createOduService(opts: ServiceOptions): OduService {
         },
         logTails: {
           readAll: () => tails,
-          readOne: (key) => tails.get(key) ?? readTail(key, catalog) ?? undefined,
+          readOne: (key) => tails.get(key) ?? readRecipeTail(key, catalog) ?? undefined,
           upsert: (key, value) => {
             tails.set(key, value);
           },
@@ -164,7 +164,7 @@ export function createOduService(opts: ServiceOptions): OduService {
             Effect.acquireRelease(
               Effect.sync(() => {
                 watched.add(key);
-                const tail = readTail(key, catalog);
+                const tail = readRecipeTail(key, catalog);
                 if (tail !== null) tails.set(key, tail);
               }),
               () =>
@@ -547,16 +547,12 @@ export function createOduService(opts: ServiceOptions): OduService {
   );
 
   const revokedPushTokens = new Set<string>();
+  const stillServed = (row: RunRow): boolean =>
+    row.endpoint !== null && row.state === "settled" && registry.ownerAliveOf(row.runId);
   const revokeFinishedPushTokens = (rows: readonly RunRow[]): void => {
     for (const row of rows) {
       if (row.state === "provisioning" || row.state === "running") continue;
-      if (
-        row.endpoint !== null &&
-        row.state === "settled" &&
-        registry.ownerAliveOf(row.runId)
-      ) {
-        continue;
-      }
+      if (stillServed(row)) continue;
       const tokenId = registry.pushTokenOf(row.runId);
       if (tokenId === null || revokedPushTokens.has(tokenId)) continue;
       revokedPushTokens.add(tokenId);
@@ -570,7 +566,7 @@ export function createOduService(opts: ServiceOptions): OduService {
     for (const row of delta.upserted) runtime.ctx.collections.runs.upsert(row.runId, row);
     for (const runId of delta.removed) runtime.ctx.collections.runs.remove(runId);
     for (const key of watched) {
-      const tail = readTail(key, catalog);
+      const tail = readRecipeTail(key, catalog);
       if (tail === null) continue;
       const held = tails.get(key);
       if (held !== undefined && held.text === tail.text && held.complete === tail.complete) {

@@ -3,12 +3,13 @@ export interface Timers {
   clear: (handle: unknown) => void;
 }
 
+function unrefTimer(handle: ReturnType<typeof setTimeout>): ReturnType<typeof setTimeout> {
+  handle.unref?.();
+  return handle;
+}
+
 export const NODE_TIMERS: Timers = {
-  set: (fn, ms) => {
-    const handle = setTimeout(fn, ms);
-    handle.unref?.();
-    return handle;
-  },
+  set: (fn, ms) => unrefTimer(setTimeout(fn, ms)),
   clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 

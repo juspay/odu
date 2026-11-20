@@ -130,6 +130,8 @@ export type CancelOutcome =
   | { kind: "declined"; detail: string }
   | { kind: "unresolved"; detail: string };
 
+export type ConfirmedOutcome = Exclude<CancelOutcome, { kind: "unresolved" }>;
+
 export type RunCanceller = (request: CancelRequest) => Promise<CancelOutcome>;
 
 export interface CheckoutFacts {

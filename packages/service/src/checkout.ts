@@ -5,11 +5,9 @@ import {
   type RunRow,
 } from "@odu/service-client/surface";
 import type { Stream } from "effect";
-import { sameNodes } from "./nodes";
+import { NODES_POLL_MS, sameNodes } from "./nodes";
 import type { RunRegistry } from "./registry";
 import { abortableSleep } from "./sleep";
-
-export const CHECKOUT_POLL_MS = 250;
 
 export interface CheckoutDeps {
   registry: RunRegistry;
@@ -82,7 +80,7 @@ function readCheckout(
 export function checkoutSource(
   deps: CheckoutDeps,
 ): (input: { repoRoot: string }) => Stream.Stream<CheckoutFrame> {
-  const pollMs = deps.pollMs ?? CHECKOUT_POLL_MS;
+  const pollMs = deps.pollMs ?? NODES_POLL_MS;
   const sleep = deps.sleep ?? abortableSleep;
   return ({ repoRoot }) =>
     streamFromAbortableSource<CheckoutFrame>(async function* (signal) {

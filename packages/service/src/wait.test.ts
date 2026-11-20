@@ -12,7 +12,7 @@ import {
   writeNode,
   writeRoster,
 } from "./fixture.testlib";
-import { readLog, readTail } from "./logs";
+import { readLog, readRecipeTail } from "./logs";
 import { readReceipt, requestStore } from "./requests";
 import { readRun, waitForRun } from "./wait";
 
@@ -358,8 +358,8 @@ describe("log.read", () => {
       node: "unit@x86_64-linux",
       attempt: 1,
     });
-    expect(readTail(key, { root: w.catalogRoot })?.text).toBe("hello\n");
-    expect(readTail("nonsense", { root: w.catalogRoot })).toBeNull();
+    expect(readRecipeTail(key, { root: w.catalogRoot })?.text).toBe("hello\n");
+    expect(readRecipeTail("nonsense", { root: w.catalogRoot })).toBeNull();
   });
 });
 

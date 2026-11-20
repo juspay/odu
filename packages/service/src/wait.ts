@@ -22,6 +22,7 @@ import {
   type WaitInput,
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
+import { interruptiblePoll } from "./sleep";
 
 export interface ReadDeps {
   catalog?: CatalogOptions;
@@ -76,19 +77,22 @@ export function answerOf(attention: Attention): AttentionAnswer {
     })),
     endpoint: attention.endpoint,
     ...(attention.actor === undefined ? {} : { actor: attention.actor }),
-    ...(attention.push === undefined
-      ? {}
-      : {
-          push: {
-            target: attention.push.target,
-            skipped: attention.push.skipped,
-            keyWarning: attention.push.keyWarning,
-            paths: attention.push.stored + attention.push.present,
-            present: attention.push.present,
-            bytes: attention.push.bytes,
-            failedOn: attention.push.failedOn,
-          },
-        }),
+    ...(attention.push === undefined ? {} : { push: pushAnswerOf(attention.push) }),
+  };
+}
+
+function pushAnswerOf(
+  push: NonNullable<Attention["push"]>,
+): NonNullable<AttentionAnswer["push"]> {
+  const totalPaths = push.stored + push.present;
+  return {
+    target: push.target,
+    skipped: push.skipped,
+    keyWarning: push.keyWarning,
+    paths: totalPaths,
+    present: push.present,
+    bytes: push.bytes,
+    failedOn: push.failedOn,
   };
 }
 
@@ -179,28 +183,16 @@ export function waitForRun(
     if (!resolved.ok) return Effect.fail(resolved.refusal);
     const query = queryOf(resolved.cursor, input.limit);
     return Effect.map(
-      Effect.callback<Attention>((resume) => {
-        const controller = new AbortController();
-        const stop = (): void => controller.abort();
-        const outer = deps.signal;
-        if (outer !== undefined) {
-          if (outer.aborted) stop();
-          else outer.addEventListener("abort", stop, { once: true });
-        }
-        void waitForAttention(resolved.handle, {
-          ...query,
-          deadlineMs: input.deadlineMs ?? DEFAULT_ATTENTION_DEADLINE_MS,
-          settle: input.settle ?? false,
-          signal: controller.signal,
-        }).then(
-          (attention) => resume(Effect.succeed(attention)),
-          (err: unknown) => resume(Effect.die(err)),
-        );
-        return Effect.sync(() => {
-          controller.abort();
-          outer?.removeEventListener("abort", stop);
-        });
-      }),
+      interruptiblePoll<Attention>(
+        (signal) =>
+          waitForAttention(resolved.handle, {
+            ...query,
+            deadlineMs: input.deadlineMs ?? DEFAULT_ATTENTION_DEADLINE_MS,
+            settle: input.settle ?? false,
+            signal,
+          }),
+        deps.signal,
+      ),
       answerOf,
     );
   });

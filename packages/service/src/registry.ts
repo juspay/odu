@@ -56,17 +56,19 @@ const FINGERPRINTED = [
 ] as const;
 
 function fingerprint(dir: string): string {
-  const parts: string[] = [statPart(dir)];
-  for (const file of FINGERPRINTED) parts.push(statPart(join(dir, file)));
+  const parts: string[] = [statPartOrMissing(dir)];
+  for (const file of FINGERPRINTED) parts.push(statPartOrMissing(join(dir, file)));
   return parts.join("|");
 }
 
-function statPart(path: string): string {
+const MISSING_FILE = "-";
+
+function statPartOrMissing(path: string): string {
   try {
     const st = statSync(path);
     return `${st.size}:${st.mtimeMs}`;
   } catch {
-    return "-";
+    return MISSING_FILE;
   }
 }
 
@@ -93,8 +95,12 @@ function boardState(
     case "unknown_run":
       return "expired";
     case "still_running":
-      return latest.size === 0 ? "provisioning" : "running";
+      return hasStartedWork(latest) ? "running" : "provisioning";
   }
+}
+
+function hasStartedWork(latest: ReadonlyMap<string, AttemptState>): boolean {
+  return latest.size > 0;
 }
 
 function nodesOf(
@@ -161,7 +167,7 @@ function envOf(
 }
 
 function fallbackPhase(latest: ReadonlyMap<string, AttemptState>): RunPhase {
-  return latest.size === 0 ? "provisioning" : "lanes";
+  return hasStartedWork(latest) ? "lanes" : "provisioning";
 }
 
 function lanesOf(
@@ -183,6 +189,8 @@ function lanesOf(
   return out;
 }
 
+const NO_EXCERPTS = (): null => null;
+
 function project(
   handle: RunHandle,
   manifest: RunManifest,
@@ -203,7 +211,7 @@ function project(
       expiry: readExpiry(handle),
       ownerAlive: alive,
       endpoint: owner?.endpoint ?? null,
-      readExcerpt: () => null,
+      readExcerpt: NO_EXCERPTS,
     },
     { limit: 1, excerptBytes: 0 },
   );
@@ -256,6 +264,10 @@ function project(
 
 function terminal(row: RunRow): boolean {
   return row.state === "settled" || row.state === "expired";
+}
+
+function immuneToClock(row: RunRow): boolean {
+  return terminal(row) && row.endpoint === null;
 }
 
 export interface RegistryDelta {
@@ -315,7 +327,7 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
       if (
         held?.kind === "run" &&
         held.entry.fingerprint === stamp &&
-        ((terminal(held.entry.row) && held.entry.row.endpoint === null) ||
+        (immuneToClock(held.entry.row) ||
           ownerAlive(held.entry.owner, now) === held.entry.alive)
       ) {
         continue;

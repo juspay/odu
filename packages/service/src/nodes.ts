@@ -49,7 +49,13 @@ function samePool(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
-function sameEnv(a: RunEnv, b: RunEnv): boolean {
+type NewsworthyEnv = Omit<RunEnv, "elapsedMs">;
+
+function newsworthy({ elapsedMs: _elapsed, ...rest }: RunEnv): NewsworthyEnv {
+  return rest;
+}
+
+function sameEnv(a: NewsworthyEnv, b: NewsworthyEnv): boolean {
   if (
     a.phase !== b.phase ||
     a.hostsSource !== b.hostsSource ||
@@ -99,7 +105,7 @@ export function nodesSource(
   const sleep = deps.sleep ?? abortableSleep;
   return ({ runId }) =>
     streamFromAbortableSource<NodesFrame>(async function* (signal) {
-      let previous: { nodes: RunNode[]; env: RunEnv } | null = null;
+      let previous: { nodes: RunNode[]; env: NewsworthyEnv } | null = null;
       const indexBy = Date.now() + INDEX_GRACE_MS;
       for (;;) {
         deps.poll();
@@ -126,7 +132,7 @@ export function nodesSource(
         if (
           previous === null ||
           !sameNodes(previous.nodes, nodes) ||
-          !sameEnv(previous.env, env) ||
+          !sameEnv(previous.env, newsworthy(env)) ||
           done
         ) {
           yield {
@@ -137,7 +143,7 @@ export function nodesSource(
             done,
           };
         }
-        previous = { nodes, env };
+        previous = { nodes, env: newsworthy(env) };
         if (done) return;
         if (signal.aborted) return;
         await sleep(pollMs, signal);

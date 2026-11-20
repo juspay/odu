@@ -6,7 +6,7 @@ import {
   ServiceRefused,
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
-import type { RunCanceller } from "./ports";
+import type { ConfirmedOutcome, RunCanceller } from "./ports";
 import {
   claimReceipt,
   completeReceipt,
@@ -176,6 +176,14 @@ async function run(
       ),
     };
   }
+  return { result: recordCancel(input, deps, outcome) };
+}
+
+function recordCancel(
+  input: CancelInput,
+  deps: CancelDeps,
+  outcome: ConfirmedOutcome,
+): CancelResult {
   const result: CancelResult = {
     runId: input.runId,
     requestId: input.requestId,
@@ -184,7 +192,7 @@ async function run(
     detail: outcome.detail,
   };
   completeReceipt(deps.requests, input.requestId, result, deps.now());
-  return { result };
+  return result;
 }
 
 function replayOf(stored: unknown, requestId: string): CancelResult | null {

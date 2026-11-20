@@ -22,6 +22,7 @@ import {
   ServiceRefused,
 } from "@odu/service-client/surface";
 import { Effect } from "effect";
+import { interruptiblePoll } from "./sleep";
 
 export interface LogDeps {
   catalog?: CatalogOptions;
@@ -32,6 +33,27 @@ export interface LogDeps {
 
 export const DEFAULT_LOG_PAGE_BYTES = 12 * 1024;
 
+type LogCompleteness = "complete" | "cut" | "unknown";
+
+function completenessOf(handle: RunHandle, key: LogKey): LogCompleteness {
+  const record = readAttemptRecord(handle, key.node, key.attempt);
+  if (record === null) return "unknown";
+  return record.logComplete ? "complete" : "cut";
+}
+
+function logCanStillGrow(
+  handle: RunHandle,
+  completeness: LogCompleteness,
+  now: number,
+): boolean {
+  return (
+    completeness !== "complete" &&
+    readVerdict(handle) === null &&
+    readExpiry(handle) === null &&
+    ownerAliveFor(handle, now) !== false
+  );
+}
+
 function pageOf(
   handle: RunHandle,
   key: LogKey,
@@ -39,7 +61,7 @@ function pageOf(
   slice: LogSlice,
   now: number,
 ): LogPage {
-  const complete = readAttemptRecord(handle, key.node, key.attempt)?.logComplete ?? false;
+  const completeness = completenessOf(handle, key);
   return {
     key: keyText,
     text: slice.text,
@@ -47,12 +69,8 @@ function pageOf(
     size: slice.size,
     nextOffset: slice.offset + slice.bytesRead,
     eof: slice.eof,
-    complete,
-    open:
-      !complete &&
-      readVerdict(handle) === null &&
-      readExpiry(handle) === null &&
-      ownerAliveFor(handle, now) !== false,
+    complete: completeness === "complete",
+    open: logCanStillGrow(handle, completeness, now),
   };
 }
 
@@ -103,30 +121,18 @@ export function readLog(
       return Effect.succeed(page);
     }
     return Effect.flatMap(
-      Effect.callback<LogGrowth>((resume) => {
-        const controller = new AbortController();
-        const stop = (): void => controller.abort();
-        const outer = deps.signal;
-        if (outer !== undefined) {
-          if (outer.aborted) stop();
-          else outer.addEventListener("abort", stop, { once: true });
-        }
-        void waitForLogGrowth(handle, key.node, key.attempt, {
-          from: page.nextOffset,
-          deadlineMs: input.waitMs,
-          ...(stream === undefined ? {} : { stream }),
-          ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
-          ...(deps.now === undefined ? {} : { now: deps.now }),
-          signal: controller.signal,
-        }).then(
-          (growth) => resume(Effect.succeed(growth)),
-          (err: unknown) => resume(Effect.die(err)),
-        );
-        return Effect.sync(() => {
-          controller.abort();
-          outer?.removeEventListener("abort", stop);
-        });
-      }),
+      interruptiblePoll<LogGrowth>(
+        (signal) =>
+          waitForLogGrowth(handle, key.node, key.attempt, {
+            from: page.nextOffset,
+            deadlineMs: input.waitMs,
+            ...(stream === undefined ? {} : { stream }),
+            ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
+            ...(deps.now === undefined ? {} : { now: deps.now }),
+            signal,
+          }),
+        deps.signal,
+      ),
       () => {
         const grown = readAttemptLog(
           handle,
@@ -143,7 +149,7 @@ export function readLog(
   });
 }
 
-export function readTail(
+export function readRecipeTail(
   key: string,
   catalog: CatalogOptions = {},
 ): LogTail | null {
