@@ -1,11 +1,19 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Role } from "@odu/cordis/principal";
 import { normalizeLogin } from "./github";
 
+declare const Sha256HexTag: unique symbol;
+
+export type Sha256Hex = string & { readonly [Sha256HexTag]: true };
+
+export const sha256 = (value: string): Sha256Hex =>
+  createHash("sha256").update(value).digest("hex") as Sha256Hex;
+
 export interface SessionRow {
-  cookieSha256: string;
+  cookieSha256: Sha256Hex;
   login: string;
   created: number;
   lastSeen: number;
@@ -15,7 +23,7 @@ export interface SessionRow {
 
 export interface TokenRow {
   id: string;
-  hash: string;
+  hash: Sha256Hex;
   login: string;
   name: string;
   created: number;
@@ -37,14 +45,14 @@ export interface GrantRow {
 }
 
 export interface AuthRepo {
-  sessionIgnoringExpiry(cookieSha256: string): SessionRow | null;
+  sessionIgnoringExpiry(cookieSha256: Sha256Hex): SessionRow | null;
   putSession(row: SessionRow): void;
-  touchSession(id: string, at: number): void;
-  deleteSession(id: string): void;
+  touchSession(id: Sha256Hex, at: number): void;
+  deleteSession(id: Sha256Hex): void;
   sessions(login: string): SessionRow[];
   expiredSessions(now: number): SessionRow[];
 
-  tokenByHash(hash: string): TokenRow | null;
+  tokenByHash(hash: Sha256Hex): TokenRow | null;
   putToken(row: TokenRow): void;
   touchToken(id: string, at: number): void;
   revokeToken(id: string): boolean;
@@ -161,7 +169,7 @@ export function openAuthRepo(path: string): AuthRepo {
     row === null
       ? null
       : {
-          cookieSha256: row.id,
+          cookieSha256: row.id as Sha256Hex,
           login: row.login,
           created: row.created,
           lastSeen: row.last_seen,
@@ -171,7 +179,7 @@ export function openAuthRepo(path: string): AuthRepo {
 
   const tokenOf = (row: TokenDb): TokenRow => ({
     id: row.id,
-    hash: row.hash,
+    hash: row.hash as Sha256Hex,
     login: row.login,
     name: row.name,
     created: row.created,
@@ -208,7 +216,7 @@ export function openAuthRepo(path: string): AuthRepo {
           .query("SELECT * FROM session WHERE login = ?1 ORDER BY created DESC")
           .all(login) as SessionDb[]
       ).map((row) => ({
-        cookieSha256: row.id,
+        cookieSha256: row.id as Sha256Hex,
         login: row.login,
         created: row.created,
         lastSeen: row.last_seen,
@@ -221,7 +229,7 @@ export function openAuthRepo(path: string): AuthRepo {
           .query("SELECT * FROM session WHERE expires <= ?1")
           .all(now) as SessionDb[]
       ).map((row) => ({
-        cookieSha256: row.id,
+        cookieSha256: row.id as Sha256Hex,
         login: row.login,
         created: row.created,
         lastSeen: row.last_seen,

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,14 +17,12 @@ import {
   type WebWorld,
 } from "../../../../tests/e2e/webHarness";
 import { startGithubStub, type GithubStub } from "../../../web-acceptance/support/githubStub";
-import { openAuthRepo } from "../../src/db";
+import { openAuthRepo, sha256 } from "../../src/db";
 
 const ROOT_TOKEN = "e2e-auth-root";
 const LOGIN = "srid";
 const CLIENT_ID = "e2e-client-id";
 const CLIENT_SECRET = "e2e-client-secret";
-
-const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
 let odu: string;
 let world: WebWorld;

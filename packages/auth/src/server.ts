@@ -1,6 +1,6 @@
 import type { Row } from "@odu/cordis/services";
 import { AUTH_ROW } from "./surface";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { definePlugin } from "@olai/effect-cordis";
@@ -23,7 +23,7 @@ import {
   Routes,
   StateDir,
 } from "@odu/cordis/services";
-import { openAuthRepo, type AuthRepo, type SessionRow, type TokenRow } from "./db";
+import { openAuthRepo, sha256, type AuthRepo, type Sha256Hex, type SessionRow, type TokenRow } from "./db";
 import { normalizeLogin, type GithubConfig } from "./github";
 import { authRoutes } from "./routes";
 import {
@@ -50,9 +50,6 @@ export const sessionCookieOptions = (
   secure,
   maxAge: `${SESSION_DAYS * 24 * 60} minutes`,
 });
-
-const sha256 = (value: string): string =>
-  createHash("sha256").update(value).digest("hex");
 
 export function cookieValue(header: string | undefined, name: string): string | null {
   if (header === undefined) return null;
@@ -183,7 +180,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     };
   };
 
-  const liveSession = (cookieSha256: string): SessionRow | null => {
+  const liveSession = (cookieSha256: Sha256Hex): SessionRow | null => {
     const row = repo.sessionIgnoringExpiry(cookieSha256);
     if (row === null) return null;
     if (row.expires <= now()) {
@@ -196,7 +193,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
     return row;
   };
 
-  const liveToken = (hash: string): TokenRow | null => {
+  const liveToken = (hash: Sha256Hex): TokenRow | null => {
     const row = repo.tokenByHash(hash);
     if (row === null || row.revoked) return null;
     if (row.expires !== null && row.expires <= now()) return null;
@@ -411,7 +408,8 @@ export function authServer(opts: AuthServerOptions): AuthServer {
           ),
         end: ({ input }) =>
           Effect.flatMap(signedIn(), ({ login }) => {
-            if (!repo.sessions(login).some((row) => row.cookieSha256 === input.id)) {
+            const mine = repo.sessions(login).find((row) => row.cookieSha256 === input.id);
+            if (mine === undefined) {
               return Effect.fail(
                 new AuthRefused({
                   code: "unknown",
@@ -419,7 +417,7 @@ export function authServer(opts: AuthServerOptions): AuthServer {
                 }),
               );
             }
-            repo.deleteSession(input.id);
+            repo.deleteSession(mine.cookieSha256);
             endWhere((entry) => entry.session === input.id);
             return Effect.succeed({ id: input.id, ended: true });
           }),
