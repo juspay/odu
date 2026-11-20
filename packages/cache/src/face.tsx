@@ -66,6 +66,7 @@ import {
   useCommand,
   type CacheScope,
 } from "./surface";
+import { pathsQuery } from "./pathsQuery";
 
 type CacheSpec = (typeof oduCacheSurface)["spec"];
 
@@ -254,7 +255,7 @@ function CreateBucket(
   );
 }
 
-function keepIdentity<T>(keyOf: (row: T) => string): (row: T) => T {
+export function keepIdentity<T>(keyOf: (row: T) => string): (row: T) => T {
   const held = new Map<string, { readonly row: T; readonly encoded: string }>();
   return (row) => {
     const key = keyOf(row);
@@ -376,26 +377,6 @@ function BucketList(
   );
 }
 
-type FirstPage =
-  | {
-      readonly ok: true;
-      readonly rows: readonly PathRow[];
-      readonly next: string | null;
-      readonly retentionDays: number;
-    }
-  | { readonly ok: false; readonly message: string };
-
-type Versions =
-  | { readonly kind: "reading" }
-  | {
-      readonly kind: "held";
-      readonly versions: readonly CachePath[];
-      readonly next: string | null;
-      readonly reading: boolean;
-    }
-  | { readonly kind: "failed"; readonly message: string };
-
-const FILTER_DEBOUNCE_MS = 200;
 
 interface SetupDestination {
   readonly name: string;
@@ -574,11 +555,6 @@ function KeptByCell(props: {
   return <span title={said().title}>{said().cell}</span>;
 }
 
-interface AppendedPages {
-  readonly rows: readonly PathRow[];
-  readonly next: string | null;
-}
-
 function BucketPaths(props: {
   client: CacheClient;
   call: <A>(effect: Effect.Effect<A, unknown>) => Promise<A>;
@@ -587,186 +563,12 @@ function BucketPaths(props: {
   runHref: (runId: string) => string;
   retentionDays: number;
 }): JSX.Element {
-  const [typed, setTyped] = createSignal("");
-  const [filter, setFilter] = createSignal("");
-  let pending: ReturnType<typeof setTimeout> | undefined;
-  createEffect(
-    on(typed, (value) => {
-      if (pending !== undefined) clearTimeout(pending);
-      pending = setTimeout(() => setFilter(value), FILTER_DEBOUNCE_MS);
-    }),
-  );
-  onCleanup(() => {
-    if (pending !== undefined) clearTimeout(pending);
+  const paths = pathsQuery({
+    client: props.client,
+    call: props.call,
+    bucket: () => props.bucket,
+    retentionDays: () => props.retentionDays,
   });
-  createEffect(
-    on(
-      () => props.bucket,
-      () => {
-        if (pending !== undefined) clearTimeout(pending);
-        setTyped("");
-        setFilter("");
-      },
-      { defer: true },
-    ),
-  );
-
-  const [grouped, setGrouped] = createSignal(true);
-  const [column, setColumn] = createSignal<PathColumn>("pushed");
-  const [descending, setDescending] = createSignal(true);
-  const sortBy = (which: PathColumn): void => {
-    if (column() === which) setDescending(!descending());
-    else {
-      setColumn(which);
-      setDescending(which !== "name");
-    }
-  };
-
-  const [appended, setAppended] = createSignal<AppendedPages | null>(null);
-  const [failure, setFailure] = createSignal<string | null>(null);
-  const [loadingMore, setLoadingMore] = createSignal(false);
-
-  let generation = 0;
-  const current = (): number => generation;
-  const supersede = (): number => {
-    generation += 1;
-    return generation;
-  };
-  onCleanup(() => {
-    supersede();
-  });
-
-  const query = (): {
-    filter?: string;
-    group?: "name";
-    sort: PathColumn;
-    descending: boolean;
-  } => ({
-    ...(filter() === "" ? {} : { filter: filter() }),
-    ...(grouped() ? { group: "name" as const } : {}),
-    sort: column(),
-    descending: descending(),
-  });
-
-  const retention = createMemo(() => props.retentionDays);
-
-  const [first, { refetch }] = createResource(
-    () => ({ asked: { bucket: props.bucket, ...query() }, retentionDays: retention() }),
-    async ({ asked, retentionDays }): Promise<FirstPage> => {
-      setAppended(null);
-      setFailure(null);
-      setLoadingMore(false);
-      supersede();
-      try {
-        const page = await props.call(props.client.procedures.bucket.paths(asked));
-        return { ok: true, rows: pathRows(page), next: page.next ?? null, retentionDays };
-      } catch (err) {
-        return { ok: false, message: refusalText(err) };
-      }
-    },
-  );
-  const answeredRetention = createMemo(() => {
-    const answer = first();
-    return answer !== undefined && answer.ok ? answer.retentionDays : retention();
-  });
-
-  const more = (after: string): void => {
-    const asked = current();
-    setLoadingMore(true);
-    setFailure(null);
-    void props
-      .call(props.client.procedures.bucket.paths({ bucket: props.bucket, ...query(), after }))
-      .then(
-        (answer) => {
-          if (asked !== current()) return;
-          setLoadingMore(false);
-          setAppended((been) => ({
-            rows: [...(been?.rows ?? []), ...pathRows(answer)],
-            next: answer.next ?? null,
-          }));
-        },
-        (err: unknown) => {
-          if (asked !== current()) return;
-          setLoadingMore(false);
-          setFailure(refusalText(err));
-        },
-      );
-  };
-
-  const refusal = createMemo<string | null>(() => {
-    const answer = first();
-    return answer === undefined || answer.ok ? null : answer.message;
-  });
-
-  const stable = keepIdentity<PathRow>((row) => row.storePath);
-  const rows = createMemo<readonly PathRow[]>(() => {
-    const answer = first();
-    if (answer === undefined || !answer.ok) return [];
-    return [...answer.rows, ...(appended()?.rows ?? [])].map(stable);
-  });
-  const next = createMemo<string | null>(() => {
-    const been = appended();
-    if (been !== null) return been.next;
-    const answer = first();
-    return answer !== undefined && answer.ok ? answer.next : null;
-  });
-
-  const [opened, setOpened] = createSignal<ReadonlySet<string>>(new Set());
-  const [versions, setVersions] = createSignal<ReadonlyMap<string, Versions>>(new Map());
-  const held = (name: string, state: Versions): void => {
-    setVersions((all) => new Map(all).set(name, state));
-  };
-  const openState = (name: string): Versions | undefined =>
-    opened().has(name) ? versions().get(name) : undefined;
-  const readVersions = (name: string, after: string | null): void => {
-    const asked = current();
-    const standing = versions().get(name);
-    held(
-      name,
-      after === null || standing?.kind !== "held"
-        ? { kind: "reading" }
-        : { ...standing, reading: true },
-    );
-    void props
-      .call(
-        props.client.procedures.bucket.paths({
-          bucket: props.bucket,
-          name,
-          ...(filter() === "" ? {} : { filter: filter() }),
-          ...(after === null ? {} : { after }),
-          sort: "pushed",
-          descending: true,
-        }),
-      )
-      .then(
-        (answer) => {
-          if (asked !== current()) return;
-          const drawn = versions().get(name);
-          const before = after !== null && drawn?.kind === "held" ? drawn.versions : [];
-          held(name, {
-            kind: "held",
-            versions: [...before, ...answer.paths],
-            next: answer.next ?? null,
-            reading: false,
-          });
-        },
-        (err: unknown) => {
-          if (asked !== current()) return;
-          held(name, { kind: "failed", message: refusalText(err) });
-        },
-      );
-  };
-  const toggleOpen = (name: string): void => {
-    const open = !opened().has(name);
-    setOpened((all) => {
-      const next = new Set(all);
-      if (open) next.add(name);
-      else next.delete(name);
-      return next;
-    });
-    if (!open || versions().has(name)) return;
-    readVersions(name, null);
-  };
 
   const columns: ReadonlyArray<TableColumn<PathRow>> = [
     {
@@ -778,8 +580,8 @@ function BucketPaths(props: {
           <button
             type="button"
             class="disclosure-summary"
-            aria-expanded={opened().has(row.name)}
-            onClick={() => toggleOpen(row.name)}
+            aria-expanded={paths.isOpen(row.name)}
+            onClick={() => paths.toggleOpen(row.name)}
           >
             <span class="name">{row.name}</span>
             {}
@@ -854,18 +656,18 @@ function BucketPaths(props: {
             keptBy={row.keptBy}
             now={props.now}
             grouped={row.versions > 1}
-            retentionDays={answeredRetention()}
+            retentionDays={paths.answeredRetention()}
           />
         ),
     },
   ];
   const versionsOf = (row: PathRow): readonly PathRow[] => {
-    const state = openState(row.name);
+    const state = paths.openState(row.name);
     if (state === undefined || state.kind !== "held") return [];
     return state.versions.map((version) => pathRow(version, ""));
   };
   const noteUnder = (row: PathRow): JSX.Element | null => {
-    const state = openState(row.name);
+    const state = paths.openState(row.name);
     if (state === undefined) return null;
     if (state.kind === "reading") return "reading…";
     if (state.kind === "failed") return <span class="fault">{state.message}</span>;
@@ -876,7 +678,7 @@ function BucketPaths(props: {
         type="button"
         class="text-action"
         disabled={state.reading}
-        onClick={() => readVersions(row.name, state.next)}
+        onClick={() => paths.readVersions(row.name, state.next)}
       >
         {state.reading
           ? "reading…"
@@ -884,17 +686,6 @@ function BucketPaths(props: {
       </button>
     );
   };
-  const forgetVersions = (): void => {
-    setOpened(new Set<string>());
-    setVersions(new Map());
-  };
-  createEffect(
-    on(
-      () => [props.bucket, filter(), retention()] as const,
-      forgetVersions,
-      { defer: true },
-    ),
-  );
 
   return (
     <Panel
@@ -905,16 +696,16 @@ function BucketPaths(props: {
         <>
           <SearchInput
             label="filter paths"
-            value={typed()}
+            value={paths.typed()}
             placeholder="filter by path, e.g. openssl"
-            onValue={setTyped}
+            onValue={paths.setTyped}
           />
           {}
           <button
             type="button"
             class="text-action"
-            aria-pressed={grouped()}
-            onClick={() => setGrouped(!grouped())}
+            aria-pressed={paths.grouped()}
+            onClick={() => paths.setGrouped(!paths.grouped())}
           >
             group by name
           </button>
@@ -922,36 +713,33 @@ function BucketPaths(props: {
           <button
             type="button"
             class="text-action"
-            disabled={first.loading}
-            onClick={() => {
-              forgetVersions();
-              void refetch();
-            }}
+            disabled={paths.loading()}
+            onClick={() => paths.refresh()}
           >
-            {first.loading ? "reading…" : "refresh paths"}
+            {paths.loading() ? "reading…" : "refresh paths"}
           </button>
         </>
       }
     >
       {}
-      <Show when={refusal() ?? failure()}>
+      <Show when={paths.refusal() ?? paths.failure()}>
         {(message) => (
           <div class="panel-body">
             <Receipt tone="refused">{message()}</Receipt>
-            <button type="button" class="text-action" onClick={() => refetch()}>
+            <button type="button" class="text-action" onClick={() => paths.refetch()}>
               try again
             </button>
           </div>
         )}
       </Show>
       <Show
-        when={rows().length > 0}
+        when={paths.rows().length > 0}
         fallback={
-          <Show when={refusal() === null && failure() === null}>
+          <Show when={paths.refusal() === null && paths.failure() === null}>
             <p class="panel-body hint">
-              {first.loading
+              {paths.loading()
                 ? "reading…"
-                : filter() === ""
+                : paths.filter() === ""
                   ? "Nothing pushed to this bucket yet."
                   : "No path matches that filter."}
             </p>
@@ -964,19 +752,22 @@ function BucketPaths(props: {
             class="paths-table"
             label="paths"
             columns={columns}
-            rows={rows()}
-            sorted={{ key: column(), descending: descending() }}
-            onSort={(key) => sortBy(key as PathColumn)}
+            rows={paths.rows()}
+            sorted={{ key: paths.column(), descending: paths.descending() }}
+            onSort={(key) => paths.sortBy(key as PathColumn)}
             under={(row) => versionsOf(row)}
             note={(row) => noteUnder(row)}
           />
         </div>
       </Show>
-      <Show when={next()}>
+      <Show when={paths.next()}>
         {(after) => (
           <div class="panel-foot">
-            <Button disabled={loadingMore() || first.loading} onClick={() => more(after())}>
-              {loadingMore() ? "reading…" : `Show ${PATH_PAGE_SIZE} more`}
+            <Button
+              disabled={paths.loadingMore() || paths.loading()}
+              onClick={() => paths.more(after())}
+            >
+              {paths.loadingMore() ? "reading…" : `Show ${PATH_PAGE_SIZE} more`}
             </Button>
           </div>
         )}
@@ -1986,30 +1777,31 @@ function BucketGc(
     },
   );
   const [asked, setAsked] = createSignal(false);
-  const [answeredWith, setAnsweredWith] = createSignal<number | null>(null);
   const plan = reading(
     () => (asked() ? props.name : null),
     props,
     async (bucket) => {
       const days = asking();
       const override = days.kind === "days" ? days.days : null;
-      const answer = await props.call(
-        props.client.procedures.gc.plan({
-          rootToken: props.rootToken(),
-          bucket,
-          ...(override === null ? {} : { retentionDays: override }),
-        }),
-      );
-      setAnsweredWith(override);
-      return answer;
+      return {
+        at: override,
+        plan: await props.call(
+          props.client.procedures.gc.plan({
+            rootToken: props.rootToken(),
+            bucket,
+            ...(override === null ? {} : { retentionDays: override }),
+          }),
+        ),
+      };
     },
   );
+  const answeredWith = (): number | null => plan.value()?.at ?? null;
   const askAgain = (): void => {
     if (!asked()) setAsked(true);
     else plan.refetch();
   };
   const next = (): CacheGcPlan["buckets"][number] | null =>
-    plan.value()?.buckets.find((row) => row.bucket === props.name) ?? null;
+    plan.value()?.plan.buckets.find((row) => row.bucket === props.name) ?? null;
   const [stopped, setStopped] = createSignal<string | null>(null);
   const collect = (): void => {
     setStopped(null);

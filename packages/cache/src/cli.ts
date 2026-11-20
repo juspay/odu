@@ -117,17 +117,17 @@ credentials entry for the bucket's origin.
 
 const REFUSED = 1;
 
-async function withService(
+async function withService<A>(
   ports: CacheCliPorts,
   origin: string | undefined,
-  use: (client: CacheClient) => Promise<number>,
-): Promise<number> {
+  use: (client: CacheClient) => Promise<A>,
+  dead: (message: string) => A,
+): Promise<A> {
   let connection: Awaited<ReturnType<CacheCliPorts["connect"]>>;
   try {
     connection = await ports.connect(origin);
   } catch (err) {
-    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-    return REFUSED;
+    return dead(err instanceof Error ? err.message : String(err));
   }
   try {
     return await use(composedCacheSibling(connection.dispatch));
@@ -221,25 +221,26 @@ export async function cacheCommand(
 
 
 
-async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    allowPositionals: true,
-    options: { origin: originOption },
-  });
-  const name = positionals[0];
-  if (name === undefined) {
-    process.stderr.write(`odu: cache use needs a bucket name\n${CACHE_USAGE}`);
-    return 1;
-  }
-  const origin = trimTrailingSlashes(
-    values.origin ?? process.env.ODU_WEB_ORIGIN?.trim() ?? "http://127.0.0.1:18440",
-  );
-  const personal = process.env.ODU_TOKEN?.trim() || process.env.ODU_CACHE_TOKEN?.trim() || null;
+type UseFacts = { readonly url: string; readonly publicKey: string; readonly public: boolean };
+
+type BucketAnswer =
+  | { readonly kind: "facts"; readonly facts: UseFacts }
+  | { readonly kind: "needsSignIn"; readonly message: string }
+  | { readonly kind: "offline"; readonly message: string }
+  | { readonly kind: "unknown"; readonly failure: { refusal: CacheRefused | null; error?: unknown } };
+
+async function bucketFacts(input: {
+  origin: string;
+  name: string;
+  token: string | null;
+  ports: CacheCliPorts;
+  originFlag: string | undefined;
+}): Promise<BucketAnswer> {
+  const { origin, name, token, ports, originFlag } = input;
   const publicFacts = await fetch(`${origin}${CACHE_MOUNT}/${name}/`, {
     headers: {
       accept: "application/json",
-      ...(personal === null ? {} : { authorization: `Bearer ${personal}` }),
+      ...(token === null ? {} : { authorization: `Bearer ${token}` }),
     },
     signal: AbortSignal.timeout(5_000),
   }).catch(() => null);
@@ -250,50 +251,55 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
       public?: unknown;
     };
     if (typeof facts.url === "string" && typeof facts.publicKey === "string") {
-      process.stdout.write(
-        useBlock({
-          url: facts.url,
-          publicKey: facts.publicKey,
-          public: facts.public === true,
-          home: process.env.HOME ?? null,
-        }),
-      );
-      return 0;
+      return {
+        kind: "facts",
+        facts: { url: facts.url, publicKey: facts.publicKey, public: facts.public === true },
+      };
     }
   }
 
   if ((await readDoor(origin)) === true) {
-    process.stderr.write(
-      `odu: no public bucket "${name}" on ${origin} — if it is private, sign in ` +
-        `(\`odu auth login\`) or set $ODU_TOKEN to a read token\n`,
-    );
-    return REFUSED;
+    return {
+      kind: "needsSignIn",
+      message:
+        `odu: no public bucket "${name}" on ${origin} — if it is private, sign in ` +
+        `(\`odu auth login\`) or set $ODU_TOKEN to a read token`,
+    };
   }
 
-  return withService(ports, values.origin, async (client) => {
-    const answer = await call(client.surface.bucket.describe({ bucket: name }));
-    if (!answer.ok) {
-      if (answer.refusal !== null) return reportFailure(answer, false, REFUSED);
-      const said = String(answer.error);
-      if (/no principal/i.test(said)) {
-        process.stderr.write(
-          `odu: "${name}" is not publicly readable — if it is private, sign in ` +
-            `(\`odu auth login\`) or set $ODU_TOKEN to a read token\n`,
-        );
-        return REFUSED;
+  return withService<BucketAnswer>(
+    ports,
+    originFlag,
+    async (client) => {
+      const answer = await call(client.surface.bucket.describe({ bucket: name }));
+      if (!answer.ok) {
+        if (answer.refusal !== null) return { kind: "unknown", failure: answer };
+        const said = String(answer.error);
+        if (/no principal/i.test(said)) {
+          return {
+            kind: "needsSignIn",
+            message:
+              `odu: "${name}" is not publicly readable — if it is private, sign in ` +
+              `(\`odu auth login\`) or set $ODU_TOKEN to a read token`,
+          };
+        }
+        return { kind: "unknown", failure: answer };
       }
-      return reportFailure(answer, false, REFUSED);
-    }
-    const bucket = answer.value;
-    process.stdout.write(
-      useBlock({
-        url: bucket.url,
-        publicKey: bucket.publicKey,
-        public: bucket.public,
-        home: process.env.HOME ?? null,
-      }),
-    );
-    return 0;
+      const bucket = answer.value;
+      return {
+        kind: "facts",
+        facts: { url: bucket.url, publicKey: bucket.publicKey, public: bucket.public },
+      };
+    },
+    (message) => ({ kind: "offline", message }),
+  );
+}
+
+async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: rest,
+    allowPositionals: true,
+    options: { origin: originOption },
   });
 }
 
@@ -326,6 +332,108 @@ async function readSecret(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8").trim();
 }
 
+type PushTarget =
+  | { readonly kind: "cache"; readonly bucket: string; readonly origin: string; readonly said: string }
+  | { readonly kind: "bucket"; readonly bucket: string; readonly origin: string | undefined }
+  | { readonly kind: "flake"; readonly bucket: string; readonly origin: string; readonly said: string };
+
+type Aimed =
+  | { readonly ok: true; readonly target: PushTarget; readonly paths: readonly string[] }
+  | { readonly ok: false; readonly message: string };
+
+async function pushTargetOf(
+  values: { cache?: string; origin?: string; "token-file"?: string },
+  positionals: readonly string[],
+): Promise<Aimed> {
+  const asked = values.cache;
+  if (asked !== undefined) {
+    if (values.origin !== undefined) {
+      return {
+        ok: false,
+        message:
+          "odu: --cache and --origin name the same thing twice — --cache reads the " +
+          "push origin from the cache itself\n",
+      };
+    }
+    if (positionals.length === 0) {
+      return {
+        ok: false,
+        message: `odu: cache push --cache needs at least one path\n${CACHE_USAGE}`,
+      };
+    }
+    const named = positionals.filter(
+      (item) => !(item.startsWith("/") || item.includes("#") || existsSync(item)),
+    );
+    if (named.length > 0) {
+      return {
+        ok: false,
+        message:
+          `odu: --cache names the bucket, so "${named[0] as string}" is not a path it can ` +
+          `push — with --cache every positional is a store path, a result link or a ` +
+          `flake installable. Drop it, or use \`odu cache push ${named[0] as string} ` +
+          `--origin <url>\`\n`,
+      };
+    }
+    try {
+      const token = await discoveryToken(process.env, asked, values["token-file"]);
+      const facts = await describeCache(asked, fetch, token);
+      return {
+        ok: true,
+        target: {
+          kind: "cache",
+          bucket: facts.bucket,
+          origin: facts.origin,
+          said: `${asked} is bucket "${facts.bucket}" on ${facts.origin}`,
+        },
+        paths: positionals,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message: `odu: ${err instanceof Error ? err.message : String(err)}\n`,
+      };
+    }
+  }
+  const [named, ...rest] = positionals;
+  const looksLikeBucket =
+    named !== undefined && !(named.startsWith("/") || named.includes("#") || existsSync(named));
+  if (looksLikeBucket) {
+    if (rest.length === 0) {
+      return {
+        ok: false,
+        message: `odu: cache push needs a bucket and at least one path\n${CACHE_USAGE}`,
+      };
+    }
+    return { ok: true, target: { kind: "bucket", bucket: named, origin: values.origin }, paths: rest };
+  }
+  if (positionals.length === 0) {
+    return { ok: false, message: `odu: cache push needs at least one path\n${CACHE_USAGE}` };
+  }
+  if (values.origin !== undefined) {
+    return {
+      ok: false,
+      message:
+        "odu: --origin needs a bucket to go with it — `odu cache push <bucket> " +
+        "--origin <url>`. With neither, the substituter is read from " +
+        "./flake.nix and names its own origin.\n",
+    };
+  }
+  const inferred = await inferredCache();
+  if ("error" in inferred) return { ok: false, message: `odu: ${inferred.error}\n` };
+  return {
+    ok: true,
+    target: {
+      kind: "flake",
+      bucket: inferred.bucket,
+      origin: inferred.origin,
+      said:
+        `./flake.nix reads from ${inferred.substituter}, which is bucket ` +
+        `"${inferred.bucket}" on ${inferred.origin}`,
+    },
+    paths: positionals,
+  };
+}
+
 async function pushCommand(rest: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,
@@ -343,96 +451,19 @@ async function pushCommand(rest: string[]): Promise<number> {
       output: outputOption,
     },
   });
-  const json = values.output === "json";
-  const asked = values.cache;
-  let bucket: string;
-  let origin = values.origin;
-  let addressFromRepository = false;
-  let paths: string[];
-  if (asked !== undefined) {
-    if (values.origin !== undefined) {
-      process.stderr.write(
-        "odu: --cache and --origin name the same thing twice — --cache reads the " +
-          "push origin from the cache itself\n",
-      );
-      return 1;
-    }
-    if (positionals.length === 0) {
-      process.stderr.write(`odu: cache push --cache needs at least one path\n${CACHE_USAGE}`);
-      return 1;
-    }
-    const named = positionals.filter(
-      (item) => !(item.startsWith("/") || item.includes("#") || existsSync(item)),
-    );
-    if (named.length > 0) {
-      process.stderr.write(
-        `odu: --cache names the bucket, so "${named[0] as string}" is not a path it can ` +
-          `push — with --cache every positional is a store path, a result link or a ` +
-          `flake installable. Drop it, or use \`odu cache push ${named[0] as string} ` +
-          `--origin <url>\`\n`,
-      );
-      return 1;
-    }
-    try {
-      const token = await discoveryToken(process.env, asked, values["token-file"]);
-      const facts = await describeCache(asked, fetch, token);
-      bucket = facts.bucket;
-      origin = facts.origin;
-      if (!json) {
-        process.stderr.write(`${asked} is bucket "${facts.bucket}" on ${facts.origin}\n`);
-      }
-    } catch (err) {
-      process.stderr.write(`odu: ${err instanceof Error ? err.message : String(err)}\n`);
-      return 1;
-    }
-    paths = positionals;
-  } else {
-    const [named, ...rest] = positionals;
-    const looksLikeBucket =
-      named !== undefined &&
-      !(named.startsWith("/") || named.includes("#") || existsSync(named));
-    if (looksLikeBucket) {
-      if (rest.length === 0) {
-        process.stderr.write(
-          `odu: cache push needs a bucket and at least one path\n${CACHE_USAGE}`,
-        );
-        return 1;
-      }
-      bucket = named;
-      paths = rest;
-    } else {
-      if (positionals.length === 0) {
-        process.stderr.write(`odu: cache push needs at least one path\n${CACHE_USAGE}`);
-        return 1;
-      }
-      if (values.origin !== undefined) {
-        process.stderr.write(
-          "odu: --origin needs a bucket to go with it — `odu cache push <bucket> " +
-            "--origin <url>`. With neither, the substituter is read from " +
-            "./flake.nix and names its own origin.\n",
-        );
-        return 1;
-      }
-      const inferred = await inferredCache();
-      if ("error" in inferred) {
-        process.stderr.write(`odu: ${inferred.error}\n`);
-        return 1;
-      }
-      if (!json) {
-        process.stderr.write(
-          `./flake.nix reads from ${inferred.substituter}, which is bucket ` +
-            `"${inferred.bucket}" on ${inferred.origin}\n`,
-        );
-      }
-      bucket = inferred.bucket;
-      origin = inferred.origin;
-      addressFromRepository = true;
-      paths = positionals;
-    }
+  const aimed = await pushTargetOf(values, positionals);
+  if (!aimed.ok) {
+    process.stderr.write(aimed.message);
+    return 1;
   }
-  const credential = addressFromRepository
-    ? await savedCredentialFor(process.env, origin ?? "")
-    : undefined;
+  const json = values.output === "json";
+  const target = aimed.target;
+  const paths = aimed.paths;
+  const bucket = target.bucket;
+  const origin = target.origin;
+  if (!json && "said" in target) process.stderr.write(`${target.said}\n`);
+  const credential =
+    target.kind === "flake" ? await savedCredentialFor(process.env, target.origin) : undefined;
   try {
     const summary = await pushToCache({
       bucket,
