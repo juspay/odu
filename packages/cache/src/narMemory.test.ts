@@ -1,11 +1,3 @@
-/**
- * THE POD'S FAILURE, OUT OF PROCESS. A server process serves a real 320 MB NAR
- * to a `curl --limit-rate 2M` reader; the test samples the SERVER's RSS ten
- * seconds in, by which time the dump and the compressor have long finished.
- * The old child-stdout source has buffered most of the NAR by then; a
- * pull-based source has not. An in-process loopback reader is not this test:
- * the kernel and Bun's fetch apply pressure the pod's path does not.
- */
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,7 +13,6 @@ const LIMIT = 64 * 1024 * 1024;
 const SAMPLE_AFTER_MS = 10_000;
 const MB = 1024 * 1024;
 
-/** The child's RSS in bytes, from /proc; Linux only. */
 function childRss(pid: number): number {
   const status = readFileSync(`/proc/${pid}/status`, "utf8");
   const match = /VmRSS:\s+(\d+) kB/.exec(status);
@@ -29,9 +20,6 @@ function childRss(pid: number): number {
 }
 
 describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
-  // THREE NUMBERS, one harness: at 10 s into a 2 MB/s read of a 320 MB NAR,
-  // node:child_process grew 345,026,560 B, Bun.spawn 337,645,568 B, and the
-  // FIFO (read 64 KiB per pull) stays under the bound.
   it("has not buffered the NAR ten seconds into a 2 MB/s read", async () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-nar-memory-"));
     const source = join(dir, "source.bin");
@@ -110,7 +98,6 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
       }
       chunk.copy(file, at);
     }
-    // THE REAL ROUTE, with a seeded cache: one bucket, one row, one object.
     const stateRoot = join(dir, "state");
     const hash = "a".repeat(52);
     const storePath = `/nix/store/${"a".repeat(32)}-big`;
@@ -176,8 +163,6 @@ describe.skipIf(!LINUX)("a slow socket and the server's memory", () => {
           resolve(Number(match[1]));
         });
       });
-      // THE SAME ADAPTER, OBSERVED FROM OUTSIDE: a Range byte-for-byte check
-      // and the headers a client actually receives.
       const url = `http://127.0.0.1:${port}/cache/main/nar/${hash}.nar.zst`;
       const ranged = spawnSync(
         "curl",

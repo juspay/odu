@@ -1,18 +1,3 @@
-/**
- * THE URL A BUCKET PUBLISHES, which is the one thing about the cache that a
- * proxy changes — and, since the cache owns its own contract, the one thing it
- * used to borrow from the service.
- *
- * A daemon behind nginx is bound to loopback; the address its clients must be
- * told is the proxy's, and `odu cache use` prints whatever this answers into a
- * `nix.conf`. So the row is CONSTRUCTED with the public origin, and every row it
- * publishes carries that address rather than the one this process happens to be
- * bound to.
- *
- * A loopback URL in a `nix.conf` is a substituter that works for nobody, which
- * is why this asserts the string a reader copies rather than a field name.
- */
-
 import { afterEach, describe, expect, it } from "bun:test";
 import { createCache, type Cache } from "./cache";
 import { storeFacts } from "./stores";
@@ -29,8 +14,6 @@ afterEach(async () => {
   await Promise.all(trash.splice(0).map((cache) => cache.close()));
 });
 
-/** A cache over a throwaway state root with NOTHING in the store: no NAR is
- *  read or written here, so the Nix daemon is never consulted. */
 let world = 0;
 
 async function row(publicOrigin: string): Promise<{
@@ -41,21 +24,15 @@ async function row(publicOrigin: string): Promise<{
   world += 1;
   const stateRoot = `${import.meta.dirname}/../../../.ci/cache-url-test/${process.pid}-${world}`;
   const cache = createCache({
-    // A WORLD PER CASE: a bucket created by one case must not be visible to the
-    // next, or a `create` would answer `bucket_exists` for a reason this test is
-    // not about.
     stateRoot,
     stores: localStores(stateRoot),
     rootToken: "root-token",
-    // THE SAME ORIGIN THE ROW IS BUILT WITH: a bucket's `nix-cache-info`
-    // names it, and the row's `url`/`pushUrl` are built from it.
     publicOrigin,
   });
   trash.push(cache);
   const server = cacheServer({
     cache,
     publicOrigin,
-    // The broker a host always provides; nothing registers on it here.
     purge: purgeBroker(),
     mount: "/cache",
     stores: storeFacts(new Map()),
@@ -87,8 +64,6 @@ describe("the substituter URL a bucket publishes", () => {
       });
       expect(created.ok).toBe(true);
       publish();
-      // The ROW a subscriber holds carries the address a person would paste,
-      // and it moved with the construction rather than with the listener.
       expect(published.get("main")?.url).toBe(`${origin}/cache/main`);
     }
   });
@@ -102,8 +77,6 @@ describe("the substituter URL a bucket publishes", () => {
       retentionDays: 0,
       upstreamKeys: [],
     });
-    // `attach` publishes once, so a daemon that had a cache before it had a
-    // listener still shows it.
     publish();
     expect([...published.keys()]).toEqual(["early"]);
     expect(published.get("early")?.url).toBe(`${PUBLIC}/cache/early`);
@@ -125,9 +98,6 @@ describe("the substituter URL a bucket publishes", () => {
     });
     expect(named).toMatchObject({ ok: true, value: { domain: "cache.kolu.dev" } });
     publish();
-    // A NAME is the whole substituter address. The push API still needs the
-    // bucket in its path, so `pushUrl` does not move — and the advertised
-    // scheme follows the deployment's public origin (here, TLS).
     expect(published.get("kolu")?.url).toBe("https://cache.kolu.dev");
     expect(published.get("kolu")?.pushUrl).toBe("https://odu.example/cache/kolu");
     const described = await cache.admin.describe({ bucket: "kolu" });

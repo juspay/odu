@@ -1,17 +1,3 @@
-/**
- * THE COLLECTION NOBODY ASKED FOR, and the announcement it makes.
- *
- * Two facts about the ROW rather than about the engine, and both are
- * invisible from a verb's answer: a cache that no operator ever administers
- * must still stop growing, and what a collection deleted has to reach whatever
- * is serving those bytes at the edge. The engine's own cases live in
- * `gc.test.ts` and `gcStores.test.ts`; these are about the row's wiring.
- *
- * The schedule is driven at a few milliseconds rather than a day: the interval
- * is this row's own option precisely so a test can state the claim "it runs
- * again without being asked" in under a second.
- */
-
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,7 +33,6 @@ const cacheWith = (): Cache =>
     now: () => clock,
   });
 
-/** One pushed path, with bytes the cache will keep. */
 async function push(cache: Cache, storePath: string): Promise<void> {
   const bucket = cache.bucket("main");
   if (bucket === null) throw new Error("no bucket main");
@@ -90,7 +75,6 @@ const serverOver = (cache: Cache, purge: ReturnType<typeof purgeBroker>) =>
 
 const EXPIRED = "/nix/store/dddddddddddddddddddddddddddddddd-expired";
 
-/** A bucket that keeps nothing nobody wants, with one expired path in it. */
 async function withExpiredPath(cache: Cache): Promise<void> {
   await cache.admin.create({
     ...asRoot(ROOT),
@@ -100,13 +84,9 @@ async function withExpiredPath(cache: Cache): Promise<void> {
     upstreamKeys: [],
   });
   await push(cache, EXPIRED);
-  // Retention is zero and nothing references or pins it, so the next
-  // collection takes it — whoever runs that collection.
   clock += 1;
 }
 
-/** The schedule as the ROW runs it: a fibre forked into a scope, which is the
- *  only thing that ends it. */
 const forkInto = async (scope: Scope.Scope, every: number, collect: () => Promise<void>): Promise<void> => {
   await Effect.runPromise(
     Effect.provideService(Effect.forkScoped(collectEvery(every, collect)), Scope.Scope, scope),
@@ -118,9 +98,6 @@ describe("the row's own collection", () => {
     const cache = cacheWith();
     await withExpiredPath(cache);
 
-    // THE SIGNAL IS THE ANNOUNCEMENT, not a sleep: a collection that removed
-    // something tells the purge port, so the test waits for the fact it is
-    // asserting rather than for a duration somebody guessed.
     const collected = Promise.withResolvers<void>();
     const purge = purgeBroker();
     purge.register(() => collected.resolve());
@@ -135,10 +112,6 @@ describe("the row's own collection", () => {
   });
 
   it("ends with its scope, and the close waits for the collection in flight", async () => {
-    // A collection interrupted between a row's deletion and its object's
-    // would leave the two disagreeing, so each one is uninterruptible and
-    // closing the scope JOINS it — which is what lets the row close its
-    // database on the next line.
     const cache = cacheWith();
     await withExpiredPath(cache);
     const server = serverOver(cache, purgeBroker());
@@ -156,8 +129,6 @@ describe("the row's own collection", () => {
     await forkInto(scope, 1, slow);
     await started.promise;
     await Effect.runPromise(Scope.close(scope, Exit.void));
-    // Non-vacuous: the collection HAD started (the await above), and the
-    // close did not return until it had finished.
     expect({ entered, left }).toEqual({ entered, left: entered });
     expect(left).toBeGreaterThan(0);
     server.detach();
@@ -165,8 +136,6 @@ describe("the row's own collection", () => {
   });
 
   it("keeps collecting after one collection failed", async () => {
-    // A store that was unreachable at midnight may answer the next one; a
-    // cache that stopped collecting over one outage would grow in silence.
     const cache = cacheWith();
     const server = serverOver(cache, purgeBroker());
     let attempts = 0;
@@ -216,8 +185,6 @@ describe("what a collection announces", () => {
   });
 
   it("announces a bucket's own domain as well as its path form", async () => {
-    // An edge may hold either address. Purging one and leaving the other is a
-    // CDN still serving a path this cache has forgotten.
     const cache = cacheWith();
     await cache.admin.create({
       ...asRoot(ROOT),

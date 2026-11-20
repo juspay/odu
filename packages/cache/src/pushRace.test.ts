@@ -1,21 +1,3 @@
-/**
- * CONCURRENT PUSHES OF ONE PATH, through the real routes and the real adapter.
- *
- * kolu #2335's publish job had two NARs refused by the server's own verify
- * (`zstd exited 1`) while other pushers were sending overlapping closures to
- * the same bucket. Every push of a store path names ONE staged file —
- * `nar/<narHash>.nar.zst` — whoever sends it and at whatever zstd level, so two
- * pushers of one path share a name on the server's disk. These tests push the
- * same paths from several clients at once, over a socket, into a server in its
- * OWN process (`test/narServer.ts routes`, the Node adapter `odu web` uses), and
- * then read back what a substituter would: every narinfo PUT must be accepted,
- * and the served NAR must hash to the served `FileHash`/`FileSize` and
- * decompress to the `NarHash`.
- *
- * **The server's object reads yield (`slow`).** On a local disk a `get` stream
- * drains without giving the loop to another request; the pod's volume does
- * not, and neither will an S3 store. Without it the twin windows never open.
- */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -29,7 +11,6 @@ import { asRoot, localStores } from "./testlib";
 const LINUX = process.platform === "linux";
 const NIX32 = "0123456789abcdfghijklmnpqrsvwxyz";
 
-/** A seeded generator, so a failing interleaving is the same one next time. */
 function rng(seed: number): () => number {
   let state = seed >>> 0;
   return () => {
@@ -46,13 +27,10 @@ interface Path {
   hash: string;
   narHash: string;
   narSize: number;
-  /** The same NAR at two zstd levels: different compressed bytes, one name. */
   variants: Uint8Array[];
   file: string;
 }
 
-/** A NAR big enough that a verify takes real time, compressible enough that
- *  levels 1 and 19 produce different files. */
 function makePath(random: () => number, size: number, name: string): Path {
   const hash = Array.from({ length: 32 }, () => NIX32[Math.floor(random() * 32)]).join("");
   const nar = Buffer.alloc(size);
@@ -166,9 +144,6 @@ async function putNar(path: Path, variant: number): Promise<string | null> {
   return response.status === 200 ? null : `nar PUT answered ${response.status}`;
 }
 
-/** One step of a CHUNKED push, as `odu cache push` sends a NAR larger than a
- *  part: `PARTS` parts, then the join — every request carrying the upload's
- *  own session (`x-odu-upload`), so its parts are its own. */
 const PARTS = 3;
 async function putPart(path: Path, variant: number, session: string, index: number): Promise<string | null> {
   const bytes = path.variants[variant] as Uint8Array;
@@ -213,8 +188,6 @@ async function putNarinfo(path: Path, variant: number): Promise<string | null> {
   return response.status === 200 ? null : `narinfo PUT answered ${response.status}: ${text}`;
 }
 
-/** What a substituter reads back must be one consistent object: the served
- *  bytes ARE the narinfo's FileHash/FileSize, and they decompress to NarHash. */
 async function readBack(path: Path): Promise<string | null> {
   const info = await fetch(`${base}/${path.hash}.narinfo`);
   if (info.status !== 200) return `narinfo GET answered ${info.status}`;
@@ -234,7 +207,6 @@ async function readBack(path: Path): Promise<string | null> {
   return narHash === path.narHash ? null : `served NAR decompresses to ${narHash}, not ${path.narHash}`;
 }
 
-/** Every order two clients' `[nar, narinfo]` can interleave in. */
 function interleavings(): ("A" | "B")[][] {
   const out: ("A" | "B")[][] = [];
   const walk = (prefix: ("A" | "B")[], a: number, b: number): void => {
@@ -246,8 +218,6 @@ function interleavings(): ("A" | "B")[][] {
   return out;
 }
 
-/** Staged NARs nobody will name: every upload was claimed by its own
- *  narinfo or replaced by another pusher's, so none should be left. */
 function litter(): string[] {
   const at = join(dir, "state", "cache", "staging", "main", "nar");
   return readdirSync(at).filter((name) => name.endsWith(".nar.zst") || name.endsWith(".claimed"));
@@ -256,9 +226,6 @@ function litter(): string[] {
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe.skipIf(!LINUX)("concurrent pushes of one path", () => {
-  // TWO CLIENTS, ONE PATH, LEVELS 1 AND 19: every order the protocol allows,
-  // run once strictly in sequence and once with each step started before the
-  // previous one answered (a client's own narinfo still waits for its NAR).
   it("accepts both pushes and serves one consistent object, in every order", async () => {
     const random = rng(2335);
     const failures: string[] = [];
@@ -291,10 +258,6 @@ describe.skipIf(!LINUX)("concurrent pushes of one path", () => {
     expect(failures).toEqual([]);
   }, 120_000);
 
-  // TWO CHUNKED PUSHES OF ONE PATH, LEVELS 1 AND 19: each client's parts,
-  // join and narinfo in its own order, the two interleaved at random (seeded),
-  // once in sequence and once overlapped. Parts at one shared name per index
-  // would be joined from both clients.
   it("accepts both chunked pushes and serves one consistent object, parts interleaved", async () => {
     const random = rng(1402);
     const failures: string[] = [];
@@ -305,7 +268,6 @@ describe.skipIf(!LINUX)("concurrent pushes of one path", () => {
         A: { variant: 0, session: `a${trial}-${Math.floor(random() * 1e9)}` },
         B: { variant: 1, session: `b${trial}-${Math.floor(random() * 1e9)}` },
       };
-      // PARTS parts, the join, the narinfo — per client, in that order.
       const order = (["A", "B"] as const)
         .flatMap((who) => Array.from({ length: PARTS + 2 }, () => ({ who, key: random() })))
         .sort((x, y) => x.key - y.key)
@@ -346,10 +308,6 @@ describe.skipIf(!LINUX)("concurrent pushes of one path", () => {
     expect(failures).toEqual([]);
   }, 120_000);
 
-  // A TWIN'S PROOF WHILE ANOTHER TWIN'S IS IN FLIGHT: store paths with one
-  // NarHash share one staged name, and a twin whose narinfo arrives after the
-  // first was recorded finds only the object. Twelve of them, a millisecond
-  // apart, against a store whose reads yield as the pod's volume does.
   it("accepts every twin of a recorded path when their narinfos overlap", async () => {
     const random = rng(77);
     const failures: string[] = [];
@@ -379,10 +337,6 @@ describe.skipIf(!LINUX)("concurrent pushes of one path", () => {
     expect(failures).toEqual([]);
   }, 120_000);
 
-  // THE INCIDENT'S SHAPE: N pushers × M paths, each pushing every path in its
-  // own order, with a few waves in flight per pusher. "identical" is kolu's
-  // case — every pusher runs the same odu, so every NAR is the same bytes;
-  // "mixed" draws level 1 or 19 per push.
   it.each(["identical", "mixed"] as const)(
     "survives N pushers of M shared paths with no refusal and no corruption (%s bytes)",
     async (levels) => {

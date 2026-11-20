@@ -1,13 +1,3 @@
-/**
- * The metadata: migrations, and every round trip the cache depends on.
- *
- * On `:memory:` — the repository is the seam PR 12 replaces with Postgres, so
- * what is asserted here is the INTERFACE (rows in, rows out, no SQL anywhere
- * else) rather than SQLite's behaviour. The two exceptions are the two facts
- * that are SQLite's and matter: the schema version, and that a file written by
- * a newer build is refused rather than read.
- */
-
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "bun:test";
@@ -114,7 +104,6 @@ describe("buckets", () => {
     repo.putBucket({ ...bucket, domain: "cache.example.org" });
     expect(repo.bucketByDomain("cache.example.org")?.name).toBe("main");
     expect(repo.bucketByDomain("other.example.org")).toBeNull();
-    // A-TO-B: the upsert moves the name rather than keeping the old one.
     repo.putBucket({ ...bucket, domain: null });
     expect(repo.bucketByDomain("cache.example.org")).toBeNull();
   });
@@ -181,15 +170,11 @@ describe("objects", () => {
     repo.putObject({ ...object, narSize: 1, hits: 0, created: NOW + 99 });
     const row = repo.object("main", object.storePath);
     expect(row?.narSize).toBe(1);
-    // The count is a property of the ROW, not of the push that overwrote it.
     expect(row?.hits).toBe(object.hits);
     expect(row?.created).toBe(object.created);
   });
 
   it("counts a read without renewing it: hits move, lastWanted does not", () => {
-    // Reads are leaving odu (PLAN 2.8), so a clock that is about to stop
-    // ticking cannot be the one retention reads. The counter is still the
-    // cache's own statistic.
     const repo = openCacheRepo(":memory:");
     repo.putObject(object);
     repo.countRead("main", object.storePath);
@@ -199,9 +184,6 @@ describe("objects", () => {
   });
 
   it("renews exactly the paths a want names, in one statement", () => {
-    // The `missing` query asks about a whole closure at once, so the renewal
-    // is one write for the batch — and a path nobody asked about keeps its
-    // own clock.
     const repo = openCacheRepo(":memory:");
     const other = { ...object, storePath: `${object.storePath}-two`, hash: "b".repeat(32) };
     const untouched = { ...object, storePath: `${object.storePath}-three`, hash: "c".repeat(32) };
@@ -235,16 +217,12 @@ describe("counting", () => {
       narSize: 100,
     });
     repo.putObject({ ...object, bucket: "other" });
-    // `lastPush` is the newest narinfo's `created`, and `hits` the sum — the two
-    // facts a board paints per bucket, counted here rather than loaded as rows.
     expect(repo.bucketStats()).toEqual(
       new Map([
         ["main", { objects: 2, bytes: 279692, hits: 6, lastPush: NOW }],
         ["other", { objects: 1, bytes: 279592, hits: 3, lastPush: NOW }],
       ]),
     );
-    // A bucket with nothing in it has no row at all, which the caller reads as
-    // zero rather than as an error.
     expect(repo.bucketStats().get("empty")).toBeUndefined();
   });
 
@@ -262,13 +240,6 @@ describe("counting", () => {
   });
 });
 
-/**
- * THE GROUPING IS THE DATABASE'S, and that is the whole point of it: a view
- * holding one page cannot count a bucket, and a view that tried would state
- * its page's totals as the bucket's and change them at "show more". So the
- * counts, the sums, the order and the paging are asserted here, where they
- * are computed.
- */
 describe("a bucket's paths, by package", () => {
   const build = (name: string, hash: string, over: Partial<ObjectRow>): ObjectRow => ({
     ...object,
@@ -276,8 +247,6 @@ describe("a bucket's paths, by package", () => {
     hash,
     ...over,
   });
-  /** Three builds of one package and one of another, so a group's totals are
-   *  neither the page's nor any one row's. */
   const seed = (repo: CacheRepo): void => {
     repo.putObject(
       build("widget-1.0", "a".repeat(32), { narSize: 100, hits: 1, created: NOW, lastWanted: NOW }),
@@ -320,13 +289,9 @@ describe("a bucket's paths, by package", () => {
         versions: 3,
         bytes: 600,
         hits: 7,
-        // The newest PUSH, and the latest want across all three — a version
-        // nobody wants must not make the package look idle.
         pushed: NOW + 20,
         wanted: NOW + 50,
         storePath: `/nix/store/${"c".repeat(32)}-widget-1.0`,
-        // The newest version's own, read off the same row the path is: this
-        // seed states no provenance, so both are null.
         run: null,
         commit: null,
       },
@@ -349,8 +314,6 @@ describe("a bucket's paths, by package", () => {
     seed(repo);
     const names = (sort: PathSort, descending: boolean): string[] =>
       repo.objectGroupsPage("main", { ...page, sort, descending }).rows.map((row) => row.name);
-    // zlib's single NAR (900) is the biggest; the PACKAGE widget holds 600
-    // against it, so by size zlib leads — and by reads it does too.
     expect(names("size", true)).toEqual(["zlib-1.3", "widget-1.0"]);
     expect(names("size", false)).toEqual(["widget-1.0", "zlib-1.3"]);
     expect(names("reads", true)).toEqual(["zlib-1.3", "widget-1.0"]);
@@ -367,9 +330,6 @@ describe("a bucket's paths, by package", () => {
     const second = repo.objectGroupsPage("main", { ...page, sort: "size", limit: 1, after });
     expect(second.rows.map((row) => row.name)).toEqual(["widget-1.0"]);
     expect(second.next).toBeNull();
-    // A CURSOR NAMES ITS OWN ORDER. Replayed against another one it is no
-    // cursor at all — the FIRST page, not an empty one: read as a number, a
-    // name binds as NULL and every keyset test would fail silently.
     const elsewhere = repo.objectGroupsPage("main", { ...page, sort: "pushed", limit: 1, after });
     expect(elsewhere.rows).toHaveLength(1);
     expect(elsewhere.next).not.toBeNull();
@@ -380,8 +340,6 @@ describe("a bucket's paths, by package", () => {
     seed(repo);
     const versions = repo.objectsPage("main", { ...page, name: "widget-1.0" });
     expect(versions.rows.map((row) => row.narSize)).toEqual([300, 200, 100]);
-    // The filter is the same substring the board's box sends, and it narrows
-    // the GROUPING too — the totals are of what matched.
     expect(
       repo.objectGroupsPage("main", { ...page, filter: "zlib" }).rows.map((row) => row.name),
     ).toEqual(["zlib-1.3"]);
@@ -389,9 +347,6 @@ describe("a bucket's paths, by package", () => {
 
   it("reads a FILTERED group's provenance off the newest version the filter matched", () => {
     const repo = openCacheRepo(":memory:");
-    // Two of one package's three builds share a hash prefix the third does
-    // not, so the newest MATCHING version is not the newest version — and
-    // the provenance columns have to come from the former.
     repo.putObject(
       build("widget-1.0", `prg${"a".repeat(29)}`, {
         created: NOW,
@@ -415,9 +370,6 @@ describe("a bucket's paths, by package", () => {
     );
     const { rows } = repo.objectGroupsPage("main", { ...page, filter: "prg" });
     expect(rows).toHaveLength(1);
-    // THE ASSERTION A MIS-BINDING FAILS: every per-version subquery carries
-    // its own filter `?`, so a select list and a binding list that drifted
-    // apart would answer run-c's row — or no row at all.
     expect(rows[0]).toMatchObject({
       versions: 2,
       storePath: `/nix/store/prg${"b".repeat(29)}-widget-1.0`,
@@ -445,8 +397,6 @@ describe("pins", () => {
     const repo = openCacheRepo(":memory:");
     const pin = { bucket: "main", name: "release-1.2" };
     repo.putPin({ ...pin, rootPaths: ["/nix/store/a"], created: NOW, createdBy: "admin" });
-    // A RE-POINT CARRIES THE NEW AUTHOR: a pin is whoever last made it, and
-    // the rule about who may move it next reads that column.
     repo.putPin({ ...pin, rootPaths: ["/nix/store/b"], created: NOW, createdBy: "write" });
     expect(repo.pins("main")).toEqual([
       { ...pin, rootPaths: ["/nix/store/b"], created: NOW, createdBy: "write" },
@@ -470,12 +420,6 @@ describe("deleting a bucket", () => {
   });
 });
 
-/** THE FOUR SQL STRINGS THAT SHIPPED BEFORE THIS PR, pinned by content.
- *
- * `slice(0, 4)` alone follows a future mid-list insert, so it would hand the
- * new migration list back to itself and pass. The hash makes a reorder or an
- * insert in the shipped prefix fail HERE, where the cause is obvious.
- */
 const SHIPPED_V1_TO_V4_SHA256 =
   "278af79f3e7195b7faed7eb47e239afb5a7e978c4f8a5b5ccf8b1ea324a6f22e";
 
@@ -487,8 +431,6 @@ describe("upgrading an existing database", () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-cache-upgrade-"));
     const file = join(dir, "cache.sqlite");
     try {
-      // THE POD'S FILE: the four migrations that shipped before this PR's
-      // fetch progress. `user_version` is 4, and `domain` already exists.
       const old = new Database(file);
       for (const sql of MIGRATIONS.slice(0, 4)) old.exec(sql);
       old.exec("PRAGMA user_version = 4;");
@@ -516,10 +458,6 @@ describe("upgrading an existing database", () => {
   });
 
   it("sends a self-referencing row judged not content-addressed back to be proved", () => {
-    // A ROW JUDGED WITH ONE FORM OF TWO: before migration 19 odu knew only the
-    // Nix 2.34 modulo hash, so a self-referencing path Nix 2.35 rewrote was
-    // stored `not-content-addressed` and would never be judged again. Every
-    // other verdict stands.
     const dir = mkdtempSync(join(tmpdir(), "odu-cache-upgrade-"));
     const file = join(dir, "cache.sqlite");
     const self = "/nix/store/j9xpm5a9yzp9v5slnxsgvay2lnwqi2l6-selfref";

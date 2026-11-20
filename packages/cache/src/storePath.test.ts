@@ -1,13 +1,3 @@
-/**
- * VECTORS FROM NIX, not from the formula's own implementation.
- *
- * `0ng8ghb7…-odu-runner` is a real path from the kolu bucket, with the
- * references and NarHash its narinfo carries. `6gyc…-selfref` is
- * `nix build` output containing its own store path, then
- * `nix store make-content-addressed`; a self-reference's CA hash is the modulo
- * hash of its NAR, supplied by the byte pass — metadata alone (NarHash) cannot
- * prove it.
- */
 import { describe, expect, it } from "bun:test";
 import { contentAddressOf, storePathHashOf, base32Bytes } from "./storePath";
 import { NIX_RECORDED } from "../test/nixRecorded";
@@ -55,10 +45,6 @@ describe("contentAddressOf", () => {
   });
 
   it("proves a self-reference from whichever form of its modulo hash rebuilds it", () => {
-    // NIX 2.34 wrote 6gyc…'s CA from the zeroed bytes alone; Nix 2.35 wrote
-    // j9xp…'s, from the same derivation, with `|107` after them
-    // (`test/nixRecorded.ts`). Each is proved by its own form, in either
-    // slot: the path decides, not the slot.
     const zero = `sha256:${"0".repeat(52)}`;
     const facts = (vector: { storePath: string; narHash: string }) => ({
       storePath: vector.storePath,
@@ -78,17 +64,11 @@ describe("contentAddressOf", () => {
     expect(contentAddressOf({ ...v235, selfHash: { withoutOffsets: zero, withOffsets: hash235 } })).toBe(
       NIX_RECORDED.selfref235.ca,
     );
-    // ONE PATH'S HASH DOES NOT PROVE ANOTHER PATH, and neither form proving
-    // it is `null`, not a guess.
     expect(contentAddressOf({ ...v235, selfHash: { withoutOffsets: hash234, withOffsets: zero } })).toBeNull();
     expect(contentAddressOf({ ...v234, selfHash: { withoutOffsets: zero, withOffsets: zero } })).toBeNull();
   });
 
   it("matches Nix's makeStorePath for the self vector's own hash", () => {
-    // `nix path-info` reports this path's CA as fixed:r:sha256:163ry…
-    // The TYPE for a self reference is `source:self`, and with that hash the
-    // formula reproduces the path exactly — which is why a CA hash WOULD prove
-    // it, and a NarHash cannot.
     const hash = "163ryiah9ms80qck6zb6dpy7sz9db61pjx460983wd3yyb41r7gl";
     expect(storePathHashOf("source:self", base32Bytes(hash), "selfref")).toBe(
       "6gyc4k1ilcw1k97kf3dnzwia3rq6vakd",

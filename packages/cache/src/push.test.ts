@@ -1,18 +1,3 @@
-/**
- * The push client, against a server in this process.
- *
- * Three properties, and each of them is a promise the docs make:
- *
- *   - **dependency order.** A closure is pushed shallowest first, so the server
- *     can import each path the moment its narinfo lands. Out of order, Nix says
- *     "is not valid" and a push of any real closure fails.
- *   - **retry per path.** A dropped upload is retried, and the retry does not
- *     re-send the paths that already landed.
- *   - **token precedence.** `--token-file`, then `$ODU_CACHE_TOKEN`, then the
- *     credentials file — in that order, and never the other way round, because
- *     CI sets the variable and a stale login must not win over it.
- */
-
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,8 +25,6 @@ const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
 const GLIBC = "/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57";
 const LIBC = "/nix/store/00fs4zz9c0jjcvs62wg39b91dydz7zqb-libidn2-2.3.8";
 
-/** A distinct nar hash per path, so an upload's file name identifies its path —
- *  which is how the assertions below read the order off the wire. */
 function entry(storePath: string, references: readonly string[] = []): ClosureEntry {
   return {
     storePath,
@@ -54,7 +37,6 @@ function entry(storePath: string, references: readonly string[] = []): ClosureEn
   };
 }
 
-/** hello → glibc → libidn2, so the depth order is libidn2, glibc, hello. */
 const CLOSURE = new Map<string, ClosureEntry>([
   [HELLO, entry(HELLO, [GLIBC])],
   [GLIBC, entry(GLIBC, [LIBC])],
@@ -66,9 +48,6 @@ interface Seen {
   path: string;
   authorization: string | null;
   upload: string | null;
-  /** What the request said built these paths (cache 4.7) — read off every
-   *  request, so a case can prove the headers ride on the narinfo PUT and
-   *  nowhere else. */
   run: string | null;
   commit: string | null;
   body: string;
@@ -77,53 +56,26 @@ interface Seen {
 interface Server {
   origin: string;
   seen: Seen[];
-  /** How many times each path's nar upload should fail before succeeding. */
   failNar: Map<string, number>;
-  /** Status to answer a nar upload with, before the failure count applies. */
   narStatus: Map<string, number>;
-  /** Store paths whose narinfo answers 202 — a success code that is not
-   *  "stored", so a refusal to this pusher. */
   answer202: Set<string>;
-  /** Parts received, keyed `${file}:${index}`. */
   parts: Map<string, string>;
-  /** How many times a part answers 500 before succeeding, keyed the same. */
   partFailures: Map<string, number>;
-  /** Every completed join, in order. */
   completed: { file: string; total: number }[];
-  /** How many joins answer 500 before one succeeds. */
   completeFailures: number;
-  /** How many `/missing` calls still answer the current list; `undefined`
-   *  means every call does. */
   missingCalls: number;
   missingOnlyFor: number | undefined;
-  /** Refuse the missing-paths query with this status — what a bucket answers
-   *  a request that carries no credential it accepts. */
   missingStatus: number | undefined;
-  /** Answer a narinfo PUT that carries no preceding NAR with a 400 saying the
-   *  bytes are gone — what a restarted server says. */
   narinfoOnlyRefusal: boolean;
   missing: string[];
   skipped: string[];
-  /** The substituter URL the bucket reports — its own domain when it has one.
-   *  `null` answers like a daemon that predates the field. */
   substituter: string | null;
   stop: () => void;
-  /** Answer the negotiation with a 404, the way an origin from before 2.9
-   *  does — it has no such route. */
   negotiation404: boolean;
-  /** When set, `begin` answers `direct` with this part size, and the same
-   *  server plays the STORE under `/store/…` — what a presigned URL points
-   *  at. `null` answers `staged`, which is every other test here. */
   directPartSize: number | null;
-  /** Every `begin` this server answered, in order, as `<file>` — so a retry
-   *  is visible as a SECOND one for the same path. */
   begun: string[];
-  /** What the fake store was handed: its key, and the bytes. */
   stored: Map<string, string>;
-  /** How many part PUTs the fake store refuses (403, an expired presign)
-   *  before it starts taking them. */
   storeRefusals: number;
-  /** Direct joins, in order: the upload and the parts it named. */
   joined: { upload: string; parts: { index: number; etag: string }[] }[];
 }
 
@@ -169,12 +121,6 @@ function startServer(): Server {
         body,
       });
 
-      // ── THE STORE, when a test turns direct mode on ───────────────────
-      //
-      // A presigned URL is opaque to the client, so the fake mints one that
-      // points back here under `/store/…`. What is asserted of it is what a
-      // real store would hold the client to: the bytes arrive, and a part's
-      // ETag is the store's own answer.
       if (request.method === "PUT" && url.pathname.startsWith("/store/")) {
         if (state.storeRefusals > 0) {
           state.storeRefusals -= 1;
@@ -185,7 +131,6 @@ function startServer(): Server {
         return new Response(null, { status: 200, headers: { etag: `"etag-${key}"` } });
       }
 
-      // ── THE NEGOTIATION ───────────────────────────────────────────────
       if (request.method === "POST" && url.pathname.endsWith("/upload")) {
         if (state.negotiation404) return new Response("not found", { status: 404 });
         const file = url.pathname.slice(
@@ -199,7 +144,6 @@ function startServer(): Server {
           mode: "direct",
           upload,
           partSize: state.directPartSize,
-          // PART 0, never a plain PUT — the shape the server really answers.
           part: `${state.origin}/store/${upload}-part-0`,
         });
       }
@@ -296,8 +240,6 @@ function startServer(): Server {
   return state;
 }
 
-/** Every store path is given the same nar hash above, which the fake server
- *  keys on — so the failure counts are per PATH here rather than per file. */
 const PLATFORM: PushPlatform = {
   closure: async () => [...CLOSURE.values()] as PathInfo[],
   dump: () => new ReadableStream({ start: (controller) => controller.close() }),
@@ -345,7 +287,6 @@ describe("pushing a closure", () => {
         }
         return "unknown";
       });
-      // A nar and its narinfo per path, shallowest first.
       expect(order).toEqual([
         "libidn2",
         "libidn2",
@@ -361,13 +302,6 @@ describe("pushing a closure", () => {
     }
   });
 
-  /**
-   * WHAT BUILT THESE PATHS RIDES ON THE TWO REQUESTS THAT REACH A ROW (cache
-   * 4.7): the narinfo PUT, which writes the row for a path this push uploads,
-   * and the `missing` query, which is the ONLY request a path the bucket
-   * already holds ever gets. The narinfo BODY stays the format a Nix client
-   * parses, and the NAR upload — which writes no row — carries neither.
-   */
   it("states the run and the commit on the narinfo and on the missing query", async () => {
     const server = startServer();
     try {
@@ -385,17 +319,10 @@ describe("pushing a closure", () => {
       );
       expect(narinfo).toHaveLength(1);
       expect(narinfo[0]).toMatchObject({ run: "run-17", commit: "a".repeat(40) });
-      // NOT IN THE BODY: a narinfo is Nix's format, and an odu field in it is
-      // a line every other reader of this cache has to learn to ignore.
       expect(narinfo[0]?.body).not.toContain("run-17");
-      // THE QUERY CARRIES IT TOO. This push uploads one path of three, and
-      // without the headers here the two the bucket already holds would learn
-      // nothing from the run that wanted them — they get no other request.
       const asked = server.seen.filter((seen) => seen.path.endsWith("/missing"));
       expect(asked).toHaveLength(1);
       expect(asked[0]).toMatchObject({ run: "run-17", commit: "a".repeat(40) });
-      // AND NOT ON THE NAR UPLOAD, which writes no row: a header there would
-      // be provenance the cache can do nothing with.
       const nars = server.seen.filter(
         (seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"),
       );
@@ -418,9 +345,6 @@ describe("pushing a closure", () => {
       const narinfo = server.seen.find(
         (seen) => seen.method === "PUT" && seen.path.endsWith(".narinfo"),
       );
-      // ABSENT, not empty: the cache reads a header it did not get as "said
-      // nothing", which is what keeps a bare push from erasing what a run
-      // stated about the same path — on either request.
       expect(narinfo).toMatchObject({ run: null, commit: null });
       expect(server.seen.find((seen) => seen.path.endsWith("/missing"))).toMatchObject({
         run: null,
@@ -435,7 +359,6 @@ describe("pushing a closure", () => {
     const server = startServer();
     try {
       server.missing = [LIBC];
-      // The file name is the nar hash, which every entry shares.
       server.failNar.set(`${storePathHash(LIBC).padEnd(52, "0")}.nar.zst`, 2);
       const summary = await pushToCache({
         bucket: `${server.origin}/main`,
@@ -465,7 +388,6 @@ describe("pushing a closure", () => {
       server.missing = [LIBC];
       const bytes = new TextEncoder().encode("0123456789");
       const narName = `${narHashBase32(entry(LIBC).narHash)}.nar.zst`;
-      // The MIDDLE part fails once: a retry costs that part, not the path.
       server.partFailures.set(`${narName}:1`, 1);
       const lines: string[] = [];
       const summary = await pushToCache({
@@ -482,8 +404,6 @@ describe("pushing a closure", () => {
               },
             }),
         },
-        // Four bytes a part: ten bytes become three requests, which is the
-        // whole point — Cloudflare refuses one hundred megabytes, not ten.
         partSize: 4,
         onLine: (line) => lines.push(line),
       });
@@ -493,8 +413,6 @@ describe("pushing a closure", () => {
         .map((seen) => Number(seen.path.slice(seen.path.lastIndexOf("/") + 1)));
       expect(parts).toEqual([0, 1, 1, 2]);
       expect(server.completed).toEqual([{ file: narName, total: 3 }]);
-      // ONE SESSION for every part and the join (contract 2.4): the parts are
-      // this upload's own, whoever else is sending the same path.
       const sessions = new Set(
         server.seen
           .filter((seen) => seen.path.includes("/parts/") || seen.path.endsWith("/complete"))
@@ -505,8 +423,6 @@ describe("pushing a closure", () => {
       expect(server.seen.some((seen) => seen.method === "PUT" && seen.path.endsWith(".nar.zst"))).toBe(
         false,
       );
-      // THE RETRY NAMES ITSELF — and says why: which attempt, of how many,
-      // the address that refused it, and what that address answered.
       expect(lines).toContain(`⏳ ${LIBC} part 1`);
       const retried = lines.find((line) => line.startsWith(`↻ ${LIBC} part 2`));
       expect(retried).toContain("attempt 2/3");
@@ -520,8 +436,6 @@ describe("pushing a closure", () => {
   });
 
   it("keeps ONE upload session across a retried join", async () => {
-    // A FAILED JOIN RETRIES THE WHOLE NAR; a fresh session per attempt would
-    // abandon the previous attempt's parts to the sweep for an hour.
     const server = startServer();
     try {
       server.missing = [LIBC];
@@ -547,7 +461,6 @@ describe("pushing a closure", () => {
       const chunked = server.seen.filter(
         (seen) => seen.path.includes("/parts/") || seen.path.endsWith("/complete"),
       );
-      // Two attempts: 3 parts + a join each.
       expect(chunked).toHaveLength(8);
       expect(new Set(chunked.map((seen) => seen.upload)).size).toBe(1);
     } finally {
@@ -646,14 +559,6 @@ describe("pushing a closure", () => {
     }
   });
 
-  // ── UPLOADS THAT GO STRAIGHT TO THE STORE (PLAN 2.9) ──────────────────
-  //
-  // What the client is held to: it ASKS first, it sends the bytes where it
-  // was told and nowhere else, it reports the ETags the store answered, and
-  // a failure out at the store re-begins the path rather than carrying a
-  // dead upload id forward.
-
-  /** A platform whose NAR is `payload`, delivered in small chunks. */
   const dumping = (payload: string): PushPlatform => ({
     closure: async () => [entry(LIBC)],
     dump: () =>
@@ -679,7 +584,6 @@ describe("pushing a closure", () => {
         partSize: 64,
       });
       expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "staged" });
-      // The negotiation comes first, and the NAR still goes through odu.
       const paths = server.seen.map((seen) => `${seen.method} ${seen.path}`);
       const begun = paths.findIndex((line) => line.endsWith("/upload"));
       const sent = paths.findIndex((line) => line.startsWith("PUT") && line.endsWith(".nar.zst"));
@@ -704,18 +608,12 @@ describe("pushing a closure", () => {
         partSize: 64,
       });
       expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "direct" });
-      // ONE PART, at the URL the plan carried — no extra round trip to sign
-      // it, and still a part, so the key stops being writable the moment the
-      // completion lands.
       expect([...server.stored.keys()]).toEqual(["u1-part-0"]);
       expect(server.stored.get("u1-part-0")).toBe("a NAR that fits in one part");
       expect(server.joined).toEqual([
         { upload: "u1", parts: [{ index: 0, etag: '"etag-u1-part-0"' }] },
       ]);
-      // AND NOBODY ASKED ODU TO SIGN ANYTHING: part 0 came with the plan.
       expect(server.seen.filter((seen) => seen.path.includes("/parts/"))).toEqual([]);
-      // NOT ONE NAR BYTE CROSSED ODU: every body it saw is a narinfo or a
-      // small JSON document.
       const toOdu = server.seen.filter(
         (seen) => seen.method === "PUT" && seen.path.includes("/nar/"),
       );
@@ -736,16 +634,12 @@ describe("pushing a closure", () => {
         paths: ["."],
         env: envOf({ ODU_CACHE_TOKEN: "t" }),
         platform: dumping(payload),
-        // THE CLIENT'S `--part-size` IS A FLOOR HERE, and the server's answer
-        // is what the slicing uses: 10 bytes, not this.
         partSize: 64,
       });
       expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "direct" });
       expect(server.stored.get("u1-part-0")).toBe("0123456789");
       expect(server.stored.get("u1-part-1")).toBe("abcdefghij");
       expect(server.stored.get("u1-part-2")).toBe("!");
-      // The parts joined in order are the NAR, and the ETags are the ones the
-      // store answered — the only thing the client could not have invented.
       expect(server.joined).toEqual([
         {
           upload: "u1",
@@ -766,8 +660,6 @@ describe("pushing a closure", () => {
     try {
       server.missing = [LIBC];
       server.directPartSize = 10;
-      // ONE 403 — an expired presign, which is the failure this retry exists
-      // for — and then the store takes everything.
       server.storeRefusals = 1;
       const summary = await pushToCache({
         bucket: `${server.origin}/main`,
@@ -777,8 +669,6 @@ describe("pushing a closure", () => {
         attempts: 2,
       });
       expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "direct" });
-      // TWO BEGINS for the one path, and the join names the SECOND upload's
-      // parts: a retry never completes an upload whose parts it half sent.
       const narName = `${narHashBase32(entry(LIBC).narHash)}.nar.zst`;
       expect(server.begun).toEqual([narName, narName]);
       expect(server.joined.map((join) => join.upload)).toEqual(["u2"]);
@@ -793,9 +683,6 @@ describe("pushing a closure", () => {
     try {
       server.missing = [LIBC];
       server.negotiation404 = true;
-      // A 404 for the negotiation is a cache from before 2.9. There is no
-      // falling back to staged: on an S3 bucket that would quietly go on
-      // pushing every byte through the daemon.
       const summary = await pushToCache({
         bucket: `${server.origin}/main`,
         paths: ["."],
@@ -804,7 +691,6 @@ describe("pushing a closure", () => {
       });
       expect(summary.failed).toBe(1);
       expect(summary.failures[0]?.message).toContain("cache surface 4.2");
-      // ONE ATTEMPT: an origin that does not speak it will not speak it twice.
       expect(server.begun).toEqual([]);
       expect(server.seen.filter((seen) => seen.path.endsWith("/upload"))).toHaveLength(1);
     } finally {
@@ -845,8 +731,6 @@ describe("pushing a closure", () => {
     const server = startServer();
     try {
       server.missing = [LIBC];
-      // 403 is the TOKEN being wrong. Repeating it streams the whole NAR again
-      // for the same answer.
       server.narStatus.set(`${storePathHash(LIBC).padEnd(52, "0")}.nar.zst`, 403);
       const summary = await pushToCache({
         bucket: `${server.origin}/main`,
@@ -865,10 +749,6 @@ describe("pushing a closure", () => {
   });
 
   it("names the address it dialled, and every link under the failure", async () => {
-    // WHAT A POD'S LOG SAID AND WHY IT WAS USELESS: Bun's rejection is a
-    // TypeError whose sentence names no address and carries no code. Both
-    // facts are on the error — under `.cause` — and keeping `err.message`
-    // throws them away. This asserts that neither is thrown away again.
     const real = globalThis.fetch;
     const dialled: string[] = [];
     globalThis.fetch = (async (input: Request | string | URL): Promise<Response> => {
@@ -893,10 +773,8 @@ describe("pushing a closure", () => {
       );
       expect(failed).not.toBeNull();
       const said = failed as string;
-      // The address, which the rejection itself never named.
       expect(said).toContain(dialled[0] as string);
       expect(said).toContain("/_odu/v1/buckets/main/missing");
-      // Both links of the chain, and the connection facts under the second.
       expect(said).toContain("Unable to connect");
       expect(said).toContain("ECONNREFUSED");
       expect(said).toContain("syscall=connect");
@@ -920,15 +798,11 @@ describe("pushing a closure", () => {
         attempts: 3,
         onLine: (line) => lines.push(line),
       });
-      // ONE NARRATED LINE PER RETRY, each naming the attempt and the reason
-      // the previous one gave — a retry that is silent is a failure that
-      // happened and was never reported.
       const retries = lines.filter((line) => line.startsWith(`↻ ${LIBC}`));
       expect(retries).toHaveLength(2);
       expect(retries[0]).toContain("attempt 2/3");
       expect(retries[1]).toContain("attempt 3/3");
       for (const line of retries) expect(line).toContain("500");
-      // AND THE FAILURE CARRIES THEM ALL, not only the last.
       const failure = summary.failures[0];
       expect(failure?.path).toBe(LIBC);
       expect(failure?.attempts).toHaveLength(3);
@@ -943,8 +817,6 @@ describe("pushing a closure", () => {
     const server = startServer();
     try {
       server.missing = [LIBC];
-      // The single-request NAR arm — what every small path takes, and the one
-      // that used to report a status with no body at all.
       server.narStatus.set(`${storePathHash(LIBC).padEnd(52, "0")}.nar.zst`, 403);
       const summary = await pushToCache({
         bucket: `${server.origin}/main`,
@@ -967,8 +839,6 @@ describe("pushing a closure", () => {
   });
 
   it("keeps an AggregateError's branches, and survives a cause that loops", () => {
-    // A happy-eyeballs dial reports BOTH addresses, and keeping one of them
-    // hides half the answer.
     const both = new AggregateError(
       [
         Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), {
@@ -1008,12 +878,7 @@ describe("pushing a closure", () => {
         platform: PLATFORM,
       });
       expect(summary).toMatchObject({ pushed: 1, skippedUpstream: 1, alreadyPresent: 1, failed: 0 });
-      // EVERY PATH THE BUCKET SERVES, and only those: the upstream-signed one
-      // is absent by design, so a caller verifying "served" never asks the
-      // bucket for a path it was right to refuse.
       expect([...summary.served].sort()).toEqual([GLIBC, HELLO].sort());
-      // A DAEMON THAT DID NOT SAY gets the address this client addressed it
-      // at — the same URL for a bucket with no domain of its own.
       expect(summary.substituter).toBe(`${server.origin}/cache/main`);
     } finally {
       server.stop();
@@ -1021,9 +886,6 @@ describe("pushing a closure", () => {
   });
 
   it("carries the bucket's own substituter URL when the bucket names one", async () => {
-    // A DOMAIN IS THE WHOLE ADDRESS: a bucket reached at its own name
-    // substitutes from that name, not from `<origin>/cache/<bucket>`, and a
-    // caller proving the push must ask where Nix will ask.
     const server = startServer();
     try {
       server.missing = [];
@@ -1084,9 +946,6 @@ describe("pushing a closure", () => {
   });
 
   it("refuses to carry on when a whole push comes back filtered", async () => {
-    // A SERVICE THAT NEVER READ `whole` answers the way it always did, with
-    // the nixpkgs paths under `skippedUpstream`. Uploading the rest would land
-    // a closure nobody can fetch from this bucket alone and call it done.
     const server = startServer();
     try {
       server.missing = [HELLO];
@@ -1124,13 +983,6 @@ describe("token precedence", () => {
   });
 
   it("answers ONLY what was saved for an origin, for an address a repo named", async () => {
-    // `--token-file` and `$ODU_CACHE_TOKEN` are credentials for wherever a
-    // push ends up, which is right when the OPERATOR typed the address
-    // (naming a cache is trusting it) and wrong when a `flake.nix` did: one
-    // `extra-substituters` line in a contributor's branch would otherwise
-    // collect a workflow secret, on the spelling that is now the recommended
-    // one. This is what an inferred push is allowed to send — a credentials
-    // entry, which is a decision somebody made about that address.
     const env = envOf({ ODU_CACHE_TOKEN: "from-env" });
     const file = join(scratch, "token");
     writeFileSync(file, "from-file\n");
@@ -1138,7 +990,6 @@ describe("token precedence", () => {
 
     expect(await savedCredentialFor(env, "https://evil.example")).toBeNull();
     expect(await savedCredentialFor(env, "https://evil.example")).toBeNull();
-    // And a SAVED one still is: this narrows the sources, not the feature.
     expect(await savedCredentialFor(env, "https://known.example")).toBe(
       "from-credentials",
     );
@@ -1168,13 +1019,6 @@ describe("token precedence", () => {
   });
 
   it("pushes ANONYMOUSLY when the caller says it has no credential", async () => {
-    // `credential: null` is explicit, and it is what the CLI passes for an
-    // inferred target with nothing saved for that origin — the alternative
-    // was sending the operator's credential to an address a flake chose. The
-    // request goes out with no `Authorization` at all and the bucket's own
-    // refusal is the answer; the sentence about where the URL came from
-    // belongs to the CLI that inferred it, which is the only thing that
-    // knows.
     const server = startServer();
     try {
       server.missingStatus = 401;
@@ -1182,9 +1026,6 @@ describe("token precedence", () => {
         bucket: `${server.origin}/main`,
         paths: ["."],
         env: envOf({ ODU_CACHE_TOKEN: "secret-token" }),
-        // WHAT THE CLI PASSES for an inferred target with nothing saved for
-        // that origin: push anonymously rather than sending a credential
-        // meant for wherever a push ends up.
         credential: null,
         platform: PLATFORM,
       }).catch((err: unknown) => err);
@@ -1193,7 +1034,6 @@ describe("token precedence", () => {
       expect(asked).toHaveLength(1);
       expect(asked[0]?.authorization).toBeNull();
       expect((refusal as Error).message).toContain("401");
-      // AND THE SECRET WENT NOWHERE NEAR IT.
       expect(JSON.stringify(server.seen)).not.toContain("secret-token");
     } finally {
       server.stop();
@@ -1226,14 +1066,12 @@ describe("resolving the bucket argument", () => {
   });
 
   it("lets --origin beat a stored credential", async () => {
-    // A machine logged in to one cache must still be able to push to a second.
     const env = envOf();
     await saveCredential(env, "http://127.0.0.1:9999", "t");
     expect(await resolveBucket(env, "main", "http://127.0.0.1:1234")).toEqual({
       origin: "http://127.0.0.1:1234",
       name: "main",
     });
-    // A full URL still names its own origin; the flag cannot move it.
     expect(await resolveBucket(env, "https://cache.example.com/main", "http://127.0.0.1:1234")).toEqual({
       origin: "https://cache.example.com",
       name: "main",
@@ -1257,9 +1095,6 @@ describe("resolving the bucket argument", () => {
 });
 
 describe("a cache that describes itself (`--cache`)", () => {
-  /** A `fetch` that answers one body, and remembers what it was asked —
-   *  including the authorization it carried, which is what a private bucket
-   *  decides on. */
   const answering = (
     reply: () => Response | Promise<Response>,
   ): { send: typeof fetch; asked: string[]; auth: (string | null)[] } => {
@@ -1283,8 +1118,6 @@ describe("a cache that describes itself (`--cache`)", () => {
     "Odu-Origin: https://odu.example.org\nOdu-Bucket: kolu-r2\n";
 
   it("reads the push origin and the bucket off the substituter's nix-cache-info", async () => {
-    // THE ONE FACT A CONSUMER HAS is the substituter URL. The push address
-    // cannot be derived from it: this one is an R2 domain that answers GET.
     const { send, asked } = answering(() => new Response(INFO, { status: 200 }));
     expect(await describeCache("https://cache.kolu.dev/kolu-r2/", send)).toEqual({
       origin: "https://odu.example.org",
@@ -1294,8 +1127,6 @@ describe("a cache that describes itself (`--cache`)", () => {
   });
 
   it("refuses a cache that answers without the two lines, naming the URL", async () => {
-    // cache.nixos.org, or an odu from before this: guessing an origin from the
-    // substituter is how a push ends up at a URL nobody owns.
     const { send } = answering(
       () => new Response("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n", { status: 200 }),
     );
@@ -1320,24 +1151,16 @@ describe("a cache that describes itself (`--cache`)", () => {
       (err: Error) => err,
     );
     expect((missing as Error).message).toContain("answered 404");
-    // AND IT SAYS WHY THAT MIGHT BE: an anonymous read of a private bucket is
-    // a 404, so "no such cache" and "not yours" look identical from here.
     expect((missing as Error).message).toContain("no token was sent");
   });
 
   it("carries the bucket's token, because a private bucket answers nobody without one", async () => {
-    // A PRIVATE BUCKET IS `404 no such bucket` TO AN ANONYMOUS READER, and its
-    // substituter is always odu's own (a private bucket is never store-fronted),
-    // so an unauthenticated discovery would make exactly the buckets that need
-    // a token unpushable. The token is the push's own, one request earlier.
     const { send, auth } = answering(() => new Response(INFO, { status: 200 }));
     expect(await describeCache("https://odu.example.org/cache/private", send, "odc_write")).toEqual(
       { origin: "https://odu.example.org", bucket: "kolu-r2" },
     );
     expect(auth).toEqual(["Bearer odc_write"]);
 
-    // A refusal of the token this machine DOES hold says that, rather than
-    // telling a CI job to set a variable it already set.
     const denied = answering(() => new Response("", { status: 403 }));
     const refusal = await describeCache("https://odu.example.org/cache/private", denied.send, "odc_write").catch(
       (err: Error) => err,
@@ -1347,9 +1170,6 @@ describe("a cache that describes itself (`--cache`)", () => {
   });
 
   it("resolves that token from the push's own three sources", async () => {
-    // The file and the variable are origin-free. The credentials file is keyed
-    // by origin, and the origin is what is being discovered — so the key is the
-    // SUBSTITUTER's own origin, which is where this request is going.
     const env = envOf({ ODU_CACHE_TOKEN: "odc_from_env" });
     const file = join(scratch, "token");
     writeFileSync(file, "odc_from_file\n");
@@ -1362,7 +1182,6 @@ describe("a cache that describes itself (`--cache`)", () => {
     expect(await discoveryToken({ HOME: scratch }, "https://odu.example.org/cache/private", undefined)).toBe(
       "odc_from_login",
     );
-    // A cache this machine has never logged in to is anonymous, honestly.
     expect(
       await discoveryToken({ HOME: scratch }, "https://cache.kolu.dev/kolu-r2", undefined),
     ).toBeNull();
@@ -1404,8 +1223,6 @@ describe("a derivation argument", () => {
       });
       expect(summary).toMatchObject({ pushed: 0, failed: 0, skippedDerivation: [drv] });
       expect(lines).toContain(`⏭ ${drv} skipped-derivation`);
-      // The only request a derivation may cause is the consumer facts (the
-      // page link); NO upload, no missing question.
       expect(server.seen.filter((seen) => seen.method === "PUT")).toEqual([]);
     } finally {
       server.stop();

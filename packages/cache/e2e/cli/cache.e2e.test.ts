@@ -1,25 +1,3 @@
-/**
- * End-to-end: the cache a real `nix` writes to and reads from.
- *
- * Everything the cache decides is unit-tested against a fake store; what only a
- * black-box run can catch is whether NIX AGREES — whether the narinfo is a
- * narinfo, whether the base32 hash spelling is Nix's, whether the fingerprint a
- * signature covers is the one Nix verifies, and whether an upload staged as a
- * `file://` cache imports. So this suite drives the nix-built binary and the
- * real client, and asserts on `nix build` succeeding rather than on bytes.
- *
- * **Nothing here touches the host store.** The daemon's cache is given
- * `$ODU_CACHE_STORE=local?root=<tmp>`, and every client store is a chroot of
- * its own: a CI host needs no `trusted-users` entry, and a failure cannot leave
- * paths in somebody's real store. The builder store is a chroot too, reached by
- * `NIX_REMOTE`, which is how `odu cache push` — a program that runs `nix` — is
- * pointed at the same store the derivation was built into.
- *
- * The order of the tests is the order of the story: create, push, substitute,
- * verify, sign, read a private bucket, follow a redirect to the store that
- * holds its NAR, then collect.
- */
-
 import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -36,48 +14,23 @@ import {
 } from "../../../../tests/e2e/harness";
 import { type WebWorld, startWebService, until } from "../../../../tests/e2e/webHarness";
 
-/** The root token this world's daemon was started with. Administration needs
- *  it; reads of a public bucket do not. */
 const ROOT_TOKEN = "e2e-root-token";
 
 let odu: string;
 let world: WebWorld;
-/** Every chroot store this suite makes: the builder's, the cache's, and the
- *  substitutes'. */
 let storeRoot: string;
 let builderStore: string;
 let substituteStore: string;
-/** A real S3 service of this suite's own, declared to the daemon as an object
- *  store, so one bucket's NARs live somewhere odu can hand a client off to. */
 let gateway: Gateway;
 
-/** The name that store is declared under — what `bucket_create { store }` says. */
 const GATEWAY_STORE = "gw";
 
-/**
- * THE SAME S3 SERVICE, REACHED THROUGH A PROXY THIS SUITE CAN ARM — declared
- * as a second store so one bucket's reads can be made to meet an object that
- * MOVES while odu is reading it (issue #160).
- *
- * It forwards everything, signature and all: the `Host` header a request was
- * signed against is passed through, so versitygw verifies what odu signed.
- * `rewriteNextTempRead` arms it for exactly one event — the first window of a
- * readback of a temp key — after which it rewrites that key SHORTER behind
- * odu's back. That is FAULT INJECTION, not a story about who did it: the
- * completion ended every URL odu signed for that key, so no client can be
- * writing it, and what the pod met was R2 answering a 1 MiB range with 190
- * bytes. The reader sees the same thing either way, and this is how to make
- * it see it on demand.
- */
 const RACE_STORE = "gw-racy";
 let storeProxy: { port: number; stop: () => void };
 let rewriteNextTempRead = false;
-/** The keys the proxy rewrote, in order — the witness that it fired. */
 const rewritten: string[] = [];
 let gatewayTarget: S3Target;
 
-/** The bytes a rewritten temp key is left holding: shorter than it was, and a
- *  different object, so the read in flight meets both halves of "it changed". */
 const REWRITTEN_BYTES = new Uint8Array(512).fill(0x5a);
 
 function startStoreProxy(upstream: string): { port: number; stop: () => void } {
@@ -95,17 +48,11 @@ function startStoreProxy(upstream: string): { port: number; stop: () => void } {
         ...(body === undefined ? {} : { body }),
         redirect: "manual",
       });
-      // The key, as the service sees it: the path is `/<bucket>/<key>`. What
-      // makes a key TEMP is `@odu/objects`' to say, not this suite's.
       const key = decodeURIComponent(url.pathname).split("/").slice(2).join("/");
       const opening = request.headers.get("range")?.startsWith("bytes=0-") === true;
       if (!rewriteNextTempRead || request.method !== "GET" || !opening || !isTemp(key)) {
         return answer;
       }
-      // ARMED, AND THIS IS THE EVENT. The window is read out whole before the
-      // key is rewritten, so the rewrite lands strictly between the GET that
-      // measured the object and the one that reads the next window — the race
-      // the pod lost, made an ordering.
       rewriteNextTempRead = false;
       const window = await answer.arrayBuffer();
       const put = await s3Fetch(gatewayTarget, "PUT", key, { body: REWRITTEN_BYTES });
@@ -121,7 +68,6 @@ function startStoreProxy(upstream: string): { port: number; stop: () => void } {
 
 const dirs: string[] = [];
 
-/** macOS cannot build into a diverted store; Linux can, and does. */
 const HOST_BUILD = currentNixSystem().endsWith("-darwin");
 
 beforeAll(async () => {
@@ -130,9 +76,6 @@ beforeAll(async () => {
   builderStore = `local?root=${join(storeRoot, "builder")}`;
   substituteStore = `local?root=${join(storeRoot, "substitute")}`;
 
-  // THE DECLARED STORE, written before the daemon starts: `$ODU_OBJECT_STORES`
-  // is read once at boot, so a store this suite wants has to exist before the
-  // service does.
   gateway = await startGateway();
   const target = await gateway.bucket();
   const credentials = join(storeRoot, "gw-credentials");
@@ -155,15 +98,8 @@ beforeAll(async () => {
     JSON.stringify({
       [GATEWAY_STORE]: {
         ...declared,
-        // `localhost`, SPELLED THAT WAY ON PURPOSE. The gateway listens on
-        // 127.0.0.1 and so does odu, but the two hosts differ as STRINGS —
-        // which is the whole of the redirect proof below: curl drops an
-        // `Authorization` header when a redirect changes host, so a NAR that
-        // still arrives proves the presigned URL carries its own authority and
-        // that the bucket's token never reached the store.
         endpoint: `http://localhost:${gateway.endpoint.port}`,
       },
-      // THE SAME BUCKET, through the proxy this suite can arm.
       [RACE_STORE]: { ...declared, endpoint: `http://127.0.0.1:${storeProxy.port}` },
     }),
   );
@@ -177,7 +113,7 @@ beforeAll(async () => {
     },
     suitePortFor("cache"),
   );
-}, 900_000); // nix build, cold cache
+}, 900_000);
 
 afterAll(async () => {
   world?.dispose();
@@ -186,9 +122,6 @@ afterAll(async () => {
   for (const dir of dirs.splice(0)) cleanup(dir);
 });
 
-/** A deterministic, incompressible file in the builder's store. Xorshift keeps
- *  it reproducible across hosts without a toolchain: no fetch, no /dev/urandom,
- *  no dd. */
 function storeFile(name: string, bytes: number): string {
   const dir = scratchDir("odu-e2e-file-");
   dirs.push(dir);
@@ -213,7 +146,6 @@ interface Ran {
   stderr: string;
 }
 
-/** `odu …` against this world's service, as the operator. */
 function cli(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
   const res = spawnSync(odu, argv, {
     env: { ...world.env, ODU_ROOT_TOKEN: ROOT_TOKEN, ...env },
@@ -223,10 +155,6 @@ function cli(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-/** THE SAME COMMAND WITHOUT BLOCKING THIS PROCESS. `spawnSync` holds the event
- *  loop, which is fine for every case here except one: the store proxy above
- *  runs in THIS process, so a push whose readback must reach it has to be
- *  awaited rather than waited on. */
 async function cliAsync(argv: string[], env: NodeJS.ProcessEnv = {}): Promise<Ran> {
   const child = Bun.spawn([odu, ...argv], {
     env: { ...world.env, ODU_ROOT_TOKEN: ROOT_TOKEN, ...env } as Record<string, string>,
@@ -241,30 +169,13 @@ async function cliAsync(argv: string[], env: NodeJS.ProcessEnv = {}): Promise<Ra
   return { status, stdout, stderr };
 }
 
-/**
- * One administrative verb, through `odu surface` — the only face that
- * administers the cache now. The root token is a FIELD of the input, not an
- * environment side channel, so each call names the token it is making.
- *
- * Exit 0 is an answer, 1 a refusal (as JSON on stderr), 2 a usage error, 3
- * nothing serving.
- */
 function surface(verb: string, input: unknown, env: NodeJS.ProcessEnv = {}): Ran {
   return cli(["surface", "cache", verb, "--input", JSON.stringify(input), "--json"], env);
 }
 
-/** The same verb, without blocking this process — see {@link cliAsync}. Any
- *  verb that makes the daemon TALK TO THE PROXIED STORE must use it. */
 const surfaceAsync = (verb: string, input: unknown): Promise<Ran> =>
   cliAsync(["surface", "cache", verb, "--input", JSON.stringify(input), "--json"]);
 
-/**
- * THE NETRC LINE AS `odu cache use` PRINTS IT, with the reader's token where
- * the placeholder stands — never a line this suite spells for itself. A suite
- * that wrote its own `machine <host>` passed while odu printed
- * `machine <host>:<port>`, a line Nix matches against nothing, so it sent no
- * credential and the bucket answered "not found".
- */
 function printedNetrc(bucket: string, token: string): string {
   const used = cli(["cache", "use", bucket, "--origin", world.origin], { ODU_TOKEN: token });
   expect({ status: used.status, stderr: used.stderr }).toMatchObject({ status: 0 });
@@ -273,7 +184,6 @@ function printedNetrc(bucket: string, token: string): string {
   return `${(machine[0] as string).replace("<your-read-token>", token)}\n`;
 }
 
-/** `nix …` against the builder's store — the machine that built the paths. */
 function nix(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
   const res = spawnSync("nix", argv, {
     env: { ...process.env, NIX_REMOTE: builderStore, ...env },
@@ -283,29 +193,10 @@ function nix(argv: string[], env: NodeJS.ProcessEnv = {}): Ran {
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-/**
- * A derivation with NO inputs: `/bin/sh` is not a store path, so nothing lands
- * in the closure but the output itself. That is what makes this suite fast —
- * and it is still a real derivation, built by a real `nix build` into a store
- * the cache has never seen.
- */
 function build(name: string): string {
   return realised(`derivation { name = "${name}"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "echo ${name} > $out" ]; }`, name);
 }
 
-/**
- * Realise a derivation into the BUILDER's store, whichever way this platform
- * allows.
- *
- * On Linux that is one `nix build --store local?root=…`. On macOS it cannot be:
- * Nix refuses — `building using a diverted store is not supported on this
- * platform` — and the refusal is about the diverted store, not the sandbox
- * (`--option sandbox false` says the same thing). So there the path is built in
- * the HOST store and copied into the builder's, which keeps the reference edges
- * a plain `nix store add-path` throws away, and is still two store paths the
- * cache has never seen. The host store is the only thing a macOS run touches
- * outside its own temp dir, and the paths are bytes long.
- */
 function realised(expr: string, what: string): string {
   const args = ["build", "--no-link", "--print-out-paths", "--impure", "--expr", expr];
   const res = HOST_BUILD
@@ -314,9 +205,6 @@ function realised(expr: string, what: string): string {
   if (res.status !== 0) throw new Error(`nix build ${what} failed:\n${res.stderr}`);
   const out = res.stdout.trim();
   if (!HOST_BUILD) return out;
-  // `--no-check-sigs`: a chroot store is not a trusted destination, and these
-  // paths were built on this machine a moment ago. The alternative is signing
-  // fixtures, which buys a test nothing.
   const copied = spawnSync("nix", ["copy", "--no-check-sigs", "--to", builderStore, out], {
     encoding: "utf-8",
     maxBuffer: BIG,
@@ -328,11 +216,6 @@ function realised(expr: string, what: string): string {
   return out;
 }
 
-/**
- * Two paths where one REFERENCES the other — the shape every real closure has.
- * The parent records immediately now (a reference is a name in the narinfo),
- * and a cold substitute still walks the closure.
- */
 function buildPair(name: string): { parent: string; child: string } {
   const child = `derivation { name = "${name}-child"; system = builtins.currentSystem; ` +
     `builder = "/bin/sh"; args = [ "-c" "echo child > $out" ]; }`;
@@ -344,23 +227,15 @@ function buildPair(name: string): { parent: string; child: string } {
   if (evaluated.status !== 0) throw new Error(`nix eval ${name} failed:\n${evaluated.stderr}`);
   const childPath = evaluated.stdout.trim();
 
-  // Building the PARENT builds the child with it, and `--print-out-paths` on a
-  // derivation answers its output.
   const parent = realised(
     `let child = ${child}; in derivation { name = "${name}-parent"; ` +
       `system = builtins.currentSystem; builder = "/bin/sh"; ` +
-      // The child's path is written INTO the output: Nix computes a path's
-      // references by scanning its contents for store-path hashes, so a
-      // reference that appears only in `args` would not survive. `echo` is a
-      // shell builtin, which is what a builder with an empty PATH has.
       `args = [ "-c" "echo ${'$'}{child} > $out" ]; }`,
     `${name}-parent`,
   );
   return { parent, child: childPath };
 }
 
-/** Every file the daemon has staged, so a refusal can be checked to have
- *  written nothing. */
 function stagedFiles(): string[] {
   const root = join(world.env.ODU_STATE_DIR as string, "cache", "staging");
   const out: string[] = [];
@@ -379,7 +254,6 @@ function stagedFiles(): string[] {
   return out.sort();
 }
 
-/** The 32-character hash a narinfo is named for. */
 const hashOf = (storePath: string): string =>
   storePath.slice(storePath.lastIndexOf("/") + 1).slice(0, 32);
 
@@ -389,26 +263,17 @@ interface Bucket {
   publicKey: string;
   keyName: string;
   upstreamKeys: string[];
-  /** The declared store its objects live in. */
   store: string;
-  /** Who answers a read of it — the store itself, or odu (PLAN 2.8). */
   readsFrom: "store" | "odu";
 }
 
-/** One `cache.nar.served` line the daemon wrote. The daemon's log is JSON per
- *  line on stderr, which the world's harness collects into a file: this is the
- *  only place a test can see HOW a NAR left — whether odu streamed it or handed
- *  the client an address. */
 interface Served {
   bucket: string;
-  /** The store path the NAR holds — what a caller names a read by, since the
-   *  line's `hash` is the NAR's and not the store path's. */
   path: string;
   bytes: number;
   source: "object" | "transition" | "redirect";
 }
 
-/** Every `cache.nar.served` line written for `storePath`, in order. */
 function narServed(storePath: string): Served[] {
   let text: string;
   try {
@@ -423,13 +288,11 @@ function narServed(storePath: string): Served[] {
       const entry = JSON.parse(line) as Served & { msg?: string };
       if (entry.msg === "odu cache: cache.nar.served" && entry.path === storePath) lines.push(entry);
     } catch {
-      // A partial last line: the daemon is still writing it. The poll retries.
     }
   }
   return lines;
 }
 
-/** One `cache.nar.uploaded` line: how a NAR's bytes reached the bucket. */
 interface Uploaded {
   bucket: string;
   file: string;
@@ -438,7 +301,6 @@ interface Uploaded {
   bytes: number;
 }
 
-/** Every `cache.nar.uploaded` line for one bucket, in order. */
 function narUploaded(bucket: string): Uploaded[] {
   let text: string;
   try {
@@ -453,13 +315,11 @@ function narUploaded(bucket: string): Uploaded[] {
       const entry = JSON.parse(line) as Uploaded & { msg?: string };
       if (entry.msg === "odu cache: cache.nar.uploaded" && entry.bucket === bucket) lines.push(entry);
     } catch {
-      // A partial last line: the daemon is still writing it.
     }
   }
   return lines;
 }
 
-/** One `cache.nar.verify_failed` line: an upload odu refused, and why. */
 interface VerifyFailed {
   bucket: string;
   mode: "direct" | "staged";
@@ -467,7 +327,6 @@ interface VerifyFailed {
   reason: string;
 }
 
-/** Every `cache.nar.verify_failed` line for one bucket, in order. */
 function verifyFailed(bucket: string): VerifyFailed[] {
   let text: string;
   try {
@@ -482,7 +341,6 @@ function verifyFailed(bucket: string): VerifyFailed[] {
       const entry = JSON.parse(line) as VerifyFailed & { msg?: string };
       if (entry.msg === "odu cache: cache.nar.verify_failed" && entry.bucket === bucket) lines.push(entry);
     } catch {
-      // A partial last line: the daemon is still writing it.
     }
   }
   return lines;
@@ -492,12 +350,8 @@ let main: Bucket;
 let writeToken: string;
 let pinned: string;
 let evictable: string;
-/** The private bucket, and a write token for it — made by the private-read
- *  scenario and read by the discovery one below it. */
 let priv: Bucket;
 let privToken: string;
-/** The S3-backed bucket, and a write token for it — made by the redirect
- *  scenario and pushed to again by the direct-upload one (PLAN 2.9). */
 let fronted: Bucket;
 let frontedToken: string;
 
@@ -525,9 +379,6 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("serves a public bucket's facts with no account", async () => {
-    // THE PROTOCOL PATH, not the surface: anonymous `cache use` did not work on
-    // a daemon with a door because the connection was refused first. The
-    // consumer facts are as public as the NARs.
     const response = await fetch(`${world.origin}/cache/main`, {
       headers: { accept: "application/json" },
     });
@@ -542,7 +393,6 @@ describe("odu serves a Nix binary cache", () => {
     });
     expect({ status: used.status, stderr: used.stderr }).toMatchObject({ status: 0 });
     expect(used.stdout).toContain(main.publicKey);
-    // A public bucket is read with no credential, so it prints no netrc lines.
     expect(used.stdout).not.toContain("netrc-file");
     expect(used.stdout.split("\n").some((line) => line.startsWith("machine "))).toBe(false);
   });
@@ -558,9 +408,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(refused.stderr).toContain("root token");
   });
 
-  // THE DESTRUCTIVE VERB HAS THE SAME FLOOR, and has to be refused BEFORE it
-  // takes anything — so the bucket is read back after the refusal rather than
-  // taken on the exit code's word.
   it("refuses a bucket delete without the root token, and keeps the bucket", () => {
     const refused = surface("bucket_delete", { rootToken: "wrong", bucket: "main" });
     expect(refused.status).toBe(1);
@@ -590,7 +437,6 @@ describe("odu serves a Nix binary cache", () => {
 
     const listed = surface("token_list", { rootToken: ROOT_TOKEN });
     expect(listed.status).toBe(0);
-    // The plaintext is nowhere in the listing — the database holds a hash.
     expect(listed.stdout).not.toContain(writeToken);
     expect(listed.stdout).toContain(answer.facts.id);
   });
@@ -606,8 +452,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(pushed.status).toBe(0);
     expect(pushed.stdout).toContain("pushed 1");
 
-    // The substituter, trusted by the bucket's own key, into a store that has
-    // never seen the path.
     const substituted = nix(
       [
         "build",
@@ -630,29 +474,17 @@ describe("odu serves a Nix binary cache", () => {
       ["store", "verify", "--store", substituteStore, "--trusted-public-keys", main.publicKey, pinned],
       { encoding: "utf-8", maxBuffer: BIG },
     );
-    // `nix store verify` narrates each path on stderr and exits 0 when every
-    // one is signed by a trusted key.
     expect(verified.stderr).not.toContain("not signed");
     expect(verified.status).toBe(0);
   });
 
   it("pushes a NAR in parts, and substitutes the joined path", () => {
-    // TWO MEGABYTES OF DETERMINISTIC, INCOMPRESSIBLE BYTES: the NAR's compressed
-    // stream cannot fit one part at `--part-size 1`, which is the shape
-    // Cloudflare forces on a real closure. A part is an overwrite by index, so
-    // this is also the protocol's retry story in miniature.
-    //
-    // NOT A DERIVATION: the lane host's build sandbox has `/bin/sh` and no
-    // `dd`, and a fixture that fetches or runs host tools is not a fixture the
-    // lane can build. The bytes are made here, deterministically, and added to
-    // the store with `nix store add-file`.
     const big = storeFile("odu-cache-e2e-chunked", 2 * 1024 * 1024);
     const pushed = cli(["cache", "push", "main", big, "--part-size", "1"], {
       ODU_CACHE_TOKEN: writeToken,
       NIX_REMOTE: builderStore,
     });
     expect({ status: pushed.status, stderr: pushed.stderr }).toMatchObject({ status: 0 });
-    // The voice names the parts, so a large push is not silent.
     expect(pushed.stderr).toContain("part 2");
     expect(pushed.stdout).toContain("pushed 1");
 
@@ -675,9 +507,6 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("discovers a bucket from its substituter, and pushes with `--cache` alone", async () => {
-    // WHAT A CONSUMER REPOSITORY HAS is the URL in its `nix.conf`. The push
-    // origin and the bucket are read off `<substituter>/nix-cache-info`, which
-    // the cache states for itself — nothing here names a bucket or an origin.
     const info = await fetch(`${main.url}/nix-cache-info`);
     expect(info.status).toBe(200);
     const stated = await info.text();
@@ -699,7 +528,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(summary).toMatchObject({ pushed: 1, failed: 0, substituter: main.url });
     expect(summary.served).toContain(discovered);
 
-    // SERVED WHERE NIX ASKS, which is what the push action then proves.
     const narinfo = await fetch(`${main.url}/${hashOf(discovered)}.narinfo`);
     expect(narinfo.status).toBe(200);
     expect(await narinfo.text()).toContain(`StorePath: ${discovered}`);
@@ -708,8 +536,6 @@ describe("odu serves a Nix binary cache", () => {
   it("takes a path `nix copy --to` uploads, and keeps the client's signature", async () => {
     evictable = build("odu-cache-e2e-evictable");
 
-    // A key of the CLIENT's own, so the path carries a signature the bucket did
-    // not make — which is the signature a lane host's `nix store sign` leaves.
     const keyFile = join(storeRoot, "client-key");
     const generated = spawnSync(
       "nix",
@@ -721,7 +547,6 @@ describe("odu serves a Nix binary cache", () => {
     const signed = nix(["store", "sign", "--store", builderStore, "--key-file", keyFile, evictable]);
     expect(signed.status).toBe(0);
 
-    // The token rides in the URL, which is the CI spelling that needs no file.
     const copied = nix([
       "copy",
       "--to",
@@ -729,7 +554,6 @@ describe("odu serves a Nix binary cache", () => {
       "--no-recursive",
       evictable,
     ]);
-    // `nix copy` narrates each path on stderr; the exit code is the answer.
     expect({ status: copied.status, error: copied.stderr.includes("error:") }).toEqual({
       status: 0,
       error: false,
@@ -740,8 +564,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(narinfo).toContain(`Sig: ${main.keyName}:`);
     expect(narinfo).toContain("Sig: client-1:");
 
-    // And it substitutes, so the narinfo the server re-signed is a narinfo Nix
-    // accepts.
     const substituted = nix(
       [
         "build",
@@ -760,10 +582,6 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("takes what an upstream key signed when the bucket names no upstream", async () => {
-    // A path carrying a `cache.nixos.org-1` signature is what a lane host that
-    // built against nixpkgs produces. `main` skips it as upstream — the whole
-    // point of the default. The escape is a bucket with no upstream keys at
-    // all; such a bucket stores it like any other object.
     const within = build("odu-cache-e2e-upstream");
     const keyFile = join(storeRoot, "nixos-key");
     const generated = spawnSync(
@@ -810,11 +628,6 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("pushes a closure whole with `--whole`, so `nix copy --from` the bucket alone takes it", () => {
-    // THE CONSUMER READS ONE CACHE. `nix copy --from <bucket>` walks the
-    // closure inside that bucket and stops at the first path it lacks, so a
-    // closure whose nixpkgs half was skipped as upstream cannot be fetched
-    // from `main` alone. `--whole` stores that half too, in a bucket that
-    // keeps its default upstream keys.
     const { parent, child } = buildPair("odu-cache-e2e-whole");
     const keyFile = join(storeRoot, "whole-upstream-key");
     const generated = spawnSync(
@@ -826,9 +639,6 @@ describe("odu serves a Nix binary cache", () => {
     writeFileSync(keyFile, generated.stdout, { mode: 0o600 });
     expect(nix(["store", "sign", "--store", builderStore, "--key-file", keyFile, child]).status).toBe(0);
 
-    /** The consumer's command, into a store that has never seen either path,
-     *  with a narinfo cache of its own so no earlier answer stands in for the
-     *  bucket's. */
     const fetchAlone = (name: string): Ran => {
       const xdg = scratchDir(`odu-e2e-xdg-${name}-`);
       dirs.push(xdg);
@@ -856,8 +666,6 @@ describe("odu serves a Nix binary cache", () => {
     const partial = fetchAlone("whole-before");
     console.log(`nix copy --from main, after a push without --whole:\n${partial.stderr}`);
     expect(partial.status).not.toBe(0);
-    // THE MISSING PIECE, and not any other failure: the upstream-signed child
-    // the bucket skipped is what the copy could not find.
     expect(partial.stderr).toContain(`path '${child}' is not valid`);
 
     const whole = cli(["cache", "push", "main", parent, "--whole"], {
@@ -899,13 +707,11 @@ describe("odu serves a Nix binary cache", () => {
       ODU_CACHE_TOKEN: token,
       NIX_REMOTE: builderStore,
     });
-    // Progress goes to stderr by design; the exit code is the answer.
     expect({ status: pushed.status, stderr: pushed.stderr.split("\n")[0] }).toEqual({
       status: 0,
       stderr: expect.stringContaining("1 paths in the closure"),
     });
 
-    // 404, not 401: "you need a token" would confirm the bucket exists.
     const anonymous = await fetch(`${priv.url}/${hashOf(secret)}.narinfo`);
     expect(anonymous.status).toBe(404);
     const authorised = await fetch(`${priv.url}/${hashOf(secret)}.narinfo`, {
@@ -913,8 +719,6 @@ describe("odu serves a Nix binary cache", () => {
     });
     expect(authorised.status).toBe(200);
 
-    // The netrc file Nix actually reads — `netrc-file`, never `~/.netrc` — with
-    // the line `odu cache use` prints for this bucket.
     const netrc = join(storeRoot, "netrc");
     writeFileSync(netrc, printedNetrc("private", token), { mode: 0o600 });
     const privateStore = `local?root=${join(storeRoot, "private")}`;
@@ -935,18 +739,12 @@ describe("odu serves a Nix binary cache", () => {
       ],
       { encoding: "utf-8", maxBuffer: BIG },
     );
-    // The bucket's OWN key, so a private read verifies signatures rather than
-    // skipping them.
     expect(read.stderr).not.toContain("not signed");
     expect(read.stderr).not.toContain("401");
     expect(read.status).toBe(0);
   });
 
   it("discovers a PRIVATE bucket, which answers its nix-cache-info to nobody", async () => {
-    // THE BLOCKER THIS PINS: an anonymous read of a private bucket is a 404,
-    // so a discovery that carried no credential would leave exactly the
-    // buckets that need a token unpushable — and `--cache` is the push
-    // action's only address input now.
     expect((await fetch(`${priv.url}/nix-cache-info`)).status).toBe(404);
     const stated = await fetch(`${priv.url}/nix-cache-info`, {
       headers: { authorization: `Bearer ${privToken}` },
@@ -973,15 +771,6 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("redirects a private bucket's NAR to its store, and a real Nix client follows it", async () => {
-    // PLAN 2.8, END TO END, with nothing faked: the bucket's objects live on a
-    // real S3 service, odu renders and signs the narinfo as it always has, and
-    // answers the NAR with an ADDRESS instead of bytes.
-    //
-    // The bucket is PRIVATE and the store is spelled `localhost` while the
-    // daemon is bound at `127.0.0.1`. curl calls that a change of host and
-    // drops the `Authorization` the netrc supplied, so a NAR that arrives
-    // anyway arrived on the presigned URL's own signature — which is the claim
-    // worth proving: the read left odu, and the bucket's token did not.
     const created = surface("bucket_create", {
       rootToken: ROOT_TOKEN,
       name: "fronted",
@@ -992,8 +781,6 @@ describe("odu serves a Nix binary cache", () => {
     expect({ status: created.status, stderr: created.stderr }).toMatchObject({ status: 0 });
     fronted = JSON.parse(created.stdout) as Bucket;
     expect(fronted.store).toBe(GATEWAY_STORE);
-    // The store fronts no public URL of its own, so odu is still the address a
-    // client is handed: it is the NAR, and only the NAR, that leaves.
     expect(fronted.readsFrom).toBe("odu");
     expect(new URL(fronted.url).hostname).toBe("127.0.0.1");
 
@@ -1016,9 +803,6 @@ describe("odu serves a Nix binary cache", () => {
     });
     expect(pushed.stdout).toContain("pushed 1");
 
-    // THE REDIRECT ITSELF, before anything is asked to follow one. A 307, so
-    // the method survives the hop; a URL on the STORE's host; no body; and
-    // nothing an edge may keep, because the signature in it expires.
     const basic = {
       authorization: `Basic ${Buffer.from(`anyone:${token}`).toString("base64")}`,
     };
@@ -1038,9 +822,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(location.port).toBe(gateway.endpoint.port);
     expect(location.searchParams.get("X-Amz-Expires")).toBe("600");
 
-    // AND A REAL CLIENT FOLLOWS IT. The netrc is the line `odu cache use`
-    // prints, which names odu's host only — the gateway is nowhere in it — so
-    // the hop is unauthenticated by construction.
     const netrc = join(storeRoot, "fronted-netrc");
     writeFileSync(netrc, printedNetrc("fronted", token), { mode: 0o600 });
     const clientStore = `local?root=${join(storeRoot, "fronted-client")}`;
@@ -1065,8 +846,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(read.stderr).not.toContain("403");
     expect(read.status).toBe(0);
 
-    // The path is VALID in the client's store: the bytes that came off the
-    // gateway are the NAR the narinfo odu signed describes.
     const verified = spawnSync(
       "nix",
       [
@@ -1083,13 +862,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(verified.stderr).not.toContain("not signed");
     expect(verified.status).toBe(0);
 
-    // ODU STREAMED ZERO NAR BYTES. The daemon's own log is the only witness to
-    // that: every line for this path says `redirect`, and none says `object`.
-    // Polled, because the world collects the daemon's stderr on this process's
-    // event loop and the `nix build` above held it.
-    // TWO of them: the probe above, and the client's own fetch — so this waits
-    // for the second rather than passing on the first and calling the line the
-    // suite made its own proof.
     const served = await until(
       "odu to log the two NARs it redirected",
       () => {
@@ -1108,10 +880,6 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("pushes into an S3-backed bucket without sending odu a single NAR byte", async () => {
-    // PLAN 2.9, END TO END: the bucket from the scenario above lives on a real
-    // S3 service, so its push NEGOTIATES `direct` — the client sends the bytes
-    // to presigned URLs at the gateway, and odu reads the object back to prove
-    // it before the path is recorded.
     const offloaded = build("odu-cache-e2e-direct");
     const pushed = cli(["cache", "push", "fronted", offloaded, "-o", "json"], {
       ODU_CACHE_TOKEN: frontedToken,
@@ -1123,10 +891,6 @@ describe("odu serves a Nix binary cache", () => {
     const summary = JSON.parse(pushed.stdout) as { pushed: number; failed: number; mode: string };
     expect(summary).toMatchObject({ pushed: 1, failed: 0, mode: "direct" });
 
-    // THE DAEMON'S OWN ACCOUNT OF IT: a direct upload of this path, and odu's
-    // NAR upload routes were handed nothing — a staged line for this bucket
-    // would be bytes that crossed the machine. Polled, because the daemon
-    // writes the line after it has answered the client.
     const uploads = await until(
       "odu to log the upload it took",
       () => {
@@ -1138,9 +902,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(uploads.map((line) => line.mode)).not.toContain("staged");
     expect(uploads.at(-1)).toMatchObject({ bucket: "fronted", mode: "direct" });
 
-    // AND IT IS A PATH THE CACHE SERVES: the narinfo odu signed is there, over
-    // the object its own copy made inside the store — which is the proof that
-    // the readback verified and the copy landed.
     const narinfo = await fetch(`${fronted.url}/${hashOf(offloaded)}.narinfo`, {
       headers: { authorization: `Bearer ${frontedToken}` },
     });
@@ -1149,14 +910,6 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("refuses a direct upload whose object changed under the readback, and keeps serving", async () => {
-    // ISSUE #160, END TO END. The pod's readback was answered 190 bytes of a
-    // 1 MiB range and the process exited 1. The proxy above reproduces what
-    // the READER saw — a later window that is not the object it was promised
-    // — on demand; what is proved here is that the upload is refused with the
-    // store's own sentence and the daemon is still answering afterwards.
-    // CREATED THROUGH THE ASYNC FACE: making a bucket writes `nix-cache-info`
-    // into its store, and this process is the proxy that store is reached
-    // through — a `spawnSync` here would hold the loop the daemon is waiting on.
     const created = await surfaceAsync("bucket_create", {
       rootToken: ROOT_TOKEN,
       name: "racy",
@@ -1174,8 +927,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(minted.status).toBe(0);
     const token = (JSON.parse(minted.stdout) as { token: string }).token;
 
-    // INCOMPRESSIBLE AND SEVERAL WINDOWS LONG (a window is 1 MiB), so the
-    // readback cannot finish inside the one GET the proxy lets through.
     const racing = storeFile("odu-cache-e2e-racy", 4 << 20);
     rewriteNextTempRead = true;
     const pushed = await cliAsync(["cache", "push", "racy", racing, "-o", "json"], {
@@ -1189,12 +940,9 @@ describe("odu serves a Nix binary cache", () => {
       failures: { message: string }[];
     };
     expect({ pushed: summary.pushed, failed: summary.failed }).toEqual({ pushed: 0, failed: 1 });
-    // THE STORE'S OWN SENTENCE, carried through the refusal to the client.
     expect(summary.failures[0]?.message).toContain("answered 400");
     expect(summary.failures[0]?.message).toContain("changed while it was being read");
 
-    // AND THE DAEMON'S VERDICT: a refusal named `short_read`, not a crash and
-    // not a NAR it could not read.
     const refusals = await until(
       "odu to log the upload it refused",
       () => {
@@ -1205,15 +953,11 @@ describe("odu serves a Nix binary cache", () => {
     );
     expect(refusals.at(-1)).toMatchObject({ bucket: "racy", mode: "direct", reason: "short_read" });
 
-    // STILL SERVING — the same process, the next request. This is the whole
-    // point: a refused upload is not a process exit.
     const alive = await fetch(`${racy.url}/nix-cache-info`, {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(alive.status).toBe(200);
     expect(await alive.text()).toContain("StoreDir:");
-    // AND NOTHING WAS RECORDED: the path the readback could not prove is not
-    // one this bucket serves.
     const narinfo = await fetch(`${racy.url}/${hashOf(racing)}.narinfo`, {
       headers: { authorization: `Bearer ${token}` },
     });
@@ -1232,9 +976,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(pushed.status).toBe(0);
     expect(pushed.stdout).toContain("pushed 2");
 
-    // The TOP path only, into a store that has neither: substitution has to
-    // walk the reference it was given, which is the fingerprint with a
-    // non-empty reference list and the ordering, end to end.
     const cold = `local?root=${join(storeRoot, "cold")}`;
     const substituted = nix(
       [
@@ -1258,8 +999,6 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("refuses an upload with no bytes behind it, and one whose hash disagrees", async () => {
-    // THE CROSS-BUCKET HOLE: `private` holds a write token, and `main` holds a
-    // path. A narinfo alone must not be enough to publish it.
     const created = surface("bucket_create", {
       rootToken: ROOT_TOKEN,
       name: "thief",
@@ -1293,7 +1032,6 @@ describe("odu serves a Nix binary cache", () => {
     expect(await bare.text()).toContain("never uploaded");
     expect(await statusOf(thief.url, pinned)).toBe(404);
 
-    // A NAR whose bytes do not hash to the narinfo's NarHash.
     const truncated = "0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76";
     const put = await fetch(`${thief.url}/nar/${truncated}.nar.zst`, {
       method: "PUT",
@@ -1307,8 +1045,6 @@ describe("odu serves a Nix binary cache", () => {
       body: [
         `StorePath: ${pinned}`,
         `URL: nar/${truncated}.nar.zst`,
-        // `none`, so the refusal under test is the HASH and not a decompressor
-        // that could not read the frame.
         "Compression: none",
         "NarHash: sha256:0b56hsfzp1d4kx9j095zk64b0zmi189s3ih8mk2zyshpi48fgw76",
         "NarSize: 279592",
@@ -1335,8 +1071,6 @@ describe("odu serves a Nix binary cache", () => {
   });
 
   it("keeps a pinned closure and evicts what nothing holds", async () => {
-    // Both paths are older than retention 0 the moment they were pushed; the
-    // pin is the only thing between `pinned` and the collector.
     const pin = surface("pin_create", {
       rootToken: ROOT_TOKEN,
       bucket: "main",
@@ -1374,7 +1108,6 @@ describe("odu serves a Nix binary cache", () => {
       "thief",
     ]);
     expect(answer.objects).toBeGreaterThanOrEqual(2);
-    // Every read above went through the protocol, so the counter moved.
     expect(answer.hits).toBeGreaterThan(0);
   });
 });

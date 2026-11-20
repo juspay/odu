@@ -1,19 +1,3 @@
-/**
- * The cache's steps — a bucket pushed from a terminal, read from the page.
- *
- * The ARRANGE half is the terminal, deliberately: a path gets into a bucket by
- * somebody running `odu cache push` (or a hook on a lane host), and no control
- * on this page creates one. The bucket and its token come from the API face
- * (`odu surface cache …`), which is where administration lives.
- * `nix store add-file` is the cheapest real path there is — one small file, no
- * references, no build — so the scenario is about the page rather than about
- * nix.
- *
- * The ASSERT half is the page: the row, the bucket, the filter. Every locator
- * is a role and an accessible name where one exists, and the app's own class
- * names where the shape is the contract (`./support/world.ts` keeps those).
- */
-
 import * as assert from "node:assert";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -38,14 +22,6 @@ function unique(what: string): string {
   return `wa-${what}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/**
- * One cache verb through `odu surface cache …` — the face that administers.
- *
- * The root token is a FIELD of the input: a call with no session names the
- * operator's token, and a call carrying one (`ODU_TOKEN`) names the empty
- * string, because the row reads a signed-in person's ROLE instead
- * (`packages/cache/src/server.ts`'s `authorityOf`).
- */
 function cacheVerb(
   world: OduWorld,
   verb: string,
@@ -59,9 +35,6 @@ function cacheVerb(
   );
 }
 
-/** The plaintext a `token_mint` answered — shown once, by the verb that minted
- *  it. `--json` prints the member's own payload, so this is `{ token, facts }`
- *  and nothing wrapping it. */
 function mintedToken(answer: { stdout: string }): string {
   const payload = JSON.parse(answer.stdout) as { token?: unknown };
   assert.ok(
@@ -71,19 +44,11 @@ function mintedToken(answer: { stdout: string }): string {
   return payload.token;
 }
 
-/** WHAT A SCENARIO WANTS IN A BUCKET: a file's base NAME — which becomes the
- *  store path's name, and therefore the table's group — and the bytes it
- *  holds, which decide the NAR's size. Two specs of the same name are two
- *  builds of one package; two sizes are what a sort by size is about. */
 interface FileSpec {
   readonly name: string;
   readonly body: string;
 }
 
-/** THE ARRANGE, registered under several texts: a scenario that pushes BEFORE
- *  it opens the page (the page is then read as it stands), and one that opens
- *  the page FIRST and pushes into it — which is the scenario that grades the
- *  property the row exists for, a push arriving with no reload. */
 function arrangePush(world: OduWorld, howMany = 1, states: readonly string[] = []): void {
   arrangeFiles(
     world,
@@ -95,19 +60,12 @@ function arrangePush(world: OduWorld, howMany = 1, states: readonly string[] = [
   );
 }
 
-/** `states` is what the push SAYS about itself beyond its paths — `--run` and
- *  `--commit` (cache 4.7). Empty for every scenario that is not about
- *  provenance, which is what a developer's own push sends. */
 function arrangeFiles(
   world: OduWorld,
   specs: readonly FileSpec[],
   states: readonly string[] = [],
 ): void {
   const bucket = unique("bucket");
-  // LEAF FILES, added straight to the store: a path with no references, so the
-  // narinfo needs no referrers and the import cannot sit at 202 waiting for
-  // them. A DIRECTORY EACH, because two builds of one package are the same
-  // base name with different bytes and one directory cannot hold both.
   const paths: string[] = [];
   for (const spec of specs) {
     const file = join(mkdtempSync(join(tmpdir(), "odu-wa-cache-")), spec.name);
@@ -133,10 +91,6 @@ function arrangeFiles(
     `cache bucket_create failed: ${created.stderr}`,
   );
 
-  // A WRITE TOKEN, not the root token: pushing is the cache's HTTP API with a
-  // scoped credential — the arrangement is a person's `cache token_mint`
-  // followed by `ODU_CACHE_TOKEN=… odu cache push`, which is the documented CI
-  // shape and the one an operator actually uses.
   const minted = cacheVerb(world, "token_mint", {
     rootToken: ROOT_TOKEN,
     bucket,
@@ -153,7 +107,6 @@ function arrangeFiles(
 
   world.cacheBucket = bucket;
   world.cachePath = path;
-  // The store path's own base name — what a person types into the filter box.
   world.cachePathName = path.split("/").pop()?.replace(/^[a-z0-9]{32}-/, "") ?? "";
   world.cachePaths = paths;
   world.cachePathNames = paths.map(
@@ -161,8 +114,6 @@ function arrangeFiles(
   );
 }
 
-/** One leaf path added to the store — no references, so its narinfo imports
- *  at once rather than waiting at 202. */
 function addLeafPath(world: OduWorld): string {
   const name = unique("door-path");
   const file = join(mkdtempSync(join(tmpdir(), "odu-wa-cache-")), name);
@@ -181,9 +132,6 @@ When(
     const bucket = this.cacheBucket;
     assert.ok(bucket !== undefined, "no bucket was created for this scenario");
     assert.ok(this.mintedToken !== undefined, "no personal token was minted");
-    // The person mints the bucket's write token through `/mcp` (their own
-    // credential); the PUSH then speaks only the cache's HTTP protocol, with
-    // that bucket token and no cookie — the shape a CI job on a door has.
     const mint = cacheVerb(
       this,
       "token_mint",
@@ -228,15 +176,6 @@ Given("a bucket with two paths pushed from the CLI", function (this: OduWorld) {
   arrangePush(this, 2);
 });
 
-/**
- * A PUSH THAT SAYS WHAT BUILT IT (cache 4.7) — the arrange a run makes, from
- * a terminal like every other one here.
- *
- * The commit is forty hex characters because that is what a sha is and the
- * table abbreviates it; the run id names no run this scenario started, which
- * is the point — the page draws the LINK from the string it was given and
- * resolves nothing.
- */
 Given(
   "a bucket with one path pushed from the CLI with a run and a commit",
   function (this: OduWorld) {
@@ -249,8 +188,6 @@ Given(
   },
 );
 
-/** THREE BUILDS OF ONE PACKAGE: the same base name, different bytes, so the
- *  store gives each its own hash and the table has a group to draw. */
 Given(
   "a bucket with three builds of one package pushed from the CLI",
   function (this: OduWorld) {
@@ -259,9 +196,6 @@ Given(
   },
 );
 
-/** A BIG ONE AND A SMALL ONE, the big one pushed FIRST so the default order
- *  (newest push at the top) is not already the order a sort by size would
- *  produce. `cachePathNames[0]` is the large path. */
 Given("a bucket with a large and a small path pushed from the CLI", function (this: OduWorld) {
   arrangeFiles(this, [
     { name: unique("large"), body: "x".repeat(400_000) },
@@ -279,8 +213,6 @@ When("a bucket with one path is pushed from the CLI", function (this: OduWorld) 
 
 Given("I open the cache", async function (this: OduWorld) {
   await this.open("#/cache");
-  // THE SCREEN'S ONE HEADING IS THE ROW'S NAME. The buckets under it are a
-  // labelled grid of cards, not a second heading saying "Buckets".
   await this.page.getByRole("heading", { name: "Cache", exact: true }).waitFor();
 });
 
@@ -294,9 +226,6 @@ When("I open that bucket", async function (this: OduWorld) {
 When("I open a bucket the cache does not have", async function (this: OduWorld) {
   await this.open("#/cache/wa-no-such-bucket");
   await this.page.getByRole("heading", { name: "wa-no-such-bucket", exact: true }).waitFor();
-  // THE PAGE HAS TO HAVE ANSWERED before "no page errors" is worth asserting.
-  // A bucket the board does not carry has no panels at all — the page says so
-  // in one sentence — so that sentence is what this waits for.
   await this.page
     .locator("p.empty", { hasText: "This bucket is not on the board" })
     .first()
@@ -314,17 +243,10 @@ When("I filter the paths by the first path's name", async function (this: OduWor
   await this.page.getByRole("searchbox", { name: "filter paths" }).fill(name);
 });
 
-/** A ROW OF THE PATHS TABLE — the grouped row for a package, or a version
- *  under an open one. The GC panel keeps an `ol.paths` of its own, so these
- *  are addressed through the table rather than by the word "path". */
 function pathRow(world: OduWorld, name: string): Locator {
   return world.page.locator("table.paths-table tbody tr", { hasText: name }).first();
 }
 
-/** THE CELL UNDER A HEADER, in a row of the paths table — found by the
- *  header's own word rather than by position, because a column added beside
- *  it moves every position after it. The header is drawn in capitals and a
- *  sortable one carries an arrow glyph after its word; neither is the name. */
 async function cellUnder(world: OduWorld, row: Locator, header: string): Promise<Locator> {
   const headers = world.page.locator("table.paths-table thead th");
   await headers.first().waitFor({ timeout: 30_000 });
@@ -336,16 +258,12 @@ async function cellUnder(world: OduWorld, row: Locator, header: string): Promise
   return row.locator("td").nth(index);
 }
 
-/** One of the paths this scenario pushed, as its row: by the store path's
- *  NAME, which is what the row prints. */
 function pushedRow(world: OduWorld, which: 0 | 1): Locator {
   const path = world.cachePaths?.[which];
   assert.ok(path !== undefined, `path ${which + 1} was not pushed`);
   return pathRow(world, path.slice(path.indexOf("-") + 1));
 }
 
-/** WHAT KEEPS IT, as the cell says it — waited for, because the cell is
- *  drawn from a page that is read after the refresh that asked for it. */
 async function keptBySays(world: OduWorld, which: 0 | 1, expected: RegExp | string): Promise<Locator> {
   const cell = await cellUnder(world, pushedRow(world, which), "kept by");
   await until(`path ${which + 1} to be kept by ${String(expected)}`, async () => {
@@ -363,8 +281,6 @@ Then("the second path is kept by {string}", async function (this: OduWorld, text
   await keptBySays(this, 1, text);
 });
 
-/** THE CELL SAYS HOW LONG; the sentence behind it says the DAY — and both are
- *  graded, because a reader deciding whether to pin something needs the date. */
 Then("the second path is kept by retention, with a day it leaves", async function (this: OduWorld) {
   const cell = await keptBySays(this, 1, /^retention · in \d+d$/);
   const title = await cell.locator("span").getAttribute("title");
@@ -393,14 +309,6 @@ Then("the second path is not listed", async function (this: OduWorld) {
   );
 });
 
-/**
- * The TAB, while another row is on screen.
- *
- * The title is the page's ambient monitor: it counts runs whether or not they
- * are being drawn. A second row must not switch it off — a run that fails while
- * somebody reads buckets is exactly the fact a title bar exists to carry — so
- * this is asserted from the cache's own scenario rather than the board's.
- */
 Then("the tab counts the failing run", async function (this: OduWorld) {
   await this.waitUntil(
     async () => (await this.page.title()) === "✗ 1 failing · odu",
@@ -411,9 +319,6 @@ Then("the tab counts the failing run", async function (this: OduWorld) {
 Then("a bucket row names it", async function (this: OduWorld) {
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");
-  // A ROW is the control: `button.bucket`, found by the bucket's name. The page
-  // was opened BEFORE the push with no reload after it, which is the property —
-  // the row arrives over the wire the cache publishes on.
   await this.page.locator("button.bucket", { hasText: name }).first().waitFor({
     timeout: 30_000,
   });
@@ -422,9 +327,6 @@ Then("a bucket row names it", async function (this: OduWorld) {
 Then("that row says it holds {int} paths", async function (this: OduWorld, count: number) {
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");
-  // THE COUNT AND ITS WORD ARE A STAT — a number over the thing it counts — so
-  // the card's text carries them on two lines. The claim is about the pair, not
-  // about how they are stacked, so the row's text is normalised before it.
   const row = this.page.locator("button.bucket", { hasText: name }).first();
   await this.waitUntil(
     async () => (await row.innerText()).replace(/\s+/g, " ").includes(`${count} paths`),
@@ -435,8 +337,6 @@ Then("that row says it holds {int} paths", async function (this: OduWorld, count
 Then("that row shows a recent push", async function (this: OduWorld) {
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");
-  // Not an exact age — the point is that the counter moved off "nothing
-  // pushed", which is the fact a fresh bucket shows and a used one does not.
   const row = this.page.locator("button.bucket", { hasText: name }).first();
   await this.waitUntil(
     async () => !(await row.innerText()).includes("nothing pushed"),
@@ -453,14 +353,9 @@ Then("the page shows its substituter URL", async function (this: OduWorld) {
 Then("the page shows its public key", async function (this: OduWorld) {
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");
-  // A bucket's key is `<bucket>-1:<base64>` by construction, so the name is
-  // enough to know the line is the KEY rather than the URL.
   await this.saysThat(this.page.locator("pre.use-block"), "the use block", `${name}-1:`);
 });
 
-// A PUBLIC BUCKET IS READ WITH NO CREDENTIAL, so its `nix.conf` tab is the two
-// settings and nothing else. The block is read once it shows the key, so the
-// absence is of a block that has rendered.
 Then("the page's nix.conf block carries no netrc lines", async function (this: OduWorld) {
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");
@@ -480,8 +375,6 @@ Then("the pushed path is listed", async function (this: OduWorld) {
   await pathRow(this, name).waitFor({ timeout: 30_000 });
 });
 
-/** WHAT THIS SCENARIO'S PUSH STATED, kept in the harness's row bag because it
- *  is the cache row's noun and not the harness's. */
 interface StatedProvenance {
   run: string;
   commit: string;
@@ -493,10 +386,6 @@ function statedProvenance(world: OduWorld): StatedProvenance {
   return held;
 }
 
-/** THE SHORT SHA IS WHAT IS DRAWN, and the whole one is the cell's `title` —
- *  so the assertion is both: the row carries the commit it was pushed with,
- *  and what a reader SEES is the seven characters they would compare against
- *  their own checkout. */
 Then(
   "that path shows the commit it was built from, abbreviated",
   async function (this: OduWorld) {
@@ -509,9 +398,6 @@ Then(
   },
 );
 
-/** A RUN IS A PLACE, so the cell is an ANCHOR: `#/run/<id>` is the board's own
- *  hash route for a run, and a reader who wants to know why a path is here
- *  clicks rather than copies an id into a search box. */
 Then("that path links to the run that pushed it", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no path was arranged");
@@ -521,11 +407,6 @@ Then("that path links to the run that pushed it", async function (this: OduWorld
   assert.strictEqual((await link.innerText()).trim(), run);
 });
 
-/** WANTED, not read. The `wanted` column is the clock GC decides by, and
- *  the push that arranged this scenario has just renewed it — so what is
- *  asserted is the SHAPE of the fact rather than a number that moves while
- *  the page is open. The cell is found under its header, because that is what
- *  a reader compares it by — not by being last, which `kept by` now is. */
 Then("that path says when it was last wanted", async function (this: OduWorld) {
   const name = this.cachePathName;
   assert.ok(name !== undefined && name !== "", "no path was arranged");
@@ -543,9 +424,6 @@ Then("no path is listed", async function (this: OduWorld) {
     .waitFor({ state: "detached", timeout: 30_000 });
 });
 
-/** WHAT THE TABLE HOLDS AFTER A REFRESH — a count of grouped rows, because
- *  the question is whether the page asked the row again, not which path
- *  survived. */
 Then("one path is listed", async function (this: OduWorld) {
   const rows = this.page.locator("table.paths-table tbody tr.table-row");
   await this.waitUntil(
@@ -554,7 +432,6 @@ Then("one path is listed", async function (this: OduWorld) {
   );
 });
 
-/** THE GROUPED ROWS — one per package, whatever each holds. */
 Then("the paths table holds {int} rows", async function (this: OduWorld, count: number) {
   const rows = this.page.locator("table.paths-table tbody tr.table-row");
   await this.waitUntil(
@@ -563,8 +440,6 @@ Then("the paths table holds {int} rows", async function (this: OduWorld, count: 
   );
 });
 
-/** …and the versions under an open one, which are a different kind of row:
- *  the count is what the group's own line claimed. */
 Then(
   "the paths table holds {int} version rows",
   async function (this: OduWorld, count: number) {
@@ -588,8 +463,6 @@ When("I expand that package", async function (this: OduWorld) {
   await pathRow(this, name).locator("button.disclosure-summary").click();
 });
 
-/** THE ORDER IS CHOSEN IN THE HEADER, so this presses the header — the same
- *  gesture a person makes, and the one a keyboard can make too. */
 When("I sort the paths by {string}", async function (this: OduWorld, column: string) {
   await this.page
     .locator("table.paths-table thead")
@@ -608,8 +481,6 @@ Then(
   },
 );
 
-/** WHICH PATH IS AT THE TOP — by name, because the name is what a person
- *  reads there, and the arrangement knows which one is the large one. */
 Then("the {string} path is first", async function (this: OduWorld, which: string) {
   const names = this.cachePathNames ?? [];
   const wanted = which === "large" ? names[0] : names[1];
@@ -634,11 +505,6 @@ Then("the page says that bucket is not there", async function (this: OduWorld) {
   );
 });
 
-// ── administration, through the page ────────────────────────────────────────
-
-/** The bucket token this scenario minted — on a bucket page (its one showing,
- *  and the id its list row carries) or through the CLI for a door push. The
- *  cache's own state, in the harness's row bag. */
 interface MintedHere {
   token?: string;
   id?: string;
@@ -656,8 +522,6 @@ Then("the cache says {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.page.locator(".cache"), "the cache view", text);
 });
 
-/** The create form is folded away until somebody wants it: a list of buckets
- *  is what the screen is, and the form for a new one is a choice. */
 async function openCreateForm(world: OduWorld): Promise<void> {
   const summary = world.page
     .locator('section[aria-label="new bucket"] button.disclosure-summary')
@@ -677,9 +541,6 @@ When("I name a new bucket", async function (this: OduWorld) {
   await this.page.getByPlaceholder("new bucket name").fill(name);
 });
 
-/** `uncheck()`, not a click: it asserts the box ended up clear, so a switch
- *  whose label stopped naming it fails here instead of creating a bucket with
- *  the filter nobody meant. */
 When("I untick {string}", async function (this: OduWorld, label: string) {
   await this.page.getByLabel(label, { exact: true }).uncheck();
 });
@@ -690,9 +551,6 @@ Then("the page opens that bucket", async function (this: OduWorld) {
   await this.page.getByRole("heading", { name, exact: true }).waitFor({ timeout: 30_000 });
 });
 
-/** On a daemon with NO DOOR the page asks for the operator's root token; a
- *  step that administers from a page IT just opened must type it, exactly as a
- *  person would. Signed-in scenarios draw no field, so this is a no-op there. */
 async function typeRootTokenIfAsked(page: OduWorld["page"]): Promise<void> {
   const field = page.getByLabel("root token", { exact: true });
   if ((await field.count()) > 0) await field.fill(ROOT_TOKEN);
@@ -716,8 +574,6 @@ When("I mint a {string} token", async function (this: OduWorld, scope: string) {
   const block = this.page.locator("pre.minted-token");
   await block.waitFor({ timeout: 30_000 });
   minted(this).token = (await block.innerText()).trim();
-  // The id is read off the LIST, where the row the mint just added says so —
-  // the plaintext and the id are two halves the page shows in two places.
   const row = this.page.locator("ul.tokens li", { hasText: "just minted" });
   await row.waitFor({ timeout: 30_000 });
   minted(this).id = (await row.locator("code").first().innerText()).trim();
@@ -726,13 +582,6 @@ When("I mint a {string} token", async function (this: OduWorld, scope: string) {
 When("I name the bucket {string}", async function (this: OduWorld, domain: string) {
   await this.page.getByPlaceholder("cache.example.org").fill(domain);
   await this.page.getByRole("button", { name: "Set domain", exact: true }).click();
-  // The USE BLOCK is the proof the row accepted it: it is redrawn from the
-  // published bucket row, not from the field that was typed.
-  //
-  // A REFUSAL IS AN ANSWER, and this step reads it. The row refuses a name
-  // another bucket already holds, and a step that watched only the block
-  // turned that sentence into a two-minute timeout naming nothing — which is
-  // the whole of what issue #170 looked like from a lane log.
   const refusal = this.page
     .getByRole("region", { name: "domain" })
     .locator("p.receipt-bad .receipt-text");
@@ -744,7 +593,6 @@ When("I name the bucket {string}", async function (this: OduWorld, domain: strin
 });
 
 Then("the domain answer says {string}", async function (this: OduWorld, text: string) {
-  // Every control on this board answers in a RECEIPT, refusals included.
   const answer = this.page.locator("p.receipt", { hasText: "Named this bucket" });
   await answer.waitFor({ timeout: 30_000 });
   await until(`the domain answer to say ${text}`, async () =>
@@ -761,21 +609,12 @@ Then("the page's substituter URL is {string}", async function (this: OduWorld, h
   );
 });
 
-/** WHICH BLOCK THE SET-UP PANEL IS SHOWING. The six things a person pastes
- *  are one block behind a tablist now — the panel used to be three stacked
- *  panels above the paths — so a step that reads the push block chooses it
- *  first. `nix.conf` is the tab the panel opens on, so a reader of
- *  `pre.consume-block` needs nothing. */
 async function openSetupTab(world: OduWorld, name: string): Promise<void> {
   const tab = world.page.getByRole("tab", { name, exact: true });
   await tab.waitFor({ timeout: 30_000 });
   if ((await tab.getAttribute("aria-selected")) !== "true") await tab.click();
 }
 
-/** ONE FACT, AND IT IS THE ONE ABOVE IT. Since `--cache`, a push names the
- *  substituter URL and the cache states the rest in its own `nix-cache-info`
- *  — so a bucket that has just been given a DOMAIN has a push block that
- *  follows it, and the two blocks on the page cannot name two caches. */
 Then("the push block names the same cache the nix.conf block does", async function (
   this: OduWorld,
 ) {
@@ -806,8 +645,6 @@ When("the API creates a private bucket as this person", function (this: OduWorld
 When("the CLI reads the bucket's facts with no account", function (this: OduWorld) {
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");
-  // NO ODU_TOKEN, NO ROOT TOKEN: the substituter URL is what a person with a
-  // browser and a terminal has before signing in.
   this.cliAnswer = oduCli(this.service, ["cache", "use", name, "--origin", this.service.origin], {
     ODU_TOKEN: "",
     ODU_ROOT_TOKEN: "",
@@ -854,8 +691,6 @@ Then("the page is the bucket's public page", function (this: OduWorld) {
   assert.strictEqual(visited.status, 200, "the substituter URL did not answer 200");
   assert.ok(visited.body.includes("extra-substituters"), "the page carries no nix.conf lines");
   assert.ok(visited.body.includes("odu cache use "), "the page carries no `odu cache use` line");
-  // NOT THE BOARD: the SPA shell has the board's row buttons; this page has a
-  // sentence and a pre block.
   assert.ok(!visited.body.includes('aria-label="board rows"'), "the board's SPA answered");
 });
 
@@ -955,8 +790,6 @@ When("I open a path under the cache that names nothing", async function (this: O
   const name = this.cacheBucket;
   assert.ok(name !== undefined, "no bucket was arranged");
   const url = `${this.service.origin}/cache/${name}/nope`;
-  // THE 404 IS THE ANSWER THIS STEP ASKS FOR. Declared before the navigation,
-  // so the generic "no page errors" check allows exactly this URL and status.
   this.expectedResponses.push({ status: 404, url });
   const response = await this.page.goto(url);
   this.visited = { status: response?.status() ?? null, body: await this.page.content() };
@@ -1021,17 +854,10 @@ When("I revoke the minted token", async function (this: OduWorld) {
   await this.page.getByRole("button", { name: `revoke ${id}`, exact: true }).click();
 });
 
-/** A LEAF PATH PUSHED WITH THE TOKEN THE PAGE MINTED, and only it: the push
- *  talks to the cache's HTTP API with a bucket credential, so a token the page
- *  minted wrongly fails here rather than three steps later. */
 function pushWithMintedToken(world: OduWorld): string {
   return pushManyWithMintedToken(world, 1)[0] as string;
 }
 
-/** The same push, with `count` leaf paths in one command: a pin over a
- *  dozen-path closure is what the roots disclosure exists for, and twelve
- *  `nix store add-file`s in one push is the cheapest honest way to arrange
- *  one. */
 function pushManyWithMintedToken(world: OduWorld, count: number): string[] {
   const bucket = world.cacheBucket;
   const token = minted(world).token;
@@ -1062,31 +888,21 @@ When("a path is pushed with that token from the CLI", function (this: OduWorld) 
   this.cachePaths = [path];
 });
 
-/** TWO leaf paths, neither referencing the other, so a pin over the first is
- *  the WHOLE difference between them when the collector comes — no clock has
- *  to move for one to go and the other to stay. */
 When("two paths are pushed with that token from the CLI", function (this: OduWorld) {
   const paths = [pushWithMintedToken(this), pushWithMintedToken(this)];
   this.cachePath = paths[0] as string;
   this.cachePaths = paths;
 });
 
-/** A CLOSURE BIG ENOUGH TO BE A WALL — twelve leaf paths in one push, which
- *  is two more than a pin row draws before it folds the rest away. */
 When("twelve paths are pushed with that token from the CLI", function (this: OduWorld) {
   const paths = pushManyWithMintedToken(this, 12);
   this.cachePath = paths[0] as string;
   this.cachePaths = paths;
 });
 
-/** THE PINS ARE A TAB NOW, beside the paths: they are both "what is in this
- *  bucket", and the roots of every pin printed down the sidebar were most of
- *  this page's DOM. */
 When("I open the pins", async function (this: OduWorld) {
   await this.page.getByRole("tab", { name: "Pins", exact: true }).click();
   await this.page.locator('section[aria-label="pins"]').waitFor({ timeout: 30_000 });
-  // The tab is the list AND the form that adds to it; a scenario that says it
-  // opened the pins has both in front of it.
   await openPinForm(this);
 });
 
@@ -1095,8 +911,6 @@ When("I open the paths", async function (this: OduWorld) {
   await this.page.locator(".cache-paths").waitFor({ timeout: 30_000 });
 });
 
-/** The pin form is folded away until somebody wants it: the list is what the
- *  tab is for, and making one pin is a choice. */
 async function openPinForm(world: OduWorld): Promise<void> {
   const summary = world.page
     .locator('section[aria-label="pins"] button.disclosure-summary')
@@ -1122,7 +936,6 @@ When("I pin that path as {string}", async function (this: OduWorld, name: string
   await pinThatPath(this, name);
 });
 
-/** The same control, said the way a scenario holding TWO paths has to say it. */
 When("I pin the first path as {string}", async function (this: OduWorld, name: string) {
   await pinThatPath(this, name);
 });
@@ -1133,23 +946,17 @@ When("I pin every pushed path as {string}", async function (this: OduWorld, name
   await pinPaths(this, name, paths);
 });
 
-/** One pin's row in the table. */
 function pinRow(world: OduWorld, name: string): Locator {
   return world.page.locator("table.pins-table tr.table-row", { hasText: name }).first();
 }
 
-/** What that pin holds, which is a row of its OWN under it: a note row is a
- *  sibling of the row it belongs to, so it carries the pin's name. */
 function pinRoots(world: OduWorld, name: string): Locator {
   return world.page.locator(`table.pins-table [data-pin="${name}"]`);
 }
 
-/** Open what a pin holds, once. */
 async function openRoots(world: OduWorld, name: string): Promise<void> {
   const summary = pinRow(world, name).locator("button.disclosure-summary").first();
   await summary.waitFor({ timeout: 30_000 });
-  // The open bit is the LIST's now, not the platform's, and it is announced
-  // on the control: a second click would close what this is about to read.
   if ((await summary.getAttribute("aria-expanded")) !== "true") await summary.click();
 }
 
@@ -1157,10 +964,6 @@ When("I expand what the pin {string} holds", async function (this: OduWorld, nam
   await openRoots(this, name);
 });
 
-/** WHAT A PIN HOLDS, beside the button that takes it away: a name on its own
- *  says that something is kept, never what, and a pin nobody can read is a
- *  pin nobody dares remove. The disclosure is opened by the `When` above —
- *  an assertion that acted could not tell "drawn" from "reachable". */
 Then(
   "the pin {string} is listed holding that path",
   async function (this: OduWorld, name: string) {
@@ -1170,9 +973,6 @@ Then(
   },
 );
 
-/** THE WALL THIS PAGE NO LONGER DRAWS, counted in the DOM rather than
- *  described: a pin of a big closure renders ten store paths, whatever its
- *  closure holds, until somebody asks for the rest. */
 Then(
   "the pin {string} renders {int} store paths",
   async function (this: OduWorld, name: string, count: number) {
@@ -1184,12 +984,7 @@ Then(
   },
 );
 
-/** …and they are not merely off the bottom of a long list: they are not drawn
- *  at all until the disclosure is open. */
 Then("the pin {string} keeps its roots folded away", async function (this: OduWorld, name: string) {
-  // NOT DRAWN AT ALL, not merely hidden: the disclosure's box is mounted when
-  // it is open, which is the whole reason a pin of a 1 789-path closure is one
-  // row until somebody asks.
   await pinRow(this, name).waitFor({ timeout: 30_000 });
   assert.strictEqual(
     await pinRoots(this, name).locator("code.path").count(),
@@ -1209,9 +1004,6 @@ When("I unpin {string}", async function (this: OduWorld, name: string) {
   await this.page.getByRole("button", { name: `unpin ${name}`, exact: true }).click();
 });
 
-/** The list is ASKED AGAIN after an unpin rather than patched in place, so the
- *  empty answer here is `pin.list`'s and not the page's memory of its own
- *  click. */
 Then("the pin list says nothing is pinned", async function (this: OduWorld) {
   await this.saysThat(
     this.page.locator('section[aria-label="pins"]'),
@@ -1224,9 +1016,6 @@ function deleteSection(world: OduWorld): Locator {
   return world.page.locator('section[aria-label="delete"]');
 }
 
-/** THE GATE IS THE CONTROL. A delete has no undo, so the button is dead until
- *  the bucket's own name has been typed — graded here, before it is, because a
- *  confirm field nobody has to satisfy is decoration. */
 Then("the delete button is disabled until the name is typed", async function (this: OduWorld) {
   const button = deleteSection(this).getByRole("button", { name: "Delete bucket", exact: true });
   await button.waitFor({ timeout: 30_000 });
@@ -1243,9 +1032,6 @@ When("I type the bucket's name to confirm", async function (this: OduWorld) {
   await deleteSection(this).getByLabel(`type ${name} to confirm`, { exact: true }).fill(name);
 });
 
-/** EVERY READ ON THAT PAGE IS ABOUT TO REFUSE, so a delete that worked leaves
- *  it: the list is the only page left that can say anything true about this
- *  bucket. */
 Then("the page returns to the cache list", async function (this: OduWorld) {
   await this.page.getByRole("heading", { name: "Cache", exact: true }).waitFor({ timeout: 30_000 });
   await this.waitUntil(
@@ -1263,9 +1049,6 @@ Then("that bucket is no longer listed", async function (this: OduWorld) {
     .waitFor({ state: "detached", timeout: 30_000 });
 });
 
-/** THE SAME ADDRESS THAT ANSWERED 200 two steps ago, asked with the same
- *  token: an unknown bucket is a 404 before anything is authorized, so this is
- *  the objects being GONE rather than a credential being refused. */
 Then("the bucket's narinfo answers 404", async function (this: OduWorld) {
   const path = this.cachePath;
   assert.ok(path !== undefined && this.cacheBucket !== undefined, "nothing was pushed");
@@ -1290,27 +1073,14 @@ When("I set the retention to {string} days", async function (this: OduWorld, day
   await this.page.getByRole("button", { name: "Set retention", exact: true }).click();
 });
 
-/** THE PLAN'S OWN NUMBER, which is not the bucket's: a different field, with
- *  no "set" button behind it, read when the dry run is asked for. Addressed
- *  by its exact label so it can never resolve to the retention control above
- *  — the two being told apart is most of what this scenario is about. */
 When("I set the dry run retention to {string} days", async function (this: OduWorld, days: string) {
-  // `retention` INSIDE the collection's own panel: the settings column has a
-  // `retention days` field of its own, and the two are different questions —
-  // this one asks, that one keeps.
   await gcSection(this).getByLabel("retention", { exact: true }).fill(days);
 });
 
-/** THE FACTS LINE at the top of the bucket page, which is drawn from the row
- *  the cache republished — so a number read here is the bucket's, never the
- *  field that was typed into. */
 Then("the bucket's facts say {string}", async function (this: OduWorld, text: string) {
   await this.saysThat(this.page.locator("p.page-sub"), "the bucket's facts", text);
 });
 
-/** The collection's section — the dry run, the button, and the report the
- *  button leaves. The bucket's own path list carries an `ol.paths` too, so
- *  every GC assertion is scoped to this section. */
 function gcSection(world: OduWorld): Locator {
   return world.page.locator('section[aria-label="garbage collection"]');
 }
@@ -1328,9 +1098,6 @@ Then("the dry run names the unpinned path", async function (this: OduWorld) {
     .waitFor({ timeout: 30_000 });
 });
 
-/** The NEGATIVE half, and it means something only after the positive one: the
- *  list has rendered, so a path missing from it is one the pin holds rather
- *  than one the page has not drawn yet. */
 Then("the dry run does not name the pinned path", async function (this: OduWorld) {
   const path = this.cachePath;
   assert.ok(path !== undefined, "no path was pinned");
@@ -1344,8 +1111,6 @@ Then("the dry run does not name the pinned path", async function (this: OduWorld
 Then("the push block names the minted token", async function (this: OduWorld) {
   const token = minted(this).token;
   assert.ok(token !== undefined, "no token was minted");
-  // The once-shown moment is when a person pastes it into a CI secret, so the
-  // push block carries it while the page can still show it.
   await openSetupTab(this, "push");
   await this.saysThat(this.page.locator("pre.push-block"), "the push block", token);
 });
@@ -1358,33 +1123,10 @@ When("I type a wrong root token", async function (this: OduWorld) {
   await this.page.getByLabel("root token", { exact: true }).fill("not-the-root-token");
 });
 
-// ── a second store, and a bucket that moves to it ───────────────────────────
-
-/**
- * A WORLD WITH SOMEWHERE TO MOVE A BUCKET TO.
- *
- * `$ODU_OBJECT_STORES` is read ONCE at boot, so the daemon that declares a
- * second store cannot be the worker's loopback one — it is a daemon of this
- * row's own, beside a real S3 service (versitygw, the same gateway the
- * cache's unit suite runs against), so the objects really do travel.
- *
- * IT IS STARTED HERE rather than in the harness because a store is the
- * CACHE's noun: `support/hooks.ts` owns the three worlds every row shares and
- * names no row's vocabulary, and `@odu/objects/testing` is a dependency only
- * this package has. The step hands it over as `this.service`, which is the
- * handle every cache step already uses — so the whole vocabulary above works
- * unchanged against it.
- *
- * One per WORKER, not per scenario: a daemon is seconds to start and the move
- * is what the scenario is about.
- */
 const SECOND_STORE = "gw";
 let gateway: Gateway | undefined;
 let storesWorld: Service | undefined;
 
-/** A port the kernel vouches for. The harness reserves one per world it owns
- *  and this world is not one of them, so it is asked for the same way: bind
- *  zero, read what was assigned, let it go. */
 async function freePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1435,25 +1177,6 @@ AfterAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
   }
 });
 
-/**
- * A `@tunnel` SCENARIO GIVES ITS BUCKET'S NAME BACK.
- *
- * A domain is daemon-global — one name, one bucket — and the tunnel world is
- * one daemon per cucumber worker, shared by every `@tunnel` scenario that
- * worker runs. A scenario that left `cache.tunnel.test` bound made the next
- * one's "Set domain" a refusal, and which scenarios share a worker is
- * cucumber's own scheduling, so that read as a lane-only flake (issue #170).
- *
- * It is also what makes "the tunnel panel shows <name> as live" the
- * scenario's OWN fact: a route of that name the previous scenario left live
- * satisfies the assertion without this one having wired anything.
- *
- * The world is READ rather than the steps trusted: a scenario names two
- * buckets, and one that failed half way named whatever it reached. A verb
- * that refuses is written to stderr rather than raised — a teardown's own
- * failure would replace the scenario's verdict — and a leak that survives it
- * is caught by `I name the bucket`, which reads the refusal.
- */
 After({ tags: "@tunnel", timeout: RUN_SETUP_TIMEOUT }, function (this: OduWorld) {
   const listed = cacheVerb(this, "bucket_list", { rootToken: ROOT_TOKEN });
   if (listed.status !== 0) {
@@ -1465,7 +1188,6 @@ After({ tags: "@tunnel", timeout: RUN_SETUP_TIMEOUT }, function (this: OduWorld)
   };
   for (const bucket of answer.buckets ?? []) {
     if (bucket.domain === null) continue;
-    // No `domain` field is how the verb spells "take the name away".
     const cleared = cacheVerb(this, "bucket_domain", { rootToken: ROOT_TOKEN, bucket: bucket.name });
     if (cleared.status !== 0) {
       process.stderr.write(
@@ -1483,16 +1205,10 @@ Given(
   },
 );
 
-/** The move's own panel. The bucket page draws one card per store it could
- *  move to, and the facts line above is where the move ENDS — so every
- *  assertion about the control itself is scoped here. */
 function migrateSection(world: OduWorld): Locator {
   return world.page.locator('section[aria-label="migrate"]');
 }
 
-/** A CARD, by its accessible name — which is the store's name followed by the
- *  sentence explaining what kind of store it is, so the match is a prefix
- *  rather than the whole of it. */
 function storeCard(world: OduWorld, store: string): Locator {
   return migrateSection(world).getByRole("radio", { name: store });
 }

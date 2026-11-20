@@ -1,14 +1,3 @@
-/**
- * ONE SOURCE FOR THE BLOCKS A PERSON COPIES.
- *
- * A bucket's page prints five paste-blocks (plus netrc on a private bucket) —
- * four for a Nix client, one for a workflow — and `odu cache use` prints the
- * same strings; the cache docs quote them. The docs are prose nobody compiles,
- * so the only thing that keeps them from drifting is this: the docs must
- * contain exactly what each function prints for the docs' example bucket,
- * placeholder and all.
- */
-
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -68,9 +57,6 @@ describe("the copy a bucket page and the docs share", () => {
   });
 
   it("names ONE fact in the action's inputs — the substituter — and the token as a secret", () => {
-    // The push origin and the bucket are the CACHE's to state
-    // (`nix-cache-info`'s `Odu-Origin`/`Odu-Bucket`), so a workflow that was
-    // written once cannot carry a stale origin for a bucket that moved.
     const url = "https://odu.example.com/cache/main";
     const block = actionsPushBlock({ url, ref: ACTION_REF_PLACEHOLDER });
     expect(block).toContain(`cache: ${url}`);
@@ -78,9 +64,6 @@ describe("the copy a bucket page and the docs share", () => {
     expect(block).not.toContain("bucket:");
     expect(block).toContain("token: ${{ secrets.ODU_CACHE_TOKEN }}");
     expect(block).toContain("uses: juspay/odu/.github/actions/push@");
-    // Pinned by revision, because the action builds the pusher from the commit
-    // it is pinned to. The PLACEHOLDER is what a build that cannot name its
-    // commit offers; a daemon that can offers its own.
     expect(block).toContain(ACTION_REF_PLACEHOLDER);
     expect(actionsPushBlock({ url, ref: "abc1234" })).toContain(
       "uses: juspay/odu/.github/actions/push@abc1234",
@@ -98,13 +81,7 @@ describe("the copy a bucket page and the docs share", () => {
   });
 
   it("names ONE fact — the substituter — and never a bucket or an origin", () => {
-    // The push origin and the bucket are the CACHE's to state, in its own
-    // `nix-cache-info`, exactly as the Actions block above has it. A block
-    // that spelled them here is three facts a reader keeps current for a
-    // bucket that may gain a domain or move stores.
     const block = pushBlock({ url: "https://odu.example.com/cache/main/", token: null });
-    // The trailing slash is dropped: `--cache <url>/` and `--cache <url>` are
-    // the same cache, and only one of them is what `odu cache use` printed.
     expect(block).toContain("odu cache push --cache https://odu.example.com/cache/main <paths>");
     expect(block).not.toContain("--origin");
     expect(block).not.toContain("/cache/main/");
@@ -112,7 +89,6 @@ describe("the copy a bucket page and the docs share", () => {
 
   it("names the credential each block needs", () => {
     const use = useBlock({ url: URL, publicKey: KEY, public: false, home: null });
-    // A private bucket READS with a read token; a push WRITES with a write one.
     expect(use).toContain(`password ${READ_TOKEN_PLACEHOLDER}`);
     expect(use).toContain("extra-substituters");
     expect(useCommand("main")).toBe("odu cache use main");
@@ -126,8 +102,6 @@ describe("the copy a bucket page and the docs share", () => {
   });
 
   it("names the netrc machine by its host alone, which is all a netrc matches", () => {
-    // `machine 127.0.0.1:18440` matches nothing, so Nix would send no
-    // credential at all.
     expect(netrcBlock({ url: URL, home: null })).toContain(
       `\nmachine 127.0.0.1 password ${READ_TOKEN_PLACEHOLDER}`,
     );

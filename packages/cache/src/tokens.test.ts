@@ -1,12 +1,3 @@
-/**
- * Tokens: what a scope means, what a glob matches, and when a token stops
- * working.
- *
- * The four ways a token can fail are separate answers on purpose — `odu cache`
- * says "revoked" or "expired" rather than "unauthorised", because the person
- * holding it can act on the first two and not on the third.
- */
-
 import { describe, expect, it } from "bun:test";
 import { type CacheRepo, openCacheRepo, type TokenRow } from "./db";
 import {
@@ -74,8 +65,6 @@ describe("bucket globs", () => {
   });
 
   it("treats a pattern as a pattern, not as a regex", () => {
-    // The day a glob becomes a regex is the day `cache.nixos.org-1` starts
-    // matching more than it was meant to.
     expect(globMatches("cache.nixos.org-1", "cacheXnixosXorg-1")).toBe(false);
   });
 });
@@ -166,8 +155,6 @@ describe("the root token", () => {
     expect(rootTokenMatches("secret", "secret")).toBe(true);
     expect(rootTokenMatches("secret", "secreT")).toBe(false);
     expect(rootTokenMatches("secret", "")).toBe(false);
-    // The failure this exists to prevent: no configured token must not mean
-    // "anything matches", least of all the empty string.
     expect(rootTokenMatches(null, "")).toBe(false);
     expect(rootTokenMatches(null, "anything")).toBe(false);
     expect(rootTokenMatches("", "")).toBe(false);

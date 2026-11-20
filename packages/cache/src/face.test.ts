@@ -1,20 +1,3 @@
-/**
- * THE COMPILER IS PART OF THIS VIEW TOO.
- *
- * `./face` is Solid JSX in a package that is mostly not — and it ships into
- * `@odu/web-ui`'s bundle, where `scripts/build-web-ui.ts` claims every `.tsx`
- * there is. That is what makes a compiler check worth repeating here: the day
- * the view moves again, or a bundler changes its loader, the failure is a page
- * that looks right in a screenshot and loses the caret in a field, the focus
- * ring on a button and the scroll position of a list somebody was reading. It
- * passes a typecheck and it bundles.
- *
- * The claim is the same one `@odu/web-ui`'s `compile.test.ts` makes for its own
- * views, over the same pinned presets: DOM-mode Solid, cloned templates, no
- * `jsx-runtime`. The presets are reached through the ROOT's toolchain — they are
- * build-time dependencies, never runtime ones.
- */
-
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -49,17 +32,10 @@ describe("the Solid compiler that builds the Cache view", () => {
     // presence is the signature of the DOM-mode Solid transform.
     expect(code).toContain('from "solid-js/web"');
     expect(code).toContain("_$template(");
-    // The tell of a generic React-shaped transform, which would bundle and
-    // render and re-run the whole component on every update.
     expect(code).not.toContain("jsx-runtime");
   });
 });
 
-/**
- * WHAT AN EMPTY CACHE SAYS DEPENDS ON WHO IS LOOKING — and a mistake here is a
- * sentence pointing a member at a form they cannot see, or an admin at a verb
- * they do not need. Pure, so it is pinned here rather than in a browser.
- */
 describe("the empty state names what this person can do", () => {
   it("points an admin at the form below it", async () => {
     const { emptyBucketsText } = await import("./face");
@@ -82,19 +58,6 @@ describe("the empty state names what this person can do", () => {
   });
 });
 
-/**
- * A PIN'S NAME IS THREE FACTS, and the page reads them out of it.
- *
- * CI never types a pin name: the push action derives
- * `<owner>/<repo>@<ref>/<system>`, so a busy bucket's list is forty of them
- * and the table draws the ref and the system as the separate things they
- * are. The parse is pure, so it is pinned here rather than in a browser.
- *
- * The cases that matter are the ones a regex gets wrong: a ref with a slash
- * in it (`release/2.0`), which is legal and common, and a name that is NOT a
- * derived one at all — inventing a repository for `release-1.2` would be a
- * guess printed as a fact.
- */
 describe("a pin's name is split into the facts it carries", () => {
   it("splits a derived name into repository, ref and system", async () => {
     const { pinName } = await import("./face");
@@ -118,16 +81,6 @@ describe("a pin's name is split into the facts it carries", () => {
   });
 });
 
-/**
- * A HOSTILE NAME IS JUST A NAME — bounded, whatever it looks like.
- *
- * The parse used to be a regex with `.+` between the `@` and the last `/`,
- * and CodeQL was right about it: `a/b@!/!/!/…` is quadratic backtracking,
- * and a pin name comes off the API, so a bucket with one of these in it
- * would hang the tab that listed it. The parse is three index scans now, so
- * the claim is a BUDGET rather than a shape — ten thousand slashes, answered
- * at once, and still answered correctly.
- */
 describe("a pin name is parsed in one pass", () => {
   it("answers a pathological name promptly, and reads it as nobody's repository", async () => {
     const { pinName } = await import("./face");
@@ -135,7 +88,6 @@ describe("a pin name is parsed in one pass", () => {
     const started = performance.now();
     const parsed = pinName(hostile);
     const took = performance.now() - started;
-    // A trailing `/` means no system, so the whole string is the name.
     expect(parsed).toEqual({ repo: null, ref: hostile, system: null });
     expect(took, `the parse took ${took}ms on a 20k-character name`).toBeLessThan(100);
   });
@@ -152,13 +104,6 @@ describe("a pin name is parsed in one pass", () => {
   });
 });
 
-/**
- * WHERE A READ IS ANSWERED is the fact 2.8 added to the bucket page, and it is
- * the one fact on that line a person checks after binding a domain: a bucket
- * whose reads still come from odu looks identical otherwise. What is pinned
- * here is the HOST it extracts from a substituter URL — the part that can be
- * wrong — and not the sentence it is put in.
- */
 describe("the facts line says who answers a read", () => {
   it("names the store's host when the reads left odu", async () => {
     const { readsFromText } = await import("./face");
@@ -182,11 +127,6 @@ describe("the facts line says who answers a read", () => {
   });
 });
 
-/**
- * THE ONE COMPUTATION IN A MOVE'S SENTENCE is its count: "1 object" against
- * "12 objects", on a number that arrives from the row. The wording around it
- * is wording, and is not pinned.
- */
 describe("a migration counts what it has moved", () => {
   const moving = (over: Partial<CacheMigration> = {}): CacheMigration => ({
     to: "r2",
@@ -208,13 +148,6 @@ describe("a migration counts what it has moved", () => {
   });
 });
 
-/**
- * THE PATHS TABLE IS A VIEW OVER THE PAGE THE ROW ANSWERED — and since round
- * 3, only a view: the counting, the summing and the order are the database's
- * (`db.test.ts`, "a bucket's paths, by package"), because a client holding
- * one page cannot count a bucket. What is left here is the mapping of two
- * answer shapes onto the one row the table draws.
- */
 describe("the paths table draws what the row answered", () => {
   const path = (
     name: string,
@@ -233,8 +166,6 @@ describe("the paths table draws what the row answered", () => {
     created: over.created ?? 1_000,
     hits: over.hits ?? 0,
     lastWanted: over.lastWanted ?? 1_000,
-    // OMITTED, not `undefined`: the fields are optional on the wire, so a
-    // case that states neither is answering as a 4.6 daemon does.
     ...(over.run === undefined ? {} : { run: over.run }),
     ...(over.commit === undefined ? {} : { commit: over.commit }),
   });
@@ -267,12 +198,8 @@ describe("the paths table draws what the row answered", () => {
         hits: 7,
         pushed: 30,
         wanted: 50,
-        // The newest version's, carried straight through — the row decided
-        // which version that is.
         run: "run-9",
         commit: "f".repeat(40),
-        // A DAEMON OLDER THAN 4.9 SAYS NOTHING about what keeps it, and the
-        // cell draws nothing rather than a guess.
         keptBy: null,
       },
     ]);
@@ -286,14 +213,10 @@ describe("the paths table draws what the row answered", () => {
         path("odu-base-0.1.0", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", { narSize: 100, hits: 1 }),
       ],
     });
-    // THE ORDER IS THE ROW'S: the view re-sorts nothing, or a sort click
-    // would answer twice and disagree with the next page's cursor.
     expect(rows.map((row) => row.name)).toEqual(["zlib-1.3", "odu-base-0.1.0"]);
     expect(rows.every((row) => row.versions === 1)).toBe(true);
     expect(rows.map((row) => row.bytes)).toEqual([900, 100]);
     expect(rows[0]?.pushed).toBe(1_000);
-    // A DAEMON OLDER THAN 4.7 ANSWERS NEITHER FIELD, and the table draws
-    // "nothing known" rather than carrying `undefined` into a cell.
     expect(rows[0]).toMatchObject({ run: null, commit: null });
   });
 
@@ -336,16 +259,11 @@ describe("the paths table draws what the row answered", () => {
   });
 
   it("splits a store path into the hash a person compares and the name they read", async () => {
-    // THE RULE IS THE CONTRACT'S: the row groups a bucket by this name when
-    // it stores a path, and the board labels a row and splits the hash off
-    // with the same function.
     const { storePathParts } = await import("./surface");
     expect(storePathParts("/nix/store/abcd1234abcd1234abcd1234abcd1234-hello-2.12")).toEqual({
       hash: "abcd1234abcd1234abcd1234abcd1234",
       name: "hello-2.12",
     });
-    // A path that is not that shape keeps all of itself rather than being
-    // given a hash it does not have.
     expect(storePathParts("not-a-store-path")).toEqual({
       hash: "",
       name: "not-a-store-path",
@@ -353,11 +271,6 @@ describe("the paths table draws what the row answered", () => {
   });
 });
 
-/**
- * WHY A PATH IS STILL HERE, AND WHEN IT GOES — the cell a reader scans and
- * the sentence behind it, per kind. The verdict is the row's; what is pinned
- * here is what the page makes of it against its own clock.
- */
 describe("the kept by column says why a path stays, and until when", () => {
   const DAY = 24 * 60 * 60 * 1000;
   const NOW = Date.UTC(2026, 10, 13);

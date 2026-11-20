@@ -1,11 +1,3 @@
-/**
- * THE OLD STORE, as the route suite's transition fixture.
- *
- * The cache no longer delegates bytes to a store; this fake stands only for the
- * ONE-TIME migration's source. A route test seeds a path's bytes, then asks the
- * cache for it while the row has no object yet — the legacy branch — and the
- * fake records that it was dumped.
- */
 import { storePathHash } from "../src/narinfo";
 
 export const hashOf = (storePath: string): string => storePathHash(storePath);
@@ -35,7 +27,6 @@ export class FakeStore {
     return stored;
   }
 
-  /** What the old store hands the migration/transition: the seeded bytes. */
   dump(storePath: string): ReadableStream<Uint8Array> {
     this.calls.push({ op: "dump", storePath });
     const entry = this.paths.get(storePath);

@@ -1,13 +1,3 @@
-/**
- * The narinfo format, the fingerprint, and Nix's key format.
- *
- * The base32 vector is a REAL narinfo from cache.nixos.org, because the only
- * thing that can tell you whether a hash spelling is right is a client that
- * already agreed with Nix. The rest is round-trip and refusal: a narinfo odu
- * writes must parse back, and one it cannot parse must say so rather than
- * produce a plausible empty record.
- */
-
 import { describe, expect, it } from "bun:test";
 import {
   base32,
@@ -171,9 +161,6 @@ describe("ed25519 keys", () => {
 
     expect(verifySignature(a.publicKey, `${fingerprint} `, signature)).toBe(false);
     expect(verifySignature(b.publicKey, fingerprint, signature)).toBe(false);
-    // The NAME is part of the signature: Nix picks the trusted key by it, so a
-    // correct signature carrying somebody else's name is not a signature by
-    // that key.
     expect(verifySignature(`b-1:${a.publicKey.split(":")[1] as string}`, fingerprint, signature)).toBe(
       false,
     );

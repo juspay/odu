@@ -9,8 +9,6 @@
  *
  * Nix 2.17 through 2.34 hash the zeroed bytes alone (`withoutOffsets`); Nix
  * 2.35 and later follow them with `|<offset>` per occurrence (`withOffsets`).
- * The expected values are literals, so a suite holding odu's hashing to them
- * is held to Nix, not to itself.
  */
 export const NIX_RECORDED = {
   selfref234: {

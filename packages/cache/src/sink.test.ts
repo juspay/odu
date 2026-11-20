@@ -13,8 +13,6 @@ describe("writeAll", () => {
     };
     const chunk = new Uint8Array(10).fill(7);
     await writeAll(sink, chunk, "a part");
-    // 5, 2, 1, 1, 1 — and never more than the
-    // bytes the chunk had left.
     expect(written).toEqual([5, 2, 1, 1, 1]);
   });
 

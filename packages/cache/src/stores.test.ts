@@ -1,11 +1,3 @@
-/**
- * THE DECLARED STORES — read once, refused with a fact, and held as values.
- *
- * The parse is driven with an in-memory `readFile`, so every refusal is a case
- * here rather than a daemon that would not start. The two cache-level rules —
- * `bucket.create` refuses a store nobody declared, and a bucket whose store
- * went away refuses the mount — run against a real cache.
- */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -54,8 +46,6 @@ describe("reading the declarations", () => {
         secretAccessKey: "s3cr3t",
       },
     });
-    // WHAT THE BOARD IS TOLD: names, kinds and the public URL, never an
-    // endpoint or a key.
     expect(storeFacts(reading.stores)).toEqual([
       { name: "local", kind: "local", default: true, publicUrl: null },
       { name: "r2", kind: "s3", default: false, publicUrl: null },

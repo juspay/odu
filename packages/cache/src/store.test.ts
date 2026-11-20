@@ -1,13 +1,3 @@
-/**
- * The store's edges: what `nix path-info` is allowed to have said, what a NAR
- * stream does when `nix` fails, and what an upload's hash has to be.
- *
- * The first is a shape question — three Nixes answer three ways — and the
- * second is the one that turns a broken read into a silent 200: a `dump-path`
- * that dies halfway leaves a VALID zstd frame of a truncated NAR, so the stream
- * must fail rather than close.
- */
-
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -58,9 +48,6 @@ afterEach(() => {
   scratch = null;
 });
 
-/** A PATH with a stand-in `nix` in front of the real one — the seam
- *  `default.nix` documents as "the host that provides the daemon provides the
- *  client", turned into something a suite can make fail. */
 function withFakeNix(script: string): () => void {
   scratch = mkdtempSync(join(tmpdir(), "odu-cache-store-"));
   const path = join(scratch, "nix");
@@ -93,9 +80,6 @@ describe("nix path-info's three shapes", () => {
   });
 
   it("reads the ARRAY every Nix before --json-format printed", () => {
-    // The fallback path runs only on Nix ≤ 2.18, and that Nix answers an array
-    // keyed by each record's own `path` — keyed by index, every entry would be
-    // dropped and the narinfo PUT would be a 500.
     const table = parsePathInfoTable(JSON.stringify([{ path: HELLO, ...record }]));
     expect(table.get(HELLO)?.narHash).toBe(NAR);
     expect(table.get(HELLO)?.storePath).toBe(HELLO);
@@ -132,8 +116,6 @@ describe("a NAR stream", () => {
   it("fails the read when the pipeline cannot even be spawned", async () => {
     const empty = mkdtempSync(join(tmpdir(), "odu-cache-path-"));
     const restore = withFakeNix("#!/bin/sh\nexit 0\n");
-    // A PATH with neither program on it: `spawn` fails, no `close` ever
-    // arrives, and the stream must still settle.
     process.env.PATH = empty;
     try {
       const reader = nixDump(HELLO, null).getReader();
@@ -144,13 +126,6 @@ describe("a NAR stream", () => {
     }
   });
 
-  /**
-   * THE DEFECT, FORCED. A non-blocking FIFO read answers `EAGAIN` — "a writer
-   * holds me and has nothing this instant" — and the loop used to report that
-   * as a zero-byte read, which ends the stream as soon as the writer has
-   * ended. Both are true at once for any NAR small enough that zstd's only
-   * write and the pipeline's exit land in the same breath.
-   */
   it("keeps reading when a writer has nothing YET", async () => {
     let fifo = "";
     let fd = -1;
@@ -158,8 +133,7 @@ describe("a NAR stream", () => {
     const reader = fifoStream((path) => {
       fifo = path;
       // O_RDWR never blocks and counts as a writer, so the FIFO has one from
-      // the first poll — which is what makes a read with nothing in it answer
-      // EAGAIN rather than 0.
+      // the first poll.
       fd = openSync(path, constants.O_RDWR);
       return {
         ended: () => {
@@ -172,33 +146,20 @@ describe("a NAR stream", () => {
     try {
       writeSync(fd, "first");
       expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
-      // A REAL CLOCK, deliberately: the loop polls the OS every few ms, and
-      // the defect was a race between that syscall and a process exit. No fake
-      // timer drives a FIFO. The old loop ended the stream on the first of
-      // these polls, because it took EAGAIN for end of file.
       const late = reader.read();
       await new Promise((resolve) => setTimeout(resolve, 25));
       writeSync(fd, "late");
       expect(new TextDecoder().decode((await late).value)).toBe("late");
-      // And it never even asked: while a writer holds the FIFO, how that
-      // writer ended is not a question the reader has any business putting.
       expect(asked).toBe(0);
       closeSync(fd);
       fd = -1;
       expect((await reader.read()).done).toBe(true);
-      // The node belongs to the stream, and is gone before the consumer is
-      // told the stream ended.
       expect(existsSync(fifo)).toBe(false);
     } finally {
       if (fd !== -1) closeSync(fd);
     }
   });
 
-  /**
-   * WHAT A REFUSAL HAS TO SAY. `zstd exited 1` is the same sentence for an
-   * empty upload, a truncated one and a corrupt one, and it is the sentence
-   * that cost a day of guessing which. zstd knows; the refusal repeats it.
-   */
   it("refuses an empty upload with the decompressor's own reason", async () => {
     scratch = mkdtempSync(join(tmpdir(), "odu-cache-nar-"));
     const path = join(scratch, "nar.zst");
@@ -220,14 +181,10 @@ describe("an upload's bytes", () => {
     expect(checked.ok).toBe(true);
     if (checked.ok) expect(checked.narSize).toBe(5);
 
-    // A FORMAT ODU CANNOT READ has been judged: the whole answer is a message,
-    // with no `why` — `toEqual` rather than `toMatchObject` for exactly that.
     expect(await verifyNarFile(path, "lz4")).toEqual({
       ok: false,
       message: "unsupported Compression: lz4",
     });
-    // ABSENT is not WRONG: the caller may have another way to prove the same
-    // bytes (a twin object), and a file that is not there has not been judged.
     expect(await verifyNarFile(join(scratch, "absent"), "none")).toMatchObject({
       ok: false,
       why: "absent",
@@ -243,8 +200,6 @@ describe("an upload's bytes", () => {
     const whole = narHashModuloHasher(hashPart);
     whole.update(payload);
     const expected = whole.finish();
-    // THE OFFSETS ARE THE NAR'S, not a chunk's: 4, 44 and 82 here, so a
-    // positioned hash computed from chunk-relative offsets differs below.
     const zeroed = Buffer.from(payload);
     for (const at of [4, 44, 82]) zeroed.fill(0, at, at + 32);
     expect(expected.withOffsets).toBe(
@@ -263,8 +218,6 @@ describe("an upload's bytes", () => {
     }
   });
 
-  /** What each Nix line wrote for a self-referencing path, recorded rather
-   *  than computed: see `test/nixRecorded.ts`. */
   for (const vector of Object.values(NIX_RECORDED)) {
     it(`proves the CA Nix ${vector.nix} wrote for ${vector.storePath.slice(44)}`, async () => {
       scratch = mkdtempSync(join(tmpdir(), "odu-self-ca-"));
@@ -273,7 +226,6 @@ describe("an upload's bytes", () => {
       const hashPart = vector.storePath.slice("/nix/store/".length, "/nix/store/".length + 32);
       const checked = await verifyNarFile(narFile, "none", hashPart);
       if (!checked.ok || checked.selfHash === null) throw new Error("no modulo hash");
-      // The form that Nix line writes is the CA's own hash; the other is not.
       const other = vector.form === "withOffsets" ? "withoutOffsets" : "withOffsets";
       expect(checked.selfHash[vector.form]).toBe(`sha256:${vector.ca.slice("fixed:r:sha256:".length)}`);
       expect(checked.selfHash[other]).not.toBe(checked.selfHash[vector.form]);
@@ -324,7 +276,6 @@ describe("an upload's bytes", () => {
       const checked = await verifyNarFile(narFile, "none", hashPart);
       expect(checked.ok).toBe(true);
       if (!checked.ok || checked.selfHash === null) throw new Error("no modulo hash");
-      // WHICHEVER NIX THIS MACHINE HAS: its CA is one of the two forms.
       expect(Object.values(checked.selfHash)).toContain(
         `sha256:${facts.ca.replace("fixed:r:sha256:", "")}`,
       );
@@ -337,8 +288,6 @@ describe("an upload's bytes", () => {
         }),
       ).toBe(facts.ca);
 
-      // ONE BYTE DIFFERS: the modulo hash moves and no longer reproduces the
-      // path, so the proof refuses it.
       const altered = Buffer.from(nar.stdout);
       altered[Math.floor(altered.length / 2)]! ^= 0x01;
       writeFileSync(narFile, altered);
@@ -358,8 +307,6 @@ describe("an upload's bytes", () => {
   });
 
   it("decompresses before it hashes, for every Compression a client sends", async () => {
-    // THE BUG THIS PINS: a decompressor spawned with stdin closed reads
-    // nothing, exits non-zero, and refuses every upload — while `none` passes.
     scratch = mkdtempSync(join(tmpdir(), "odu-cache-nar-"));
     const plain = join(scratch, "plain.nar");
     writeFileSync(plain, "hello");
@@ -389,17 +336,6 @@ describe("an upload's bytes", () => {
   });
 });
 
-/**
- * THE READBACK THAT KILLED A POD (issue #160). A direct upload is proved by
- * streaming the temp object back out of the store, and the window GETs that
- * stream it can answer SHORT — R2 answered 190 bytes of a 1 MiB range. The
- * failure belongs to the upload, which is refused; it must never belong to the
- * process, which went down with an uncaught `S3Failure` printed twenty times.
- *
- * Against versitygw, with a `send` that drops the last bytes of the window
- * starting at 1 MiB: a real store, a real range request, and a lie of exactly
- * the shape R2 told.
- */
 describe("a readback whose window comes up short", () => {
   let gateway: Gateway;
   beforeAll(async () => {
@@ -409,8 +345,6 @@ describe("a readback whose window comes up short", () => {
     await gateway.stop();
   });
 
-  /** The object, put honestly; read back through a store whose window from
-   *  1 MiB comes up short (`@odu/objects/testing` owns that lie). */
   async function readbackOf(bytes: Uint8Array): Promise<{
     stream: ReadableStream<Uint8Array>;
     size: number;
@@ -426,13 +360,6 @@ describe("a readback whose window comes up short", () => {
     return object;
   }
 
-  /** `verifyNarStream`, with the window's rejection caught by nobody watched
-   *  for: an unhandled rejection is the crash, and a verify that never settles
-   *  is the hang the same bug causes. Both are failures of this case.
-   *
-   *  A WALL-CLOCK WATCHDOG, deliberately: "never settles" has no event to
-   *  await — that is what it means — so the only way to assert it is to stop
-   *  waiting. It costs nothing on a green run, which settles at once. */
   async function verified(
     object: { stream: ReadableStream<Uint8Array>; size: number },
     compression: string,
@@ -449,8 +376,6 @@ describe("a readback whose window comes up short", () => {
     );
     try {
       const checked = await Promise.race([verifyNarStream(object, compression), watchdog.promise]);
-      // A rejection nobody owns is reported at the END of a turn, so give the
-      // loop one before reading what came loose.
       const turned = Promise.withResolvers<void>();
       setImmediate(() => turned.resolve());
       await turned.promise;
@@ -472,8 +397,6 @@ describe("a readback whose window comes up short", () => {
   }, 30_000);
 
   it("refuses the upload and leaves no rejection loose — through the decompressor", async () => {
-    // THE POD'S OWN PATH: a `.nar.zst`, so the failing stream is the one being
-    // piped INTO zstd rather than the one being hashed.
     const compressed = spawnSync("zstd", ["-c"], { input: randomBytes(3 << 20), maxBuffer: 8 << 20 });
     expect(compressed.status).toBe(0);
     const { checked, loose } = await verified(await readbackOf(compressed.stdout), "zstd");

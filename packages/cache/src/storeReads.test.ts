@@ -1,28 +1,3 @@
-/**
- * READS THAT LEAVE ODU (PLAN 2.8) — the three facts that belong to no other
- * suite, and all three are about a store the operator put a DOMAIN in front of.
- *
- * - **The address a bucket publishes.** A public bucket on a store with a
- *   `publicUrl` is read from the store, so that is the substituter URL odu
- *   advertises and `readsFrom` says so. Everything else — a private bucket, a
- *   bucket on the daemon's own disk — is still read from odu, and `pushUrl`
- *   never moves, because a push is authenticated by odu whatever serves the
- *   reads.
- * - **The boot probe.** A `publicUrl` is a promise made outside odu, so the
- *   daemon asks the domain for the one file every Nix client reads first and
- *   logs a refusal when the answer is not it. `probePublicStores` returns what
- *   it would log, which is the only reason it can be asserted here.
- * - **The backfill.** Narinfos became objects in 2.8; every bucket pushed to
- *   before it has rows whose objects do not exist. The backfill writes them,
- *   and the claim worth proving is that it can be run again: the second pass
- *   writes nothing, and a rewritten object is written again only when its
- *   bytes are wrong.
- *
- * The store here is the daemon's own disk, which is enough for all three: the
- * backfill talks to an `ObjectStore` and nothing else, and `gcStores.test.ts`
- * is where the two stores are run against each other.
- */
-
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,9 +18,6 @@ const ROOT = "root-token";
 const ORIGIN = "https://odu.example.org";
 const PUBLIC_URL = "https://cache.example.com";
 
-/** One declared store with a domain bound to it. Spelled as a value rather
- *  than parsed from a file: `stores.test.ts` owns the parse, and what this
- *  file is about starts once the declaration exists. */
 const R2: S3Declaration = {
   kind: "s3",
   target: {
@@ -58,8 +30,6 @@ const R2: S3Declaration = {
   },
 };
 
-/** The same store with nothing bound to it: the operator declared R2 but never
- *  gave it a name of its own. */
 const PLAIN: S3Declaration = { kind: "s3", target: { ...R2.target, publicUrl: undefined } };
 
 const declaring = (store: S3Declaration): StoreDeclarations => new Map([["r2", store]]);
@@ -75,13 +45,6 @@ afterEach(async () => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-/**
- * A daemon with `r2` declared beside `local`, and the rows it publishes.
- *
- * The declared store's OBJECTS are a directory here — nothing below reads or
- * writes one, and the rule under test is about the declaration, which is the
- * only thing the server ever sees of a store.
- */
 function daemon(declared: StoreDeclarations): {
   cache: Cache;
   published: Map<string, CacheBucket>;
@@ -148,8 +111,6 @@ describe("what a store's public URL publishes", () => {
     publish();
     expect(published.get("kolu")?.url).toBe(`${PUBLIC_URL}/kolu`);
     expect(published.get("kolu")?.readsFrom).toBe("store");
-    // A PUSH IS STILL ODU'S: the store serves bytes to anyone, but only this
-    // daemon takes new ones, and it authenticates them on its own path.
     expect(published.get("kolu")?.pushUrl).toBe(`${ORIGIN}/cache/kolu`);
     const described = await cache.admin.describe({ bucket: "kolu" });
     expect(described).toMatchObject({ ok: true, value: { store: "r2" } });
@@ -159,11 +120,6 @@ describe("what a store's public URL publishes", () => {
     const { cache, published, publish } = daemon(declaring(R2));
     await create(cache, "secret", { public: false, store: "r2" });
     publish();
-    // The bytes are on the same store with the same domain in front of it, and
-    // the address is still odu's: a private bucket's reads are admitted by a
-    // token this daemon holds, and a domain that served them would serve them
-    // to everyone. (The NAR itself still leaves, as a signed redirect odu only
-    // mints for an admitted reader — `routes.test.ts`.)
     expect(published.get("secret")?.url).toBe(`${ORIGIN}/cache/secret`);
     expect(published.get("secret")?.readsFrom).toBe("odu");
     expect(published.get("secret")?.pushUrl).toBe(`${ORIGIN}/cache/secret`);
@@ -176,8 +132,6 @@ describe("what a store's public URL publishes", () => {
     publish();
     expect(published.get("kolu")?.url).toBe(`${ORIGIN}/cache/kolu`);
     expect(published.get("kolu")?.readsFrom).toBe("odu");
-    // `local` can never have one: those objects are files on this machine, and
-    // nothing but this process can read them.
     expect(published.get("disk")?.readsFrom).toBe("odu");
   });
 
@@ -188,17 +142,11 @@ describe("what a store's public URL publishes", () => {
       await cache.admin.domain({ ...asRoot(ROOT), bucket: "kolu", domain: "cache.kolu.dev" }),
     ).toMatchObject({ ok: true });
     publish();
-    // THE READ ADDRESS IS WHERE THE BYTES ARE. A domain pointed at odu would
-    // route every substitution back through this daemon, which is the thing
-    // 2.8 exists to stop; the name keeps serving pushes and the `missing`
-    // query, which odu answers from its own database.
     expect(published.get("kolu")?.url).toBe(`${PUBLIC_URL}/kolu`);
     expect(published.get("kolu")?.readsFrom).toBe("store");
     expect(published.get("kolu")?.pushUrl).toBe(`${ORIGIN}/cache/kolu`);
     expect(cache.bucketByDomain("cache.kolu.dev")?.name).toBe("kolu");
 
-    // And on a PRIVATE bucket, with no store URL to lose to, the domain is
-    // still the whole address.
     await create(cache, "secret", { public: false, store: "r2" });
     expect(
       await cache.admin.domain({ ...asRoot(ROOT), bucket: "secret", domain: "secret.kolu.dev" }),
@@ -213,8 +161,6 @@ describe("asking a store's domain whether it serves", () => {
   const BUCKETS = [{ name: "kolu", public: true, store: "r2" }];
   const PROBED = `${PUBLIC_URL}/kolu/nix-cache-info`;
 
-  /** A `fetch` that answers the same thing to everything, and remembers what
-   *  it was asked. */
   const answering = (
     reply: () => Response | Promise<Response>,
   ): { send: typeof fetch; asked: string[] } => {
@@ -241,8 +187,6 @@ describe("asking a store's domain whether it serves", () => {
     const refusals = await probePublicStores({
       stores: storeFacts(declaring(R2)),
       buckets,
-      // WHAT THE STORE OUGHT TO BE SERVING — the cache's own rendering for
-      // that bucket, origin and name included.
       info: (bucket) => nixCacheInfo({ origin: ORIGIN, bucket }),
       send,
       log: (event, fields) => logged.push({ event, fields }),
@@ -260,8 +204,6 @@ describe("asking a store's domain whether it serves", () => {
   });
 
   it("refuses a 404, a wrong body and a request that never arrived, naming each", async () => {
-    // THE THREE WAYS A BOUND DOMAIN IS WRONG: nothing there, something else
-    // there (a parked page, another bucket), and nothing answering at all.
     const cases: [string, () => Response | Promise<Response>, number | null][] = [
       ["404", () => new Response("", { status: 404 }), 404],
       ["another site", () => new Response("<html>hello</html>", { status: 200 }), 200],
@@ -273,8 +215,6 @@ describe("asking a store's domain whether it serves", () => {
         name,
         refusals: [{ store: "r2", url: PROBED, status }],
       });
-      // A LOGGED REFUSAL, NEVER A BOOT FAILURE: the daemon keeps serving every
-      // bucket itself while the operator's DNS catches up.
       expect({ name, logged: seen.logged }).toEqual({
         name,
         logged: [{ event: "cache.store.public.unreachable", fields: { store: "r2", url: PROBED, status } }],
@@ -283,9 +223,6 @@ describe("asking a store's domain whether it serves", () => {
   });
 
   it("never asks about a store whose buckets are all private", async () => {
-    // The domain may not be bound yet, and it would not matter here: nothing
-    // on this store is advertised at it, so a refusal would be noise at every
-    // boot. What it DOES mean for those buckets is the next describe's.
     const seen = await probe(() => new Response("", { status: 404 }), [
       { name: "secret", public: false, store: "r2" },
     ]);
@@ -295,12 +232,6 @@ describe("asking a store's domain whether it serves", () => {
   });
 });
 
-/**
- * WHAT A BOUND DOMAIN EXPOSES. The binding covers every prefix in the S3
- * bucket, so a PRIVATE bucket on a fronted store is readable by anyone who
- * knows the name. `create` and `migrate` refuse the combination; this is how
- * an operator who already had one finds out.
- */
 describe("the private buckets a bound domain exposes", () => {
   const naming = (
     stores: StoreDeclarations,
@@ -330,12 +261,6 @@ describe("the private buckets a bound domain exposes", () => {
   });
 });
 
-/**
- * A STORE'S ENDPOINT IS A CLIENT'S ADDRESS NOW. Before 2.8 only the daemon
- * dialled it; it is signed into the URL a 307 hands to `nix build`, which
- * runs somewhere else, so a loopback endpoint is a cache that cannot be read
- * from any other machine — with nothing in odu's own log to say why.
- */
 describe("an endpoint a client cannot dial", () => {
   const endpointing = (endpoint: string, buckets: readonly { store: string }[]) => {
     const logged: { event: string; fields: Record<string, unknown> }[] = [];
@@ -366,12 +291,6 @@ describe("an endpoint a client cannot dial", () => {
   });
 });
 
-/**
- * A PRIVATE BUCKET MAY NOT LIVE WHERE THE WORLD CAN READ. A bound domain
- * covers the whole S3 bucket, every prefix in it, so a private bucket on such
- * a store is private in name only — and odu holds both facts at the moment of
- * the choice, which is why this is a refusal and not a documentation note.
- */
 describe("a private bucket on a store the world can read", () => {
   const fronted = (): Cache => {
     const cache = createCache({
@@ -402,7 +321,6 @@ describe("a private bucket on a store the world can read", () => {
     if (!refused.ok) expect(refused.message).toContain("publishes its objects at a public URL");
     await create(cache, "kolu", { public: true, store: "r2" });
     expect(cache.bucket("kolu")?.store).toBe("r2");
-    // And a private bucket on the daemon's own disk is nobody's business.
     await create(cache, "secret", { public: false, store: "local" });
     expect(cache.bucket("secret")?.store).toBe("local");
   });
@@ -422,8 +340,6 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
     "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-two",
   ];
 
-  /** The cache, its disk store, and two pushed paths — then the store put back
-   *  the way 2.7 left it: rows, NARs, and no text objects at all. */
   async function pushedBefore28(): Promise<{ cache: Cache; objects: ObjectStore }> {
     const objects = diskObjectStore({ dir: join(scratch, "cache") });
     const cache = createCache({
@@ -461,8 +377,6 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
       );
       if (!outcome.ok) throw new Error(`push ${storePath}: ${outcome.message}`);
     }
-    // STAGE THE PAST: delete what 2.8 writes, leaving exactly what a bucket
-    // pushed to by the older daemon holds.
     for (const storePath of PATHS) await objects.delete(narinfoKey("main", storePathHash(storePath)));
     await objects.delete(cacheInfoKey("main"));
     return { cache, objects };
@@ -483,8 +397,6 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
 
     for (const storePath of PATHS) {
       const hash = storePathHash(storePath);
-      // THE OBJECT IS THE ROW'S TEXT: a client that never reaches odu must get
-      // the same signed narinfo odu would have rendered for it.
       expect(await textOf(objects, narinfoKey("main", hash))).toBe(cache.narinfoText(bucket, hash));
     }
     expect(await textOf(objects, cacheInfoKey("main"))).toBe(cache.cacheInfoText("main"));
@@ -493,8 +405,6 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
   it("writes nothing the second time, which is how a restart resumes it", async () => {
     const { cache } = await pushedBefore28();
     expect((await cache.backfillObjects()).written).toBe(2);
-    // SIXTEEN THOUSAND ROWS ON ONE BUCKET: a pass that rewrote what it had
-    // already written would make every restart cost the whole catch-up again.
     expect(await cache.backfillObjects()).toEqual({ rows: 2, written: 0, failures: 0 });
   });
 
@@ -504,8 +414,6 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
     const bucket = cache.bucket("main");
     if (bucket === null) throw new Error("no bucket main");
     const hash = storePathHash(PATHS[0] as string);
-    // A HALF-WRITTEN OBJECT, or one left by a key rotation: the row is the
-    // truth, so the store's copy loses.
     await objects.delete(narinfoKey("main", hash));
     expect((await objects.put(narinfoKey("main", hash), new Blob(["Stale: yes\n"]))).ok).toBe(true);
 
@@ -514,11 +422,6 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
   });
 
   it("rewrites `nix-cache-info` when the daemon's public origin changed, and purges it", async () => {
-    // A DEPLOYMENT MOVED behind a new `$ODU_PUBLIC_ORIGIN`. The object in the
-    // store names the OLD one, and a pusher reading it (`odu cache push
-    // --cache`) would aim at an address this daemon no longer answers. The
-    // backfill is the pass that notices — by the stored sha256, not the
-    // length, which two origins can share.
     const { cache, objects } = await pushedBefore28();
     await cache.backfillObjects();
     expect(await textOf(objects, cacheInfoKey("main"))).toContain(`Odu-Origin: ${ORIGIN}\n`);
@@ -538,18 +441,12 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
 
     expect(await textOf(objects, cacheInfoKey("main"))).toBe(later.cacheInfoText("main"));
     expect(await textOf(objects, cacheInfoKey("main"))).toContain(`Odu-Origin: ${MOVED}\n`);
-    // ANNOUNCED LIKE A NARINFO REWRITE: the superseded text was cacheable for
-    // a day, and it names an origin that no longer takes a push.
     expect(purged).toContainEqual({ reason: "repush", cacheInfo: true });
   });
 
   it("leaves alone a row whose NAR the legacy migration has not landed", async () => {
     const { cache, objects } = await pushedBefore28();
     const hash = storePathHash(PATHS[0] as string);
-    // A ROW FROM BEFORE OBJECTS WERE KEPT: no `FileHash`, no `FileSize`, and
-    // the old Nix store still serving it. Its narinfo would omit both and
-    // name a `URL:` that is not in the store — on a store-fronted bucket,
-    // a narinfo the store serves and a NAR that 404s.
     const repo = openCacheRepo(join(scratch, "cache", "cache.sqlite"));
     const row = repo.object("main", PATHS[0] as string);
     if (row === null) throw new Error("no row");
@@ -562,12 +459,6 @@ describe("the narinfo objects a bucket pushed before 2.8 is missing", () => {
   });
 });
 
-/**
- * A RE-PUSH REWRITES A NARINFO OBJECT that carries a day of `Cache-Control`.
- * Odu's own render is correct the moment the row changes; the store's copy is
- * not, and whatever fronts the store has to be told — the same announcement a
- * collection makes, for one address.
- */
 describe("a re-push purges the narinfo it rewrote", () => {
   const PATH = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-one";
   const bytes = new TextEncoder().encode(PATH);
@@ -597,8 +488,6 @@ describe("a re-push purges the narinfo it rewrote", () => {
           bucket: moved.bucket,
           store: moved.store,
           reason: moved.reason,
-          // THE NAR IS NOT IN IT: it is named by its own bytes and did not
-          // change, so purging it would be a cold cache for nothing.
           removed: moved.removals.map((removal) => `${removal.hash}:${String(removal.narFile)}`),
         }),
     });
@@ -620,8 +509,6 @@ describe("a re-push purges the narinfo it rewrote", () => {
     };
 
     await push([]);
-    // A FIRST WRITE IS NOT A REWRITE: nobody can be holding what was never
-    // served. Nor is an identical re-push, which changes no bytes.
     await push([]);
     expect(purged).toEqual([]);
 

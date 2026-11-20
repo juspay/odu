@@ -6,7 +6,6 @@ describe("the bucket a path names", () => {
     expect(bucketOf(`${CACHE_MOUNT}/kolu/nar/x.nar.zst`)).toBe("kolu");
     expect(bucketOf(`${CACHE_MOUNT}/kolu`)).toBe("kolu");
     expect(bucketOf(`${PUSH_API}/buckets/kolu/missing`)).toBe("kolu");
-    // A name arrives percent-encoded from a URL; the grammar decodes it once.
     expect(bucketOf(`${CACHE_MOUNT}/ko%6cu/${"a".repeat(32)}.narinfo`)).toBe("kolu");
   });
 

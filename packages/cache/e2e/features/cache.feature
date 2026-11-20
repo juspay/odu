@@ -1,13 +1,4 @@
 Feature: The cache is a row of the board
-  # The cache used to be a capability of the CI feature and invisible from the
-  # page. It is a row now, and this feature grades the three things that makes
-  # true: a push shows up WITHOUT a reload, a bucket page answers what a client
-  # needs to trust it, and its paths can be read and narrowed.
-  #
-  # Every action here is a CONTROL. The arrange steps push from the CLI because
-  # that is how a path gets into a bucket — a person with a `result` symlink on
-  # a build box — and the board is then read the way a person would read it:
-  # clicking, typing, tabbing.
 
   Scenario: A bucket pushed while the page is open appears without a reload
     Given I open the cache
@@ -17,9 +8,6 @@ Feature: The cache is a row of the board
     And that row shows a recent push
     And there should be no page errors
 
-  # The board has two rows and ONE tab. What is graded here is that switching
-  # rows does not switch off the ambient monitor: the counts are the runs', and
-  # they must keep arriving while the cache is the row on screen.
   Scenario: The tab keeps counting runs while the cache is on screen
     Given a settled red run of the failing fixture
     When I open the cache
@@ -34,16 +22,9 @@ Feature: The cache is a row of the board
     And the page shows its public key
     And the page's nix.conf block carries no netrc lines
     And the pushed path is listed
-    # WANTED, NOT READ: retention counts from the last push or `missing` query
-    # that named this path, and the reads beside it never move it. The number
-    # GC decides by is the one the page prints.
     And that path says when it was last wanted
     And there should be no page errors
 
-  # WHAT BUILT A PATH, on the page that lists it. A path nobody recognises is
-  # a path nobody dares collect: the push states the run that made it and the
-  # commit it came from, and the row draws the commit the length a person
-  # compares it at and the run as a LINK to the run's own page.
   Scenario: A path says which commit built it, and links the run that pushed it
     Given a bucket with one path pushed from the CLI with a run and a commit
     And I open the cache
@@ -54,8 +35,6 @@ Feature: The cache is a row of the board
     And there should be no page errors
 
   Scenario: The filter narrows a bucket's paths
-    # TWO paths, so this shows NARROWING rather than show-and-hide: one filter
-    # leaves both, another leaves exactly one.
     Given a bucket with two paths pushed from the CLI
     When I open that bucket
     Then both pushed paths are listed
@@ -67,10 +46,6 @@ Feature: The cache is a row of the board
     Then no path is listed
     And the page says nothing matches
 
-  # ONE ROW PER PACKAGE, because a bucket is mostly one package over and over:
-  # six builds of `odu-base-0.1.0` under six hashes is ONE thing a reader cares
-  # about, with a number beside it. The versions are a click away, and the
-  # switch beside the filter says which view is on.
   Scenario: Builds of one package are one row, and open to the versions
     Given a bucket with three builds of one package pushed from the CLI
     When I open that bucket
@@ -82,9 +57,6 @@ Feature: The cache is a row of the board
     Then the paths table holds 3 rows
     And there should be no page errors
 
-  # THE ORDER IS CHOSEN IN THE HEADER, and the header says which way round it
-  # is. The large path is pushed FIRST, so the default order (newest at the
-  # top) is not already the answer a sort by size gives.
   Scenario: The table sorts by size, and says which way
     Given a bucket with a large and a small path pushed from the CLI
     When I open that bucket
@@ -96,8 +68,6 @@ Feature: The cache is a row of the board
     And the "size" column says it is sorted "ascending"
     And there should be no page errors
 
-  # A PAGE IS TWENTY ROWS and the rest are a button — the paging the row
-  # answers with, read through the table rather than around it.
   Scenario: A bucket with more than one page offers the next twenty
     Given a bucket with 25 paths pushed from the CLI
     When I open that bucket
@@ -106,11 +76,6 @@ Feature: The cache is a row of the board
     Then the paths table holds 25 rows
     And there should be no page errors
 
-  # THE SUBSTITUTER URL IN A BROWSER. It used to render the board's Runs view —
-  # the SPA shell at a path it was never routed for — because a bucket's page is
-  # server-rendered and `/cache/<bucket>` matched no protocol file. It is the
-  # cache row's page now, and a path under that prefix that names nothing is the
-  # row's text 404, never the shell.
   Scenario: The substituter URL in a browser is the bucket's page
     Given a bucket with one path pushed from the CLI
     When I open the bucket's substituter URL in a browser
@@ -124,8 +89,6 @@ Feature: The cache is a row of the board
     Then the cache answers it as its own 404
     And there should be no page errors
 
-  # A PRIVATE BUCKET'S READER NEEDS A CREDENTIAL, so its page — and only its
-  # page — carries the netrc block.
   Scenario: A private bucket's page carries the netrc block
     Given a bucket with one path pushed from the CLI
     When the API makes a private bucket and mints a read token
@@ -133,9 +96,6 @@ Feature: The cache is a row of the board
     Then the page has the netrc block
     And there should be no page errors
 
-  # A CONTROL FOR A ROW THAT IS NOT MOUNTED opens a subscription nothing
-  # answers, and runs on every existing cache scenario. The daemon's roster is
-  # the fact the page draws by.
   Scenario: A daemon without the tunnel row draws no Tunnel control
     Given I open the cache
     Then the board offers no Tunnel control
@@ -147,10 +107,6 @@ Feature: The cache is a row of the board
     Then the page says that bucket is not there
     And there should be no page errors
 
-  # THE PUSH API BEHIND A DOOR. Every scenario above runs against a loopback
-  # daemon with no door, which is how the gate answering `/_odu/v1/…` with the
-  # sign-in page reached a live pod unseen. A bucket token is the push's whole
-  # credential: the CLI carries no session cookie, and must not need one.
   @signed-in:admin
   Scenario: A bucket token pushes through the door with no session
     When the API creates a bucket as this person

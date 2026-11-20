@@ -1,44 +1,3 @@
-/**
- * `odu cache` — the cache's SHELL-NATIVE verbs, in the package that owns the
- * buckets.
- *
- * Four commands, and what they have in common is a machine:
- *
- *   - **`push`** is a client of the cache's HTTP API, run from the machine
- *     that holds the store paths. It imports `./push` and nothing else — no
- *     service, no catalog, no engine — which is the argument `@odu/cli`'s
- *     `authority.test.ts` makes for why it is admissible under a wall that
- *     forbids every public client the engine.
- *   - **`login`** writes this machine's token for an origin, which is the
- *     credential `push` then reads. A credential store is a file on a disk,
- *     so there is nothing for a browser or an API verb to do here.
- *   - **`use`** prints the nix.conf and flake `nixConfig` lines for a bucket,
- *     and its netrc lines when it is private, for pasting into this machine's
- *     configuration. It needs no token for a public bucket: its URL and public
- *     key are what it publishes.
- *   - **`target`** prints the one odu substituter `./flake.nix` names — the
- *     same reading `push` makes with no `--cache`, said instead of acted on.
- *     It reads THIS checkout, which no daemon has a copy of, and it is what
- *     lets a caller holding a token NAME the address the repository chose
- *     (`.github/actions/push`, #163).
- *
- * ADMINISTRATION IS NOT HERE ANY MORE. Creating a bucket, minting and revoking
- * tokens, naming a domain, pinning a closure, collecting garbage and reading
- * the stats are controls on the bucket page, and verbs on the API — `odu
- * surface cache bucket_create`, `cache token_mint`, `cache gc_run` … — which
- * is the same vocabulary `odu mcp` serves an agent. A second argv spelling of
- * a verb the board already owns was a face that had to be kept in step with
- * the row for no capability in return.
- *
- * ## The dial is a PORT, bound by the root
- *
- * This module is a FACE, and `use` dials the daemon when a bucket is not
- * publicly readable. The bootstrap — "start one if nothing is serving" —
- * belongs to `@odu/host`, and a ROW never names the host: that is the arrow
- * backwards. So the root binds a `connect` here (`src/main.ts`), and this
- * face stays a client that names no host.
- */
-
 import { parseArgs } from "node:util";
 import type { SurfaceClientOf } from "@kolu/surface/project";
 import { composedClients } from "@odu/cordis/compose";
@@ -65,30 +24,18 @@ import {
   useBlock,
 } from "./surface";
 
-/** THE CACHE'S CLIENT, over a dispatch the caller already holds. One
- *  connection to the daemon serves every row; this is the cache's typed view of
- *  it, minted through the framework's own sibling composition so the tags it
- *  addresses are the ones the sibling is mounted at. */
 export type CacheClient = SurfaceClientOf<(typeof oduCacheSurface)["spec"]>;
 
 function cacheClientOver(dispatch: SurfaceDispatch): CacheClient {
-  // The SIBLING, not the surface: `composeSurfaceContracts` re-walks the spec
-  // with the `surface/cache/` prefix, and the face is built over the same
-  // dispatch the ci client is, so one connection answers both.
-  // ONE builder for every sibling client in the tree (`@odu/service-client`'s
-  // `./compose`), so this face addresses the tags the daemon mounts the row at
-  // without a second derivation of the prefix.
   return composedClients(
     { [CACHE_KEY]: oduCacheSurface },
     dispatch,
   ).cache as unknown as CacheClient;
 }
 
-/** What the root hands this face: the way in, and nothing else. */
 export interface CacheCliPorts {
   /** Reach the daemon — starting it when nothing is serving and the origin is
-   *  this install's own. Bound at the composition root, because the bootstrap is
-   *  `@odu/host`'s and a row never names the host. */
+   *  this install's own. */
   connect(origin: string | undefined): Promise<{
     dispatch: SurfaceDispatch;
     dispose: () => Promise<void>;
@@ -168,15 +115,8 @@ Token resolution for \`push\`: --token-file, then $ODU_CACHE_TOKEN, then the
 credentials entry for the bucket's origin.
 `;
 
-/** What `use` exits with when the service refuses it: 1. The run-shaped table
- *  in `serviceFace` numbers the states of a RUN, and a bucket is not one. */
 const REFUSED = 1;
 
-
-// ── the face's plumbing ─────────────────────────────────────────────────────
-
-/** Reach the daemon and hand the caller the cache's client, or report that
- *  nothing is serving and exit. */
 async function withService(
   ports: CacheCliPorts,
   origin: string | undefined,
@@ -196,7 +136,6 @@ async function withService(
   }
 }
 
-/** One procedure call, keeping the cache's REFUSAL apart from a dead link. */
 async function call<A>(
   effect: Effect.Effect<A, unknown>,
 ): Promise<
@@ -212,8 +151,6 @@ async function call<A>(
     : { ok: false, refusal: null, error: failure };
 }
 
-/** A refusal, or a failed call, as the exit code and the sentence a person
- *  reads. */
 function reportFailure(
   answer: { refusal: CacheRefused | null; error?: unknown },
   json: boolean,
@@ -243,10 +180,8 @@ function emitJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-/** A flag's whole-number value, or a usage error naming the flag. `Number("")`
- *  is 0 and `Number(" 5 ")` is 5, so a bare `Number` would read a truncated
- *  `--part-size=` as "no bytes at all" — which is a destructive reading of a
- *  typo. */
+/** `Number("")` is 0 and `Number(" 5 ")` is 5, so a bare `Number` would read a
+ *  truncated `--part-size=` as "no bytes at all". */
 function wholeNumber(flag: string, raw: string): number {
   const trimmed = raw.trim();
   if (!/^-?\d+$/.test(trimmed)) {
@@ -297,11 +232,6 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
     process.stderr.write(`odu: cache use needs a bucket name\n${CACHE_USAGE}`);
     return 1;
   }
-  // A PUBLIC BUCKET'S FACTS COME OFF THE PROTOCOL, not the surface: on a
-  // daemon with a door an anonymous connection is refused before a public
-  // read can be answered, and "use needs no token" has to be true of a person
-  // who has not signed in. The protocol's own path answers a public bucket with
-  // no account — the same facts the page shows, JSON for a terminal.
   const origin = normalizeOrigin(
     values.origin ?? process.env.ODU_WEB_ORIGIN?.trim() ?? "http://127.0.0.1:18440",
   );
@@ -324,8 +254,6 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
         useBlock({
           url: facts.url,
           publicKey: facts.publicKey,
-          // The netrc lines unless the bucket SAYS it is public: a private
-          // bucket answered here only because a token was sent, and needs them.
           public: facts.public === true,
           home: process.env.HOME ?? null,
         }),
@@ -334,9 +262,6 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
     }
   }
 
-  // A PRIVATE BUCKET ON A DAEMON WITH A DOOR is not readable without a
-  // session, and asking the surface would be an anonymous connection refused
-  // for the wrong reason. The door fact says which sentence a person needs.
   if ((await readDoor(origin)) === true) {
     process.stderr.write(
       `odu: no public bucket "${name}" on ${origin} — if it is private, sign in ` +
@@ -346,9 +271,6 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
   }
 
   return withService(ports, values.origin, async (client) => {
-    // THE FALLBACK IS A PRIVATE BUCKET ON A DAEMON WITH NO DOOR, and an unknown
-    // bucket there; the surface answers both without a credential, as it always
-    // did.
     const answer = await call(client.surface.bucket.describe({ bucket: name }));
     if (!answer.ok) {
       if (answer.refusal !== null) return reportFailure(answer, false, REFUSED);
@@ -363,9 +285,6 @@ async function useCommand(rest: string[], ports: CacheCliPorts): Promise<number>
       return reportFailure(answer, false, REFUSED);
     }
     const bucket = answer.value;
-    // ONE spelling of the block, in `./surface`, because the bucket page prints
-    // it too — and the two had already drifted (`~/.netrc` here, `$HOME/.netrc`
-    // there, and a `flake.nix` block on only one).
     process.stdout.write(
       useBlock({
         url: bucket.url,
@@ -400,8 +319,6 @@ async function loginCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
-/** One line from stdin. A prompt goes to STDERR, so a pipeline that feeds the
- *  token in still gets a clean stdout. */
 async function readSecret(): Promise<string> {
   if (process.stdin.isTTY === true) process.stderr.write("token: ");
   const chunks: Buffer[] = [];
@@ -427,20 +344,9 @@ async function pushCommand(rest: string[]): Promise<number> {
     },
   });
   const json = values.output === "json";
-  // ── WHERE THIS PUSH IS AIMED ────────────────────────────────────────────
-  //
-  // TWO SPELLINGS, MUTUALLY EXCLUSIVE, because they answer one question from
-  // opposite ends. `--cache <substituter>` is the single fact a consumer
-  // repository already has — the URL in its `nix.conf` — and the cache states
-  // the rest in its `nix-cache-info`. `<bucket> --origin <url>` is a person in
-  // a shell naming both, which stays: a person has them in hand, and a cache
-  // that predates this says nothing about itself.
   const asked = values.cache;
   let bucket: string;
   let origin = values.origin;
-  /** THE ADDRESS CAME OUT OF A REPOSITORY, which the inference below is the
-   *  only way of reaching. It is what decides the credential this push is
-   *  allowed to send. */
   let addressFromRepository = false;
   let paths: string[];
   if (asked !== undefined) {
@@ -455,11 +361,6 @@ async function pushCommand(rest: string[]): Promise<number> {
       process.stderr.write(`odu: cache push --cache needs at least one path\n${CACHE_USAGE}`);
       return 1;
     }
-    // A POSITIONAL BUCKET BESIDE `--cache` IS THE SAME CONFLICT `--origin` IS,
-    // and it has to be caught HERE: taken as a path, a bucket name reaches
-    // `nix path-info` and fails there, naming the store's complaint instead of
-    // the mistake. A path is absolute, or something on this disk, or a flake
-    // installable (`.#x`, `nixpkgs#x`); a bare word is none of those.
     const named = positionals.filter(
       (item) => !(item.startsWith("/") || item.includes("#") || existsSync(item)),
     );
@@ -473,16 +374,10 @@ async function pushCommand(rest: string[]): Promise<number> {
       return 1;
     }
     try {
-      // THE PUSH'S OWN TOKEN, ONE REQUEST EARLIER: a private bucket answers
-      // its `nix-cache-info` to nobody, so discovery without it would make
-      // exactly the buckets that need a token unpushable.
       const token = await discoveryToken(process.env, asked, values["token-file"]);
       const facts = await describeCache(asked, fetch, token);
       bucket = facts.bucket;
       origin = facts.origin;
-      // THE DISCOVERY, SAID OUT LOUD on the human path: a push that resolved a
-      // URL to somewhere unexpected should be readable in the log of the job
-      // that ran it. `--output json` keeps stdout the answer and stderr quiet.
       if (!json) {
         process.stderr.write(`${asked} is bucket "${facts.bucket}" on ${facts.origin}\n`);
       }
@@ -493,11 +388,6 @@ async function pushCommand(rest: string[]): Promise<number> {
     paths = positionals;
   } else {
     const [named, ...rest] = positionals;
-    // A BARE WORD IS A BUCKET, and everything else is a path: that is the same
-    // test `--cache` applies in the other direction, and it is what lets the
-    // inferred form share this grammar without a flag to tell them apart. An
-    // absolute path, a flake installable and something on this disk are paths;
-    // a bare word is a bucket name.
     const looksLikeBucket =
       named !== undefined &&
       !(named.startsWith("/") || named.includes("#") || existsSync(named));
@@ -511,21 +401,10 @@ async function pushCommand(rest: string[]): Promise<number> {
       bucket = named;
       paths = rest;
     } else {
-      // ── NEITHER SPELLING: THE REPOSITORY ALREADY SAID IT (PLAN 4.1) ──
-      //
-      // `flake.nix`'s `nixConfig` is the one declaration a repo that READS
-      // from an odu cache keeps, so a push from inside that repo needs no
-      // second copy of the bucket name. The client has no notion of "served
-      // here" — that is the service's grant, not a pusher's — so ANY odu cache
-      // in the config qualifies, and two is a refusal naming both.
       if (positionals.length === 0) {
         process.stderr.write(`odu: cache push needs at least one path\n${CACHE_USAGE}`);
         return 1;
       }
-      // `--origin` NAMES THE SAME THING THE FLAKE DOES, and the inference is
-      // about to overwrite it. Refused out loud, exactly as `--cache
-      // --origin` is: a flag that is silently ignored is worse than one that
-      // conflicts.
       if (values.origin !== undefined) {
         process.stderr.write(
           "odu: --origin needs a bucket to go with it — `odu cache push <bucket> " +
@@ -539,9 +418,6 @@ async function pushCommand(rest: string[]): Promise<number> {
         process.stderr.write(`odu: ${inferred.error}\n`);
         return 1;
       }
-      // SAID OUT LOUD, where the `--cache` branch above says the same thing
-      // about the URL IT was given: a push that resolved an address out of a
-      // file should be readable in the log of the job that ran it.
       if (!json) {
         process.stderr.write(
           `./flake.nix reads from ${inferred.substituter}, which is bucket ` +
@@ -554,12 +430,6 @@ async function pushCommand(rest: string[]): Promise<number> {
       paths = positionals;
     }
   }
-  // THE CREDENTIAL, when a REPOSITORY named the address. `--token-file` and
-  // `$ODU_CACHE_TOKEN` are credentials for wherever a push ends up — right
-  // when the operator typed the address, wrong when a contributor's
-  // `extra-substituters` line did, on the spelling that is now the
-  // recommended one. Only what this machine SAVED for that origin is in
-  // scope, and `null` means push anonymously and let the bucket answer.
   const credential = addressFromRepository
     ? await savedCredentialFor(process.env, origin ?? "")
     : undefined;
@@ -568,16 +438,7 @@ async function pushCommand(rest: string[]): Promise<number> {
       bucket,
       paths,
       env: process.env,
-      // An EXPLICIT origin, which beats a stored credential: a machine logged
-      // in to one cache must still be able to push to a second. With `--cache`
-      // it is the origin the cache named.
       ...(origin === undefined ? {} : { origin }),
-      // THE CREDENTIAL, when a REPOSITORY named the address. `--token-file`
-      // and `$ODU_CACHE_TOKEN` are credentials for wherever a push ends up —
-      // right when the operator typed the address, wrong when a contributor's
-      // `extra-substituters` line did, on the spelling that is now the
-      // recommended one. Only what this machine SAVED for that origin is in
-      // scope, and `null` means push anonymously and let the bucket answer.
       ...(credential === undefined ? {} : { credential }),
       ...(values["token-file"] === undefined ? {} : { tokenFile: values["token-file"] }),
       ...(values.concurrency === undefined
@@ -589,19 +450,9 @@ async function pushCommand(rest: string[]): Promise<number> {
             partSize:
               wholeNumber("--part-size", values["part-size"]) * 1024 * 1024,
           }),
-      // THE PIN THE PUSH RE-POINTS, when the caller asked for one. A flag on
-      // the push rather than a verb of its own: the pin names what THIS push
-      // put there, and the write token is already in hand.
       ...(values.pin === undefined ? {} : { pin: values.pin }),
-      // WHAT BUILT THESE PATHS, when the caller knows: a run id and the
-      // commit it ran on, kept on every row this push stores. OMITTED rather
-      // than passed as `undefined`, because the cache reads "said nothing"
-      // as "leave what is there" — a laptop's bare `odu cache push` must not
-      // erase the provenance a run wrote.
       ...(values.run === undefined ? {} : { run: values.run }),
       ...(values.commit === undefined ? {} : { commit: values.commit }),
-      // THE WHOLE CLOSURE, upstream-signed paths included, when the caller
-      // will fetch it from this bucket alone.
       whole: values.whole === true,
       onLine: (line) => {
         if (!json) process.stderr.write(`${line}\n`);
@@ -626,9 +477,6 @@ async function pushCommand(rest: string[]): Promise<number> {
     return summary.failed === 0 ? 0 : 1;
   } catch (err) {
     const said = err instanceof Error ? err.message : String(err);
-    // AND WHY IT WENT OUT ANONYMOUSLY, if it did. A bare 401 does not say
-    // that the address came from `./flake.nix` rather than off this command
-    // line, which is the whole of what to do about it.
     const hint =
       credential === null
         ? ` — the substituter came from ./flake.nix and nothing is saved for ` +
@@ -641,27 +489,6 @@ async function pushCommand(rest: string[]): Promise<number> {
   }
 }
 
-/**
- * `odu cache target` — THE INFERENCE, SAID OUT LOUD.
- *
- * Exactly the reading `push` makes with no `--cache` and no bucket, printed
- * instead of acted on: one odu substituter out of `./flake.nix`'s `nixConfig`,
- * with the same three refusals (no flake, none, two).
- *
- * **Shell-native for the reason `push` is:** it reads THIS checkout. A verb on
- * the board could not — the daemon has no copy of the caller's working
- * directory, and PLAN 2.10's rule is that a CLI verb must earn its place by
- * needing the machine it runs on.
- *
- * It answers the caller that has a token and cannot send it. `push`'s
- * inference withholds `--token-file` and `$ODU_CACHE_TOKEN` by design (#159,
- * SEC-5): a URL a REPOSITORY named must not collect an operator's credential.
- * A caller that reads the URL here and hands it back as `push --cache <that>`
- * has NAMED the target — the address is its own choice now — so its token
- * goes with it. That is the whole of what `.github/actions/push` does with
- * this (#163), on the argument that a workflow and the flake beside it are
- * one trust boundary.
- */
 async function targetCommand(rest: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,
@@ -680,49 +507,15 @@ async function targetCommand(rest: string[]): Promise<number> {
     process.stderr.write(`odu: ${inferred.error}\n`);
     return 1;
   }
-  // `{ cache, origin, bucket }` BY SHORTHAND, from a local named for the
-  // field: a face may not retype the row's own word as a key
-  // (`packages/host/src/fence.test.ts`), and the substituter is `cache` here
-  // because that is what the Action's own `cache` input calls it.
   const { substituter: cache, origin, bucket } = inferred;
   if (json) {
     emitJson({ cache, origin, bucket });
   } else {
-    // THE URL ALONE, because a shell reads this with `$(…)`. This command
-    // SAYS the target rather than acting on it, so the answer is the whole of
-    // its output and there is nothing to narrate beside it.
     process.stdout.write(`${cache}\n`);
   }
   return 0;
 }
 
-/**
- * THE CACHE `./flake.nix` ALREADY NAMES (PLAN 4.1) — `odu cache push` with no
- * `--cache` and no bucket.
- *
- * The same reading the service makes at `run.start`, less the grant: this is
- * a CLIENT, with no daemon and no bucket of its own, so "is it an odu cache"
- * is the whole of the test. Two of them is a refusal naming both, for the
- * reason the run's resolver refuses: a repository builds for one cache, and
- * choosing would be this command inventing a policy.
- *
- * **The probe is ANONYMOUS, and that is the whole difference from `--cache`.**
- * With `--cache` the OPERATOR typed the URL — naming a cache is trusting it —
- * and the push's own token rides one request early so a private bucket is
- * discoverable. Here the REPOSITORY names the URL, so sending `$ODU_CACHE_TOKEN`
- * or a `--token-file` would hand the operator's credential to whatever a flake
- * points at, including `cache.nixos.org`, which most of them do. The cost is
- * that a PRIVATE bucket cannot be inferred — its `nix-cache-info` is a 404 to
- * an anonymous reader — and the refusal says to pass `--cache`.
- *
- * The SUBSTITUTER comes back beside the bucket and the origin: it is the one
- * fact a repository actually wrote, and `target` prints it.
- *
- * IT ANSWERS AND SAYS NOTHING. Whether a resolution is narrated is the
- * COMMAND's business — `push` says it on the human path, beside where its
- * `--cache` branch says the same of the URL it was handed, and `target` has
- * no need to because the answer IS its output.
- */
 async function inferredCache(): Promise<
   { substituter: string; bucket: string; origin: string } | { error: string }
 > {

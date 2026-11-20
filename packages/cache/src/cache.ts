@@ -1,25 +1,3 @@
-/**
- * THE CACHE — the buckets, their keys, and the two faces over them.
- *
- * Two faces over one object, and they are deliberately in one module because
- * they must agree about one thing: what a bucket IS. The protocol face is what
- * a Nix client speaks (`./routes`); the admin face is what `odu cache` reaches
- * through the service. Between them sit the rows (`./db`), the tokens
- * (`./tokens`), the collector (`./gc`), the object stores (`@odu/objects`,
- * one per declared store, chosen per bucket) and the one-time migration.
- *
- * The WRITE PATH is not here: staging an upload, proving it and keeping the
- * object moves on the Nix protocol's clock rather than on the product's, and it
- * lives in `./staging`. This module hands it the write lock and `record`,
- * because a pin and a collection take the same lock, and a second lock there
- * would be a second answer to "who may change what is retained".
- *
- * **The root token is a field, not a file.** `rootToken` arrives from the
- * composition root, which reads `$ODU_ROOT_TOKEN`. There is no fallback to a
- * file on disk and no "first run mints one": a cache that administers itself on
- * first contact is a cache anybody on the machine can create buckets in.
- */
-
 import { statfs } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -118,7 +96,6 @@ import {
   verifyToken,
 } from "./tokens";
 
-/** What a bucket looks like to a caller. No secret key, ever. */
 export interface BucketFacts {
   name: string;
   public: boolean;
@@ -126,72 +103,34 @@ export interface BucketFacts {
   keyName: string;
   publicKey: string;
   upstreamKeys: readonly string[];
-  /** The name this bucket is served at, when it has one. */
   domain: string | null;
   objects: number;
   bytes: number;
   created: number;
-  /** When the newest narinfo landed; `null` for a bucket nothing was pushed
-   *  to. */
   lastPush: number | null;
-  /** narinfo reads, summed over the bucket's objects. */
   hits: number;
-  /** The declared store its objects live in. */
   store: string;
-  /**
-   * WHO TAKES A PUSH'S BYTES (PLAN 2.9) — `readsFrom`'s mirror.
-   *
-   * `store` when the bucket's store takes them itself: `odu cache push` is
-   * handed presigned URLs and the NAR never crosses this machine, which then
-   * reads the object back to prove it. `odu` when they come through the
-   * daemon into staging — every disk-backed bucket, and every client older
-   * than the negotiation.
-   */
   writesTo: "store" | "odu";
-  /** THE MOVE RUNNING ON THIS BUCKET, or null. While it is not null the
-   *  bucket is still served from `store`; the move's own `to` is where it is
-   *  going (PLAN 2.8). */
   migration: MigrationFacts | null;
 }
 
-/** A store-to-store move, as a subscriber watches it. */
 export interface MigrationFacts {
-  /** The store it is moving to. */
   to: string;
-  /** `copying` while the new store is being filled, `flipping` for the moment
-   *  the bucket changes hands under the write lock, `deleting` while the old
-   *  store gives its copies up. */
   state: "copying" | "flipping" | "deleting";
   copied: number;
   total: number;
   bytes: number;
 }
 
-/**
- * What `describe` answers: a bucket's PUBLIC identity and nothing else.
- *
- * Not `BucketFacts`. `describe` takes no credential, and a bucket's object
- * count, byte total, retention and upstream key names are facts about the
- * operator's cache rather than about the substituter a client is pointed at.
- * `odu cache use` needs the URL and the key; a private bucket's EXISTENCE is
- * still something this answers, which is why PR 2 gates `describe` for a
- * private bucket behind a login — the contract must not inherit a leak the
- * route layer was careful to close.
- */
 export interface BucketIdentity {
   name: string;
   public: boolean;
   publicKey: string;
-  /** The name a client substitutes from, when the bucket has one. */
   domain: string | null;
-  /** The store its objects live in. Not a secret — the row publishes it
-   *  already — and the one fact the caller needs to say whether the reads
-   *  come from odu or from the store's own domain. */
   store: string;
 }
 
 export interface TokenMinted {
-  /** The plaintext, shown ONCE. */
   token: string;
   facts: TokenFacts;
 }
@@ -201,7 +140,6 @@ export interface PinFacts {
   name: string;
   rootPaths: readonly string[];
   created: number;
-  /** The authority that made it — what decides who may re-point it. */
   createdBy: PinAuthor;
 }
 
@@ -210,19 +148,14 @@ export interface CacheStats {
   objects: number;
   bytes: number;
   hits: number;
-  /** The newest renewal across the whole cache — the clock GC reads. */
   lastWanted: number | null;
 }
 
-/** Why an admin call was refused. The service maps these onto its own refusal
- *  codes; the package does not import the contract. */
 export type CacheRefusalCode =
   | "no_root_token"
   | "unknown_bucket"
   | "bucket_exists"
   | "bad_input"
-  /** The credential is real and may not do THIS — a write token asked to
-   *  re-point an administrator's pin. */
   | "not_permitted"
   | "unknown_store";
 
@@ -230,60 +163,27 @@ export type CacheOutcome<T> =
   | { ok: true; value: T }
   | { ok: false; code: CacheRefusalCode; message: string };
 
-/**
- * HOW A CALL WAS AUTHORISED — and the union is the point.
- *
- * The row builds it, once, from the caller's principal: an operator's ROOT
- * TOKEN, or a signed-in person whose ROLE the row already checked. The engine
- * does not know what a role means — this package's row decides what an `admin`
- * may do, and this is that decision's arrival at the data.
- *
- * THE ROLE ARM IS SEALED. It carries a key of a symbol this module does not
- * export, so no code outside this package can word-process one: the only way to
- * obtain the arm is {@link roleAuthority}, which nothing but the row calls. A
- * boolean a caller could set would be a claim the engine cannot check.
- */
 const roleSeal: unique symbol = Symbol("odu:cache/role");
 
 export type Authority =
   | { readonly kind: "root"; readonly rootToken: string }
   | { readonly kind: "role"; readonly login: string; readonly [roleSeal]: true };
 
-/** The ROLE arm — minted here and nowhere else, because `roleSeal` is private. */
 export function roleAuthority(login: string): Authority {
   return { kind: "role", login, [roleSeal]: true };
 }
 
-/** The admin face, structurally the service's `CacheAdmin` port. */
 export interface CacheAdmin {
-  /** Where the protocol is mounted under the origin — `./paths`, re-exported
-   *  here because this is the object the composition root hands the service,
-   *  and the service is what prefixes a bucket's substituter URL. */
   readonly mount: string;
   create(input: { authority: Authority;
     name: string;
     public: boolean;
     retentionDays: number;
     upstreamKeys: readonly string[];
-    /** A declared store's name; absent is `local`, the daemon's disk. */
     store?: string;
   }): Promise<CacheOutcome<BucketFacts>>;
   list(input: { authority: Authority }): Promise<CacheOutcome<readonly BucketFacts[]>>;
-  /**
-   * One bucket's PUBLIC identity — its URL and the key a client has to trust —
-   * with no root token.
-   *
-   * `odu cache use` needs exactly this, and nothing else: the substituter
-   * address and the public key are what a bucket publishes to every client
-   * that talks to it, so demanding the operator's root token for them would
-   * make a read-only question into an administrative one. The NAME is the
-   * capability, the same way it is in the substituter URL.
-   */
   describe(input: { bucket: string }): Promise<CacheOutcome<BucketIdentity>>;
-  /**
-   * GIVE A BUCKET A NAME, or take it away (`null`). One domain, one bucket;
-   * the row answers by that `Host` and the substituter URL becomes the name.
-   */
   domain(input: {
     authority: Authority;
     bucket: string;
@@ -291,7 +191,6 @@ export interface CacheAdmin {
   }): Promise<CacheOutcome<BucketFacts>>;
   tokenMint(input: { authority: Authority;
     bucket: string;
-    /** A glob, so one token can cover `team-*`. Absent means the bucket. */
     bucketGlob: string | null;
     scope: Scope;
     expiresDays: number | null;
@@ -302,46 +201,16 @@ export interface CacheAdmin {
   tokenRevoke(input: { authority: Authority;
     id: string;
   }): Promise<CacheOutcome<{ id: string; revoked: boolean }>>;
-  /**
-   * HOW LONG THIS BUCKET KEEPS WHAT NOBODY WANTS, in days from `lastWanted`.
-   * A bucket is created with the default and changes its mind here; zero
-   * expires everything that is not referenced or pinned.
-   */
   retention(input: {
     authority: Authority;
     bucket: string;
     retentionDays: number;
   }): Promise<CacheOutcome<BucketFacts>>;
-  /**
-   * MOVE THIS BUCKET'S OBJECTS TO ANOTHER STORE (PLAN 2.8).
-   *
-   * Answers as soon as the move is RECORDED, not when it finishes: the copy
-   * runs in the background and its progress is on the bucket's own row, which
-   * the board already follows. The bucket is served from the old store the
-   * whole time and changes hands in one moment under the write lock.
-   *
-   * Refused for an unknown store, for the store it already lives in, and for
-   * a bucket that is already moving.
-   */
   migrateStore(input: {
     authority: Authority;
     bucket: string;
     store: string;
   }): Promise<CacheOutcome<BucketFacts>>;
-  /**
-   * TAKE THIS BUCKET AWAY — the objects, the paths, the tokens and the pins.
-   *
-   * The purge is the FIRST half and the rows are the second, both under the
-   * write lock: a bucket whose rows went first would leave a store prefix
-   * nothing can name, and therefore nothing can ever delete. Answers what the
-   * store gave up (`objects` keys, `bytes`), which is the only count a person
-   * can check afterwards — the rows it names are gone.
-   *
-   * Refused — from INSIDE that lock, with every guard re-read there — for a
-   * bucket with a DOMAIN bound to it, so no DNS record is left pointing at a
-   * bucket that is not there, and for one with a move in flight, whose
-   * copier is writing into the other store this purge never touches.
-   */
   bucketDelete(input: {
     authority: Authority;
     bucket: string;
@@ -351,14 +220,10 @@ export interface CacheAdmin {
     name: string;
     paths: readonly string[];
   }): Promise<CacheOutcome<PinFacts>>;
-  /** Every pin this bucket holds, and WHAT each one holds: the closure it
-   *  resolved at pin time. */
   pinList(input: {
     authority: Authority;
     bucket: string;
   }): Promise<CacheOutcome<readonly PinFacts[]>>;
-  /** Let a pin go. The paths it held become ordinary rows, collected on the
-   *  next run if retention has passed them. */
   pinDelete(input: {
     authority: Authority;
     bucket: string;
@@ -368,34 +233,12 @@ export interface CacheAdmin {
     authority: Authority;
     bucket: string | null;
   }): Promise<CacheOutcome<GcCollection>>;
-  /** THE SAME DECISION, WITHOUT DOING IT — what the next collection would
-   *  evict, path by path, and what it would reclaim.
-   *
-   *  `retentionDays` asks that question with a retention OTHER than the
-   *  buckets' own, and writes none: `0` answers "what is here that nothing
-   *  references and no pin holds", which is what a person wants before
-   *  deciding what a bucket's retention should be. `null` is each bucket's
-   *  own number. Only `bucket.retention` changes a row, so this cannot be a
-   *  collection under another name. */
   gcPlan(input: {
     authority: Authority;
     bucket: string | null;
     retentionDays: number | null;
   }): Promise<CacheOutcome<GcPreview>>;
   stats(input: { authority: Authority }): Promise<CacheOutcome<CacheStats>>;
-  /**
-   * ONE PAGE of a bucket's stored paths — as paths, as PACKAGES (`group`), or
-   * as one package's versions (`name`), in the order asked for.
-   *
-   * No root token: the same reasoning as `describe`. A bucket's PATH LIST is
-   * what the substituter already serves one narinfo at a time to anyone who can
-   * read the bucket, so a listing that demanded the operator's secret would be
-   * a credential on a question the protocol answers for free.
-   *
-   * THE GROUPING AND THE ORDER ARE THIS ROW'S. A caller holding one page
-   * cannot count a bucket, and a caller that tried would state its page's
-   * totals as the bucket's.
-   */
   paths(input: {
     bucket: string;
     filter: string | null;
@@ -413,34 +256,23 @@ export interface CacheAdmin {
   >;
 }
 
-/** WHAT A DELETED BUCKET'S STORE GAVE UP: the keys removed under its prefix
- *  and their bytes. The only count a person can check afterwards, since every
- *  row that named them went with the bucket. */
 export interface BucketDeleted {
   name: string;
   objects: number;
   bytes: number;
 }
 
-/** One stored path, as `paths` lists it. */
 export interface PathPageRow {
   storePath: string;
   narSize: number;
   created: number;
   hits: number;
-  /** When a push or a `missing` query last said somebody wants it. */
   lastWanted: number;
-  /** WHAT BUILT IT, as the pusher stated it — a run id and a commit sha, or
-   *  null where nothing was said. */
   run: string | null;
   commit: string | null;
-  /** WHAT KEEPS IT, and until when — the collector's own answer, read as
-   *  the page was answered. */
   keptBy: CacheKeptBy;
 }
 
-/** One PACKAGE, as a grouped `paths` lists it: every version of one store
- *  path's name, counted and summed by the database. */
 export interface PathGroupPageRow {
   name: string;
   versions: number;
@@ -448,44 +280,24 @@ export interface PathGroupPageRow {
   hits: number;
   pushed: number;
   wanted: number;
-  /** The newest version's path — the hash a reader compares by — and the
-   *  provenance of THAT version, never a mixture of two builds. */
   storePath: string;
   run: string | null;
   commit: string | null;
-  /** What keeps the version held LONGEST among those the filter leaves. */
   keptBy: CacheKeptBy;
 }
 
-/** The verdict on a presented credential. `status` is what the route answers
- *  with: 401 for "who are you", 403 for "not with that token", and 404 for an
- *  anonymous read of a PRIVATE bucket — a 401 there would confirm the bucket
- *  exists, which is exactly what a private name must not leak. */
 export type AuthVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404; message: string };
 
 export type NarSource =
-  /** A KEPT OBJECT, in whichever store its bucket lives: the whole size, and
-   *  a read of any range of it. Every store answers the same way. */
   | {
       kind: "object";
       storePath: string;
       size: number;
       read(range?: ByteRange): Promise<ReadableStream<Uint8Array> | null>;
     }
-  /** THE ONE-TIME MIGRATION: the old Nix store still has this row's path and
-   *  its object has not been produced yet. Removed when that store is. */
   | { kind: "legacy"; storePath: string; stream: ReadableStream<Uint8Array> }
-  /**
-   * THE STORE SERVES IT, NOT ODU (PLAN 2.8). The bucket's objects live in a
-   * store that hands out URLs of its own, so the route answers a redirect to
-   * one that expires and the bytes never cross this machine. odu still
-   * decided that this caller may read this bucket — the URL is minted only
-   * after that — which is why a PRIVATE bucket can be served this way at all.
-   */
   | { kind: "redirect"; storePath: string; size: number; url: URL };
 
-/** Why the cache cannot be mounted. A value naming the fact, rendered once at
- *  the row's boundary. */
 export type CacheMountRefusal = {
   kind: "undeclared_store";
   bucket: string;
@@ -501,75 +313,44 @@ export function mountRefusalMessage(refusal: CacheMountRefusal): string {
   );
 }
 
-/** What one boot's SYNCHRONOUS work found: before mount, no pushes can race. */
 export interface BootReport {
-  /** Rows whose path proved its own `fixed:r:sha256` CA. */
   caProved: number;
-  /** Object files with no row (a crash between put and record). */
   orphansSwept: number;
-  /** What dead puts left from before this boot: `.tmp-*` names, and on S3
-   *  incomplete multipart uploads. */
   tempSwept: number;
 }
 
-/** What the one-time self-CA pass found. */
 export interface SelfProofReport {
   rows: number;
   proved: number;
   refused: number;
   unreadable: number;
-  /** Rows read and judged, then left alone: by the time the verdict was
-   *  ready the row was gone, named other bytes, or had a verdict already. */
   skipped: number;
 }
 
-/** What the narinfo backfill wrote: every bucket's rows walked, the objects
- *  it had to write, and the ones no store would take. */
 export interface ObjectBackfillReport {
   rows: number;
   written: number;
   failures: number;
 }
 
-/** What the row-owned background migration did. */
 export interface MigrationReport {
   migrated: number;
   failures: number;
-  /** True only when every row has its object. */
   complete: boolean;
-  /** Why it is paused for space, if it ended that way. */
   paused: string | null;
 }
 
 export interface Cache {
-  /** The protocol face. */
   bucket(name: string): BucketRow | null;
-  /** The bucket a HOST names, or null. The caller lowercases and strips the
-   *  port; a domain is stored as the name a client types. */
   bucketByDomain(host: string): BucketRow | null;
   authorize(header: string | undefined, bucket: BucketRow, need: Scope): AuthVerdict;
   narinfoText(bucket: BucketRow, hash: string): string | null;
-  /** `nix-cache-info` for one bucket, by name — the three lines a Nix client
-   *  reads first and the two `Odu-` lines that say where this bucket is
-   *  pushed to. One rendering for the ROUTE and for the object written to the
-   *  store, so a reader that reaches odu and one that reaches only the store
-   *  cannot be told different things. */
   cacheInfoText(bucket: string): string;
   touch(bucket: BucketRow, hash: string): void;
-  /** ONE operational line; the row hands the daemon's logger to the cache. */
   log(event: string, fields: Record<string, unknown>): void;
   narSource(bucket: BucketRow, file: string): Promise<NarSource | null>;
-  /**
-   * WHERE THIS BUCKET'S NEXT NAR GOES, and the URLs that write it (PLAN 2.9).
-   *
-   * The CACHE answers it, from the bucket's store, because a route must never
-   * peek at a store: what a bucket can do is the row's business, and the only
-   * thing the protocol sees is the plan it is handed.
-   */
   beginDirect(bucket: BucketRow, file: string, floor: number | null): Promise<UploadPlan>;
-  /** The presigned URL for one part (0-based) of an upload in flight. */
   directPart(bucket: BucketRow, file: string, upload: string, index: number): Promise<DirectPart>;
-  /** The client is done sending: join the parts, and confirm the object. */
   completeDirect(
     bucket: BucketRow,
     file: string,
@@ -577,9 +358,6 @@ export interface Cache {
     parts: readonly UploadedPart[],
   ): Promise<DirectComplete>;
   beginUpload(bucket: BucketRow, file: string): Promise<Upload>;
-  /** One part of a chunked NAR, under the part ceiling. A retry overwrites the
-   *  same index, so a dropped request costs one part. `session` (2.4) makes
-   *  the parts this upload's own; null keeps the shared names 2.x sends. */
   beginPart(
     bucket: BucketRow,
     file: string,
@@ -587,282 +365,78 @@ export interface Cache {
     limit: number,
     session?: string | null,
   ): Promise<Upload>;
-  /** Join the parts into the NAR the narinfo will name. `missing` non-empty
-   *  means the client's count is ahead of what arrived. */
   completeUpload(
     bucket: BucketRow,
     file: string,
     total: number,
     session?: string | null,
   ): Promise<CompleteUpload>;
-  /** `provenance` is what the PUSHER said built this path (PLAN 4.2) — kept
-   *  on the row, understood by nobody here. A push that states nothing
-   *  leaves whatever an earlier one stated alone. */
   acceptNarinfo(
     bucket: BucketRow,
     hash: string,
     body: ReadableStream<Uint8Array>,
     provenance: Provenance,
   ): Promise<NarinfoOutcome>;
-  /** Which of `paths` the bucket needs. `skipped` is the subset it will never
-   *  take because an upstream key signed it — reported separately so `odu cache
-   *  push` can say "upstream" rather than "already there".
-   *
-   *  `whole` is a pusher storing a closure that will be FETCHED ALONE: `nix
-   *  copy --from <this bucket>` reads no other cache and stops at the first
-   *  path the bucket lacks. It answers an absent upstream-signed path as
-   *  missing, so `skipped` is empty. The bucket's `upstreamKeys` are not
-   *  touched: the next push that does not ask is filtered as before.
-   *
-   *  `provenance` is what the asker says built them, and it lands on the paths
-   *  the bucket ALREADY holds — the ones that get no narinfo PUT. Only a null
-   *  column is filled and none is ever overwritten, so the first builder to
-   *  state a fact keeps it, a run may claim a path its own workflow uploaded
-   *  at the same commit, and a later unrelated run changes nothing. */
   missing(
     bucket: BucketRow,
     paths: readonly { path: string; sigs?: readonly string[] }[],
     provenance: Provenance,
     whole: boolean,
   ): { missing: readonly string[]; skipped: readonly string[] };
-  /**
-   * EVERY BUCKET'S ROW, without a credential — what a SUBSCRIBER reads.
-   *
-   * The root token guards ADMINISTRATION, not the board: who may subscribe is
-   * the transport's decision (loopback today; a session in PR 3), and demanding
-   * the operator's secret from a reader would make the cache unrenderable
-   * without handing it out. It carries the same facts `admin.list` answers, and
-   * no more.
-   */
   snapshot(): readonly BucketFacts[];
-  /**
-   * WHAT `/metrics` READS, per bucket and counted by SQL — paths, bytes, reads
-   * and pins, for EVERY bucket including the empty ones.
-   *
-   * Its own accessor rather than `admin.stats`, because a scrape is not an
-   * administrator: `stats` demands an `Authority` carrying the root token, and
-   * a daemon started without one would answer `/metrics` with a refusal
-   * instead of its numbers. And its own shape rather than `snapshot()`,
-   * because the gauges need a pin COUNT, which no bucket row carries.
-   */
   meterGauges(): readonly BucketGauge[];
-  /**
-   * SOMETHING A SUBSCRIBER WOULD SEE MOVED — a narinfo landed, a bucket was
-   * created, a closure was pinned or collected, or reads accumulated.
-   *
-   * Reads are COALESCED here rather than at the subscriber: a bucket being
-   * fetched from is a counter moving thousands of times a minute, and a
-   * publish per read would be a broadcast storm dressed as freshness. At most
-   * one notification a second, and only when the counters actually moved.
-   *
-   * The returned function unsubscribes. There is exactly one subscriber — the
-   * row that publishes `buckets` — so this is a listener and not an emitter.
-   */
   onChange(listener: () => void): () => void;
-  /**
-   * COLLECT EVERY BUCKET, with no caller to authorise — the SCHEDULE's entry
-   * point, and nothing else's.
-   *
-   * A timer is not a principal: handing the row a fabricated root token so it
-   * could call its own admin verb would be an authority invented to satisfy a
-   * check. The verb authorises and then calls this; the schedule calls it
-   * directly.
-   */
   collect(): Promise<GcCollection>;
-  /**
-   * PIN A CLOSURE ON A BUCKET'S OWN AUTHORITY — what the protocol route
-   * offers a WRITE token, and the one pin verb that is not administration.
-   *
-   * The scope rule, and why it is write rather than admin: a write token can
-   * already keep any closure alive forever by pushing it again, because a
-   * stored push renews `lastWanted`. A pin it may create or re-point grants it
-   * no retention it lacks — it makes the same promise once instead of nightly
-   * — and it still cannot read a private bucket, delete a pin, or administer
-   * anything. DELETING a pin stays admin's: that is giving up retention
-   * somebody else asked for.
-   */
   pinAs(
     bucket: BucketRow,
     input: { name: string; paths: readonly string[] },
   ): Promise<CacheOutcome<PinFacts>>;
-  /**
-   * A WRITE TOKEN FOR ONE RUN AND ONE BUCKET — what the `ci` row mints when a
-   * repository's `flake.nix` reads from a bucket this daemon serves (PLAN
-   * 4.1), through `@odu/cordis`'s grant broker.
-   *
-   * NOT an admin verb, and deliberately not reached through one. `tokenMint`
-   * authorises a PERSON holding the root token; there is no person here. The
-   * caller is the runs' row in this same process, acting on a run this daemon
-   * has already accepted, and handing it a fabricated root token so it could
-   * call the administrative verb would be an authority invented to satisfy a
-   * check — the same reasoning {@link Cache.collect} is separate for.
-   *
-   * What bounds it instead is the GRANT: scope `write`, a glob of exactly this
-   * bucket, and an expiry in MILLISECONDS rather than the whole days the
-   * administrative mint takes, because a run is shorter than a day. The run
-   * revokes it at finalize whatever the outcome; the expiry is the backstop
-   * for a daemon that died first.
-   *
-   * `null` when no such bucket is served here.
-   */
-  /** A RUN'S WRITE TOKEN for one bucket (PLAN 4.1). The run's id and nothing
-   *  else: this row writes `expires`, so {@link RUN_TOKEN_LIFETIME_MS} is its
-   *  own, and this row's bucket page shows the Tokens list, so `run <id>` is
-   *  its wording too. */
   grantRunToken(request: { bucket: string; runId: string }): { id: string; token: string } | null;
-  /** Let a token go, by id. Idempotent — an unknown id is not an error,
-   *  because a finalize cannot know whether a restart already revoked. */
   revokeToken(id: string): void;
-  /** The admin face. */
   admin: CacheAdmin;
-  /** BEFORE MOUNT: prove `CA:`, sweep orphan objects and abandoned temp files.
-   *  Nothing is writing yet, so a sweep cannot race a put. */
   boot(): Promise<{ ok: true; report: BootReport } | { ok: false; refusal: CacheMountRefusal }>;
-  /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: prove self-referencing rows
-   *  from their kept bytes, ONCE per row (the verdict is persisted). */
   proveSelf(): Promise<SelfProofReport>;
-  /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: migrate objects the old store
-   *  still owns, two at a time, resuming after a disk pause. */
   migrate(): Promise<MigrationReport>;
-  /** AFTER MOUNT, AS A ROW-OWNED BACKGROUND TASK: write every bucket's
-   *  narinfo and `nix-cache-info` objects, two at a time, skipping the ones
-   *  already there (PLAN 2.8). Idempotent, so a restart resumes it. */
   backfillObjects(): Promise<ObjectBackfillReport>;
-  /** AFTER MOUNT: pick up every store-to-store move a restart interrupted
-   *  (PLAN 2.8). Answers when they are all finished. */
   resumeMigrations(): Promise<void>;
-  /** Join the row's background work, then close the database. */
   close(): Promise<void>;
 }
 
 export interface CacheOptions {
-  /** The per-user state root; the cache owns `<stateRoot>/cache`. */
   stateRoot: string;
-  /** `$ODU_ROOT_TOKEN`, or null when the operator supplied none. */
   rootToken: string | null;
-  /**
-   * WHERE THIS DAEMON IS REACHED — the same string the row builds a bucket's
-   * `pushUrl` and its path-form `url` from.
-   *
-   * The cache needs it because `nix-cache-info` NAMES IT (PLAN 2.8): reads
-   * come from the store, so the push address can no longer be derived from
-   * the substituter, and the file a Nix client reads first is where the cache
-   * states it.
-   *
-   * THE ROW PASSES `$ODU_PUBLIC_ORIGIN` WHEN THERE IS ONE AND THE BOUND
-   * ORIGIN OTHERWISE (`server.ts`), which on a loopback daemon makes
-   * `Odu-Origin` a `127.0.0.1` address. That is honest — it is exactly what
-   * `pushUrl` and the bucket page already say, and on a loopback daemon it is
-   * where a push goes — but a deployment whose reads come from a store and
-   * whose operator never set `$ODU_PUBLIC_ORIGIN` publishes a push address
-   * only its own machine can use. Required rather than defaulted so that
-   * answer is the ROW's, said once, and not a constant hidden here.
-   */
   publicOrigin: string;
-  /** THE OLD NIX STORE, read only during the one-time migration. `null` on a
-   *  fresh deployment; the row never needs a store otherwise. */
   legacyStore?: {
     dump(storePath: string): ReadableStream<Uint8Array>;
-    /** The old store's own facts for a row: the NarHash the migration must
-     *  match before keeping bytes, and the CA its narinfo could not prove. */
     pathInfo?(storePath: string): Promise<{ ca: string | null; narHash: string } | null>;
   } | null;
-  /** Pause the migration below this many free bytes (default 10 GiB). */
   migrationFreeFloor?: number;
-  /** How long a paused migration waits before re-checking free space. */
   migrationRetryMs?: number;
-  /** Injected by the suite for the disk-floor test. */
   freeBytes?: () => Promise<number | null>;
-  /** THE STORES, by declared name, `local` among them — the row builds them
-   *  from the operator's declarations (`./stores` `objectStores`), and a suite
-   *  passes its own. The cache never builds a store. */
   stores: ReadonlyMap<string, ObjectStore>;
-  /**
-   * THE STORES THE WORLD CAN READ DIRECTLY — those whose declaration carries
-   * a `publicUrl` (PLAN 2.8).
-   *
-   * A bound domain covers the WHOLE store, every prefix in it, because that
-   * is what binding a custom domain to an S3 bucket means. So a PRIVATE
-   * bucket on one of these would have its narinfos and its NARs readable by
-   * anyone who can guess its name, whatever odu's own routes decide — which
-   * is why `create` and `migrate` refuse the combination rather than
-   * documenting it.
-   */
   frontedStores?: ReadonlySet<string>;
   now?: () => number;
-  /** ONE structured line per operational fact (serve, import, boot, refusal).
-   *  The row hands the daemon's logger here; a suite that does not care omits
-   *  it. No per-chunk lines: a NAR read is one line. */
   log?: (event: string, fields: Record<string, unknown>) => void;
-  /**
-   * AN ADDRESS WHOSE BYTES ARE NO LONGER WHAT THEY WERE, so whoever fronts
-   * the store can be told.
-   *
-   * Three callers. A finished MOVE leaves the previous store's copies
-   * deleted; a RE-PUSH rewrites a narinfo object that was cacheable for a
-   * day; a DELETED BUCKET gives up every address it ever served. The ROW
-   * knows where a bucket is reachable from and the cache does not, so the
-   * cache names the paths and the row builds the URLs — the same division the
-   * collector's announcement uses.
-   */
   purged?: (input: {
     bucket: string;
     store: string;
     reason: "migrate" | "repush" | "delete";
     removals: readonly GcRemoval[];
-    /** The bucket's `nix-cache-info`, when that is what changed — a move
-     *  deletes it with everything else, and a `Priority:` edit rewrites it. */
     cacheInfo?: boolean;
   }) => void;
 }
 
-/** The floor between two READ-driven publications. Reads are the only change
- *  that arrives thousands of times a minute, and a hit count that moved a second
- *  ago is as true for a reader as one that moved a millisecond ago. */
 export const HITS_REFRESH_MS = 1000;
 
-/**
- * HOW LONG A RUN'S WRITE TOKEN MAY LIVE (PLAN 4.1) — a BACKSTOP, not the
- * lifetime.
- *
- * The ordinary end of one of these is the revoke the service's projection
- * performs once nothing is serving the run, usually within seconds of it
- * stopping. This bounds the case a revoke cannot cover: a daemon that dies
- * with runs in flight. Long enough that it never expires under a slow run,
- * short enough that a forgotten credential is not a permanent one.
- *
- * HERE, beside the only code that writes a token's `expires`, rather than
- * beside either caller that asks for one: it is a credential policy, and it
- * revs when somebody decides a push credential may outlive its run by less —
- * never when `run.start` changes.
- */
 export const RUN_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
-/**
- * HOW LONG A REDIRECTED NAR URL LIVES — {@link PRESIGN_SECONDS}, spelled in
- * `./surface` beside the push protocol's other numbers, because a WRITE is
- * presigned for the same budget (PLAN 2.9) and the two must not drift.
- */
 export { PRESIGN_SECONDS } from "./surface";
 
-/** A bucket name is a path segment on the wire, so it is a DNS-ish label and
- *  nothing else: lowercase, digits, dashes. A name with a `/` in it would be a
- *  second route, and one with a `.` would collide with `<hash>.narinfo`. */
 const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
-/** A bucket's public NAME: a lowercase DNS hostname, no scheme, no port. The
- *  last label is alphanumeric so `cache.` and `-x` are refused. */
 const DOMAIN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-/**
- * A NUMBER OF DAYS, CHECKED ONCE.
- *
- * Three verbs take one — a bucket's creation, its change of mind, and the dry
- * run's "ask as if" — and the rule and the sentence a person reads are one
- * thing rather than three copies to drift apart. `null` is "not asked",
- * which only the plan can mean.
- */
 function checkedDays(days: number | null): CacheOutcome<null> {
   if (days !== null && (!Number.isSafeInteger(days) || days < 0)) {
     return {
@@ -879,52 +453,21 @@ export function createCache(options: CacheOptions): Cache {
   const dir = join(options.stateRoot, "cache");
   const repo = openCacheRepo(join(dir, "cache.sqlite"));
   const { stores } = options;
-  /** The stores a client can read without odu — empty unless the operator
-   *  bound a domain to one. */
   const fronted = options.frontedStores ?? new Set<string>();
-  /**
-   * THE ONE PLACE A BUCKET BECOMES ITS STORE, from the row's own `store` fact.
-   * Every bucket's store was proved declared at boot and at create, so a
-   * missing one here is a broken invariant, not a refusal.
-   */
   const storeOf = (bucket: Pick<BucketRow, "name" | "store">): ObjectStore => {
     const store = stores.get(bucket.store);
     if (store === undefined) throw new Error(`bucket "${bucket.name}" names an undeclared store`);
     return store;
   };
-  /** The same, for a caller holding only a bucket's NAME (an object row's). */
   const objectsOf = (name: string): ObjectStore => {
     const bucket = repo.bucket(name);
     if (bucket === null) throw new Error(`no bucket "${name}"`);
     return storeOf(bucket);
   };
 
-  /**
-   * ONE writer at a time, across keep-and-record (staging's), `pin` and `gc`.
-   *
-   * Those three are the only things that change what is retained, and they are
-   * the three that must not interleave: a collection that planned while a pin
-   * was in flight would delete the path the pin had just promised to keep, and
-   * a `record` between a plan and a delete is the same race from the other
-   * side. The lock is taken for the whole of each, so the loser sees the
-   * winner's result rather than a half-applied one.
-   */
   const writers = newChain();
   const withWriteLock = <T>(work: () => Promise<T>): Promise<T> => serial(writers, work);
 
-  /**
-   * WHAT HOLDS EACH PATH, per bucket — the collector's own holds, and every
-   * path's name beside them so a package can find its versions.
-   *
-   * KEPT, because they need the whole bucket and the page asks often: on
-   * open, on every sort click, every filtered keystroke, every "show more"
-   * and every package opened, and kolu's sixteen thousand rows are a tenth
-   * of a second of event loop to load and walk. Holds carry no clock, so
-   * nothing but a WRITE makes them false, and `repo.revision` is the number
-   * every such write moves. Read with no lock: the read is synchronous, like
-   * the page read beside it, and the collector never looks here — it plans
-   * from fresh rows under its own lock.
-   */
   const holdsMemo = new Map<
     string,
     { revision: number; holds: Map<string, Hold>; byName: Map<string, string[]> }
@@ -938,8 +481,6 @@ export function createCache(options: CacheOptions): Cache {
     if (kept !== undefined && kept.revision === revision) return kept;
     const objects = repo.objects(bucket.name);
     const holds = holdsOf(bucket, objects, repo.pins(bucket.name));
-    // THE NAME MIGRATION 16 WROTE INTO `object.name`, split by the same
-    // function, so a package here is exactly the group SQL counted.
     const byName = new Map<string, string[]>();
     for (const row of objects) {
       const name = storePathParts(row.storePath).name;
@@ -952,19 +493,8 @@ export function createCache(options: CacheOptions): Cache {
     return fresh;
   }
 
-  /**
-   * MAY THIS CALL ADMINISTER A BUCKET?
-   *
-   * Two answers, and exactly one applies. A `role` authority is one the ROW
-   * already decided: it read the connection's principal and found an `admin` or
-   * an `owner`, so there is no operator secret to compare — a daemon with an
-   * identity provider mounted need not have a root token at all. Otherwise the
-   * root token is the rule, which is loopback mode and the operator's bootstrap.
-   */
   function requireRoot(input: { authority: Authority }): CacheOutcome<null> {
     if (input.authority.kind === "role") {
-      // THE SEAL, not the word: `kind` is a string a cast can write, and the
-      // symbol is not obtainable outside this module.
       if (roleSeal in input.authority && input.authority[roleSeal] === true) {
         return { ok: true, value: null };
       }
@@ -988,15 +518,6 @@ export function createCache(options: CacheOptions): Cache {
     return { ok: true, value: null };
   }
 
-  /**
-   * WOULD THIS BUCKET'S BYTES BE WORLD-READABLE BY MERELY LIVING THERE?
-   *
-   * A store's `publicUrl` is a domain bound to the whole S3 bucket, so every
-   * prefix in it answers to anyone who knows a name — odu's own routes do not
-   * come into it. A PRIVATE bucket on such a store is therefore private in
-   * name only, and the refusal is here rather than in the documentation
-   * because odu holds both facts at the moment of the choice.
-   */
   const exposure = (isPublic: boolean, store: string): CacheOutcome<never> | null =>
     isPublic || !fronted.has(store)
       ? null
@@ -1016,9 +537,6 @@ export function createCache(options: CacheOptions): Cache {
       : { to: row.toStore, state: row.state, copied: row.copied, total: row.total, bytes: row.bytes };
   };
 
-  /** What writing one of the protocol's text objects came to: a first write,
-   *  bytes that were already there, or a REWRITE whose old text an edge may
-   *  still be serving. */
   type WriteOutcome = "written" | "same" | "rewritten";
 
   function factsOf(
@@ -1040,21 +558,11 @@ export function createCache(options: CacheOptions): Cache {
       lastPush: counts?.lastPush ?? null,
       hits: counts?.hits ?? 0,
       store: bucket.store,
-      // WHAT THE STORE CAN TAKE, asked of the store itself — the same answer
-      // the push negotiation gives a client, so the row and the protocol
-      // cannot disagree about where a bucket's bytes go.
       writesTo: staging.uploadMode(bucket) === "direct" ? "store" : "odu",
-      // THE MOVE, IF ONE IS RUNNING — read per bucket, because a bucket moves
-      // between stores perhaps twice in its life and a join for the usual
-      // answer would be a cost every page pays for a row that is almost
-      // always absent.
       migration: migrationFactsOf(bucket.name),
     };
   }
 
-  /** The bucket's signature over one path, computed AT READ TIME. A stored
-   *  signature would silently survive a rotated key; one ed25519 sign per
-   *  narinfo GET is nothing. */
   function signatureOf(bucket: BucketRow, row: ObjectRow): string {
     return signFingerprint(
       bucket.secretKey,
@@ -1067,8 +575,6 @@ export function createCache(options: CacheOptions): Cache {
     );
   }
 
-  /** The narinfo a client reads: the bucket's signature first, then the
-   *  client's own, so a path signed on a lane stays verifiable there. */
   function narinfoFor(bucket: BucketRow, row: ObjectRow): string {
     const info: NarInfo = {
       storePath: row.storePath,
@@ -1086,20 +592,6 @@ export function createCache(options: CacheOptions): Cache {
     return formatNarinfo(info);
   }
 
-  /**
-   * THE PROTOCOL'S TEXT FILES AS OBJECTS (PLAN 2.8) — a narinfo and
-   * `nix-cache-info`, written where the store can serve them without odu.
-   *
-   * `put` is CONDITIONAL — first writer wins — which is exactly right for a
-   * NAR, whose key names its own bytes, and exactly wrong for a narinfo that a
-   * re-push rewrote with one more signature. So this one compares: the kept
-   * object's facts come back on the refusal, identical bytes are left alone,
-   * and different ones are deleted and written again.
-   *
-   * A FAILURE HERE NEVER FAILS THE PUSH. The row is the truth and odu still
-   * renders the narinfo from it; the object is the store's copy, and the
-   * backfill (`backfillObjects`) writes any that a failed put left behind.
-   */
   async function writeText(
     objects: ObjectStore,
     key: string,
@@ -1121,19 +613,9 @@ export function createCache(options: CacheOptions): Cache {
     await objects.delete(key);
     const again = await put();
     if (!again.ok) throw new Error(`${key} could not be written: ${again.refusal.kind}`);
-    // A REWRITE, NOT A FIRST WRITE: an edge may be holding the text this just
-    // replaced, for the day `INFO_CACHE_CONTROL` gave it. The caller purges.
     return "rewritten";
   }
 
-  /**
-   * ONE OF THE PROTOCOL'S TEXT OBJECTS, written or confirmed.
-   *
-   * A FAILURE HERE NEVER FAILS THE CALLER. The row is the truth and odu
-   * renders from it; the object is the store's copy, and the backfill writes
-   * what a failed put left behind. The caller announces a `"rewritten"`,
-   * because only it knows which address changed.
-   */
   async function keepTextObject(
     bucket: BucketRow,
     what: { key: string; text: string; contentType: string },
@@ -1150,10 +632,6 @@ export function createCache(options: CacheOptions): Cache {
     }
   }
 
-  /** The bucket's narinfo object for one row. A rewrite is announced: the
-   *  superseded text is cacheable for a day, and odu's own render is already
-   *  correct. One narinfo, no NAR — a NAR is named by its own bytes and never
-   *  changes, so purging it would be a cold cache for nothing. */
   async function keepNarinfoObject(
     bucket: BucketRow,
     row: ObjectRow,
@@ -1174,26 +652,9 @@ export function createCache(options: CacheOptions): Cache {
     return outcome;
   }
 
-  /** THE ONE RENDERING of a bucket's `nix-cache-info` — what the route
-   *  answers and what the object in the store holds. The origin is this
-   *  daemon's (`publicOrigin`), which is the address `odu cache push` has to
-   *  reach; the substituter a reader came from may be a store's domain that
-   *  takes no PUT at all. */
   const cacheInfoText = (bucket: string): string =>
     nixCacheInfo({ origin: options.publicOrigin, bucket });
 
-  /**
-   * `nix-cache-info` for one bucket, written when the bucket is created and
-   * confirmed on every backfill.
-   *
-   * IT IS NOT A CONSTANT ANY MORE (PLAN 2.8): the text carries this daemon's
-   * origin and this bucket's name, so moving the deployment behind a new
-   * `$ODU_PUBLIC_ORIGIN` changes it. `writeText` compares the STORED SHA256
-   * the store already keeps rather than the length — the two origins a move
-   * is between can be the same number of characters — and a rewrite is
-   * purged like a narinfo's, because the old text was cacheable for a day and
-   * names an address that no longer takes a push.
-   */
   async function keepCacheInfoObject(bucket: BucketRow): Promise<void> {
     const outcome = await keepTextObject(bucket, {
       key: cacheInfoKey(bucket.name),
@@ -1211,15 +672,6 @@ export function createCache(options: CacheOptions): Cache {
     }
   }
 
-  /** Record an imported path. Idempotent: a re-pushed path refreshes its row
-   *  rather than duplicating, and keeps its hit count.
-   *
-   * The signature the BUCKET made is not stored — it is computed at read — so
-   * the row holds only the CLIENT's signatures, deduplicated by full
-   * `name:base64` string: Nix hands the same signature back from
-   * `path-info` that it took from the narinfo, and a row with it twice would
-   * put it twice in every answer.
-   */
   async function recordNow(
     bucket: BucketRow,
     info: NarInfo,
@@ -1230,23 +682,12 @@ export function createCache(options: CacheOptions): Cache {
     const existing = repo.object(bucket.name, info.storePath);
     const at = now();
     const sigs = [...new Set(info.sigs)].filter((sig) => keyNameOf(sig) !== bucket.keyName);
-    // CA IS PROVED FROM THE PATH, not taken from the pusher and not asked of a
-    // store: the row already holds (name, narHash, references, self), and Nix's
-    // formula reproduces the path or it does not. An old input-addressed row
-    // stays null, honestly.
     const computed = contentAddressOf({
       storePath: info.storePath,
       narHash: info.narHash,
       references: info.references,
       selfHash,
     });
-    // A SECOND narinfo PUT for a self-referencing row has no staged NAR to
-    // prove from; `selfHash` is null, which means NO HASH WAS COMPUTED, never
-    // that neither form matched. Such a path is never judged without its
-    // bytes. The SAME NarHash means the bytes the row already judged are the
-    // bytes being named — keep that verdict, whatever it is. With no such row
-    // (none, or one naming other bytes) the path is `unknown`, and the
-    // startup pass proves it from the kept object.
     const unjudged =
       computed === null && selfHash === null && info.references.includes(info.storePath);
     const keep = unjudged && existing !== null && existing.narHash === info.narHash;
@@ -1274,42 +715,23 @@ export function createCache(options: CacheOptions): Cache {
       sigs,
       hits: existing?.hits ?? 0,
       created: existing?.created ?? at,
-      // A STORED PUSH IS A WANT, and the clock retention reads: the pusher
-      // has just said this path matters to it.
       lastWanted: at,
-      // WHAT THE PUSHER SAID BUILT IT, written as stated — including the
-      // nulls. The upsert COALESCEs, so a push that states nothing keeps
-      // what a run stated and does not have to read the old row to know it.
       run: provenance.run,
       commit: provenance.commit,
     });
-    // THE STORE'S COPY OF THE NARINFO, rewritten from the row that has just
-    // landed (PLAN 2.8): a re-push that added a signature must not leave the
-    // store serving the old text. The row is already recorded, so a store that
-    // refuses this is a stale object the backfill picks up — never a push that
-    // 400s for bytes it kept.
     const recorded = repo.object(bucket.name, info.storePath);
     if (recorded !== null) await keepNarinfoObject(bucket, recorded);
     return true;
   }
 
-  // The write path, wired to the ONE lock: staging keeps an object and records
-  // its row under it, so neither a pin nor a collection lands in between.
   const staging = createStaging({
     storeOf,
-    // READ UNDER THE LOCK: which store a push writes to is decided from the
-    // row as it is then, never from the snapshot the request was admitted
-    // against (PLAN 2.8's move).
     bucketNow: (name) => repo.bucket(name),
     dir,
     now,
     withWriteLock,
     record: recordNow,
     log: options.log,
-    // A KEPT OBJECT'S FACTS, READ — never re-hashed when a row already has
-    // them: the row an earlier proof recorded, confirmed by the stored size.
-    // An object with no row (a crash between keep and record) is asked of the
-    // store, which for S3 is a stored checksum rather than a read of the bytes.
     async keptFacts(bucket, narHash, compression) {
       const key = objectKey(bucket.name, narHash, compression);
       const objects = storeOf(bucket);
@@ -1323,19 +745,11 @@ export function createCache(options: CacheOptions): Cache {
       return stored === null ? null : keptFileOf(stored);
     },
   });
-  /** THE MIGRATION'S THROTTLE: two old-store dumps at a time, never more. */
   const migrationSlots = createSlots(2);
-  /** THE BACKFILL'S THROTTLE, its own: two narinfo objects at a time, so a
-   *  catch-up pass cannot crowd out the migration's dumps. */
   const backfillSlots = createSlots(2);
-  /** THE STORE-TO-STORE MOVES RUNNING NOW, by bucket — so `close` can join
-   *  them and a start cannot begin the same one twice. */
   const storeMoves = new Map<string, Promise<void>>();
-  /** Two objects in flight per move, the same throttle the rest of the row's
-   *  background work uses. */
   const moveSlots = createSlots(2);
 
-  /** Start — or resume — one bucket's move, row-owned. */
   const startMigration = (row: MigrationRow): Promise<void> => {
     const running = storeMoves.get(row.bucket);
     if (running !== undefined) return running;
@@ -1355,32 +769,13 @@ export function createCache(options: CacheOptions): Cache {
     storeMoves.set(row.bucket, task);
     return task;
   };
-  /** Paths whose transition serve was refused, logged once each. */
   const unavailableLogged = new Set<string>();
-  /** The row's background migration, so close can join it before the DB goes. */
   let migrationTask: Promise<MigrationReport> | null = null;
   let selfTask: Promise<SelfProofReport> | null = null;
   let backfillTask: Promise<ObjectBackfillReport> | null = null;
   let stopping = false;
-  /** Resolves on close: a migration sleeping on disk or waiting on a dump can
-   *  end without waiting for that promise to settle. */
   const stopSignal = Promise.withResolvers<void>();
 
-  // ── who hears about a change ──────────────────────────────────────────────
-  //
-  // ONE listener: the row that publishes `buckets` to whatever is watching. The
-  // cache knows when a push lands, when a bucket appears and when reads
-  // accumulate — and nothing outside it does — so the notification is emitted
-  // here rather than polled for.
-  //
-  // READS ARE THROTTLED, and with a TRAILING edge. A bucket being fetched from
-  // moves a counter thousands of times a minute, so a publish per read is a
-  // broadcast storm dressed as freshness — but a leading edge alone drops the
-  // reads after the first of each window, and a burst that then stops leaves the
-  // board showing a number that never existed. So the first read of a window
-  // publishes, a read at the end of it ARMS a timer, and the timer fires once
-  // the burst has been quiet for a window. The timer is the cache's, and
-  // `close()` clears it: nothing outlives the activation.
   const listeners = new Set<() => void>();
   let lastReadNotify = Number.NEGATIVE_INFINITY;
   let trailing: ReturnType<typeof setTimeout> | null = null;
@@ -1446,13 +841,7 @@ export function createCache(options: CacheOptions): Cache {
         store,
       };
       repo.putBucket(bucket);
-      // `nix-cache-info` AS AN OBJECT, from the moment the bucket exists: a
-      // store that fronts its own reads is asked for it before anything else,
-      // and a bucket whose first push had not happened yet would answer 404
-      // to every client that found it. Its text is a constant, so this is the
-      // only time it is written (the backfill confirms it).
       await keepCacheInfoObject(bucket);
-      // A bucket that appeared is a row that appeared.
       notify();
       return { ok: true, value: factsOf(bucket) };
     },
@@ -1460,7 +849,6 @@ export function createCache(options: CacheOptions): Cache {
     async list(input) {
       const root = requireRoot(input);
       if (!root.ok) return root;
-      // ONE count query for every bucket, not one per bucket.
       const counted = repo.bucketStats();
       return { ok: true, value: repo.buckets().map((bucket) => factsOf(bucket, counted)) };
     },
@@ -1470,10 +858,6 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      // The substituter's own identity: its name, whether it is public, and the
-      // key a client trusts. Not the object count, the bytes, the retention or
-      // the upstream key names — those are the operator's, and this verb takes
-      // no credential.
       return {
         ok: true,
         value: {
@@ -1548,9 +932,6 @@ export function createCache(options: CacheOptions): Cache {
         bucketGlob: glob,
         scope: input.scope,
         expires: input.expiresDays === null ? null : now() + input.expiresDays * 24 * 60 * 60 * 1000,
-        // AN ADMINISTRATOR'S MINT SAYS NOTHING ABOUT ITSELF. The label is a
-        // run's (PLAN 4.1); a person holding the root token is the ordinary
-        // case and has no second name to carry.
         label: null,
         lastUsed: null,
         revoked: false,
@@ -1607,13 +988,6 @@ export function createCache(options: CacheOptions): Cache {
           message: `no store "${input.store}" — this daemon declares ${[...stores.keys()].join(", ")}`,
         };
       }
-      // UNDER THE WRITE LOCK, every read this decision rests on. The bucket
-      // may be DELETED and a move may be RECORDED while this call waits for
-      // somebody else's push to finish recording, and both of those are
-      // decided by rows read here: a check taken in the caller's own tick is
-      // a check about a state the insert below may no longer be part of.
-      // `bucket.delete` reads the same two rows under the same lock, so of a
-      // move and a delete that arrive together, exactly one is refused.
       const started = await withWriteLock(
         async (): Promise<CacheOutcome<MigrationRow>> => {
           const bucket = repo.bucket(input.bucket);
@@ -1629,9 +1003,6 @@ export function createCache(options: CacheOptions): Cache {
           }
           const exposed = exposure(bucket.isPublic, input.store);
           if (exposed !== null) return exposed;
-          // ONE MOVE PER BUCKET. A second one would be two copiers writing the
-          // same keys into two stores and one of them flipping the bucket under
-          // the other; a refusal says which one is running.
           const running = repo.migration(bucket.name);
           if (running !== null) {
             return {
@@ -1664,13 +1035,6 @@ export function createCache(options: CacheOptions): Cache {
         },
       );
       if (!started.ok) return started;
-      // OUTSIDE THE LOCK: the copier takes it for its own flip, and starting
-      // it from inside would queue that flip behind a lock this call still
-      // holds.
-      //
-      // THE ANSWER IS THE ROW, NOT THE OUTCOME: the copy is minutes of work
-      // on a bucket of any size, and a verb that waited for it would be a
-      // board control that times out. Progress is on the row.
       startMigration(started.value);
       return { ok: true, value: factsOf(repo.bucket(started.value.bucket) as BucketRow) };
     },
@@ -1678,28 +1042,11 @@ export function createCache(options: CacheOptions): Cache {
     async bucketDelete(input) {
       const root = requireRoot(input);
       if (!root.ok) return root;
-      // EVERY READ THIS DECISION RESTS ON IS INSIDE THE LOCK, and so is the
-      // purge it authorises. A guard taken in the caller's own tick is a
-      // guard about a state that can change while `withWriteLock` WAITS —
-      // which is exactly when it matters, because the thing being waited on
-      // is a push recording. `bucket.migrate` reads the same two rows under
-      // the same lock, so of a move and a delete that arrive together,
-      // exactly one is refused.
-      //
-      // AND THE OBJECTS GO FIRST: a push taking the lock next finds no
-      // bucket, and a crash between the two halves leaves rows that still
-      // name every key — a delete that can be asked for again, where the
-      // other order is a prefix nothing can name.
       return withWriteLock(async (): Promise<CacheOutcome<BucketDeleted>> => {
         const bucket = repo.bucket(input.bucket);
         if (bucket === null) {
           return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
         }
-        // A NAME FIRST. A domain is a DNS record somebody else made point
-        // here, and deleting the bucket under it would leave that name
-        // answering 404 for a bucket nobody can recreate under it without
-        // noticing — so the operator takes the name away first, which is one
-        // control above this one on the same page.
         if (bucket.domain !== null) {
           return {
             ok: false,
@@ -1709,9 +1056,6 @@ export function createCache(options: CacheOptions): Cache {
               "before deleting it, so no DNS record is left pointing at nothing",
           };
         }
-        // AND NOT WHILE IT IS MOVING: the copier is writing this bucket's
-        // keys into the other store, which this purge never touches, so a
-        // delete would leave the copy it had already made behind.
         const moving = repo.migration(bucket.name);
         if (moving !== null) {
           return {
@@ -1723,19 +1067,11 @@ export function createCache(options: CacheOptions): Cache {
           };
         }
         const store = storeOf(bucket);
-        // WHAT THE ADDRESSES WERE, read before the rows go: the row below
-        // turns these into the URLs an edge is holding.
         const removals: GcRemoval[] = repo.objects(bucket.name).map((row) => ({
           storePath: row.storePath,
           hash: row.hash,
           narFile: narFileName(row.narHash, row.compression),
         }));
-        // THE KEYS THE STORE HOLDS, AND THE KEYS THE ROWS NAME. The listing
-        // is what the count is made of, and it also catches an ORPHAN — a put
-        // whose record never landed — which no row can name and which would
-        // otherwise outlive the bucket under its own prefix forever. The row
-        // keys beyond it are deleted too and counted in nothing: they are
-        // keys nobody ever stored, and a count has to be checkable.
         const held = new Map((await store.list(bucket.name)).map((one) => [one.key, one.size]));
         const unlisted = migrationKeys(repo, bucket.name)
           .map((entry) => entry.key)
@@ -1752,20 +1088,11 @@ export function createCache(options: CacheOptions): Cache {
             objects += 1;
             bytes += size;
           },
-          // A KEY THAT WOULD NOT GO ENDS THIS. The answer below is the bytes
-          // this freed and the rows that named them are about to go, so a
-          // purge that reported a key it did not remove would be a number
-          // nobody can check. The rows are untouched, so it can be asked for
-          // again.
           failed: (_key, reason) => {
             throw reason;
           },
         });
-        // AND WHAT A DEAD PUT LEFT: temp names are not objects, so `list`
-        // never showed them and only this sweep takes them.
         objects += await store.sweepTemp(bucket.name, now());
-        // THE EDGE IS TOLD BEFORE THE ROW GOES, because the row is where the
-        // URLs come from: its store, and the mount it is served under.
         options.purged?.({
           bucket: bucket.name,
           store: bucket.store,
@@ -1773,9 +1100,6 @@ export function createCache(options: CacheOptions): Cache {
           removals,
           cacheInfo: true,
         });
-        // THE ROWS: the bucket, its objects, its pins, any migration record —
-        // and the TOKENS minted for this bucket alone, which `deleteBucket`
-        // takes with it.
         repo.deleteBucket(bucket.name);
         holdsMemo.delete(bucket.name);
         options.log?.("cache.bucket.deleted", { bucket: bucket.name, objects, bytes });
@@ -1811,9 +1135,6 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      // UNDER THE WRITE LOCK, like every other change to what is retained: a
-      // collection planning while this pin disappears must see one state or
-      // the other, never a pin half-gone.
       return withWriteLock(async () => {
         if (!repo.deletePin(bucket.name, input.name)) {
           return {
@@ -1832,7 +1153,6 @@ export function createCache(options: CacheOptions): Cache {
       if (!root.ok) return root;
       const chosen = bucketsFor(input.bucket);
       if (!chosen.ok) return chosen;
-      // A NAMED BUCKET IS NOT A SWEEP: see `collectNow`.
       return { ok: true, value: await collectNow(chosen.value, input.bucket === null) };
     },
 
@@ -1844,18 +1164,10 @@ export function createCache(options: CacheOptions): Cache {
       if (!days.ok) return days;
       const chosen = bucketsFor(input.bucket);
       if (!chosen.ok) return chosen;
-      // THE OVERRIDE IS A ROW THIS CALL MADE UP, and never one it kept: the
-      // planner reads `retentionDays` off each bucket, so asking a different
-      // question is handing it different rows. Nothing writes them, which is
-      // what makes "the dry run cannot collect" structural rather than a
-      // promise — and `gc.run` has no such field on the wire at all.
       const asked =
         retentionDays === null
           ? chosen.value
           : chosen.value.map((bucket) => ({ ...bucket, retentionDays }));
-      // UNDER THE SAME LOCK as the collection it previews: a dry run taken
-      // while a push was half-recorded would answer about a state that never
-      // existed, and the lock is already how this row reads "what is retained".
       return withWriteLock(async () => ({
         ok: true as const,
         value: previewGc(planFor(asked), GC_PREVIEW_PATHS),
@@ -1867,10 +1179,6 @@ export function createCache(options: CacheOptions): Cache {
       if (bucket === null) {
         return { ok: false, code: "unknown_bucket", message: `no bucket "${input.bucket}"` };
       }
-      // THE TWO NARROWINGS ARE EXCLUSIVE and the schema cannot say so, so the
-      // row does: a call that asks for the packages AND for one package's
-      // versions means one of them, and guessing which is a wrong answer with
-      // no complaint attached to it.
       if (input.group === "name" && input.name !== undefined && input.name !== null) {
         return {
           ok: false,
@@ -1884,24 +1192,12 @@ export function createCache(options: CacheOptions): Cache {
         after: input.after,
         filter: input.filter,
         sort: input.sort ?? "pushed",
-        // BIGGEST, NEWEST, MOST READ, Z BEFORE A — one rule for every order
-        // rather than a taste per column. The board sends what its header
-        // says, so nothing drawn there depends on this default.
         descending: input.descending ?? true,
       };
-      // WHAT KEEPS EACH ROW, decided NOW: the holds are the bucket's as of its
-      // last write, and the clock is this answer's. The holds and the page are
-      // read in one synchronous stretch at one revision, so every row the page
-      // names has a hold, and every group SQL counted has a version the same
-      // filter leaves — the casts below say that, and a broken one throws
-      // rather than answering an empty cell that reads as an older daemon.
       const { holds, byName } = holdsFor(bucket);
       const at = now();
       if (input.group === "name") {
         const grouped = repo.objectGroupsPage(bucket.name, page);
-        // THE VERSIONS THE GROUP COUNTED: the same name, narrowed by the same
-        // substring SQL's `instr` applied, so a filtered package says how long
-        // the versions it shows are kept rather than one it hides.
         const filter = page.filter === null || page.filter === "" ? null : page.filter;
         const versionsOf = (name: string): Hold[] =>
           (byName.get(name) ?? []).flatMap((path) => {
@@ -1943,7 +1239,6 @@ export function createCache(options: CacheOptions): Cache {
     async stats(input) {
       const root = requireRoot(input);
       if (!root.ok) return root;
-      // ONE count query for every bucket, not one per bucket.
       const counted = repo.bucketStats();
       return {
         ok: true,
@@ -1955,18 +1250,11 @@ export function createCache(options: CacheOptions): Cache {
     },
   };
 
-  /** A pin, checked and taken under the write lock — the body of BOTH doors:
-   *  the administrative verb, and the protocol route a write token reaches
-   *  (see {@link Cache.pinAs}). The sentences a person reads are here once. */
   async function pinChecked(
     bucket: BucketRow,
     input: { name: string; paths: readonly string[] },
     by: PinAuthor,
   ): Promise<CacheOutcome<PinFacts>> {
-    // THE NAME IS TRIMMED ONCE, here, and what follows is that name: the
-    // table's key is `(bucket, name)`, so a `"rel "` checked against `rel`
-    // and then STORED with its space would be a second pin — and re-pointing
-    // that releases nothing, which is the one thing re-pointing is for.
     const name = input.name.trim();
     if (name === "") {
       return { ok: false, code: "bad_input", message: "a pin needs a name, e.g. release-1.2" };
@@ -1974,14 +1262,6 @@ export function createCache(options: CacheOptions): Cache {
     if (input.paths.length === 0) {
       return { ok: false, code: "bad_input", message: "a pin needs at least one path" };
     }
-    // RE-POINTING IS RELEASING: the roots a pin held before are let go in the
-    // same statement, so a write token re-pointing an ADMIN's pin would undo
-    // an administrator's retention with a credential that may not delete one.
-    // A write token makes its own pins and re-points those; everything else
-    // in this bucket is an admin's to move.
-    //
-    // UNDER THE LOCK, with the write it guards: read outside it, the answer
-    // could be about a pin an admin made a moment ago.
     return withWriteLock(async () => {
       const held = repo.pins(bucket.name).find((pin) => pin.name === name);
       if (by === "write" && held !== undefined && held.createdBy === "admin") {
@@ -2003,11 +1283,6 @@ export function createCache(options: CacheOptions): Cache {
     input: { name: string; paths: readonly string[] },
     by: PinAuthor,
   ): Promise<CacheOutcome<PinFacts>> {
-    // THE CLOSURE IS THE BUCKET'S OWN ROWS, walked by the COLLECTOR'S own
-    // function: a pin promises exactly what GC protects, and two walks with
-    // two rules is a pin that holds paths the collector lets go. The
-    // references are followed in the metadata, never asked of a Nix store
-    // the server no longer has.
     const rows = new Map(repo.objects(bucket.name).map((row) => [row.storePath, row]));
     const absent = input.paths.filter((path) => !rows.has(path));
     if (absent.length > 0) {
@@ -2026,8 +1301,6 @@ export function createCache(options: CacheOptions): Cache {
       created,
       createdBy: by,
     });
-    // A pin changes `pinnedPaths`, which is a column of the bucket's row — so
-    // this is the third mutator that NOTIFIES, beside create and gc.
     notify();
     return {
       ok: true,
@@ -2041,8 +1314,6 @@ export function createCache(options: CacheOptions): Cache {
     };
   }
 
-  /** The buckets a verb names: one, or every one. An unknown name is the
-   *  refusal; `null` is "all of them" and cannot be unknown. */
   function bucketsFor(name: string | null): CacheOutcome<readonly BucketRow[]> {
     if (name === null) return { ok: true, value: repo.buckets() };
     const bucket = repo.bucket(name);
@@ -2052,28 +1323,9 @@ export function createCache(options: CacheOptions): Cache {
     return { ok: true, value: [bucket] };
   }
 
-  /** THE ONE PLACE A PLAN IS MADE, so the dry run and the collection cannot
-   *  answer differently about the same buckets. */
   const planFor = (buckets: readonly BucketRow[]): GcBucketPlan[] =>
     planGc({ buckets, objects: repo.objects(), pins: repo.pins(), now: now() });
 
-  /**
-   * The whole collection: plan, delete in batches, and (for a collection of
-   * EVERY bucket) the orphan sweep.
-   *
-   * THE WRITE LOCK IS TAKEN FOR DECISIONS, NEVER ACROSS THE NETWORK. The plan
-   * is made under it, each batch is decided and its rows dropped under it, and
-   * the deletes in between run with it free — a collection of forty thousand
-   * objects used to hold it for the whole hour, and every push to the daemon
-   * waited behind it. What that keeps is in `runGc`: a pin or a re-push that
-   * lands before a batch is decided still wins, because the batch asks the
-   * plan's own predicate again under the lock.
-   *
-   * `sweep` is false for one named bucket: orphans appear when a push dies,
-   * not when retention passes, so the button a person presses twice must not
-   * pay a full paged LIST of the store each time. The schedule collects every
-   * bucket, and that is when the sweep rides along.
-   */
   async function collectNow(
     buckets: readonly BucketRow[],
     sweep: boolean,
@@ -2081,10 +1333,6 @@ export function createCache(options: CacheOptions): Cache {
     const plan = await withWriteLock(async () => planFor(buckets));
     const collected = await runGc(repo, plan, objectsOf, { now, withLock: withWriteLock });
     const { report } = collected;
-    // A COLLECTION THAT STOPPED DOES NOT THEN WALK THE WHOLE STORE: the sweep
-    // is a full paged LIST per bucket, asked of the service that has just
-    // refused a delete, and what it would find is still there for the next
-    // pass.
     if (sweep && report.stopped === null) {
       for (const bucket of buckets) {
         const swept = await sweepOrphans(repo, bucket.name, storeOf(bucket));
@@ -2093,25 +1341,17 @@ export function createCache(options: CacheOptions): Cache {
         report.orphans += swept;
       }
     }
-    // Every bucket the collection touched answers a different count now.
     if (report.evicted > 0 || report.orphans > 0) notify();
     options.log?.("cache.gc", {
       evicted: report.evicted,
       kept: report.kept,
       orphans: report.orphans,
       bytes: report.bytes,
-      // AND THE SPLIT, because the totals cannot be apportioned afterwards:
-      // `/metrics` counts evictions per bucket, and a run that took a
-      // thousand paths is only actionable once the line says which bucket
-      // gave them up. The report already has it; this is it flattened to the
-      // three fields a reader of the line (or of the counter) acts on.
       buckets: report.buckets.map((one) => ({
         bucket: one.bucket,
         evicted: one.evicted,
         bytes: one.bytes,
       })),
-      // AND WHY IT STOPPED, when it did: the one line the bucket page shows,
-      // in the log a daemon keeps.
       ...(report.stopped === null ? {} : { stopped: report.stopped }),
     });
     return collected;
@@ -2139,7 +1379,6 @@ export function createCache(options: CacheOptions): Cache {
         if (stopping) return;
         const row = rows[next++];
         if (row === undefined) return;
-        // FROM THE STORE, whichever it is: the kept bytes, streamed.
         const object = await objectsOf(row.bucket)
           .get(objectKey(row.bucket, row.narHash, row.compression))
           .catch(() => null);
@@ -2160,15 +1399,6 @@ export function createCache(options: CacheOptions): Cache {
           unreadable += 1;
         } else {
           const selfHash = checked.selfHash;
-          // THE ROW AS IT IS NOW, under the lock every other writer holds. The
-          // rows are a snapshot taken at pass start and this pass reads every
-          // one from the store, for minutes: a collection or a
-          // `bucket.delete` may have taken the row meanwhile, a push may
-          // have replaced its bytes or judged it. Writing the snapshot back
-          // would put back a path nothing lists, naming an object that is
-          // gone. So the verdict is computed from, and lands on, a row that
-          // still names the bytes read and is still unknown, and only the two
-          // verdict fields change on it.
           const outcome = await withWriteLock(async () => {
             const bucket = repo.bucket(row.bucket);
             const current = bucket === null ? null : repo.object(bucket.name, row.storePath);
@@ -2193,10 +1423,6 @@ export function createCache(options: CacheOptions): Cache {
             };
             repo.putObject(judged);
             if (ca === null) return "refused" as const;
-            // THE NARINFO CLIENTS READ. A bucket read from its store serves the
-            // object written there, not odu's own rendering, so a proved path
-            // gets its `CA:` line only once that object is rewritten. A row
-            // that stays not content-addressed renders the same text.
             await keepNarinfoObject(bucket, judged);
             return "proved" as const;
           });
@@ -2228,8 +1454,6 @@ export function createCache(options: CacheOptions): Cache {
       }
       const legacy = options.legacyStore;
       if (legacy === undefined || legacy === null) {
-        // NO OLD STORE: the rows stay objectless, and the route answers 404
-        // rather than inventing bytes. The line names the count.
         options.log?.("cache.migration.incomplete", {
           remaining: missing.length,
           reason: "no old store is configured",
@@ -2257,8 +1481,6 @@ export function createCache(options: CacheOptions): Cache {
         new Promise((resolve) => setTimeout(resolve, ms));
 
       const migrateOne = async (row: (typeof missing)[number]): Promise<void> => {
-        // THE DISK FLOOR, RE-CHECKED AND WAITED OUT rather than ending the run:
-        // space that returns in a minute should resume without a restart.
         for (;;) {
           if (stopping) return;
           const bytes = await free().catch(() => null);
@@ -2291,9 +1513,6 @@ export function createCache(options: CacheOptions): Cache {
             });
             return;
           }
-          // A REBUILT PATH CAN WEAR THE SAME NAME WITH DIFFERENT BYTES. The row
-          // was signed over one NarHash; keep only bytes the old store says
-          // carry that hash.
           if (
             known !== undefined &&
             canonicalNarHash(known.narHash) !== row.narHash
@@ -2306,11 +1525,8 @@ export function createCache(options: CacheOptions): Cache {
             });
             return;
           }
-          // A TWIN MAY HAVE LANDED THE SAME OBJECT: ask before spawning a dump
-          // whose bytes would be thrown away.
           const key = objectKey(row.bucket, row.narHash, row.compression);
           const objects = objectsOf(row.bucket);
-          // A READ, not an empty put: a put racing a delete would store 0 bytes.
           const stored = await objects.facts(key);
           if (stored !== null) {
             repo.putObject({ ...row, ...keptFileOf(stored) });
@@ -2318,8 +1534,6 @@ export function createCache(options: CacheOptions): Cache {
             return;
           }
           const dump = legacy.dump(row.storePath);
-          // FIRST KEPT WINS: a twin that landed the key meanwhile is refused
-          // with `exists`, and its facts are the row's.
           const writing = migrationSlots.withSlot(async (): Promise<ObjectFacts> => {
             const outcome = await objects.put(key, dump, undefined, {
               contentType: NAR_CONTENT_TYPE,
@@ -2329,8 +1543,6 @@ export function createCache(options: CacheOptions): Cache {
             if (outcome.refusal.kind === "exists") return outcome.refusal.facts;
             throw new Error(`${key}: the store kept nothing (${outcome.refusal.kind})`);
           });
-          // A losing write is not left running: cancelling the stream kills the
-          // dump pipeline's process group.
           void writing.catch(() => {});
           const facts = await Promise.race([
             writing,
@@ -2358,8 +1570,6 @@ export function createCache(options: CacheOptions): Cache {
         }
       };
 
-      // REAL CONCURRENCY: two workers share the queue; each is inside the
-      // row's fetch-slot bound while it dumps and puts.
       const workers = Array.from({ length: Math.min(2, missing.length) }, async () => {
         for (;;) {
           if (stopping) return;
@@ -2373,7 +1583,6 @@ export function createCache(options: CacheOptions): Cache {
       const complete = repo.objects().every((row) => row.fileHash !== null);
       const remaining = repo.objects().filter((row) => row.fileHash === null).length;
       if (complete && migrated > 0) {
-        // THE LINE THE OPERATOR WAITS FOR before deleting the old store.
         options.log?.("cache.migration.complete", {
           migrated,
           note: "the old store is no longer read and can be deleted",
@@ -2384,22 +1593,6 @@ export function createCache(options: CacheOptions): Cache {
     return { migrated, failures, complete, paused };
   }
 
-  /**
-   * EVERY BUCKET'S NARINFO AND `nix-cache-info` AS OBJECTS — the one-time
-   * pass that catches up what was pushed before 2.8, and the repair for any
-   * object a failed put left behind.
-   *
-   * Forked after the mount beside the legacy migration, and for the same
-   * reason: kolu's bucket holds sixteen thousand rows, and a boot that wrote
-   * them all before serving would be a cache that is down for minutes. Two at
-   * a time, so a store sees the same concurrency a migration gives it.
-   *
-   * RESUMABLE because it is IDEMPOTENT: a row whose object is already there
-   * with the rendered text's length is skipped on one HEAD, so a daemon
-   * restarted half way through costs a walk and not a rewrite. The size test
-   * is the cheap one; `keepNarinfoObject` compares the bytes themselves for
-   * any row that fails it.
-   */
   async function backfillNow(): Promise<ObjectBackfillReport> {
     const buckets = repo.buckets();
     let rows = 0;
@@ -2407,12 +1600,6 @@ export function createCache(options: CacheOptions): Cache {
     let failures = 0;
     for (const snapshot of buckets) {
       if (stopping) break;
-      // THE ROW AS IT IS NOW, and the write under the lock `bucket.delete`
-      // purges inside: this pass is forked on every boot and runs for
-      // minutes on a big bucket, all of it while the row is answering verbs.
-      // A key written after the purge sits under a prefix no row names, and
-      // neither a collection nor an orphan sweep can ever reach it — both
-      // walk `repo.buckets()`.
       const existing = await withWriteLock(async () => {
         const bucket = repo.bucket(snapshot.name);
         if (bucket !== null) await keepCacheInfoObject(bucket);
@@ -2426,30 +1613,12 @@ export function createCache(options: CacheOptions): Cache {
       let inBucket = 0;
       const one = async (row: ObjectRow): Promise<void> => {
         if (stopping) return;
-        // THE BUCKET AS IT IS NOW, like a push's: this pass can run for
-        // minutes, and a `bucket.migrate` that flipped in the middle of it
-        // would otherwise have objects written into the store it is emptying.
-        // The HEAD is outside the lock — it is one round trip per row, and
-        // holding the lock across sixteen thousand of them would be a boot
-        // pass that blocks every push behind it.
         const at = repo.bucket(bucket.name);
         if (at === null) return;
         const key = narinfoKey(at.name, row.hash);
         const text = narinfoFor(at, row);
         const size = await storeOf(at).head(key).catch(() => null);
-        // NOT A ROW WHOSE OBJECT THE LEGACY MIGRATION HAS NOT LANDED: with no
-        // `FileHash` the narinfo omits it, and the `URL:` it names is not in
-        // the store — on a store-fronted bucket that is a narinfo the store
-        // serves and a NAR that 404s. The pass that lands the object writes
-        // it. (Guarded here rather than returned, so `done` keeps counting
-        // and `remaining` still reaches zero.)
         if (row.fileHash !== null && size !== new TextEncoder().encode(text).length) {
-          // UNDER THE LOCK, AND ONLY WHAT A ROW STILL NAMES. Everything that
-          // takes keys away — `bucket.delete`'s purge, a collection's
-          // evictions — does it holding this, so the two reads below are the
-          // whole guarantee that this put is not resurrecting a key its row
-          // is gone from. Outside it they would be true a moment before the
-          // write and false during it.
           const outcome = await withWriteLock(async () => {
             const now = repo.bucket(bucket.name);
             if (now === null || repo.object(now.name, row.storePath) === null) {
@@ -2464,8 +1633,6 @@ export function createCache(options: CacheOptions): Cache {
           }
         }
         done += 1;
-        // ONE LINE PER FIVE HUNDRED ROWS: a line per object would be sixteen
-        // thousand lines for one bucket's catch-up.
         if (done % 500 === 0) {
           options.log?.("cache.narinfo.backfill", {
             bucket: bucket.name,
@@ -2499,10 +1666,6 @@ export function createCache(options: CacheOptions): Cache {
       const presented = credentialOf(header);
       if (presented === null) {
         if (need === "read" && bucket.isPublic) return { ok: true };
-        // NOT a 401 for a private bucket: "you need a token" confirms the
-        // bucket exists, and a private name must not be enumerable. A caller
-        // who HAS a token and is refused gets 403, which leaks nothing it did
-        // not already know.
         return {
           ok: false,
           status: bucket.isPublic ? 401 : 404,
@@ -2538,19 +1701,11 @@ export function createCache(options: CacheOptions): Cache {
       if (!isStorePathHash(hash)) return;
       const row = repo.objectByHash(bucket.name, hash);
       if (row === null) return;
-      // COUNTED, NOT RENEWED. A read moves the hit counter and nothing else:
-      // retention runs on `lastWanted`, which a push and the `missing` query
-      // set, because reads are leaving odu (PLAN 2.8) and a clock that is
-      // about to stop ticking cannot be the one GC reads.
       repo.countRead(bucket.name, row.storePath);
       notifyReaders();
     },
 
     async narSource(bucket, file) {
-      // THE EXTENSION NAMES THE COMPRESSION, and twins can share a NarHash with
-      // different bytes: look up the pair, not the hash alone. A single row
-      // still answers a client that spelled the wrong extension, because its
-      // bytes are unambiguous.
       const at = file.indexOf(".nar");
       const hash = at === -1 ? file : file.slice(0, at);
       const narHash = `sha256:${hash}`;
@@ -2563,19 +1718,9 @@ export function createCache(options: CacheOptions): Cache {
           return twins.length === 1 ? (twins[0] as ObjectRow) : null;
         })();
       if (row === null) return null;
-      // A KEPT ROW ALREADY KNOWS ITS OBJECT'S SIZE (`FileSize`, written when
-      // the object was kept), so nothing is asked of the store before the
-      // read: no HEAD, one round trip to the first byte on S3. An object that
-      // is gone after all is the read's answer — null, a 404 — decided once.
       if (row.fileHash !== null && row.fileSize !== null) {
         const key = objectKey(bucket.name, narHash, row.compression);
         const objects = storeOf(bucket);
-        // THE STORE HANDS OUT ITS OWN URLS (PLAN 2.8): odu has just decided
-        // that this caller may read this bucket, and from here on the bytes
-        // are between the client and the store. The URL expires, so a
-        // private bucket's NAR is reachable for ten minutes by whoever was
-        // authorised and not at all by anyone else. A store with no such
-        // capability — the disk — is streamed by odu as it always was.
         if (objects.presignGet !== undefined) {
           return {
             kind: "redirect",
@@ -2591,15 +1736,8 @@ export function createCache(options: CacheOptions): Cache {
           read: async (range) => (await objects.get(key, range))?.stream ?? null,
         };
       }
-      // THE ONE-TIME TRANSITION. A row from before objects were kept has no
-      // object yet (no `FileHash`); the old Nix store serves it until the boot
-      // migration lands it. When that store is gone this branch is unreachable and the route
-      // is a 404, not a silent dump.
       const legacy = options.legacyStore;
       if (legacy === undefined || legacy === null) return null;
-      // THE OLD STORE MAY NOT HAVE IT (the upstream closure was never copied,
-      // or the store is gone). A 404 is honest; a 200 whose stream errors is
-      // not. One line per path, not per client retry.
       if (legacy.pathInfo !== undefined) {
         const known = await legacy.pathInfo(row.storePath).catch(() => null);
         if (known === null) {
@@ -2617,8 +1755,6 @@ export function createCache(options: CacheOptions): Cache {
       return { kind: "legacy", storePath: row.storePath, stream: legacy.dump(row.storePath) };
     },
 
-    // The write path is `./staging`'s; this face is the one the routes speak,
-    // and it is the same object either way.
     beginUpload: (bucket, file) => staging.beginUpload(bucket, file),
     beginDirect: (bucket, file, floor) => staging.beginDirect(bucket, file, floor),
     directPart: (bucket, file, upload, index) =>
@@ -2631,9 +1767,6 @@ export function createCache(options: CacheOptions): Cache {
       staging.completeUpload(bucket, file, total, session),
     async acceptNarinfo(bucket, hash, body, provenance) {
       const outcome = await staging.acceptNarinfo(bucket, hash, body, provenance);
-      // A PUSH LANDED OR WAS REFUSED — the changes nobody outside the cache
-      // can see, and the reason this listener exists at all. The publisher
-      // diffs, so a refusal that changed nothing costs one comparison.
       notify();
       return outcome;
     },
@@ -2641,16 +1774,12 @@ export function createCache(options: CacheOptions): Cache {
     missing(bucket, paths, provenance, whole) {
       const missing: string[] = [];
       const skipped: string[] = [];
-      /** The paths this bucket HAS and the asker wants. */
       const wanted: string[] = [];
       for (const { path, sigs } of paths) {
         if (repo.object(bucket.name, path) !== null) {
           wanted.push(path);
           continue;
         }
-        // A WHOLE PUSH IS ANSWERED BEFORE THE KEYS ARE READ: the asker said
-        // the closure will be fetched from this bucket alone, so a path an
-        // upstream key signed is as missing as any other.
         const upstream =
           !whole &&
           (sigs ?? []).some((sig) => {
@@ -2659,20 +1788,6 @@ export function createCache(options: CacheOptions): Cache {
           });
         (upstream ? skipped : missing).push(path);
       }
-      // THE QUESTION IS THE RENEWAL, AND THE CLAIM. A pusher asking "do you
-      // have these" is a build that wants them: the paths it is about to push
-      // arrive as rows with a fresh clock, and the ones already here — the
-      // whole point of a cache hit — have theirs renewed by the asking.
-      // Without this, the paths a CI job hits every day would expire while it
-      // kept hitting them, because the hit is a `missing` answer and never a
-      // read.
-      //
-      // IT IS ALSO THE ONLY MOMENT those paths are touched by this push, so
-      // what the asker says built them lands here: only a null `run` or
-      // `commit` is filled and neither is ever overwritten, so the first
-      // builder to state a fact keeps it, a run may claim a path its own
-      // workflow uploaded at the same commit, and a later unrelated run
-      // changes nothing.
       repo.want(bucket.name, wanted, now(), provenance);
       return { missing, skipped };
     },
@@ -2681,11 +1796,6 @@ export function createCache(options: CacheOptions): Cache {
 
     pinAs: (bucket, input) => pinChecked(bucket, input, "write"),
 
-    // THE RUN'S OWN WRITE TOKEN (PLAN 4.1). No principal, no root token, and
-    // no admin verb — see the interface for why those would be an authority
-    // invented rather than one held. The bucket must exist HERE: a grant for a
-    // name this daemon does not serve is the whole of what "served elsewhere"
-    // means on the resolver's side.
     grantRunToken: ({ bucket, runId }) => {
       const row = repo.bucket(bucket);
       if (row === null) return null;
@@ -2694,18 +1804,9 @@ export function createCache(options: CacheOptions): Cache {
       repo.putToken({
         id,
         hash: hashToken(token),
-        // EXACTLY this bucket. `globMatches` takes a comma-separated list of
-        // patterns and a bare name is the narrowest one expressible, so a run
-        // that pushes to the bucket it reads from can reach nothing else.
         bucketGlob: row.name,
         scope: "write",
-        // THE BACKSTOP, in wall-clock milliseconds — the administrative mint
-        // rounds to whole days, and a run is shorter than one.
         expires: now() + RUN_TOKEN_LIFETIME_MS,
-        // WHAT THE BUCKET PAGE'S TOKENS LIST SHOWS. Composed here because
-        // this row owns that page's words: an asker that sent the sentence
-        // would be an asker whose next feature (a filter, a "revoke every run
-        // token" control) needs the id parsed back out of it.
         label: `run ${runId}`,
         lastUsed: null,
         revoked: false,
@@ -2720,19 +1821,11 @@ export function createCache(options: CacheOptions): Cache {
 
     admin,
 
-    // ONE `bucketStats()` for the whole snapshot: the query is a GROUP BY over
-    // every object, and the default parameter would run it once per bucket — so
-    // a push into a cache with B buckets would cost B full scans per publish.
     snapshot: () => {
       const counted = repo.bucketStats();
       return repo.buckets().map((bucket) => factsOf(bucket, counted));
     },
 
-    // TWO AGGREGATE QUERIES FOR THE WHOLE SCRAPE, and the BUCKET LIST comes
-    // from the bucket table rather than from either of them: a bucket that has
-    // never been pushed to appears in neither GROUP BY, and a scrape that
-    // omitted it would make an empty bucket indistinguishable from one the
-    // daemon has forgotten.
     meterGauges: () => {
       const counted = repo.bucketStats();
       const pinned = repo.pinCounts();
@@ -2749,10 +1842,6 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async boot() {
-      // 0. EVERY BUCKET'S STORE IS DECLARED, or the row does not mount: a
-      // bucket whose objects nobody can reach would answer 404 for every path
-      // it has, which reads as data loss rather than as a missing line of
-      // configuration.
       for (const bucket of repo.buckets()) {
         if (!stores.has(bucket.store)) {
           return {
@@ -2767,8 +1856,6 @@ export function createCache(options: CacheOptions): Cache {
         }
       }
 
-      // 1. CA IS PROVED FROM THE PATH. Pure and instant: no store query, no
-      // pusher line. A self-reference's modulo hash comes from its bytes in 1b.
       let caProved = 0;
       for (const row of repo.objects().filter(
         (one) => one.caProof === "unknown" && !one.references.includes(one.storePath),
@@ -2790,15 +1877,6 @@ export function createCache(options: CacheOptions): Cache {
         notify();
       }
 
-      // 2. NOBODY IS WRITING YET: an object with no row is a crash between put
-      // and record; a `.tmp-*` older than this boot is a put that died. Both
-      // are swept BEFORE the mount, so the sweep cannot race a live push.
-      // PER BUCKET, under its own prefix in its own store: a store may be
-      // shared, and only a bucket's prefix is the cache's to sweep.
-      // A BUCKET'S OBJECTS ARE THREE KINDS NOW (PLAN 2.8): the NARs, the
-      // narinfo beside each one, and the bucket's own `nix-cache-info`. A
-      // sweep that knew only the NARs would delete the other two every boot
-      // and the backfill would write them again — a cache that fights itself.
       const owned = new Set([
         ...repo.objects().flatMap((row) => [
           objectKey(row.bucket, row.narHash, row.compression),
@@ -2842,10 +1920,6 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async resumeMigrations() {
-      // A MOVE IS A ROW, so a restart finds the unfinished ones by reading
-      // them. Each resumes from the state it reached: copying walks the keys
-      // again (skipping what is already there), flipping redoes the delta and
-      // the flip, deleting lets the old copies go.
       await Promise.all(repo.migrations().map((row) => startMigration(row)));
     },
     onChange(listener) {
@@ -2856,23 +1930,14 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async close() {
-      // The trailing-edge timer is the cache's, so the cache ends it. A timer
-      // that outlived `close()` would publish into a closed database.
       if (trailing !== null) clearTimeout(trailing);
       trailing = null;
       stopping = true;
       stopSignal.resolve();
-      // JOIN the row's migration before the database closes: its in-flight put
-      // may be one disk write away from a row.
       if (migrationTask !== null) await migrationTask.catch(() => {});
       if (selfTask !== null) await selfTask.catch(() => {});
       if (backfillTask !== null) await backfillTask.catch(() => {});
-      // JOIN EVERY STORE-TO-STORE MOVE: each checks `stopping` between keys,
-      // so this is the time its current copy takes and no more.
       await Promise.all([...storeMoves.values()].map((task) => task.catch(() => {})));
-      // REFUSE THE QUEUE FIRST: a job waiting for a slot belongs to this row,
-      // and none of them may start after it closed. Then join the ones already
-      // running, before the database closes.
       migrationSlots.close();
       backfillSlots.close();
       moveSlots.close();
@@ -2898,21 +1963,12 @@ export function createCache(options: CacheOptions): Cache {
  *  input and treating it as part of the scheme is the safe reading. */
 const headerSpace = (ch: string): boolean => ch === " " || ch === "\t";
 
-/**
- * The credential in an `Authorization` header, or null.
- *
- * Parsed by hand rather than with `/^Bearer\s+(.+)$/i`. Two adjacent
- * quantifiers over a header we do not control is a polynomial backtracking
- * hazard — a header of ten thousand spaces makes the engine try every split of
- * `\s+` against `(.+)$` — and the header is the one string on this face that
- * arrives before anything has been authenticated.
- */
 function credentialOf(header: string | undefined): string | null {
   if (header === undefined) return null;
   let at = 0;
   while (at < header.length && !headerSpace(header[at] as string)) at++;
   const scheme = header.slice(0, at).toLowerCase();
-  if (at === header.length) return null; // a scheme with no whitespace after it
+  if (at === header.length) return null;
   let payloadAt = at;
   while (payloadAt < header.length && headerSpace(header[payloadAt] as string)) payloadAt++;
   const payload = header.slice(payloadAt).trim();

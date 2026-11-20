@@ -24,13 +24,10 @@ describe("a bounded slot queue", () => {
         return error instanceof SlotsClosed ? "refused" : "other";
       }
     });
-    // Let both waiters reach the queue.
     await Promise.resolve();
     slots.close();
     expect(await Promise.all(outcomes)).toEqual(["refused", "refused"]);
     expect(ran).toEqual([]);
-    // The two already running still belong to their caller; closing is not
-    // cancellation. The owner joins them through its own chain.
     expect(active).toHaveLength(2);
   });
 

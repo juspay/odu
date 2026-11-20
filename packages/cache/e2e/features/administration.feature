@@ -1,17 +1,5 @@
 Feature: An admin administers the cache from the board
-  # The board does everything `odu surface cache …` does. Each scenario here is
-  # one verb of the cache row, reached through its control on the page — create
-  # (with the upstream switch), retention, token mint / list / revoke, pin /
-  # pin list / unpin (the Pins tab beside Paths), the dry run, GC and the facts
-  # line's recount — and the one arrange step that leaves the page (a push)
-  # uses the token the page minted, which is the proof that the token is real.
-  #
-  # @signed-in:admin: the row's floor for administration, on a daemon with a
-  # door. A member is drawn none of these controls (auth.feature) and the row
-  # refuses the API's call on its own.
 
-  # The button is never greyed out: the empty name is SENT, and what the page
-  # shows is the ROW's own refusal — the sentence asserted is the cache's.
   @signed-in:admin
   Scenario: An empty bucket name is refused by the row, in its words
     Given I open the cache
@@ -22,11 +10,6 @@ Feature: An admin administers the cache from the board
 
   @signed-in:admin
   Scenario: A bucket gets a name of its own from its page
-    # THE NAME CHANGES WHAT THE PAGE SHOWS A CLIENT, and the push block is one
-    # of the things it changes: the substituter URL, the nix.conf block and the
-    # push's `--cache` are the one name, because the cache states the push
-    # origin and the bucket itself. (A board bucket is public, so its nix.conf
-    # tab has no netrc line to carry the name.)
     Given a bucket created from the board
     When I name the bucket "cache.e2e.test"
     Then the page's substituter URL is "cache.e2e.test"
@@ -34,8 +17,6 @@ Feature: An admin administers the cache from the board
     And the push block names the same cache the nix.conf block does
     And there should be no page errors
 
-  # A PUBLIC BUCKET'S FACTS NEED NO ACCOUNT, and that is a PROTOCOL read: the
-  # anonymous CLI works before anybody signs in, and a cURL sees the key.
   @signed-in:admin
   Scenario: A public bucket's facts are read with no account
     Given the API creates a bucket as this person
@@ -61,17 +42,9 @@ Feature: An admin administers the cache from the board
     And I press "Create bucket"
     Then the page opens that bucket
     And the cache says "no upstream filter"
-    # WHERE ITS OBJECTS LIVE: this daemon declares no store but its own disk,
-    # so the form offers no choice and the page says the default back.
     And the cache says "objects on local"
     And there should be no page errors
 
-  # WHERE A BUCKET'S OBJECTS LIVE IS NO LONGER FINAL. The move is the row's —
-  # it copies every object to the other store, keeps serving from the old one
-  # until it is done, then flips — and the page follows it from the bucket's
-  # own deltas: the panel reports the move, and the facts line at the top says
-  # the new store once the bucket has changed hands. The second store is a
-  # real S3 service on this machine, so the objects really do travel.
   Scenario: A bucket is moved to another declared store from its page
     Given a daemon that declares a second store
     And a bucket created from the board
@@ -81,8 +54,6 @@ Feature: An admin administers the cache from the board
     And the move offers the store "gw"
     When I move the bucket to "gw"
     Then the bucket's facts say "objects on gw"
-    # The store publishes no public URL, so a read of it is still odu's to
-    # answer — the other half of the fact this line now carries.
     And the bucket's facts say "reads served by odu"
     And there should be no page errors
 
@@ -99,18 +70,12 @@ Feature: An admin administers the cache from the board
 
   @signed-in:admin
   Scenario: A token minted on the page carries an expiry
-    # THE FORM'S DEFAULT IS NINETY DAYS and "never" is a visible choice, so a
-    # web-minted token is not the one credential on this page that never ends.
     Given a bucket created from the board
     Then the token form defaults to 90 days
     When I mint a "write" token
     Then the minted token shows an expiry
     And there should be no page errors
 
-  # THE ONE CREATION FACT A BUCKET MAY CHANGE ITS MIND ABOUT. The number is
-  # the page's answer twice over: the row's sentence under the button, and the
-  # facts line at the top, which is drawn from the republished bucket row
-  # rather than from the field that was typed.
   Scenario: A bucket is told how long to keep a path, and says the number back
     Given a bucket created from the board
     Then the retention form defaults to 90 days
@@ -119,10 +84,6 @@ Feature: An admin administers the cache from the board
     And the bucket's facts say "7d retention"
     And there should be no page errors
 
-  # A PIN CONTRADICTS A COLLECTION, so a person has to be able to audit one:
-  # the list says what each pin HOLDS, beside the button that takes it away.
-  # The push is arranged with the token the page minted, which is the proof
-  # that the token is real.
   Scenario: A pin says what it holds, and unpinning gives the path back to retention
     Given a bucket created from the board
     And I mint a "write" token
@@ -137,11 +98,6 @@ Feature: An admin administers the cache from the board
     And the pin list says nothing is pinned
     And there should be no page errors
 
-  # A PIN IS ONE ROW, WHATEVER IT HOLDS. A pin a CI push takes over a flake's
-  # outputs holds thousands of paths, and printing them inline made seven pins
-  # nine tenths of this page's DOM — with the controls under them off the
-  # screen. The row carries the COUNT; the roots are an audit somebody asks
-  # for, and ten of them is what asking first gets.
   Scenario: A pin of a big closure is one row, and its roots are a click away
     Given a bucket created from the board
     And I mint a "write" token
@@ -159,11 +115,6 @@ Feature: An admin administers the cache from the board
     And the pin "release" is listed holding that path
     And there should be no page errors
 
-  # THE ONE CONTROL WITH NO UNDO, so the button is dead until the bucket's own
-  # name has been typed — the gate is the whole point, and it is graded BEFORE
-  # the name is there. What the delete really took is read off the
-  # SUBSTITUTER: the path this scenario pushed answered a moment ago, and the
-  # same address is a 404 once the bucket is gone.
   Scenario: A bucket is deleted from its page, and stops serving what it held
     Given a bucket created from the board
     And I mint a "write" token
@@ -177,11 +128,6 @@ Feature: An admin administers the cache from the board
     And the bucket's narinfo answers 404
     And there should be no page errors
 
-  # "WHAT AM I ABOUT TO LOSE" is asked BEFORE the button, so the dry run is
-  # graded naming the path the collection then takes — and not naming the one
-  # the pin holds. ZERO DAYS is the bucket saying "keep only what a reference
-  # or a pin holds": both paths are expired the moment they land, so the pin is
-  # the whole difference between them and the scenario needs no clock to move.
   Scenario: A dry run names the next collection, which keeps the pin and takes the rest
     Given a bucket created from the board
     And I mint a "write" token
@@ -198,22 +144,12 @@ Feature: An admin administers the cache from the board
     When I press "Run GC"
     Then the cache says "Collected: evicted 1 path"
     And the dry run says "would take nothing here"
-    # THE FACTS LINE FOLLOWS THE ROW, with nothing pressed: the collection
-    # republished the bucket, so the number at the top is already the new one.
     Then the bucket's facts say "1 paths"
-    # THE LIST DOES NOT — it is a page read when the tab was opened, and
-    # **refresh paths** is what asks again.
     When I open the paths
     And I press "refresh paths"
     Then one path is listed
     And there should be no page errors
 
-  # THE QUESTION ASKED WITHOUT ANSWERING IT FIRST. The scenario above had to
-  # SET the retention to zero before it could see what zero would take — which
-  # is the operator editing the bucket in order to ask it a question, and then
-  # living with the answer. The dry run's own retention asks it instead: the
-  # bucket keeps its ninety days throughout, and the collection that follows
-  # the plan takes nothing, because only the plan was ever told about zero.
   Scenario: The dry run asks at a retention the bucket does not have, and keeps it
     Given a bucket created from the board
     And I mint a "write" token
@@ -227,20 +163,12 @@ Feature: An admin administers the cache from the board
     And the dry run says "would take 1 path"
     And the dry run names the unpinned path
     And the dry run does not name the pinned path
-    # NOTHING WAS WRITTEN: the facts line is drawn from the republished row.
     And the bucket's facts say "90d retention"
     When I press "Run GC"
     Then the cache says "Collected: evicted 0 paths"
     And the bucket's facts say "90d retention"
     And there should be no page errors
 
-  # WHY IS THIS PATH STILL HERE, AND WHEN DOES IT GO. The column is the
-  # collector's own answer, so it is graded against the same arrangement the
-  # dry run is: a pin is the whole difference between the two paths, and
-  # ZERO DAYS turns the unpinned one into what the next collection takes —
-  # with no clock having to move. The second read is the RETENTION CHANGE's
-  # own: every `kept by` is a sentence about the bucket's days, so changing
-  # them re-reads the list with nothing pressed.
   Scenario: Each path says what keeps it, and when it leaves
     Given a bucket created from the board
     And I mint a "write" token
@@ -266,9 +194,6 @@ Feature: An admin administers the cache from the board
     Then the cache says "a pin needs a name"
     And there should be no page errors
 
-  # LOOPBACK: no door, so the person at this machine is its owner and the
-  # row's rule for administration is the operator's root token. The page asks
-  # for it once; a wrong one is the row's refusal, not the page's.
   Scenario: With no door, the root token typed once creates a bucket
     Given I open the cache
     When I type the root token

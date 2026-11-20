@@ -1,24 +1,3 @@
-/**
- * A BUCKET TAKEN AWAY — `bucket.delete`, the one verb with no undo behind it.
- *
- * Three questions, and all three are about what is left afterwards:
- *
- * - **What it REFUSES**, because every refusal here is a thing that would be
- *   left dangling: a name that is not a bucket, a DNS record pointing at a
- *   bucket that is not there, a copier writing into the other store as we
- *   delete.
- * - **What the STORE gives up**, counted — including the two kinds of key no
- *   row names and which would therefore outlive the bucket forever: an ORPHAN
- *   (a put whose record never landed) and a TEMP (a put that died).
- * - **What the DATABASE gives up**: the paths, the pins, and the tokens minted
- *   for this bucket alone — a credential whose only bucket is gone is a
- *   credential with nothing to address.
- *
- * The published ROW is checked through the server, not the cache: the board
- * subscribes to that collection, and a bucket deleted from the database while
- * its row stayed in the collection is a card a person can still click.
- */
-
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,21 +30,14 @@ afterEach(async () => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-/** `gw`, a second declared store — what a `bucket.migrate` needs somewhere to
- *  move to. A disk store like `local`: the copier's own suite grades S3. */
 const SECOND_STORE = "gw";
 
-/** A promise the test resolves by hand — how a background pass is held inside
- *  its store while a verb runs to completion, with no sleep in it. */
 const deferred = (): PromiseWithResolvers<void> => Promise.withResolvers<void>();
 
 function cacheWith(
   options: {
     purged?: (input: { reason: string; bucket: string }) => void;
-    /** Declare `gw` beside `local`, for the cases about a move. */
     secondStore?: boolean;
-    /** Put something in front of `local` — a gate, for the cases about a
-     *  background pass that is half way through when a delete lands. */
     wrapLocal?: (inner: ObjectStore) => ObjectStore;
   } = {},
 ): Cache {
@@ -96,7 +68,6 @@ const created = (name: string): Parameters<Cache["admin"]["create"]>[0] => ({
   upstreamKeys: [],
 });
 
-/** The bytes of a NAR and the hash a narinfo has to claim for them. */
 function nar(text: string): { bytes: Uint8Array; narHash: string } {
   const bytes = new TextEncoder().encode(text);
   return { bytes, narHash: `sha256:${base32(createHash("sha256").update(bytes).digest())}` };
@@ -110,7 +81,6 @@ const stream = (text: string): ReadableStream<Uint8Array> =>
     },
   });
 
-/** What a push's narinfo claims about the NAR beside it. */
 const narinfoText = (storePath: string, payload: { narHash: string }): string =>
   [
     `StorePath: ${storePath}`,
@@ -122,9 +92,6 @@ const narinfoText = (storePath: string, payload: { narHash: string }): string =>
     "",
   ].join("\n");
 
-/** THE FIRST HALF OF A PUSH: the bytes, staged and committed, with nothing
- *  recorded yet. Split out because the narinfo that records them is a SECOND
- *  request, and the gap between the two is where a delete can land. */
 async function stageNar(
   cache: Cache,
   bucket: BucketRow,
@@ -137,7 +104,6 @@ async function stageNar(
   return payload;
 }
 
-/** One real push: the object, then the narinfo that proves it. */
 async function push(cache: Cache, bucket: string, storePath: string, text: string): Promise<void> {
   const row = cache.bucket(bucket);
   if (row === null) throw new Error(`no bucket ${bucket}`);
@@ -151,7 +117,6 @@ async function push(cache: Cache, bucket: string, storePath: string, text: strin
   if (!outcome.ok) throw new Error(`push was refused: ${outcome.message}`);
 }
 
-/** The state root's object store and database, as a test reads them back. */
 const objectsDir = (): string => join(scratch, "cache", "objects");
 const repoNow = () => openCacheRepo(join(scratch, "cache", "cache.sqlite"));
 
@@ -171,10 +136,7 @@ describe("bucket.delete refuses", () => {
     const refused = await cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: "named" });
     expect(refused).toMatchObject({ ok: false, code: "bad_input" });
     expect((refused as { message: string }).message).toContain("cache.example.org");
-    // AND IT IS STILL THERE: a refusal that had already deleted the objects
-    // would be the worst outcome of the three.
     expect(cache.bucket("named")).not.toBeNull();
-    // Clearing the name is the operator's next step, and then it goes.
     await cache.admin.domain({ ...asRoot(ROOT), bucket: "named", domain: null });
     expect(await cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: "named" })).toMatchObject({
       ok: true,
@@ -184,8 +146,6 @@ describe("bucket.delete refuses", () => {
   it("a bucket that is moving to another store", async () => {
     const cache = cacheWith();
     await cache.admin.create(created("moving"));
-    // The MOVE ROW is what the refusal reads, so writing one is the whole
-    // arrangement — the copier itself is `migrateStore.test`'s subject.
     const repo = repoNow();
     repo.putMigration({
       bucket: "moving",
@@ -220,12 +180,8 @@ describe("bucket.delete purges the store", () => {
     await cache.admin.create(created("main"));
     await push(cache, "main", "/nix/store/00000000000000000000000000000001-one", "one");
 
-    // AN ORPHAN: a key under this bucket's prefix that no row names — a put
-    // whose record never landed. Nothing but a listing can find it.
     const orphan = join(objectsDir(), "main", "nar", "orphan.nar.zst");
     writeFileSync(orphan, "an object nobody recorded");
-    // AND A TEMP: what a put that died leaves. `list` never shows it, so only
-    // the sweep takes it — and only if this verb asks for one.
     const temp = join(objectsDir(), "main", "nar", ".tmp-dead");
     writeFileSync(temp, "half an upload");
     utimesSync(temp, new Date(NOW - 60_000), new Date(NOW - 60_000));
@@ -233,13 +189,9 @@ describe("bucket.delete purges the store", () => {
     const gone = await cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: "main" });
     expect(gone).toMatchObject({ ok: true });
     if (!gone.ok) return;
-    // The NAR, its narinfo, the bucket's `nix-cache-info`, the orphan — and
-    // the temp, which the sweep counts.
     expect(gone.value).toMatchObject({ name: "main", objects: 5 });
     expect(gone.value.bytes).toBeGreaterThan(0);
 
-    // NOTHING LEFT UNDER THE PREFIX. A key that survives is a key no row can
-    // name again, so no later collection could ever remove it.
     const store = localStores(scratch).get("local");
     expect(await store?.list("main")).toEqual([]);
   });
@@ -287,8 +239,6 @@ describe("bucket.delete drops the rows", () => {
       scope: "write",
       expiresDays: null,
     });
-    // A WIDER GLOB IS NOT THIS BUCKET'S: it addresses the neighbour too, and
-    // deleting one bucket is not a decision about the others.
     const wide = await cache.admin.tokenMint({
       ...asRoot(ROOT),
       bucket: "rows",
@@ -306,7 +256,6 @@ describe("bucket.delete drops the rows", () => {
     expect(cache.bucket("rows")).toBeNull();
     const listed = await cache.admin.list(asRoot(ROOT));
     expect(listed.ok && listed.value.map((row) => row.name)).toEqual(["neighbour"]);
-    // The paths and the pin are gone with it, so nothing names the bucket.
     const repo = repoNow();
     expect(repo.objects("rows")).toEqual([]);
     expect(repo.pins("rows")).toEqual([]);
@@ -326,8 +275,6 @@ describe("bucket.delete drops the rows", () => {
     if (row === null) return;
     expect(cache.narinfoText(row, hashOf(path))).not.toBeNull();
     await cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: "served" });
-    // THE BUCKET IS THE ROUTE'S FIRST LOOKUP, so a reader is answered 404 by
-    // the name not resolving at all.
     expect(cache.bucket("served")).toBeNull();
   });
 });
@@ -355,9 +302,6 @@ describe("the row the board follows", () => {
     });
     await cache.admin.create(created("watched"));
     await cache.admin.create(created("other"));
-    // NOT `server.publish()`: the row subscribes to the cache's own change
-    // notification, and a verb that forgot to notify is exactly the bug this
-    // case is here for.
     expect([...published.keys()].sort()).toEqual(["other", "watched"]);
 
     await cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: "watched" });
@@ -368,11 +312,6 @@ describe("the row the board follows", () => {
 
 describe("a delete and the writer it races", () => {
   it("refuses a narinfo whose bucket went while its NAR was being verified", async () => {
-    // THE ROW THE REQUEST WAS ADMITTED AGAINST, held across the delete: this
-    // is a push past `admit` whose proof took long enough for the bucket to
-    // go. Recording it against that stale row would write an object and a
-    // row under a name no listing reaches — never collected, never swept,
-    // and served again under a new key if the name is ever re-created.
     const cache = cacheWith();
     await cache.admin.create(created("racing"));
     const admitted = cache.bucket("racing");
@@ -391,11 +330,8 @@ describe("a delete and the writer it races", () => {
       stream(narinfoText(path, payload)),
       { run: null, commit: null },
     );
-    // 404, which is what `admit` would have answered the same request one
-    // moment later — not a 200 with nothing reachable behind it.
     expect(late).toMatchObject({ ok: false, status: 404 });
 
-    // AND NOTHING WAS WRITTEN: no row, and not one key under the prefix.
     const repo = repoNow();
     const left = repo.objects("racing");
     repo.close();
@@ -404,10 +340,6 @@ describe("a delete and the writer it races", () => {
   });
 
   it("lets exactly one of a move and a delete win, whichever asks first", async () => {
-    // BOTH DECIDE UNDER THE WRITE LOCK, so the second to reach it reads what
-    // the first did. Either order is a legal outcome; what must never happen
-    // is both succeeding — a copier writing a deleted bucket's keys into the
-    // store this purge never touches.
     for (const deleteFirst of [true, false]) {
       const cache = cacheWith({ secondStore: true });
       const name = deleteFirst ? "delete-first" : "move-first";
@@ -418,7 +350,6 @@ describe("a delete and the writer it races", () => {
         cache.admin.bucketDelete({ ...asRoot(ROOT), bucket: name });
       const move = (): Promise<unknown> =>
         cache.admin.migrateStore({ ...asRoot(ROOT), bucket: name, store: SECOND_STORE });
-      // ISSUED IN ONE TICK, so both are queued on the lock before either runs.
       const [deleted, moved] = (deleteFirst
         ? await Promise.all([remove(), move()])
         : await Promise.all([move(), remove()]).then(([first, second]) => [second, first])) as [
@@ -428,11 +359,9 @@ describe("a delete and the writer it races", () => {
 
       expect([deleted.ok, moved.ok].filter(Boolean)).toHaveLength(1);
       if (deleteFirst) {
-        // The bucket went; the move has nothing to move.
         expect(moved).toMatchObject({ ok: false, code: "unknown_bucket" });
         expect(cache.bucket(name)).toBeNull();
       } else {
-        // The move was recorded; the delete reads that row and waits.
         expect(deleted).toMatchObject({ ok: false, code: "bad_input" });
         expect(cache.bucket(name)).not.toBeNull();
       }
@@ -440,28 +369,11 @@ describe("a delete and the writer it races", () => {
   });
 
   it("writes nothing for a bucket deleted while the narinfo backfill is inside it", async () => {
-    // THE BACKFILL IS FORKED ON EVERY BOOT and walks a SNAPSHOT of the
-    // buckets and of each one's rows — minutes of wall clock on a big bucket,
-    // all of it while the row is already answering verbs. A delete landing
-    // inside that window used to be answered by writing the bucket's
-    // `nix-cache-info` and a narinfo PER REMAINING ROW back into the prefix
-    // the delete had just purged: keys no row names, which neither a
-    // collection nor an orphan sweep can ever reach, since both walk
-    // `repo.buckets()`. And the delete has already answered its counts, so
-    // they are wrong by whatever landed after it.
-    //
-    // TWO DAEMONS OVER ONE STATE ROOT, which is how the window is held open
-    // without a sleep: the second's pass is suspended inside its store — on
-    // the HEAD of the bucket's FIRST row, so the rest of the walk is still
-    // ahead of it — while the first's delete runs to completion.
     const arrange = cacheWith();
     await arrange.admin.create(created("walked"));
     for (const [index, text] of ["one", "two", "three", "four"].entries()) {
       await push(arrange, "walked", `/nix/store/0000000000000000000000000000001${index}-w`, text);
     }
-    // THE OBJECTS THE BACKFILL EXISTS TO WRITE: narinfos a pre-2.8 push never
-    // left behind. Without this it would find every key already correct and
-    // write nothing whatever the guards did.
     const live = new Map(localStores(scratch)).get("local") as ObjectStore;
     for (const object of await live.list("walked")) {
       if (object.key.endsWith(".narinfo")) await live.delete(object.key);
@@ -471,12 +383,6 @@ describe("a delete and the writer it races", () => {
     const release = deferred();
     let open = false;
     const backfilling = cacheWith({
-      // EVERY HEAD WAITS, not just the first: the pass walks two rows at a
-      // time, and a gate on one of them would let the other race the delete
-      // on its own — which in this fixture is two daemons, each with its own
-      // write chain, so the lock that makes the check and the write one
-      // moment inside a real daemon is not shared here. What is being graded
-      // is the re-read.
       wrapLocal: (inner) => ({
         ...inner,
         async head(key: string): Promise<number | null> {
@@ -498,9 +404,6 @@ describe("a delete and the writer it races", () => {
     release.resolve();
     await pass;
 
-    // NOT ONE KEY under the purged prefix — including from the rows that were
-    // already past the gate, because the write itself asks again, under the
-    // lock the purge runs inside.
     expect(await live.list("walked")).toEqual([]);
   });
 });

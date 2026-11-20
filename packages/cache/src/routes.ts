@@ -1,43 +1,16 @@
 /**
- * THE PROTOCOL — the standard Nix HTTP binary cache, as one `HttpRouter` layer.
+ * `HttpRouter` ranks by specificity, so these literal and prefixed paths beat
+ * the shell's `GET /*` catch-all whichever way round they go in.
  *
- * Merged beside the shell exactly like `/mcp` (`packages/host/src/mcpRoute.ts`,
- * and see the comment there on why the return type is INFERRED): `HttpRouter`
- * ranks by specificity, so these literal and prefixed paths beat the shell's
- * `GET /*` catch-all whichever way round they go in.
+ * The router DECODES `%2F`, so a `:name` of `..%2F..%2Fx` would otherwise be a
+ * path segment in a `join()`.
  *
- * **The cache owns every two-segment GET on the listener.** `GET /:bucket/:name`
- * is the narinfo route, and a bucket named `sw.js` would shadow the shell's own
- * `/sw.js` — which it cannot, because a bucket name is a lowercase label and
- * the shell's fixed paths are not, and because `/:bucket/nix-cache-info` and
- * `/:bucket/nar/:file` rank above it. The one path this file DOES claim is any
- * two-segment GET, so a future fixed asset with a two-segment path belongs
- * above this layer, not beside it. `routes.test.ts` pins the shell's three.
+ * `Authorization: Bearer` and HTTP Basic are both accepted — Basic with any
+ * username and the token as the password is what `nix copy --to` sends through
+ * curl.
  *
- * **Nothing here holds a NAR.** A read hands the socket
- * `HttpServerResponse.stream` of the store's own pipeline; an upload hands the
- * store the request's body stream. The two places a multi-gigabyte NAR could be
- * materialised are exactly the two places that do not.
- *
- * **Every route parameter is validated before it reaches the filesystem.** The
- * router DECODES `%2F`, so a `:name` of `..%2F..%2Fx` would otherwise be a path
- * segment in a `join()`. A narinfo hash is 32 characters of Nix base32 and a NAR
- * file name is a plain file name; anything else is a 400 and nothing is
- * written.
- *
- * **Authentication is per request and per bucket.** A public bucket reads
- * without a token; a private one needs read scope; a write always needs write
- * scope. `Authorization: Bearer` and HTTP Basic are both accepted — Basic with
- * any username and the token as the password is what `nix copy --to` sends
- * through curl, so a cache that spoke only Bearer would be a cache no Nix
- * client could write to. An anonymous read of a PRIVATE bucket is a 404, not a
- * 401: "you need a token" confirms the bucket exists.
- *
- * **`HEAD` is served by the `GET` route.** `find-my-way` falls back from HEAD
- * to GET, and `HttpRouter.add` cannot even register a HEAD, so the narinfo
- * handler branches on the method and answers an empty 200: the touch that makes
- * a HEAD count as a read still happens, and no body is generated for a client
- * that will not read it.
+ * `find-my-way` falls back from HEAD to GET, and `HttpRouter.add` cannot even
+ * register a HEAD, so the narinfo handler branches on the method.
  */
 
 import { Effect, Layer, Stream } from "effect";
@@ -74,9 +47,6 @@ import {
 } from "./surface";
 
 
-/** Count what actually crossed to the adapter, and report it once — at close,
- *  at cancellation, or at an error. A log at response-build time is intent, not
- *  evidence; the pod printed one for requests that never wrote a byte. */
 function observedBody(
   body: ReadableStream<Uint8Array>,
   onDone: (bytes: number, cancelled: boolean, error: string | null) => void,
@@ -112,10 +82,6 @@ function observedBody(
   });
 }
 
-/**
- * THE `Range` HEADER, against an object of `size` bytes: the whole object
- * (`null`), the inclusive range asked for, or `"unsatisfiable"` (416).
- */
 function rangeOf(header: string | undefined, size: number): ByteRange | null | "unsatisfiable" {
   const range = /^bytes=(\d*)-(\d*)$/.exec(header ?? "");
   if (range === null) return null;
@@ -132,14 +98,6 @@ function rangeOf(header: string | undefined, size: number): ByteRange | null | "
   return { start, end };
 }
 
-/**
- * SERVE THE BYTES — ONE PATH, whichever store keeps them. A kept object answers
- * with its length and `Accept-Ranges`, and a `Range` is the route's arithmetic
- * and the store's read: a disk file read from an offset, a ranged GET on S3. The
- * store streams; nothing here buffers. Only a row whose object is not there yet
- * falls back to the old store's FIFO stream, which has no length and is logged
- * as such.
- */
 function narResponse(
   cache: Cache,
   request: HttpServerRequest.HttpServerRequest,
@@ -179,19 +137,9 @@ function narResponse(
     return Effect.succeed(streamed(source.stream, "transition", { headers }));
   }
   /**
-   * THE STORE SERVES IT (PLAN 2.8). A `307` — not a `302` — because the
-   * method must survive the hop: a HEAD that came back as a GET would hand a
-   * client asking "is it there" a whole NAR.
-   *
-   * NO `Range` IS PROXIED. The client re-sends its own `Range` to the store,
-   * which answers the 206 — so a resumed download is between those two and
-   * odu never sees a byte of it. For the same reason the redirect itself is
-   * `private, no-store` on every bucket, public or not: the URL in it carries
-   * a signature that expires, and an edge that cached the redirect would hand
-   * out a dead URL long after.
-   *
-   * The line is written HERE rather than by the body observer, because there
-   * is no body to observe: `bytes: 0` is the fact 2.8 trades away.
+   * A `307` — not a `302` — because the method must survive the hop: a HEAD
+   * that came back as a GET would hand a client asking "is it there" a whole
+   * NAR.
    */
   if (source.kind === "redirect") {
     served("redirect")(0, false, null);
@@ -207,9 +155,6 @@ function narResponse(
   return Effect.map(
     Effect.promise(() => source.read(range ?? undefined)),
     (body) => {
-      // THE ROW'S OBJECT IS GONE (a collection, perhaps, won the race): the
-      // read's own first GET decides it, before any header is sent, and the
-      // answer is the one a missing object always gets.
       if (body === null) return HttpServerResponse.empty({ status: 404 });
       const length = range === null ? source.size : range.end - range.start + 1;
       return streamed(body, "object", {
@@ -226,9 +171,6 @@ function narResponse(
   );
 }
 
-/** A bucket by name, and a credential that may do `need` with it — or the
- *  response that says why not. Every protocol route starts here, so "unknown
- *  bucket is a 404 everywhere" is one line rather than six. */
 function admit(
   cache: Cache,
   request: HttpServerRequest.HttpServerRequest,
@@ -248,20 +190,12 @@ function admit(
   return authorize(cache, request, bucket, need);
 }
 
-/** The `Host` a request arrived under, lowercased and without its port. A
- *  bucket's domain is stored that way, and the header is the only name a
- *  domain-routed request carries. */
 function hostOf(request: HttpServerRequest.HttpServerRequest): string {
   const raw = (request.headers["host"] ?? "").trim().toLowerCase();
   const colon = raw.indexOf(":");
   return colon === -1 ? raw : raw.slice(0, colon);
 }
 
-/**
- * THE BUCKET A REQUEST'S `HOST` NAMES. A bucket with a domain is served at the
- * ROOT of that name — `/nix-cache-info`, `/<hash>.narinfo`, `/nar/<file>` — the
- * way every public binary cache is; no `Host` match is the path form's business.
- */
 function admitByHost(
   cache: Cache,
   request: HttpServerRequest.HttpServerRequest,
@@ -304,28 +238,13 @@ function authorize(
 }
 
 /**
- * THE HEADERS A BUCKET'S READ CARRIES. A PUBLIC bucket's bytes are shared
- * cacheable; a PRIVATE one's are not, and saying so is the ROW's fact — the
- * module's nginx honours it, so one authorised read cannot become the next
- * anonymous reader's cache hit. Nginx also bypasses its cache on any request
- * that carries `Authorization`; this is the half the daemon owns.
+ * The module's nginx honours `private, no-store`, and bypasses its cache on
+ * any request that carries `Authorization`.
  */
 function readHeaders(bucket: BucketRow): Record<string, string> {
   return bucket.isPublic ? {} : { "cache-control": "private, no-store" };
 }
 
-/**
- * THE ONE NARINFO ANSWER, shared by the two routes that give it: a client
- * substituting from a bucket's DOMAIN asks for `/<hash>.narinfo`, one under
- * the mount asks for `/cache/<bucket>/<hash>.narinfo`, and from here down they
- * are the same request.
- *
- * IT IS ALSO THE ONE PLACE THE HIT RATE IS KNOWN, which is why the line is
- * written here rather than at either caller: `cache.narinfo.served` is what
- * `/metrics` counts `odu_cache_requests_total{kind="narinfo"}` from, and a
- * second emit site is a second chance for the two routes to disagree about
- * what a hit is.
- */
 function narinfoAnswer(
   cache: Cache,
   request: HttpServerRequest.HttpServerRequest,
@@ -335,8 +254,6 @@ function narinfoAnswer(
   const text = cache.narinfoText(bucket, hash);
   cache.log("cache.narinfo.served", { bucket: bucket.name, hash, hit: text !== null });
   if (text === null) return HttpServerResponse.empty({ status: 404 });
-  // A HEAD is a read: it is how a client asks "do you have this", and a cache
-  // that did not count it would evict what its clients are about to fetch.
   cache.touch(bucket, hash);
   return request.method === "HEAD"
     ? HttpServerResponse.empty({ status: 200, headers: readHeaders(bucket) })
@@ -346,7 +263,6 @@ function narinfoAnswer(
       });
 }
 
-/** The two root-level narinfo routes share one body. */
 function narinfoRoot(cache: Cache) {
   return (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
@@ -361,12 +277,6 @@ function narinfoRoot(cache: Cache) {
 const bad = (message: string): HttpServerResponse.HttpServerResponse =>
   HttpServerResponse.text(message, { status: 400 });
 
-/**
- * THE UPLOAD SESSION a chunked upload's parts and join carry (`x-odu-upload`,
- * since the cache row's 2.4): the parts are that upload's own, so two clients
- * sending one NAR cannot have theirs joined together. Absent is an older
- * pusher, and keeps the shared part names; malformed (`undefined`) is refused.
- */
 function uploadSession(request: HttpServerRequest.HttpServerRequest): string | null | undefined {
   const value = request.headers[UPLOAD_SESSION_HEADER];
   if (value === undefined || value === "") return null;
@@ -375,16 +285,6 @@ function uploadSession(request: HttpServerRequest.HttpServerRequest): string | n
 
 const BAD_SESSION = `${UPLOAD_SESSION_HEADER} must be 1–64 letters, digits, '-' or '_'`;
 
-/**
- * THE PARTS A DIRECT UPLOAD SAYS IT WROTE (PLAN 2.9) — `{"parts":[{"index",
- * "etag"}]}`, or null when the document is not that.
- *
- * The ETags are the STORE's own answers to the client's PUTs, which is the
- * only thing a client could not have made up — and it would gain nothing by
- * doing so: the narinfo that follows is proved against the bytes odu reads
- * back out of the store, not against anything said here. An EMPTY list is
- * the single-object PUT, which has no parts to join.
- */
 function partsOf(body: string): readonly UploadedPart[] | null {
   let document: unknown;
   try {
@@ -404,12 +304,6 @@ function partsOf(body: string): readonly UploadedPart[] | null {
   return named;
 }
 
-/**
- * THE PART SIZE A CLIENT ASKED FOR, from a `begin`'s body: a number, `null`
- * when it asked for nothing (an empty body, or a document without the field),
- * `undefined` when what it sent is not a part size. In DIRECT mode this is a
- * floor, not a ceiling: the store's own part size is the other half of it.
- */
 function partSizeOf(body: string): number | null | undefined {
   const text = body.trim();
   if (text === "") return null;
@@ -424,7 +318,6 @@ function partSizeOf(body: string): number | null | undefined {
   return Number.isSafeInteger(asked) && (asked as number) >= 1 ? (asked as number) : undefined;
 }
 
-/** ONE line per refused request: method, path, status and the reason. */
 function refused(
   cache: Cache,
   request: HttpServerRequest.HttpServerRequest,
@@ -442,37 +335,13 @@ function refused(
   return HttpServerResponse.text(message, { status });
 }
 
-/**
- * WHAT A BUCKET PUBLISHES TO ITS CONSUMERS: the substituter URL, the key, the
- * upstream key names, and the block every face prints.
- *
- * A PUBLIC bucket's consumer facts are as public as the NARs it serves, so they
- * are answered with NO credential — that is what lets `odu cache use` work
- * before anybody has signed in, and what makes the page a cURL away. A private
- * bucket answers them only to a reader, through the same per-bucket rule the
- * protocol's reads use.
- *
- * `readsFrom` is NOT among them: the page answers at `/cache/<bucket>`, so
- * odu is self-evidently serving this request, and the one fact a consumer
- * acts on — where to substitute from — is already the `url` above, which is
- * the store's domain when a store fronts the bucket (PLAN 2.8).
- */
 export interface ConsumerFacts extends Omit<CacheBucketIdentity, "readsFrom"> {
   readonly upstreamKeys: readonly string[];
-  /** The `nix.conf` / `flake.nix` / netrc block, `home` unpinned: the page
-   *  cannot know a reader's home, and `useBlock` says so. */
   readonly use: string;
-  /** The command that prints the block in a terminal. */
   readonly command: string;
 }
 
-/** The HTML a person reads; every block is text and is escaped here, once. */
 function consumerPage(facts: ConsumerFacts): string {
-  // THE QUOTES TOO. Most of this page is text between tags, where `&<>` is the
-  // whole of what can start markup — but the substituter is also written into
-  // an ATTRIBUTE (`href="…"`), and there a quote ends the value early and
-  // turns the rest of a URL into markup. One escaper serves both contexts, so
-  // it escapes what an attribute needs.
   const escape = (text: string): string =>
     text
       .replace(/&/g, "&amp;")
@@ -480,9 +349,6 @@ function consumerPage(facts: ConsumerFacts): string {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
-  // ONE BLOCK PER THING A PERSON PASTES SOMEWHERE. netrc only when reading
-  // needs a credential: a public bucket is read with no account at all. A
-  // block may carry a sentence that says who it works for.
   const blocks: ReadonlyArray<readonly [string, string, string?]> = [
     ["nix.conf", nixConfBlock(facts)],
     ["NixOS / nix-darwin", nixOsBlock(facts)],
@@ -582,15 +448,12 @@ export { CACHE_ROUTE_PATHS } from "./paths";
 
 export function cacheRoutes(
   cache: Cache,
-  /** The substituter URL a bucket publishes. The ROW knows the deployment's
-   *  public origin; a route suite that does not passes the path form. */
   urlFor: (name: string) => string = (name) => `${CACHE_MOUNT}/${name}`,
 ): ClaimedRoutes<ReturnType<typeof cacheLayer>> {
   return { layer: cacheLayer(cache, urlFor), paths: CACHE_ROUTE_PATHS };
 }
 
 function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
-  /** The public page and its JSON form — one handler for both spellings. */
   const consumerFacts = (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
       const name = yield* param("bucket");
@@ -621,9 +484,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
           });
     });
 
-  /** The chunked upload's two verbs, on BOTH the push API's path and the
-   *  bucket's path form: `odu cache push` addresses `<bucket>/nar/<file>`,
-   *  which is the protocol's mount — while `/_odu/v1` is the admin API's. */
   const uploadPart = (request: HttpServerRequest.HttpServerRequest) =>
           Effect.gen(function* () {
         const file = yield* param("file");
@@ -693,20 +553,9 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
         return HttpServerResponse.jsonUnsafe({ parts: outcome.parts });
       });
 
-  /** The request's body as text — a small JSON document, read once. Nothing
-   *  here takes a NAR: those go to the store now (PLAN 2.9) or into staging
-   *  as a stream, never through a buffer. */
   const bodyText = (request: HttpServerRequest.HttpServerRequest): Promise<string> =>
     new Response(Stream.toReadableStream(request.stream)).text();
 
-  /**
-   * BEGIN ONE NAR'S UPLOAD, and be told where its bytes go.
-   *
-   * The answer is the CACHE's, from the bucket's store: `{mode:"direct", …}`
-   * with the URLs that write the store itself, or `{mode:"staged"}`, which
-   * means the routes below this one. A client sends its own `--part-size` as
-   * a FLOOR; an empty body asks for the store's own.
-   */
   const beginUpload = (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
       const file = yield* param("file");
@@ -721,8 +570,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       return HttpServerResponse.jsonUnsafe(plan);
     });
 
-  /** The URL that writes one part. A GET, because it changes nothing a second
-   *  request would mind: the same part asked for twice is the same part. */
   const directPart = (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
       const file = yield* param("file");
@@ -738,7 +585,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       return HttpServerResponse.jsonUnsafe({ url: part.url });
     });
 
-  /** The client has sent every part: join them and confirm the object. */
   const completeDirect = (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
       const file = yield* param("file");
@@ -758,25 +604,11 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
     });
 
   return Layer.mergeAll(
-    /**
-     * WHAT TO PASTE INTO A CLIENT — a bucket's consumer facts, with no account
-     * for a public bucket.
-     *
-     * The CLI's "use needs no token" was only true of the SURFACE, where a door
-     * refuses an anonymous connection before a public read can be answered.
-     * These facts are as public as the NARs, so the protocol path answers them
-     * anonymously; JSON for a terminal, a small page for `curl`.
-     */
-    // BOTH SPELLINGS ARE ONE ROUTE: this router normalises a trailing slash in
-    // the PATTERN, so `/cache/:bucket/` and `/cache/:bucket` are the same
-    // registration (a second one is a duplicate-route error), and the handler
-    // answers both requests.
+    // This router normalises a trailing slash in the PATTERN, so
+    // `/cache/:bucket/` and `/cache/:bucket` are the same registration (a
+    // second one is a duplicate-route error).
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket`, consumerFacts),
 
-    /** `nix-cache-info` under the mount. The text is the CACHE's — the three
-     *  lines a client reads plus the two `Odu-` lines naming this daemon and
-     *  this bucket — so the route and the object in the store say the same
-     *  thing. */
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nix-cache-info`, (request) =>
       Effect.gen(function* () {
         const bucket = yield* param("bucket");
@@ -789,17 +621,13 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
     ),
 
     /**
-     * `<hash>.narinfo`. One route for HEAD and GET (see the header), and the
-     * suffix is checked here because `find-my-way` has no "param with a static
-     * suffix" spelling that does not read as a parameter literally named
-     * `name.narinfo`.
+     * The suffix is checked here because `find-my-way` has no "param with a
+     * static suffix" spelling that does not read as a parameter literally
+     * named `name.narinfo`.
      */
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/:name`, (request) =>
       Effect.gen(function* () {
         const name = yield* param("name");
-        // A PATH UNDER A BUCKET THAT NAMES NO PROTOCOL FILE IS THE ROW'S 404,
-        // not an empty one: this route outranks the mount's wildcard, so the
-        // sentence has to be said here or the wildcard never gets the request.
         if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
         if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
@@ -809,7 +637,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       }),
     ),
 
-    /** The NAR itself, streamed from the store through zstd. */
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nar/:file`, (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
@@ -829,11 +656,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       }),
     ),
 
-    /**
-     * A NAR upload. The body goes straight to the staging directory — never
-     * through memory — and nothing is imported yet: a NAR with no narinfo names
-     * no store path, and the pair is what `nix copy --from` needs.
-     */
     HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/nar/:file`, (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
@@ -854,21 +676,9 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       }),
     ),
 
-    /**
-     * The narinfo that completes an upload.
-     *
-     * The answer is the OUTCOME, not an acknowledgement: 200 when the path is
-     * recorded, and 400 with Nix's own sentence otherwise — including a NAR
-     * that was never uploaded. References are names, so there is no ordering
-     * hold; a 200 for a path nobody recorded is how a push reports success for
-     * bytes the cache does not have.
-     */
     HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/:name`, (request) =>
       Effect.gen(function* () {
         const name = yield* param("name");
-        // A PATH UNDER A BUCKET THAT NAMES NO PROTOCOL FILE IS THE ROW'S 404,
-        // not an empty one: this route outranks the mount's wildcard, so the
-        // sentence has to be said here or the wildcard never gets the request.
         if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
         if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
@@ -887,17 +697,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       }),
     ),
 
-    // ── A BUCKET'S OWN NAME ──────────────────────────────────────────────
-    //
-    // A domain is a STABLE NAME FOR A BUCKET, not a prefix: the same four
-    // protocol paths sit at the root of it, and the request's `Host` — not a
-    // path segment — says which bucket. The routes are registered always; a
-    // request whose `Host` names no bucket is a plain 404, which is exactly
-    // what a wrong name deserves.
-
-    /** `nix-cache-info` at a bucket's domain. The same text the mount answers:
-     *  `Odu-Origin` is the DAEMON's, never the domain the reader arrived on,
-     *  because that name may be a store's and take no push at all. */
     HttpRouter.add("GET", "/nix-cache-info", (request) =>
       Effect.gen(function* () {
         const admitted = admitByHost(cache, request, "read");
@@ -908,11 +707,8 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       }),
     ),
 
-    /** `<hash>.narinfo` at a bucket's domain. The hash is the route's only
-     *  parameter; the suffix is static, so a shell path cannot match it. */
     HttpRouter.add("GET", `/:hash(${HASH_PATTERN}).narinfo`, narinfoRoot(cache)),
 
-    /** The NAR at a bucket's domain, streamed from the store. */
     HttpRouter.add("GET", "/nar/:file", (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
@@ -932,7 +728,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       }),
     ),
 
-    /** A `nix copy --to https://<domain>` uploads at the root too. */
     HttpRouter.add("PUT", "/nar/:file", (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
@@ -973,39 +768,18 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
     ),
 
     /**
-     * ONE PART of a NAR too large for a single request.
-     *
      * Cloudflare — and any proxy with a body ceiling — refuses a 100 MB
-     * request, so `odu cache push` splits the compressed stream into parts. A
-     * part is addressed by its index, which makes a retry an overwrite: a
-     * dropped request costs one part, not the path.
+     * request, so `odu cache push` splits the compressed stream into parts.
      */
     HttpRouter.add("PUT", `${PUSH_API}/buckets/:bucket/nar/:file/parts/:index`, uploadPart),
     HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/nar/:file/parts/:index`, uploadPart),
 
-    /**
-     * JOIN THE PARTS — the client's count, and the server's answer. A gap is
-     * `409` with the indexes: the client retries those parts and asks again.
-     * The hash is still proved at the narinfo, as for every other upload.
-     */
     HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/nar/:file/complete`, completeParts),
     HttpRouter.add("POST", `${CACHE_MOUNT}/:bucket/nar/:file/complete`, completeParts),
 
-    /**
-     * WHERE THIS NAR'S BYTES GO (PLAN 2.9) — asked once per path, before any
-     * of them are sent, and answered from the bucket's store.
-     *
-     * A bucket on a store that takes its own writes answers `direct` with a
-     * single-object PUT URL, a part size and this upload's handle; the parts
-     * and the completion hang off that handle below. A disk-backed bucket
-     * answers `staged`, which means the two routes above — and that is the
-     * whole of the negotiation: no flag, no probe, no version header.
-     */
     HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/nar/:file/upload`, beginUpload),
     HttpRouter.add("POST", `${CACHE_MOUNT}/:bucket/nar/:file/upload`, beginUpload),
 
-    /** The presigned URL for one part of a direct upload. Signed here and
-     *  spent at the store, so the bytes never reach this process. */
     HttpRouter.add(
       "GET",
       `${PUSH_API}/buckets/:bucket/nar/:file/upload/:upload/parts/:index`,
@@ -1017,8 +791,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       directPart,
     ),
 
-    /** THE PARTS ARE SENT: join them in the store and confirm the object is
-     *  there. The narinfo that follows is what proves it. */
     HttpRouter.add(
       "POST",
       `${PUSH_API}/buckets/:bucket/nar/:file/upload/:upload/complete`,
@@ -1030,14 +802,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
       completeDirect,
     ),
 
-    /**
-     * The batched "which of these are you missing" query. Not part of the Nix
-     * protocol — it is what makes `odu cache push` cheaper than `nix copy`,
-     * which probes one path at a time. It also drops paths signed by an
-     * upstream key, which is how nixpkgs stays out of a bucket — unless the
-     * asker says `"whole": true`, because the closure will be fetched from
-     * this bucket alone.
-     */
     HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/missing`, (request) =>
       Effect.gen(function* () {
         const admitted = admit(cache, request, yield* param("bucket"), "write");
@@ -1055,10 +819,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
             '"whole" is true or false: true asks for every path the bucket lacks, upstream-signed ones included',
           );
         }
-        // WHAT THE ASKER SAYS BUILT THEM, on the same request: a path the
-        // bucket already holds gets no narinfo PUT, so this is where its row
-        // learns where its bytes came from — filling a null column, never
-        // overwriting one.
         const answer = cache.missing(
           admitted.bucket,
           paths,
@@ -1067,37 +827,12 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
         );
         return HttpServerResponse.jsonUnsafe({
           missing: answer.missing,
-          // Additive, and the reason `odu cache push` can print "skipped
-          // upstream" as a number of its own rather than folding it into
-          // "already there": the bucket is the only side that knows its
-          // upstream key names.
           skippedUpstream: answer.skipped,
-          // WHERE A CLIENT SUBSTITUTES THIS BUCKET — a bucket's own domain
-          // when it has one, the mount path otherwise, from the SAME builder
-          // the board's row and `bucket.describe` answer with. A pusher that
-          // then proves its push asks THIS address, which is the one Nix will
-          // ask: `<substituter>/<hash>.narinfo`.
           substituter: urlFor(admitted.bucket.name),
         });
       }),
     ),
 
-    /**
-     * PIN A CLOSURE WITH THE TOKEN THAT PUSHED IT — the one pin verb outside
-     * the administrative surface, and the reason CI can keep a master pin
-     * current (`.github/actions/push`'s `pin:` input).
-     *
-     * WRITE scope, and the rule is a capability argument rather than a
-     * convenience: a write token can already keep any closure alive forever by
-     * pushing it again, because a stored push renews `lastWanted`. A pin it
-     * may create or re-point makes that same promise once instead of nightly;
-     * it reads nothing, deletes nothing, and administers nothing. DELETING a
-     * pin stays the admin surface's — that is giving up retention somebody
-     * else asked for.
-     *
-     * Re-pointing is the whole point: the same name, the closure of today's
-     * build, and yesterday's roots let go in the same statement.
-     */
     HttpRouter.add("POST", `${PUSH_API}/buckets/:bucket/pin`, (request) =>
       Effect.gen(function* () {
         const admitted = admit(cache, request, yield* param("bucket"), "write");
@@ -1108,9 +843,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
           return refused(cache, request, 'expected {"name": "…", "paths": ["/nix/store/…"]}');
         }
         const outcome = yield* Effect.promise(() => cache.pinAs(admitted.bucket, asked));
-        // 403, NOT 400, when the rule refused rather than the request: the
-        // token is real and may not move THIS pin, which is the difference
-        // between "fix your body" and "ask an administrator".
         if (!outcome.ok) {
           return refused(
             cache,
@@ -1119,20 +851,10 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
             outcome.code === "not_permitted" ? 403 : 400,
           );
         }
-        // THE PIN AS THE ROW KNOWS IT — the same shape `pin.list` answers,
-        // rather than a hand-picked copy that stops following the day the
-        // row learns another fact about a pin (it just learned two).
         return HttpServerResponse.jsonUnsafe(outcome.value);
       }),
     ),
 
-    /**
-     * A CLAIMED PREFIX MEANS "MINE". Anything under one of this row's paths
-     * that matched no protocol file is the CACHE's 404 — text, never the
-     * shell's catch-all. Without these, `…/cache/kolu/nope` met the board's
-     * SPA, which is a page at a path the board never routed for and reads as
-     * a broken board rather than as a missing file.
-     */
     HttpRouter.add("GET", `${CACHE_MOUNT}/*`, () =>
       Effect.succeed(missingRoute()),
     ),
@@ -1141,7 +863,6 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
   );
 }
 
-/** The row's own 404: a sentence, not a bundle. */
 function missingRoute(): HttpServerResponse.HttpServerResponse {
   return HttpServerResponse.text("no such cache path\n", {
     status: 404,
@@ -1149,8 +870,6 @@ function missingRoute(): HttpServerResponse.HttpServerResponse {
   });
 }
 
-/** One route parameter, as an Effect so it can be yielded beside the handler's
- *  other effects. A route that matched always has its parameters. */
 function param(name: string): Effect.Effect<string, never, HttpRouter.RouteContext> {
   return Effect.map(HttpRouter.params, (params) => params[name] ?? "");
 }
@@ -1160,13 +879,6 @@ interface MissingRequest {
   sigs?: readonly string[];
 }
 
-/**
- * Parse the `missing` body by hand rather than with a schema: it is a small,
- * frozen shape that `odu cache push` is the only producer of, and a decode
- * failure has to be a 400 with a sentence rather than a schema error. Narrowed
- * with `in` and `typeof` rather than cast, because this is somebody else's
- * bytes.
- */
 function missingRequestOf(body: unknown): MissingRequest[] | null {
   if (body === null || typeof body !== "object" || !("paths" in body)) return null;
   const paths = body.paths;
@@ -1187,23 +899,12 @@ function missingRequestOf(body: unknown): MissingRequest[] | null {
   return out;
 }
 
-/**
- * The `missing` body's optional `whole`: absent is `false`, a boolean is
- * itself, and anything else is `null` — a refusal, so a pusher that misspells
- * its intent is told rather than quietly filtered.
- */
 function wholeOf(body: unknown): boolean | null {
   if (body === null || typeof body !== "object") return null;
   if (!("whole" in body) || body.whole === undefined) return false;
   return typeof body.whole === "boolean" ? body.whole : null;
 }
 
-/**
- * The pin body, parsed by hand for the same reason the `missing` body is: a
- * small frozen shape with one producer, whose refusal has to be a sentence.
- * The row checks what a pin MEANS (a name that is not blank, paths the bucket
- * actually holds); this only says the bytes are the shape they claim.
- */
 function pinRequestOf(body: unknown): { name: string; paths: readonly string[] } | null {
   if (body === null || typeof body !== "object") return null;
   if (!("name" in body) || typeof body.name !== "string") return null;

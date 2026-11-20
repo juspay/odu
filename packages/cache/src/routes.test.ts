@@ -1,18 +1,3 @@
-/**
- * The ROUTES, over the real router and a fake store.
- *
- * `HttpRouter.toWebHandler` gives the same routing the listener uses — route
- * ranking, parameters, HEAD falling back to GET — as a `fetch`-shaped function,
- * so what is asserted here is what a client meets rather than what a handler
- * returns. The store is the fake, because half the matrix is about the answer
- * and the other half is about whether the store was reached at all.
- *
- * **Every upload here carries REAL bytes.** The cache hashes a staged NAR
- * against the narinfo's `NarHash` before it will import it, and that check is
- * the invariant the private-bucket story rests on — so a fixture that skipped
- * it would be testing a server nobody ships.
- */
-
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -32,7 +17,6 @@ import { FakeStore, hashOf } from "../test/fakeStore";
 import { type Gateway, startGateway } from "@odu/objects/testing";
 import { type ObjectStore, s3ObjectStore } from "@odu/objects";
 
-/** THE S3 GATEWAY the NAR-serving cases also run against: one per file. */
 let gateway: Gateway;
 beforeAll(async () => {
   gateway = await startGateway();
@@ -41,8 +25,6 @@ afterAll(async () => {
   await gateway.stop();
 });
 
-/** Where a harness's bucket keeps its objects: the daemon's disk, or a store
- *  declared beside it. */
 interface Where {
   name: string;
   store?: () => Promise<ObjectStore>;
@@ -55,13 +37,10 @@ const ON_S3: Where = {
 
 const ROOT = "root-token-please";
 const NOW = 1_700_000_000_000;
-/** The harness's clock, movable: the sweep's hour is the one thing in here
- *  that a test cannot otherwise reach. Reset per test by `beforeEach`. */
 let clock = NOW;
 const HELLO = "/nix/store/pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3";
 const GLIBC = "/nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57";
 
-/** Bytes, and the NAR hash a narinfo has to claim for them. */
 function nar(text: string): { bytes: Uint8Array; narHash: string } {
   const bytes = new TextEncoder().encode(text);
   return { bytes, narHash: `sha256:${base32(createHash("sha256").update(bytes).digest())}` };
@@ -71,7 +50,6 @@ interface Harness {
   cache: Cache;
   store: FakeStore;
   fetch: (path: string, init?: RequestInit) => Promise<Response>;
-  /** The same listener without the mount prepended. */
   raw: (path: string, init?: RequestInit) => Promise<Response>;
   tokens: { read: string; write: string; admin: string };
   root: string;
@@ -90,8 +68,6 @@ afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-/** Every file under the staging root, so a test can say "and nothing was
- *  written". */
 function stagedFiles(): string[] {
   const root = join(scratch, "cache", "staging");
   const out: string[] = [];
@@ -123,7 +99,6 @@ async function harness(
       storePath: HELLO,
       narHash: hello.narHash,
       narSize: hello.bytes.length,
-      // A self-reference only: the seed must be importable on its own.
       references: [HELLO],
       deriver: "/nix/store/y1kh9arkh7w7am664yqbnnrfpsisqcdc-hello-2.12.3.drv",
       sigs: ["cache.nixos.org-1:AAAA"],
@@ -135,8 +110,6 @@ async function harness(
   const cache = createCache({
     stateRoot: scratch,
     rootToken: ROOT,
-    // The DAEMON's own origin, which every bucket's `nix-cache-info` names.
-    // The same string the board is at here, as it is on a real deployment.
     publicOrigin: boardOrigin,
     legacyStore: { dump: (path) => store.dump(path) },
     now: () => clock,
@@ -165,18 +138,11 @@ async function harness(
     cacheRoutes(cache, (name) => `${CACHE_MOUNT}/${name}`).layer,
     { disableLogger: true },
   );
-  // The tests below name a path as a BUCKET names it (`/main/nix-cache-info`),
-  // and this puts it where the protocol actually is. The mount is pinned on its
-  // own, once, in "the protocol's mount is not the origin's first segment".
   const fetchIt = (path: string, init?: RequestInit): Promise<Response> =>
     handler(new Request(`http://127.0.0.1:18440${CACHE_MOUNT}${path}`, init));
-  /** The listener as it really is, mount and all — for the one test that asks. */
   const raw = (path: string, init?: RequestInit): Promise<Response> =>
     handler(new Request(`http://127.0.0.1:18440${path}`, init));
 
-  // SEEDED THROUGH THE PROTOCOL, not behind it: an object row exists because a
-  // NAR and its narinfo were accepted, so the fixture is a push rather than a
-  // row inserted past the code under test.
   expect((await upload(fetchIt, tokens.write, HELLO, hello, { sigs: ["cache.nixos.org-1:AAAA"] })).status).toBe(200);
 
   return {
@@ -191,11 +157,6 @@ async function harness(
   };
 }
 
-/**
- * MAKE A KEPT ROW A ROW FROM BEFORE OBJECTS WERE KEPT: no object file, and no
- * `FileHash` — the state the one-time migration has not reached yet, which is
- * the only state the old store's FIFO dump serves.
- */
 function asPreObjectRow(storePath: string, file: string): void {
   rmSync(join(scratch, "cache", "objects", "main", "nar", file), { force: true });
   const repo = openCacheRepo(join(scratch, "cache", "cache.sqlite"));
@@ -205,7 +166,6 @@ function asPreObjectRow(storePath: string, file: string): void {
   repo.close();
 }
 
-/** One complete upload: the NAR, then the narinfo that names it. */
 async function upload(
   fetchIt: Harness["fetch"],
   token: string,
@@ -259,8 +219,8 @@ async function mint(cache: Cache, scope: "read" | "write" | "admin"): Promise<st
   return minted.value.token;
 }
 
-/** A `Uint8Array` as a request body. The DOM lib's `BodyInit` does not admit
- *  one directly in this TypeScript version, though every runtime does. */
+/** The DOM lib's `BodyInit` does not admit a `Uint8Array` directly in this
+ *  TypeScript version, though every runtime does. */
 const body = (bytes: Uint8Array): BodyInit => bytes as unknown as BodyInit;
 
 const bearer = (token: string): RequestInit => ({ headers: { authorization: `Bearer ${token}` } });
@@ -287,20 +247,13 @@ describe("a bucket's consumer facts", () => {
     expect(facts.url).toContain("/cache/main");
     expect(facts.upstreamKeys).toEqual(["cache.nixos.org-1"]);
     expect(facts.use).toContain("extra-substituters");
-    // The SAME PAGE WITHOUT THE SLASH: the substituter URL a person pastes
-    // into a browser is `…/cache/main`, and it must not fall to the shell.
     const bare = await h.fetch("/main");
     expect(bare.status).toBe(200);
     expect((await bare.text()).includes("extra-substituters")).toBe(true);
-    // The PAGE is the same facts for a person with curl, and the key is in it.
     const page = await h.fetch("/main/");
     expect(page.status).toBe(200);
-    // The PAGE carries the key too. (Checked as a substring of the key, not
-    // of `facts`: a matcher with an asymmetric expectation can rewrite the
-    // object it matched.)
     const body = await page.text();
     expect(body.includes("main-1:")).toBe(true);
-    // ONE BLOCK PER THING A PERSON PASTES SOMEWHERE, each with a copy button.
     for (const title of ["nix.conf", "NixOS / nix-darwin", "flake.nix", "GitHub Actions"]) {
       expect({ title, heading: body.includes(`<h3>${title}</h3>`) }).toEqual({
         title,
@@ -308,18 +261,11 @@ describe("a bucket's consumer facts", () => {
       });
     }
     expect(body.split(`<button type="button" data-copy>`).length - 1).toBe(5);
-    // A PUBLIC BUCKET IS READ WITH NO CREDENTIAL, so netrc is not on its page.
     expect(body.includes("netrc-file")).toBe(false);
-    // THE PUSH BLOCK NAMES ONE FACT — the substituter this very page is
-    // served at. The bucket and the push origin are what its `nix-cache-info`
-    // states, so a page read at a bucket's own domain cannot print a stale
-    // daemon address beside it.
     expect(body).toContain(`odu cache push --cache ${facts.url} &lt;paths&gt;`);
-    // THE HEALTH FILE, at the substituter's root, as a link a person clicks.
     expect(body).toContain(
       `<a href="/cache/main/nix-cache-info">nix-cache-info</a>`,
     );
-    // ATTRIBUTION TO THE PRODUCT, a fixed site — never the instance's board.
     expect(body).toContain(
       `<p class="served">served by <a href="https://odu.kolu.dev/">odu</a></p>`,
     );
@@ -329,18 +275,14 @@ describe("a bucket's consumer facts", () => {
   it("does not leak a private bucket's existence to an anonymous reader", async () => {
     const h = await harness(false);
     expect((await h.fetch("/main/")).status).toBe(404);
-    // A reader with a read token is answered.
     const withToken = await h.fetch("/main/", {
       ...bearer(h.tokens.read),
       headers: { ...(bearer(h.tokens.read).headers as Record<string, string>), accept: "application/json" },
     });
     expect(withToken.status).toBe(200);
-    // The PAGE, not the JSON: the blocks are what a reader pastes.
     const page = await h.fetch("/main/", bearer(h.tokens.read));
     expect(page.status).toBe(200);
     const body = await page.text();
-    // READING THIS BUCKET NEEDS A CREDENTIAL, so its page carries the netrc
-    // block — and only a private bucket's does.
     expect(body).toContain("<h3>netrc</h3>");
     expect(body).toContain("netrc-file");
     await h.dispose();
@@ -354,19 +296,14 @@ describe("nix-cache-info", () => {
     expect(response.status).toBe(200);
     const text = await response.text();
     expect(text).toBe(nixCacheInfo({ origin: "https://odu.example.org", bucket: "main" }));
-    // THE NUMBER, not just the constant: 41 is one WORSE than
-    // cache.nixos.org's 40, so an upstream-signed path this bucket also
-    // holds is fetched from the CDN whatever order a client's
-    // `substituters` are in. At 40 the two are equal, and equal means
-    // whoever wrote the `nix.conf` decides which uplink pays.
+    // 41 is one WORSE than cache.nixos.org's 40, so an upstream-signed path
+    // this bucket also holds is fetched from the CDN whatever order a
+    // client's `substituters` are in.
     expect(text).toContain("Priority: 41\n");
     await h.dispose();
   });
 
   it("names the daemon a push goes to, and the bucket it is pushing to", async () => {
-    // THE WHOLE POINT OF THE TWO EXTRA LINES: reads come from the store, so a
-    // client holding only a substituter URL cannot derive where a push is
-    // taken. `odu cache push --cache <url>` reads exactly these.
     const h = await harness(true);
     const text = await (await h.fetch("/main/nix-cache-info")).text();
     expect(text).toContain("Odu-Origin: https://odu.example.org\n");
@@ -389,7 +326,6 @@ describe("narinfo", () => {
     const text = await response.text();
     expect(text).toContain(`StorePath: ${HELLO}`);
     expect(text).toContain("Compression: none");
-    // The bucket's own signature first, and the client's kept beside it.
     expect(text).toMatch(/^Sig: main-1:/m);
     expect(text).toContain("Sig: cache.nixos.org-1:AAAA");
     await h.dispose();
@@ -398,8 +334,6 @@ describe("narinfo", () => {
   it("signs AT READ TIME, so a rotated key cannot survive in a row", async () => {
     const h = await harness(true);
     const first = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
-    // Two reads of one path produce the same signature over the same
-    // fingerprint — and the row holds only the CLIENT's, never the bucket's.
     const second = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
     expect(second).toBe(first);
     expect(first.match(/^Sig: main-1:/gm)).toHaveLength(1);
@@ -451,8 +385,6 @@ describe("narinfo", () => {
     const h = await harness(true);
     const notProtocol = await h.fetch("/main/hello-2.12.3");
     expect(notProtocol.status).toBe(404);
-    // The row's sentence, not an empty body: a path under a bucket that names
-    // no protocol file must read as the cache's own 404.
     expect(await notProtocol.text()).toContain("no such cache path");
     await h.dispose();
   });
@@ -468,14 +400,11 @@ describe("the auth matrix", () => {
   });
 
   it("answers 404 — not 401 — to an anonymous read of a private bucket", async () => {
-    // A 401 would confirm the bucket exists, and a private name must not be
-    // enumerable.
     const h = await harness(false);
     const path = `/main/${hashOf(HELLO)}.narinfo`;
     expect((await h.fetch(path)).status).toBe(404);
     expect((await h.fetch(path, bearer(h.tokens.read))).status).toBe(200);
     expect((await h.fetch(path, basic(h.tokens.read))).status).toBe(200);
-    // The root token is an admin credential, and admin covers read.
     expect((await h.fetch(path, bearer(h.root))).status).toBe(200);
     await h.dispose();
   });
@@ -508,8 +437,6 @@ describe("the auth matrix", () => {
     await h.cache.admin.tokenRevoke({ ...asRoot(ROOT), id: minted.value.facts.id });
     expect((await h.fetch(path, bearer(minted.value.token))).status).toBe(403);
 
-    // An expired token, written straight into the row: `now()` is frozen for
-    // the harness, so the expiry is the only moving part.
     const expired = await h.cache.admin.tokenMint({
       ...asRoot(ROOT),
       bucket: "main",
@@ -536,7 +463,6 @@ describe("the auth matrix", () => {
     });
     later.close();
 
-    // A token minted for `main` cannot reach a bucket it does not cover.
     const other = await h.cache.admin.create({
       ...asRoot(ROOT),
       name: "other",
@@ -553,22 +479,11 @@ describe("the auth matrix", () => {
 
   it("reads a credential without backtracking on the header", async () => {
     const h = await harness(true);
-    // A header is the one string on this face that arrives before anything is
-    // authenticated, and it is somebody else's input. Ten thousand spaces is
-    // the shape that made `/^Bearer\\s+(.+)$/i` try every split of `\\s+`
-    // against `(.+)$`; the parse is one left-to-right scan, so this is linear
-    // and the bound below is generous by three orders of magnitude.
     const spaces = `Bearer${" ".repeat(10_000)}`;
     const started = performance.now();
     const verdict = h.cache.authorize(spaces, h.cache.bucket("main") as never, "read");
     expect(performance.now() - started).toBeLessThan(250);
-    // A wholesale-whitespace payload is still a PRESENTED credential: it is
-    // refused as a token this service never minted (403), not as an absent one
-    // (401) — the distinction costs an attacker nothing and keeps the answer
-    // identical to the one the regex gave.
     expect(verdict).toMatchObject({ ok: false, status: 403 });
-    // The same header with a failing tail: the case that actually backtracks,
-    // because `$` cannot match before a trailing newline.
     const tail = h.cache.authorize(`${spaces}x\n`, h.cache.bucket("main") as never, "read");
     expect(tail).toMatchObject({ ok: false, status: 403 });
     await h.dispose();
@@ -576,15 +491,10 @@ describe("the auth matrix", () => {
 
   it("mounts under a literal, so a bucket cannot shadow the board", async () => {
     const h = await harness(true);
-    // The board serves `/assets/<hashed bundle>` on this same origin, and
-    // `/assets` is a legal bucket name — so a bucket at the origin's first
-    // segment stole the page's own JavaScript and rendered it blank. The
-    // protocol answers under `CACHE_MOUNT` and NOWHERE else.
     expect(CACHE_MOUNT).toBe("/cache");
     expect((await h.fetch("/main/nix-cache-info")).status).toBe(200);
     expect((await h.raw("/main/nix-cache-info")).status).toBe(404);
     expect((await h.raw("/assets/main-abc123.js")).status).toBe(404);
-    // A bucket NAMED after the mount still lives under it.
     const created = await h.cache.admin.create({
       ...asRoot(ROOT),
       name: "cache",
@@ -654,8 +564,6 @@ describe("operational lines", () => {
     );
     const hello = nar("a NAR, in pieces");
     const response = await h.fetch(`/main/nar/${hello.narHash.replace(/^sha256:/, "")}.nar.zst`);
-    // INTENT IS NOT EVIDENCE: building the response logs nothing; the body
-    // finishing does.
     expect(lines.some((line) => line.startsWith("cache.nar.served"))).toBe(false);
     await response.arrayBuffer();
     const servedLine = lines.find((line) => line.startsWith("cache.nar.served"));
@@ -686,15 +594,11 @@ describe("operational lines", () => {
     const host = (path: string, init: RequestInit = {}): Promise<Response> =>
       h.raw(path, { ...init, headers: { host: "cache.example.org" } });
     const absent = hashOf("/nix/store/33333333333333333333333333333333-absent");
-    // THE SEEDING PUSH IS NOT THE SUBJECT: only the reads below are.
     events.length = 0;
 
     expect((await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).status).toBe(200);
     expect((await h.fetch(`/main/${absent}.narinfo`)).status).toBe(404);
-    // A HEAD IS A READ, deliberately — it is how a client asks "do you have
-    // this", and the hit rate that ignored it would be the wrong number.
     expect((await h.fetch(`/main/${hashOf(HELLO)}.narinfo`, { method: "HEAD" })).status).toBe(200);
-    // And the same two answers at the root of the bucket's own domain.
     expect((await host(`/${hashOf(HELLO)}.narinfo`)).status).toBe(200);
     expect((await host(`/${absent}.narinfo`)).status).toBe(404);
 
@@ -713,12 +617,6 @@ describe("operational lines", () => {
   });
 });
 
-// ODU STREAMS THE DISK ITSELF. Every case below is the whole serving path for
-// a bucket whose objects are files on this machine: a length, the file's own
-// hash, each twin's compression, and `Range` arithmetic odu does. Since 2.8
-// an S3-backed bucket answers none of it — it answers a 307 and the store
-// does all of this instead — and that contrast is the point of keeping the
-// two groups side by side.
 describe("the NAR, from local disk", () => {
   const where = ON_DISK;
 
@@ -732,7 +630,6 @@ describe("the NAR, from local disk", () => {
     expect(response.headers.get("content-length")).toBe(String(hello.bytes.length));
     const body = new Uint8Array(await response.arrayBuffer());
     expect(Array.from(body)).toEqual(Array.from(hello.bytes));
-    // NOTHING RE-DUMPS THE PATH: the file the pusher sent is the answer.
     expect(h.store.calls.filter((call) => call.op === "dump")).toHaveLength(0);
     const narinfo = await (await h.fetch(`/main/${hashOf(HELLO)}.narinfo`)).text();
     expect(narinfo).toContain(`FileSize: ${hello.bytes.length}`);
@@ -848,13 +745,6 @@ describe("the NAR, from local disk", () => {
   });
 });
 
-/**
- * THE S3 STORE, with every presigned URL it mints counted.
- *
- * The count is how the private-bucket case says what it means: a refusal that
- * happened BEFORE a URL was signed, rather than one that signed a URL and
- * then thought better of handing it over.
- */
 function countingS3(): { where: Where; minted: () => number } {
   let minted = 0;
   return {
@@ -877,10 +767,6 @@ function countingS3(): { where: Where; minted: () => number } {
   };
 }
 
-// READS LEAVE ODU (PLAN 2.8). A bucket whose store can sign a URL is not
-// served by this daemon at all: the NAR route answers a 307 and the client
-// fetches the bytes from the store. Everything below is asserted THROUGH the
-// route, because the only thing that matters is what a Nix client meets.
 describe("the NAR, from S3", () => {
   it("redirects to a signed URL on the store's own host, with no body", async () => {
     const lines: string[] = [];
@@ -891,28 +777,19 @@ describe("the NAR, from S3", () => {
     const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const response = await h.fetch(`/main/nar/${name}`);
 
-    // 307, NOT 302: the method has to survive the hop (see the HEAD case).
     expect(response.status).toBe(307);
     const location = new URL(response.headers.get("location") as string);
     expect(location.origin).toBe(gateway.endpoint.origin);
     expect(location.origin).not.toBe("http://127.0.0.1:18440");
-    // A SIGNATURE IN THE QUERY is what makes this URL usable by a reader who
-    // holds no credential of the store's — the whole point of the hop.
     expect(location.searchParams.get("X-Amz-Signature")).not.toBeNull();
     expect(location.searchParams.get("X-Amz-Expires")).toBe("600");
-    // PUBLIC BUCKET, PRIVATE REDIRECT: the signature expires, so an edge that
-    // cached this 307 would hand out a dead URL long after it stopped working.
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.text()).toBe("");
 
-    // AND THE URL WORKS: the bytes come back from the store itself, with no
-    // credential of odu's travelling with the request.
     const fromStore = await fetch(location.href);
     expect(fromStore.status).toBe(200);
     expect(Array.from(new Uint8Array(await fromStore.arrayBuffer()))).toEqual(Array.from(hello.bytes));
 
-    // THE LINE 2.8 TRADES AWAY ITS BYTE COUNT FOR: odu streamed nothing, and
-    // says so rather than logging a served NAR it never touched.
     const served = lines.find((line) => line.startsWith("cache.nar.served"));
     expect(served).toContain('"source":"redirect"');
     expect(served).toContain('"bytes":0');
@@ -939,8 +816,6 @@ describe("the NAR, from S3", () => {
     const hello = nar("a NAR, in pieces");
     const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const response = await h.fetch(`/main/nar/${name}`, { headers: { range: "bytes=2-5" } });
-    // NOT a 206: odu does not proxy a resumed download. The client re-sends
-    // its own `Range` to the store, which is between those two from here on.
     expect(response.status).toBe(307);
     expect(response.headers.get("content-range")).toBeNull();
 
@@ -960,14 +835,10 @@ describe("the NAR, from S3", () => {
     const hello = nar("a NAR, in pieces");
     const name = `${hello.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const refused = await h.fetch(`/main/nar/${name}`);
-    // The private bucket's answer is unchanged by 2.8 — and a URL that was
-    // never minted cannot leak: admission comes first, signing second.
     expect(refused.status).toBe(404);
     expect(refused.headers.get("location")).toBeNull();
     expect(minted()).toBe(0);
 
-    // A READER WITH A TOKEN still gets the hop, which is what makes the count
-    // above a fact about admission rather than about this store.
     const allowed = await h.fetch(`/main/nar/${name}`, bearer(h.tokens.read));
     expect(allowed.status).toBe(307);
     expect(minted()).toBe(1);
@@ -987,7 +858,6 @@ describe("the NAR before its object", () => {
     expect(h.store.calls.filter((call) => call.op === "dump")).toHaveLength(1);
     await h.dispose();
   });
-
 });
 
 describe("missing", () => {
@@ -1010,17 +880,12 @@ describe("missing", () => {
     expect(await response.json()).toEqual({
       missing: [other],
       skippedUpstream: [GLIBC],
-      // THE ADDRESS NIX ASKS, from the same builder the board's row uses, so a
-      // pusher proving its push asks what a substituter will be asked.
       substituter: "/cache/main",
     });
     await h.dispose();
   });
 
   it("asks a whole push for what an upstream key signed", async () => {
-    // THE SAME QUESTION as the case above, from a pusher whose closure is
-    // fetched from this bucket alone: the upstream-signed path is missing like
-    // any other, and the path the bucket holds is still not asked for.
     const h = await harness(true);
     const other = "/nix/store/00000000000000000000000000000000-unbuilt";
     const response = await h.raw("/_odu/v1/buckets/main/missing", {
@@ -1059,11 +924,6 @@ describe("missing", () => {
   });
 
   it("takes everything when the bucket has no upstream keys", async () => {
-    // A server whose store is not the machine that built the paths — a chroot
-    // store on a volume, a fresh host — never holds nixpkgs, so a bucket that
-    // skips upstream-signed paths leaves every referrer at 202 for ever. An
-    // EMPTY list is the answer the surface already documents ("takes
-    // everything"); this pins that the skip really is off, not just unused.
     const h = await harness(true);
     const created = await h.cache.admin.create({
       ...asRoot(ROOT),
@@ -1073,8 +933,6 @@ describe("missing", () => {
       upstreamKeys: [],
     });
     expect(created.ok).toBe(true);
-    // A token minted for `main` cannot ask about this bucket, so mint one that
-    // can: the point of the test is the upstream rule, not the scope rule.
     const scoped = await h.cache.admin.tokenMint({
       ...asRoot(ROOT),
       bucket: "everything",
@@ -1117,13 +975,8 @@ describe("missing", () => {
 
 describe("a pin made with a write token", () => {
   it("holds the closure, and re-points when the same name is pinned again", async () => {
-    // WHY A WRITE TOKEN MAY DO THIS: it can already keep any closure alive by
-    // pushing it again — a stored push renews `lastWanted` — so the pin is
-    // the same promise made once. It is how CI keeps a master closure out of
-    // collection (`.github/actions/push`'s `pin:`).
     const h = await harness(true);
     const write = bearer(h.tokens.write);
-    // A SECOND path to re-point at, pushed the way everything else here is.
     const second = "/nix/store/00000000000000000000000000000001-second";
     expect((await upload(h.fetch, h.tokens.write, second, nar("a second NAR"))).status).toBe(200);
     const pin = (paths: readonly string[]): Promise<Response> =>
@@ -1143,15 +996,11 @@ describe("a pin made with a write token", () => {
     expect(await again.json()).toMatchObject({ name: "master", rootPaths: [second] });
     const listed = await h.cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" });
     expect(listed).toMatchObject({ ok: true });
-    // ONE pin, re-pointed — not two, and yesterday's roots let go.
     if (listed.ok) expect(listed.value.map((one) => one.rootPaths)).toEqual([[second]]);
     await h.dispose();
   });
 
   it("may not re-point an ADMIN's pin, which an admin may still re-point", async () => {
-    // RE-POINTING IS RELEASING: the roots a pin held are let go in the same
-    // statement, so a leaked CI token — or a typo in a workflow's `pin:` —
-    // must not be able to drop the retention an administrator asked for.
     const h = await harness(true);
     const second = "/nix/store/00000000000000000000000000000001-second";
     expect((await upload(h.fetch, h.tokens.write, second, nar("a second NAR"))).status).toBe(200);
@@ -1166,14 +1015,11 @@ describe("a pin made with a write token", () => {
       headers: { ...write.headers, "content-type": "application/json" },
       body: JSON.stringify({ name: "release-1.0", paths: [second] }),
     });
-    // 403: the token is real and may not move THIS pin.
     expect(stolen.status).toBe(403);
     expect(await stolen.text()).toContain("made by an administrator");
     const held = await h.cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" });
     if (held.ok) expect(held.value.map((one) => one.rootPaths)).toEqual([[HELLO]]);
 
-    // AN ADMIN MAY MOVE EITHER. The write token's own pin first, to prove the
-    // rule is about who made it rather than about who is asking.
     expect(
       (
         await h.raw("/_odu/v1/buckets/main/pin", {
@@ -1252,20 +1098,13 @@ describe("uploading", () => {
   });
 
   it("refuses a narinfo with no NAR behind it — even for a path the store already has", async () => {
-    // THE HOLE: `nix copy --from` copies zero paths and exits 0 when the path
-    // is already valid, never opening the NAR. Without the byte check, a write
-    // token for one bucket publishes any path the store holds.
     const h = await harness(true);
     const priv = "/nix/store/22222222222222222222222222222222-private";
     const payload = nar("somebody else's bytes");
-    // Valid in the store, and NOT in this bucket.
     h.store.add({ storePath: priv, narHash: payload.narHash, narSize: 1, references: [] }, true);
 
     const response = await upload(h.fetch, h.tokens.write, priv, payload, { skipNar: true });
     expect(response.status).toBe(400);
-    // The BODY is the contract here, not prose: `odu cache push` reads this
-    // sentence to decide whether to re-send the bytes, so the string is pinned
-    // on purpose and the client's fallback is tested against the same words.
     expect(await response.text()).toContain("never uploaded");
     await h.dispose();
   });
@@ -1280,7 +1119,6 @@ describe("uploading", () => {
       narHash: claimed.narHash,
     });
     expect(response.status).toBe(400);
-    // Pinned for the same reason: the 400 body is what a pusher is told.
     expect(await response.text()).toContain("hashes to");
     expect((await h.fetch(`/main/${hashOf(staged)}.narinfo`)).status).toBe(404);
     await h.dispose();
@@ -1331,10 +1169,6 @@ describe("uploading", () => {
   });
 
   it("records twins whose NARs both land before either narinfo does", async () => {
-    // THE INTERLEAVING A PUSH PRODUCES: one wave of four sends NAR A, NAR B,
-    // narinfo A, narinfo B. Two store paths with identical content share one
-    // NAR name, so recording A takes the file — and B's narinfo must still be
-    // accepted, proved by the object A wrote and rebuilt from it.
     const h = await harness(true);
     const one = "/nix/store/66666666666666666666666666666666-one";
     const two = "/nix/store/77777777777777777777777777777777-two";
@@ -1349,7 +1183,6 @@ describe("uploading", () => {
       });
       expect({ path, status: put.status }).toEqual({ path, status: 200 });
     }
-    // ONE staged NAR, not two: both uploads named the same file.
     expect(
       stagedFiles().filter((file) => file.endsWith(".nar.zst")),
     ).toHaveLength(1);
@@ -1376,9 +1209,6 @@ describe("uploading", () => {
     const name = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const split = [payload.bytes.subarray(0, 5), payload.bytes.subarray(5)];
     const part = (index: number) =>
-      // THE PROTOCOL'S PATH FORM, which is where `odu cache push` addresses a
-      // part (`<bucket>/nar/<file>/parts/<index>`); the admin API's path is a
-      // second spelling of the same verbs.
       h.fetch(`/main/nar/${name}/parts/${index}`, {
         ...bearer(h.tokens.write),
         method: "PUT",
@@ -1395,16 +1225,12 @@ describe("uploading", () => {
       });
 
     expect((await part(0)).status).toBe(204);
-    // A GAP IS THE CLIENT'S TO FILL: the answer names the index, not a
-    // half-assembled NAR.
     const gap = await complete();
     expect(gap.status).toBe(409);
     expect(await gap.json()).toEqual({ missing: [1] });
 
     expect((await part(1)).status).toBe(204);
     expect((await complete()).status).toBe(200);
-    // The narinfo then proves the joined bytes exactly as it would a single
-    // request — the chunking is invisible to the proof.
     const narinfo = await h.fetch(`/main/${hashOf(staged)}.narinfo`, {
       ...bearer(h.tokens.write),
       method: "PUT",
@@ -1427,7 +1253,6 @@ describe("uploading", () => {
         headers: { authorization: `Bearer ${h.tokens.write}`, "x-odu-upload": session },
         body: body(bytes),
       });
-    // TWO UPLOADS OF ONE NAME, index 0 each: neither overwrites the other.
     expect((await part("mine", payload.bytes)).status).toBe(204);
     expect((await part("theirs", other.bytes)).status).toBe(204);
     expect(stagedFiles().filter((file) => file.includes(".part-0")).sort()).toEqual([
@@ -1444,8 +1269,6 @@ describe("uploading", () => {
         },
       });
     expect((await complete("mine", 1)).status).toBe(200);
-    // A RETRIED JOIN is answered from THIS session's join; another session
-    // with a gap is not told its NAR exists because someone else's does.
     expect((await complete("mine", 1)).status).toBe(200);
     const gap = await complete("theirs", 2);
     expect(gap.status).toBe(409);
@@ -1456,7 +1279,6 @@ describe("uploading", () => {
       body: `StorePath: ${staged}\nURL: nar/${name}\nCompression: none\nNarHash: ${payload.narHash}\nNarSize: ${payload.bytes.length}\nReferences: \n`,
     });
     expect(narinfo.status).toBe(200);
-    // A SESSION IS PART OF A FILE NAME: anything but a plain token is refused.
     expect((await part("../escape", payload.bytes)).status).toBe(400);
     await h.dispose();
   });
@@ -1503,7 +1325,6 @@ describe("uploading", () => {
     expect(line).toContain(`"storePath":"${staged}"`);
     expect(line).toContain('"parts":3');
     expect(line).toContain(`"bytesReceived":${payload.bytes.length}`);
-    // THE FILE THIS PROOF READ: the name it claimed, and its size then.
     expect(line).toMatch(new RegExp(`"stagedFile":"main/nar/${name.replaceAll(".", "\\.")}\\.[0-9a-f-]{36}\\.claimed"`));
     expect(line).toContain(`"stagedBytes":${payload.bytes.length}`);
     await h.dispose();
@@ -1528,7 +1349,6 @@ describe("uploading", () => {
   it("joins 3+ parts uploaded concurrently and out of index order", async () => {
     const h = await harness(true);
     const staged = "/nix/store/99999999999999999999999999999999-concurrent";
-    // REAL PART SIZES: 64 MiB, 64 MiB, remainder — the agent-distro shape.
     const MB = 1024 * 1024;
     const bytes = new Uint8Array(130 * MB);
     for (let i = 0; i < bytes.length; i += 4096) bytes[i] = i & 0xff;
@@ -1546,7 +1366,6 @@ describe("uploading", () => {
         method: "PUT",
         body: body(split[index] as Uint8Array),
       });
-    // THE AGENT-DISTRO SHAPE: three parts, concurrent, lines in any order.
     const uploaded = await Promise.all([part(2), part(1), part(0)]);
     expect(uploaded.map((response) => response.status)).toEqual([204, 204, 204]);
     const complete = await h.fetch(`/main/nar/${name}/complete`, {
@@ -1617,9 +1436,6 @@ describe("a bucket's domain", () => {
     expect(info.status).toBe(200);
     const infoText = await info.text();
     expect(infoText).toContain("WantMassQuery");
-    // THE DAEMON'S ORIGIN, NOT THE NAME THE READER ARRIVED ON. A bucket's
-    // domain may be a store's own, which answers GET and takes no push: the
-    // address a pusher needs is odu's.
     expect(infoText).toBe(nixCacheInfo({ origin: "https://odu.example.org", bucket: "main" }));
 
     const narinfo = await host(`/${hashOf(HELLO)}.narinfo`);
@@ -1629,11 +1445,9 @@ describe("a bucket's domain", () => {
     const nar = await host(`/${text.split("\n").find((line) => line.startsWith("URL: "))!.slice(5)}`);
     expect(nar.status).toBe(200);
 
-    // THE WRONG NAME IS A 404, not the path form and not the shell.
     expect(
       (await h.raw("/nix-cache-info", { headers: { host: "other.example.org" } })).status,
     ).toBe(404);
-    // And the claim is the hash's shape, not every one-segment path.
     expect((await host("/sw.js")).status).toBe(404);
     await h.dispose();
   });
@@ -1641,10 +1455,6 @@ describe("a bucket's domain", () => {
 
 describe("the shell's own paths", () => {
   it("is not reached by the cache's two-segment GET", async () => {
-    // `/:bucket/:name` is the narinfo route, and the shell serves fixed assets
-    // beside it. None of these is two segments, so none can match — pinned
-    // because a future fixed path that IS two segments belongs above this
-    // layer, not beside it.
     const h = await harness(true);
     for (const path of ["/sw.js", "/manifest.webmanifest", "/_app/assets/x.js"]) {
       const status = await h
@@ -1657,9 +1467,6 @@ describe("the shell's own paths", () => {
   });
 });
 
-/** A stream of `count` repeated `size`-byte chunks: large in TOTAL BYTES, small
- *  on the heap. The same buffer is handed out every pull, so a leaking server
- *  shows up as RSS and not as this fixture's allocation. */
 function pattern(size: number): Uint8Array {
   const chunk = new Uint8Array(size);
   let x = 0x9e3779b9;
@@ -1687,7 +1494,6 @@ function bigStream(count: number, size = 64 * 1024): ReadableStream<Uint8Array> 
   });
 }
 
-/** Highest RSS growth while `work` runs, sampled every 10 ms. */
 async function rssGrowth(work: () => Promise<void>): Promise<number> {
   const baseline = process.memoryUsage().rss;
   let peak = baseline;
@@ -1709,14 +1515,12 @@ describe("a large NAR stays off the heap", () => {
   it("serves it to a slow reader at constant memory", async () => {
     const h = await harness(true);
     const hello = nar("a NAR, in pieces");
-    // LARGE SOURCE CHUNKS, on purpose: zstd hands out ~1.5 MB buffers, and
-    // Bun keeps a `res.write` chunk alive until the socket drains.
+    // zstd hands out ~1.5 MB buffers, and Bun keeps a `res.write` chunk alive
+    // until the socket drains.
     const chunks = 214;
     const size = 1_500_000;
     h.store.dump = () => bigStream(chunks, size);
     const file = `${hello.narHash.replace(/^sha256:/, "")}.nar`;
-    // The FIFO FALLBACK's fixed point: a row from before objects were kept, so
-    // the route has no length and must stream the dump without buffering.
     asPreObjectRow(HELLO, file);
     const growth = await rssGrowth(async () => {
       const response = await h.fetch(`/main/nar/${file}`);
@@ -1731,14 +1535,12 @@ describe("a large NAR stays off the heap", () => {
         digest.update(next.value);
         bytes += next.value.length;
         reads += 1;
-        // A SLOW CLIENT: the server must stop producing, not buffer.
         if (reads % 16 === 0) await new Promise((resolve) => setTimeout(resolve, 5));
       }
       const expected = createHash("sha256");
       const chunk = pattern(size);
       for (let i = 0; i < chunks; i++) expected.update(chunk);
       expect(bytes).toBe(chunks * size);
-      // CONTENT, not just length: the pieces must arrive in order.
       expect(digest.digest("hex")).toBe(expected.digest("hex"));
     });
     expect({ growth, within: growth < LIMIT }).toEqual({ growth, within: true });
@@ -1761,21 +1563,7 @@ describe("a large NAR stays off the heap", () => {
   });
 });
 
-/**
- * UPLOADS THAT GO STRAIGHT TO THE STORE (PLAN 2.9).
- *
- * These drive the real routes against a real S3 service, and the PUTs go to
- * the presigned URLs odu minted — through plain `fetch`, with no odu
- * credential — so what is proved is the thing the client will actually do.
- *
- * The invariant under all of it: **odu signs no hash it did not take.** A
- * narinfo is answered 200 only after odu has streamed the object back out of
- * the store and hashed it, and the bytes become `nar/<file>` by a copy INSIDE
- * the store, never by anything the client said.
- */
 describe("a direct upload", () => {
-  /** Begin, send the bytes to the part URL the plan carries, and join.
-   *  Answers the plan and the completion, so a case can assert on either. */
   async function direct(
     h: Harness,
     file: string,
@@ -1803,13 +1591,9 @@ describe("a direct upload", () => {
   }
 
   /**
-   * A STORE WHOSE TEMP OBJECT CHANGES UNDER THE COPY, however it got there:
-   * it rewrites the source the moment odu asks to copy it. Odu's own shape
-   * makes this unreachable for a client — the only URLs it signs for the key
-   * are parts of an upload the completion closes — so this stages the hazard
-   * the shape removes, and holds the SECOND line of defence to its promise
-   * where the store honours it (AWS, versitygw; R2 does not implement the
-   * source condition on `UploadPartCopy`).
+   * A STORE WHOSE TEMP OBJECT CHANGES UNDER THE COPY: AWS and versitygw
+   * honour the source condition on `UploadPartCopy`; R2 does not implement
+   * it.
    */
   function racingS3(rewrite: Uint8Array): { where: Where; raced: () => number } {
     let raced = 0;
@@ -1825,8 +1609,6 @@ describe("a direct upload", () => {
             copy: async (from: string, to: string, options: Parameters<typeof copy>[2]) => {
               if (from.includes("/.tmp-")) {
                 raced += 1;
-                // The client's own URL would do this; writing it through the
-                // store is the same request with the same effect.
                 await store.delete(from);
                 const put = await store.put(from, new Blob([rewrite as BlobPart]));
                 expect(put.ok).toBe(true);
@@ -1849,13 +1631,8 @@ describe("a direct upload", () => {
     });
     const plan = (await begun.json()) as Record<string, unknown>;
     expect(plan.mode).toBe("direct");
-    // THE PART SIZE IS THE STORE'S FLOOR, never the 1 byte a client may ask
-    // for: S3 refuses a short part in the middle of an upload.
+    // S3 refuses a short part in the middle of an upload.
     expect(plan.partSize as number).toBeGreaterThanOrEqual(5 * 1024 * 1024);
-    // A URL THAT CARRIES ITS OWN AUTHORITY, at the store and not at odu —
-    // and it is a PART of one upload, not a plain PUT. That is the whole of
-    // why the object odu proves later cannot be rewritten: completing the
-    // upload ends every URL odu ever signed for the key.
     const part = new URL(plan.part as string);
     expect(part.searchParams.get("X-Amz-Signature")).not.toBeNull();
     expect(part.searchParams.get("partNumber")).toBe("1");
@@ -1889,20 +1666,15 @@ describe("a direct upload", () => {
     const { complete } = await direct(h, file, payload.bytes);
     expect(complete.status).toBe(200);
     expect(await complete.json()).toEqual({ parts: 1, bytes: payload.bytes.length });
-    // THIS NAR's line — the harness seeded a staged one before it, which is
-    // the same event for the other mode.
     expect(
       events.find((line) => line.event === "cache.nar.uploaded" && line.fields.file === file)
         ?.fields,
     ).toMatchObject({ bucket: "main", file, mode: "direct", parts: 1, bytes: payload.bytes.length });
 
-    // NOTHING IS RECORDED YET: bytes with no proof are not a path.
     expect(h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(GLIBC))).toBeNull();
 
     const landed = await upload(h.fetch, h.tokens.write, GLIBC, payload, { skipNar: true });
     expect(landed.status).toBe(200);
-    // THE PATH IS SERVED, from the object the copy made — and the NAR reads
-    // back through the store exactly as a staged one does.
     const read = await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read));
     expect([200, 307]).toContain(read.status);
     const bytes =
@@ -1910,7 +1682,6 @@ describe("a direct upload", () => {
         ? new Uint8Array(await (await fetch(read.headers.get("location") as string)).arrayBuffer())
         : new Uint8Array(await read.arrayBuffer());
     expect(new TextDecoder().decode(bytes)).toBe("a NAR that went straight to the store");
-    // AND THE TEMP OBJECT IS GONE: the copy's source is this request's alone.
     expect(stagedFiles().filter((name) => name.includes(".tmp-"))).toEqual([]);
     await h.dispose();
   });
@@ -1935,8 +1706,6 @@ describe("a direct upload", () => {
     expect(
       events.find((line) => line.event === "cache.nar.verify_failed")?.fields,
     ).toMatchObject({ bucket: "main", mode: "direct", reason: "nar_hash_mismatch" });
-    // NOTHING RECORDED, and nothing left in the store: no row, and the NAR
-    // the narinfo named is not there to be read.
     expect(h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(GLIBC))).toBeNull();
     const read = await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read));
     expect(read.status).toBe(404);
@@ -1969,25 +1738,17 @@ describe("a direct upload", () => {
   });
 
   it("hands the client no URL that can rewrite the object it will prove", async () => {
-    // THE FIX FOR THE ONE INVARIANT 2.9 EXISTS FOR, and it is structural
-    // rather than conditional: the plan's only write URL is PART 0 of one
-    // multipart upload, and completing that upload ends it. A precondition
-    // on the copy cannot be the guarantee, because R2 does not implement
-    // `x-amz-copy-source-if-match` on `UploadPartCopy`.
     const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
     const payload = nar("bytes the client cannot take back");
     const file = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const { plan, complete } = await direct(h, file, payload.bytes);
     expect(complete.status).toBe(200);
 
-    // THE CLIENT STILL HOLDS PART 0'S URL. It no longer writes anything: the
-    // upload it names was consumed by the completion.
     const again = await fetch(plan.part as string, {
       method: "PUT",
       body: body(new TextEncoder().encode("bytes nobody proved")),
     });
     expect(again.ok).toBe(false);
-    // AND THE PATH STILL LANDS, over the bytes odu read back.
     expect((await upload(h.fetch, h.tokens.write, GLIBC, payload, { skipNar: true })).status).toBe(200);
     const read = await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read));
     const bytes =
@@ -1999,11 +1760,6 @@ describe("a direct upload", () => {
   });
 
   it("refuses bytes that changed between the verify and the copy, and keeps none of them", async () => {
-    // THE SECOND LINE OF DEFENCE, held to its promise. No client can reach
-    // the source any more (the case above), so this stages the hazard at the
-    // store and asserts what the copy does WHERE the service honours the
-    // source precondition — versitygw here, AWS too, and NOT R2, which is
-    // exactly why the guarantee rests on the shape rather than on this.
     const events: { event: string; fields: Record<string, unknown> }[] = [];
     const honest = nar("the bytes odu verified");
     const swapped = new TextEncoder().encode("the bytes a racing client slipped in");
@@ -2024,37 +1780,26 @@ describe("a direct upload", () => {
     expect(
       events.find((line) => line.event === "cache.nar.verify_failed")?.fields,
     ).toMatchObject({ bucket: "main", mode: "direct", reason: "source_changed" });
-    // NOTHING RECORDED AND NOTHING SERVED — in particular no `nar/<file>`
-    // holding the swapped bytes under the honest hash, which `nar/<file>`
-    // being put-if-absent would have made permanent.
     expect(h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(GLIBC))).toBeNull();
     expect((await h.fetch(`/main/nar/${file}`, bearer(h.tokens.read))).status).toBe(404);
     await h.dispose();
   });
 
   it("records both of two twin paths that share one NAR name", async () => {
-    // TWO STORE PATHS OF IDENTICAL CONTENT share a NarHash and therefore the
-    // file name — and `runWave` pushes a wave several paths at a time, so
-    // their narinfos can arrive before either proof has run. The first proof
-    // consumes the upload; the second must find the object the first kept,
-    // not "never uploaded".
     const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
     const twin = nar("one NAR, two store paths");
     const file = `${twin.narHash.replace(/^sha256:/, "")}.nar.zst`;
     const other = "/nix/store/zzdhrfdsqgnqrsipbdfg1m1h1i17pmg1-twin-2.0";
     expect((await direct(h, file, twin.bytes)).complete.status).toBe(200);
 
-    // BOTH AT ONCE, which is what the client does.
     const [first, second] = await Promise.all([
       upload(h.fetch, h.tokens.write, GLIBC, twin, { skipNar: true }),
       upload(h.fetch, h.tokens.write, other, twin, { skipNar: true }),
     ]);
     expect({ first: first.status, second: second.status }).toEqual({ first: 200, second: 200 });
-    // ONE ROW EACH, both served, over the one object the first proof kept.
     for (const path of [GLIBC, other]) {
       const narinfo = h.cache.narinfoText(h.cache.bucket("main") as never, storePathHash(path));
       expect(narinfo).toContain(`StorePath: ${path}`);
-      // The SERVED extension is the row's compression, not the staged name's.
       expect(narinfo).toContain(`URL: nar/${twin.narHash.replace(/^sha256:/, "")}.nar`);
       expect(narinfo).toContain(`NarHash: ${twin.narHash}`);
     }
@@ -2062,12 +1807,6 @@ describe("a direct upload", () => {
   });
 
   it("does not reap an upload that is still moving, however long it takes", async () => {
-    // THE SWEEP'S CLOCK IS LITTER, a push's is PROGRESS. A closure big enough
-    // to upload for more than the hour would be reaped mid-flight if the
-    // record aged from when it BEGAN — the temp object deleted and the
-    // multipart upload aborted under a client still sending parts, which no
-    // number of retries can get past. Asking for a part is the sign of life
-    // that keeps the record alive, exactly as the staged path's marker is.
     const h = await harness(true, "https://odu.example.org", undefined, ON_S3);
     const payload = nar("a NAR that took its time");
     const file = `${payload.narHash.replace(/^sha256:/, "")}.nar.zst`;
@@ -2078,15 +1817,12 @@ describe("a direct upload", () => {
     });
     const plan = (await begun.json()) as { upload: string; part: string };
 
-    // Fifty minutes in, the client asks for its next part…
     clock += 50 * 60 * 1000;
     const signed = await h.fetch(
       `/main/nar/${file}/upload/${plan.upload}/parts/1`,
       bearer(h.tokens.write),
     );
     expect(signed.status).toBe(200);
-    // …and twenty more minutes later — over the hour from BEGIN — another
-    // push runs the sweep. The upload is an hour young by its last part.
     clock += 20 * 60 * 1000;
     const other = await h.fetch("/main/nar/other.nar.zst/upload", {
       ...bearer(h.tokens.write),
@@ -2095,8 +1831,6 @@ describe("a direct upload", () => {
     });
     expect(other.status).toBe(200);
 
-    // IT IS STILL THERE: the part lands, the completion joins it, and the
-    // narinfo records the path.
     const put = await fetch(plan.part, { method: "PUT", body: body(payload.bytes) });
     expect(put.status).toBe(200);
     const complete = await h.fetch(`/main/nar/${file}/upload/${plan.upload}/complete`, {

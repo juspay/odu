@@ -1,17 +1,3 @@
-/**
- * THE ROW'S `/metrics` CONTRIBUTION, graded from both sides it is fed from.
- *
- * The counters are driven by calling `observe` with the event names and field
- * shapes the serving path really logs — that is the whole interface between
- * the cache and its meter, so a test that drives it directly is testing the
- * contract rather than a harness. (That those events are EMITTED is graded
- * where they are emitted: `routes.test.ts`.)
- *
- * The gauges are read from a REAL cache on a real temporary SQLite database,
- * because they are SQL: a fake repository would prove the shape of a query
- * nobody runs.
- */
-
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,10 +13,6 @@ import type { MetricsReading } from "@odu/cordis/metrics";
 const ROOT = "root-token";
 const NOW = 1_700_000_000_000;
 
-/** One sample's value, by family name and the labels it must carry — `null`
- *  when no such sample is in the reading. The families are searched in both
- *  halves, because which half a name lives in is itself part of the contract,
- *  and the test above asserts that split by itself. */
 function sample(
   reading: MetricsReading,
   name: string,
@@ -49,7 +31,6 @@ function sample(
   return null;
 }
 
-/** Which half of the reading a family is in. */
 const familyNames = (reading: MetricsReading, half: "counters" | "gauges"): string[] =>
   (reading[half] ?? []).map((family) => family.name);
 
@@ -79,7 +60,6 @@ describe("the counters, from the events the cache logs", () => {
 
   it("counts a refusal that names a bucket and one that cannot", () => {
     const meter = cacheMeter();
-    // The refusal a reader meets: authorised against a known bucket, denied.
     meter.observe("cache.request.refused", {
       method: "GET",
       path: "/cache/main/nar/abc.nar.zst",
@@ -87,8 +67,6 @@ describe("the counters, from the events the cache logs", () => {
       status: 403,
       reason: "this token may not read",
     });
-    // And the one that is about the name itself, logged before any bucket is
-    // known — the `bucket=""` sample.
     meter.observe("cache.request.refused", {
       method: "GET",
       path: "/cache/nope/qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq.narinfo",
@@ -101,10 +79,6 @@ describe("the counters, from the events the cache logs", () => {
   });
 
   it("does not file a refused PUSH as a refused NAR read", () => {
-    // The push API's routes carry `/nar/` in the path
-    // (`/_odu/v1/buckets/<b>/nar/<file>/upload`), so a substring match put a
-    // pusher with a stale token into the same series as a client refused a NAR
-    // — and a panel watching reads paged for a credential problem.
     const meter = cacheMeter();
     meter.observe("cache.request.refused", {
       bucket: "main",
@@ -130,14 +104,10 @@ describe("the counters, from the events the cache logs", () => {
     expect(sample(reading, "odu_cache_uploads_total", { bucket: "main", mode: "direct", outcome: "recorded" })).toBe(1);
     expect(sample(reading, "odu_cache_uploads_total", { bucket: "main", mode: "import", outcome: "recorded" })).toBe(1);
     expect(sample(reading, "odu_cache_uploads_total", { bucket: "main", mode: "direct", outcome: "failed" })).toBe(1);
-    // A put the store refused carries no mode; one spelling for all of them.
     expect(sample(reading, "odu_cache_uploads_total", { bucket: "main", mode: "unknown", outcome: "failed" })).toBe(1);
     expect(sample(reading, "odu_cache_bytes_total", { bucket: "main", direction: "uploaded", mode: "staged" })).toBe(300);
     expect(sample(reading, "odu_cache_bytes_total", { bucket: "main", direction: "uploaded", mode: "direct" })).toBe(70);
     expect(sample(reading, "odu_cache_bytes_total", { bucket: "main", direction: "uploaded", mode: "import" })).toBe(11);
-    // NOTHING WAS KEPT, so nothing is added to the byte counter: there is no
-    // `direction="uploaded"` sample for a failure's bucket beyond the three
-    // recorded modes above.
     expect(sample(reading, "odu_cache_bytes_total", { bucket: "main", direction: "uploaded", mode: "unknown" })).toBeNull();
   });
 
@@ -165,8 +135,6 @@ describe("the counters, from the events the cache logs", () => {
     const meter = cacheMeter();
     meter.observe("cache.self_ca.start", { rows: 3, bytes: 10 });
     meter.observe("odu web: something else entirely", {});
-    // The log is stringly typed: a field that is not what this meter expects
-    // must cost a zero, never a throw on the serving path.
     meter.observe("cache.nar.served", { bucket: "main", bytes: "lots", source: 7 });
     const reading = meter.reading([]);
     expect(sample(reading, "odu_cache_requests_total", { bucket: "main", kind: "nar", outcome: "hit" })).toBe(1);
@@ -175,9 +143,6 @@ describe("the counters, from the events the cache logs", () => {
 
   it("reports every SQL-read number as a gauge, the in-memory tallies as counters", () => {
     const reading = cacheMeter().reading([{ bucket: "main", objects: 1, bytes: 2, hits: 3, pins: 4 }]);
-    // `odu_cache_hits` is a GAUGE: it sums `hits` over the rows a bucket holds
-    // NOW, so a collection lowers it — which as a `_total` would read as a
-    // counter reset.
     expect(familyNames(reading, "counters")).not.toContain("odu_cache_hits");
     expect(familyNames(reading, "gauges")).toEqual([
       "odu_cache_hits",
@@ -254,7 +219,6 @@ describe("the gauges, from a real database", () => {
     );
     expect(accepted).toMatchObject({ ok: true });
     expect(await cache.admin.pin({ ...asRoot(ROOT), bucket: "main", name: "keep", paths: [path] })).toMatchObject({ ok: true });
-    // TWO READS, counted on the object rows themselves.
     cache.touch(row, hashOf(path));
     cache.touch(row, hashOf(path));
 
@@ -264,15 +228,11 @@ describe("the gauges, from a real database", () => {
     expect(sample(reading, "odu_cache_pins", { bucket: "main" })).toBe(1);
     expect(sample(reading, "odu_cache_hits", { bucket: "main" })).toBe(2);
 
-    // A BUCKET WITH NOTHING IN IT IS STILL A BUCKET: it is in neither GROUP BY,
-    // and a reading that omitted it would make "empty" and "forgotten" the
-    // same picture.
     expect(sample(reading, "odu_cache_paths", { bucket: "empty" })).toBe(0);
     expect(sample(reading, "odu_cache_bytes", { bucket: "empty" })).toBe(0);
     expect(sample(reading, "odu_cache_pins", { bucket: "empty" })).toBe(0);
     expect(sample(reading, "odu_cache_hits", { bucket: "empty" })).toBe(0);
 
-    // AND NOTHING HAS COLLECTED SINCE BOOT.
     expect(sample(reading, "odu_cache_last_gc_timestamp_seconds")).toBe(0);
   });
 });

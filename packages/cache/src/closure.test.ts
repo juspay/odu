@@ -1,35 +1,3 @@
-/**
- * The WALL, enforced — what this package is allowed to import.
- *
- * Same instrument as the other members carry, and deliberately a SIBLING rather
- * than a shared helper: each package must be able to state its own closure from
- * inside its own directory, because that directory is the unit the boundary is
- * about. A guard imported from a neighbour is a guard that only reaches as far
- * as the neighbour does.
- *
- * Three claims are THIS package's own, and the first two are why it is a
- * package at all:
- *
- *   - **it imports none of odu's engine or faces.** A cache that could reach
- *     `@odu/execution` would be a second way to start a run; one that reached
- *     `@odu/service` could not be served from a listener without the service;
- *     one that reached `@odu/run-history` would drag a catalog reader into a
- *     substituter. Refused by name, from this side.
- *   - **it reads no environment.** The composition root passes the state
- *     directory, the root token and the store URI in. A cache that read
- *     `process.env` itself would have a second, invisible configuration — and
- *     the one variable that must never be found by accident is a root token.
- *     The ONE exception is `./cli`, and it is not the engine: a face IS a
- *     process, and a process reads its own environment (which token to present
- *     is the caller's, not the daemon's).
- *   - **its platform is `node:` builtins and one Bun builtin.** `bun:sqlite` is
- *     named here rather than admitted by a prefix, so the day a second Bun
- *     builtin appears is a day this file changes.
- *
- * The walk is a PARSE, not a line scan, and TYPE-ONLY EDGES COUNT — see the
- * `@odu/run-client` twin for both arguments.
- */
-
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -43,30 +11,15 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** Pinned as a literal set: `effect` and `solid-js` — the second is `./face`'s
- *  cost, and the reason the face is a separate DOOR rather than a module the
- *  server could reach. `@kolu/surface` is HYDRATED from a Nix pin and so is
- *  absent here by design. */
 const EXPECTED_DEPENDENCIES = ["@odu/cordis", "@odu/credentials", "@odu/face", "@odu/objects", "effect", "solid-js"];
 
-/** The `@kolu/*` sources hydrated from a Nix pin rather than installed. Four
- *  doors of this package open the framework: the surface (`/define`,
- *  `/expose`), the server (`/server`), and the CLI face's client
- *  (`/client`, `/project`, `/link`). */
 const HYDRATED = new Set<string>([
   "@kolu/surface",
-  // The row IS a `definePlugin`: `./server` is mounted by the host as one of
-  // its rows, so the plugin runtime's root door is part of this package's
-  // closure. (`./loader` — a file off a disk, a YAML parser — is not.)
   "@olai/effect-cordis",
 ]);
 
-/** The non-`node:` builtins this package may reach. Named, never prefix-matched:
- *  a prefix would let `bun:ffi` in with `bun:sqlite`. */
 const BUN_BUILTINS = new Set(["bun:sqlite"]);
 
-/** The walls that run the other way. This package is the BOTTOM of odu's graph:
- *  nothing above it may appear below it. */
 const FORBIDDEN = new Set([
   "@odu/service",
   "@odu/execution",
@@ -75,19 +28,12 @@ const FORBIDDEN = new Set([
   "@odu/service-client",
 ]);
 
-/** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set([
   "bun:test",
   "typescript",
-  // `face.test.ts` compiles the view with the app's own compiler; the presets
-  // are the ROOT's build toolchain (see the root manifest), never a runtime
-  // dependency — nothing a consumer installs includes them.
   "@babel/core",
   "@babel/preset-typescript",
   "babel-preset-solid",
-  // `teardown.test.ts` hands the row a `Log` and so names the daemon's `Logger`
-  // type. A type-only import of a hydrated pin, used by one test and by nothing
-  // the package ships.
   "@kolu/surface-daemon",
 ]);
 
@@ -100,23 +46,17 @@ function tsFilesUnder(dir: string): string[] {
       out.push(...tsFilesUnder(path));
       continue;
     }
-    // `.tsx` INCLUDED: `./face` is Solid JSX, and a walker that only knew about
-    // `.ts` would have quietly stopped policing it the day it was written —
-    // the failure `@odu/web-ui`'s twin records having had.
     if (entry.endsWith(".ts") || entry.endsWith(".tsx")) out.push(path);
   }
   return out;
 }
 
-/** Every module specifier a consumer's compiler would have to resolve: static
- *  imports and re-exports (`import type` included), `import x = require("…")`,
- *  dynamic `import()`, and `import("…").T` in type position. */
 function specifiersIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
+    false,
     // TSX or TS by extension. TypeScript's parser resolves `<T>(x) => x` one way
     // in a `.ts` and another in a `.tsx`, so a JSX file parsed as TS produces a
     // tree with the imports still in it and the markup mangled — a policing
@@ -149,14 +89,12 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
-/** Does this module READ the environment — a `process.env` property access,
- *  rather than the phrase appearing in prose? */
 function readsProcessEnv(source: string, fileName: string): boolean {
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
+    false,
     // TSX or TS by extension. TypeScript's parser resolves `<T>(x) => x` one way
     // in a `.ts` and another in a `.tsx`, so a JSX file parsed as TS produces a
     // tree with the imports still in it and the markup mangled — a policing
@@ -179,7 +117,6 @@ function readsProcessEnv(source: string, fileName: string): boolean {
   return found;
 }
 
-/** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@")
@@ -241,10 +178,6 @@ describe("@odu/cache's import closure", () => {
   });
 
   it("is at the bottom of the wall, and never reaches up it", () => {
-    // The claim: a substituter knows the Nix protocol and nothing about how odu
-    // runs CI. Asserted here rather than only from the other side, because a
-    // package that grew the edge would still be caught by its neighbour's test
-    // only if the neighbour's test existed first.
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
       for (const spec of specifiers) {
@@ -259,17 +192,8 @@ describe("@odu/cache's import closure", () => {
   });
 
   it("reads no environment of its own", () => {
-    // The root passes the state directory, the root token and the store URI in.
-    // A second, invisible configuration is exactly how a root token ends up
-    // being read from somewhere nobody audited.
-    //
-    // Read off the PARSE, not the text: a comment explaining why this package
-    // takes its configuration as arguments is not a read of it.
     const offenders = sources
       .filter(({ rel }) => !rel.endsWith(".test.ts"))
-      // `./cli` is a FACE and lives in a process: which root token to present,
-      // and where `~` is, are its caller's facts. Everything the ENGINE does
-      // takes them as arguments.
       .filter(({ rel }) => rel !== "src/cli.ts")
       .filter(({ source, rel }) => readsProcessEnv(source, rel))
       .map(({ rel }) => rel);

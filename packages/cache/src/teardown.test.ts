@@ -1,25 +1,3 @@
-/**
- * THE ROW'S TEARDOWN, over a real host — the one order nothing else can check.
- *
- * A row registers its cleanup in the order it wants it to run REVERSED: the
- * framework runs finalizers last-registered-first. The cache's own order is not
- * a style question — its mount is the thing a publish lands on, and its database
- * is what a publish reads. Close the database while the mount still stands and a
- * publish arriving in that window reads a torn-down cache; drop the mount while
- * the database is open and the ask simply ends. So the mount goes FIRST, and
- * this test proves it the only way an order can be proved from outside: from
- * inside the drop, ask the cache a question that needs its database.
- *
- * The question goes through the ROUTES the row registers, with kolu's own
- * `toWebHandler` — the same routing the listener uses — so what answers is the
- * server a client meets rather than a private handle the test reached for.
- *
- * The host carries TWO rows, because that is the shape the daemon has and the
- * shape where a teardown order can interleave. What is asserted about the close
- * itself is what the reviewer asked for: it does not throw, and it leaves no
- * unhandled rejection behind.
- */
-
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -63,11 +41,8 @@ const silentLog: Logger = {
   error: () => {},
 };
 
-/** What the test watches for, in the order the host runs it. */
 const seen: string[] = [];
 
-/** The routes the rows registered, in registration order — the host's stub of
- *  `HttpRoutes`, which a real daemon hands to its listener. */
 const layers: ClaimedRoutes[] = [];
 const routesStub: HttpRoutes = {
   add: (routes) => {
@@ -80,17 +55,11 @@ const routesStub: HttpRoutes = {
   layers: () => layers,
 };
 
-/** A bucket no cache has, asked of the cache's OWN routes: a refusal needs the
- *  database, so a `404` says "still open" and anything that throws says the
- *  database went first. */
 type CacheRoutes = Parameters<typeof HttpRouter.toWebHandler>[0];
 
 async function cacheAnswers(): Promise<boolean> {
   const only = layers[0]?.layer;
   if (only === undefined) return false;
-  // The row registers `cacheRoutes(cache)`; the seam it arrives through is typed
-  // for the daemon's composed router, which is broader than one row's layer. The
-  // cast is that seam, not a claim about the layer.
   const { handler, dispose } = HttpRouter.toWebHandler(only as unknown as CacheRoutes, {
     disableLogger: true,
   });
@@ -106,8 +75,6 @@ async function cacheAnswers(): Promise<boolean> {
   }
 }
 
-/** The sibling row: no services, one finalizer, so the host tears down more than
- *  one activation and the order between them is the framework's business. */
 const siblingRow = definePlugin({
   name: "sibling",
   needs: [],
@@ -134,10 +101,6 @@ describe("the cache row's teardown", () => {
   });
 
   it("starts the migration after apply returns, scoped to the row", async () => {
-    // A REAL ROW, OBJECTLESS: a store path in the test machine's own store, a
-    // bucket, and a row with no object. The migration must find it with no
-    // request; the old bug forked it with `forkChild`, which was interrupted
-    // when apply's fiber ended.
     const source = join(scratch, "migrate-me");
     writeFileSync(source, "the migration must keep this");
     const added = spawnSync("nix", ["store", "add-file", source], { encoding: "utf-8" });
@@ -194,9 +157,6 @@ describe("the cache row's teardown", () => {
     await run(provide(host, BoundOrigin, () => "http://127.0.0.1:18440"));
     await run(provide(host, PublicOrigin, () => null));
     await run(provide(host, Log, () => silentLog));
-    // THE PURGE BROKER, as the host provides it: nothing registers on it
-    // here, so a collection announces into a daemon with no CDN — which is
-    // most of them.
     await run(provide(host, CachePurge, () => purgeBroker()));
     await run(provide(host, CacheGrants, () => grantsBroker()));
     await run(provide(host, Routes, () => routesStub));
@@ -211,7 +171,6 @@ describe("the cache row's teardown", () => {
     );
     await run(mountPlugin(host, cacheRow(new Map())));
 
-    // NO REQUEST: the row's scoped fiber must put the object.
     const deadline = Date.now() + 10_000;
     let row = null;
     while (Date.now() < deadline) {
@@ -226,7 +185,6 @@ describe("the cache row's teardown", () => {
   });
 
   it("refuses to mount a bucket whose store is no longer declared, saying which", async () => {
-    // A BUCKET ON A STORE the operator has since removed from the config.
     const before = createCache({
       stateRoot: scratch,
       rootToken: "root-token",
@@ -244,9 +202,6 @@ describe("the cache row's teardown", () => {
     await run(provide(host, BoundOrigin, () => "http://127.0.0.1:18440"));
     await run(provide(host, PublicOrigin, () => null));
     await run(provide(host, Log, () => silentLog));
-    // THE PURGE BROKER, as the host provides it: nothing registers on it
-    // here, so a collection announces into a daemon with no CDN — which is
-    // most of them.
     await run(provide(host, CachePurge, () => purgeBroker()));
     await run(provide(host, CacheGrants, () => grantsBroker()));
     await run(provide(host, Routes, () => routesStub));
@@ -255,7 +210,6 @@ describe("the cache row's teardown", () => {
     await run(mountPlugin(host, cacheRow(new Map())));
     await run(settled(host, [CACHE_KEY]));
     const report = await run(rowReport(host, [CACHE_KEY]));
-    // THE SENTENCE THE HOST PRINTS: "the cache row failed to start: …".
     expect(report.get(CACHE_KEY)).toMatchObject({
       state: "failed",
       fault: expect.stringContaining('the bucket "main" keeps its objects in the store "nas"'),
@@ -280,16 +234,10 @@ describe("the cache row's teardown", () => {
       await run(provide(host, BoundOrigin, () => "http://127.0.0.1:18440"));
       await run(provide(host, PublicOrigin, () => null));
       await run(provide(host, Log, () => silentLog));
-    // THE PURGE BROKER, as the host provides it: nothing registers on it
-    // here, so a collection announces into a daemon with no CDN — which is
-    // most of them.
     await run(provide(host, CachePurge, () => purgeBroker()));
     await run(provide(host, CacheGrants, () => grantsBroker()));
       await run(provide(host, Routes, () => routesStub));
       await run(provide(host, Metrics, () => metricsBroker()));
-      // THE BUNDLE, as far as this row uses it: it mounts, and it hands back the
-      // context to publish through. The drop is OURS, which is the whole point —
-      // it is the instant this test has to be standing in.
       await run(
         provide(host, Bundle, () => ({
           mount: () => ({
@@ -311,18 +259,12 @@ describe("the cache row's teardown", () => {
       await run(mountPlugin(host, siblingRow));
       await run(mountPlugin(host, cacheRow(new Map())));
 
-      // ONE attach, so the publish half is wired before anything moves.
       expect(layers.length).toBe(1);
 
-      // The cache answers before the close — the baseline the probe needs.
       expect(await cacheAnswers()).toBe(true);
 
       await run(closeHost(host));
 
-      // A rejection is reported on a LATER turn of the loop, not at the throw:
-      // one macrotask boundary is the soonest it can be observed, and it is the
-      // event this test waits for rather than a duration it hopes is long
-      // enough.
       await new Promise((resolve) => setImmediate(resolve));
 
       expect(rejections).toEqual([]);

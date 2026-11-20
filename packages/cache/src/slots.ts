@@ -1,13 +1,3 @@
-/**
- * A BOUNDED SET OF SLOTS, OWNED BY WHOEVER CREATED IT.
- *
- * The cache row creates one per activation and closes it with the row. It is
- * NOT module state: two caches in one process have two bounds, and a job left
- * waiting on a closed row's queue is refused rather than resumed after the
- * row's lifetime.
- */
-
-/** The refusal a queued job gets when its owner closed. */
 export class SlotsClosed extends Error {
   constructor() {
     super("the fetch queue's owner closed");
@@ -15,11 +5,7 @@ export class SlotsClosed extends Error {
 }
 
 export interface Slots {
-  /** Run `work` in a slot. Once the owner closes, every waiter is refused and
-   *  no new job starts. */
   withSlot<T>(work: () => Promise<T>): Promise<T>;
-  /** Refuse everything still waiting. A job already running is not stopped —
-   *  the owner joins it through its own queue. */
   close(): void;
 }
 

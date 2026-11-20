@@ -1,23 +1,3 @@
-/**
- * THE ROW'S AUTHORITY RULE, held at the row.
- *
- * The cache decides who may administer a bucket; the host only says who is
- * asking. Two rules, and exactly one applies:
- *
- *   - **loopback**: the operator's root token, compared with `$ODU_ROOT_TOKEN`.
- *     This is the rule that must not move — every existing CLI and browser test
- *     runs under it.
- *   - **signed in**: the caller's ROLE. An `admin` or an `owner` may; a `member`
- *     may not, and is refused with `not_permitted` before the engine is asked.
- *     A daemon with an identity provider mounted need not have a root token at
- *     all, which is why `viaRole` is an arm of its own rather than a special
- *     token value.
- *
- * Reads are not administration: `bucket.describe` and `bucket.paths` answer for
- * a member, because a bucket's URL, key and path list are what the substituter
- * already publishes to anyone who can read it.
- */
-
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,7 +15,6 @@ import { CacheRefused, oduCacheSurface } from "./surface";
 import { storeFacts } from "./stores";
 import { localStores } from "./testlib";
 
-/** The cache's spec-precise client — the shape `odu cache` holds. */
 type CacheClient = SurfaceClientOf<(typeof oduCacheSurface)["spec"]>;
 
 const ROOT = "operator-root";
@@ -50,8 +29,6 @@ afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-/** The cache's procedures, dialled the in-process way a face does — so what is
- *  exercised is the surface's own dispatch, not a private handle. */
 function face(rootToken: string | null) {
   const cache = createCache({
     stateRoot: scratch,
@@ -62,15 +39,12 @@ function face(rootToken: string | null) {
   const server = cacheServer({
     cache,
     publicOrigin: "http://cache.test",
-    // The broker a host always provides; nothing registers on it here.
     purge: purgeBroker(),
     mount: "/cache",
     stores: storeFacts(new Map()),
   });
   const runtime = implementSurface(oduCacheSurface, server.deps);
   return {
-    // The same cast the CLI makes at its own client: the framework's spec-
-    // precise face is built over the spec-erased dispatch.
     client: buildSurfaceFace(
       oduCacheSurface,
       directDispatch(runtime),
@@ -82,7 +56,6 @@ function face(rootToken: string | null) {
   };
 }
 
-/** One call, with an admission when there is a person behind it. */
 function ask<A>(
   effect: Effect.Effect<A, unknown>,
   principal?: Principal,
@@ -104,8 +77,6 @@ function ask<A>(
   );
 }
 
-/** The refusal a call carried, proved to be the cache's own tagged error —
- *  which is the shape a face branches on. */
 function refusedWith(error: unknown): CacheRefused {
   if (error instanceof CacheRefused) return error;
   throw new Error(`expected a CacheRefused, got ${String(error)}`);
@@ -156,10 +127,6 @@ describe("loopback: the root token is still the rule", () => {
 
 describe("signed in: the role is the rule", () => {
   it("refuses a role authority the row did not mint", async () => {
-    // THE SEAL, not the discriminant: `kind: "role"` is a string any in-package
-    // caller can write, and the engine must not take the word for the thing.
-    // (`Authority` never crosses the surface — this is the engine's own
-    // boundary, which is exactly where the seal has to hold.)
     const cache = createCache({
       stateRoot: scratch,
       stores: localStores(scratch),
@@ -184,8 +151,6 @@ describe("signed in: the role is the rule", () => {
   });
 
   it("refuses a member, naming the role", async () => {
-    // NO ROOT TOKEN AT ALL: with an identity provider mounted the daemon need
-    // not have one, so a role-authorised call cannot be a token in disguise.
     const { client, close } = face(null);
     try {
       const answer = await ask(
@@ -231,7 +196,6 @@ describe("signed in: the role is the rule", () => {
       expect(listed.ok).toBe(true);
       if (!listed.ok) return;
       expect(listed.value.buckets.map((bucket) => bucket.name)).toEqual([bucketInput.name]);
-      // …while ADMINISTRATION stays refused at the same role.
       const refused = await ask(
         client.surface.bucket.create({ ...bucketInput, name: "team-two", rootToken: "" }),
         signedIn("member"),
@@ -264,8 +228,6 @@ describe("signed in: the role is the rule", () => {
     try {
       const made = await ask(client.surface.bucket.create({ ...bucketInput, rootToken: ROOT }));
       expect(made.ok).toBe(true);
-      // A MEMBER MAY READ THE BOARD AND NOT EMPTY IT: `bucket.delete` sits at
-      // the row's administration floor, like every other verb that writes.
       const refused = await ask(
         client.surface.bucket.delete({ bucket: bucketInput.name, rootToken: "" }),
         signedIn("member"),

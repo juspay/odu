@@ -1,222 +1,95 @@
-/**
- * THE METADATA — SQLite in WAL mode, behind a narrow repository interface.
- *
- * This is the first database in the tree (PLAN.md F3, which is why it is worth
- * a sentence): the run catalog is append-only files, and the cache needs
- * queries over mutable state — what is this bucket's oldest object, what does
- * this path reference, which tokens can write here. Files would mean an
- * index somebody has to keep true.
- *
- * **Why a repository interface rather than a store.** PR 12 puts several odu
- * servers behind one domain, which means Postgres, which means every caller
- * must stop knowing what SQLite is. The interface below is the whole of that
- * seam: rows in, rows out, no SQL, no transaction, no `Database` in a
- * signature. The cost is a handful of near-trivial methods, and the benefit is
- * that the swap is one file.
- *
- * **Why `bun:sqlite`.** It is the runtime's own binding — no native build, no
- * node-gyp in the Nix sandbox, no ABI to track — and odu already ships on Bun.
- *
- * **Migrations are by version.** `PRAGMA user_version` is the schema's own
- * number and the only place it lives; adding a column is a new entry in
- * {@link MIGRATIONS} and nothing else. A file written by a newer build is
- * refused rather than read, because reading it would mean silently dropping
- * whatever it added.
- */
-
 import { Database } from "bun:sqlite";
 import { dirname } from "node:path";
 import { chmodSync, mkdirSync } from "node:fs";
 import type { Provenance } from "./paths";
 import { type PathSort, storePathParts } from "./surface";
 
-/** A bucket: one cache, one substituter URL, one signing keypair. */
 export interface BucketRow {
   name: string;
   isPublic: boolean;
-  /** Days an object survives without being read. `0` expires everything that
-   *  is not referenced or pinned, which is what the e2e suite uses to make GC
-   *  deterministic. */
   retentionDays: number;
   keyName: string;
   secretKey: string;
   publicKey: string;
-  /** Key NAMES whose signatures make a path "already upstream" — the filter
-   *  that keeps nixpkgs out of a bucket. */
   upstreamKeys: readonly string[];
   created: number;
-  /** THE NAME A BUCKET IS SERVED AT, when it has one (`cache.kolu.dev`). The
-   *  row answers by `Host` as well as by `/cache/<name>`, and the advertised
-   *  substituter URL becomes this name. `null` means the path form. */
   domain: string | null;
-  /** THE STORE ITS OBJECTS LIVE IN, by declared name: `local` (the disk under
-   *  the state directory, always there) or a store the operator declared. A
-   *  name, never a credential: the store's facts are config, not data. */
   store: string;
 }
 
-/**
- * A BUCKET'S MOVE FROM ONE STORE TO ANOTHER, as it stands.
- *
- * It is persisted because it is long and resumable: the objects are copied
- * two at a time and the bucket keeps serving from `fromStore` throughout, so
- * a daemon restarted in the middle picks the move up where it stopped rather
- * than leaving half a bucket in each store with nobody tracking it.
- *
- * `state` is the only thing that says which store `bucket.store` names:
- * `copying` and `flipping` mean the OLD one, `deleting` means the new one is
- * already live and the old objects are being let go.
- */
 export interface MigrationRow {
   bucket: string;
   fromStore: string;
   toStore: string;
   state: "copying" | "flipping" | "deleting";
-  /** Objects copied so far, and how many there are in all. */
   copied: number;
   total: number;
-  /** Bytes copied so far. */
   bytes: number;
   started: number;
 }
 
 export type Scope = "read" | "write" | "admin";
 
-/** A token. The plaintext exists exactly once, in the answer that minted it. */
 export interface TokenRow {
   id: string;
-  /** sha256 of the token, hex. Never the token. */
   hash: string;
-  /** A comma-separated list of patterns; `*` is a wildcard. */
   bucketGlob: string;
   scope: Scope;
   expires: number | null;
-  /** WHAT MINTED IT, for a person reading the bucket's Tokens list. A run's
-   *  own token says `run <id>`; one an administrator minted says nothing, so
-   *  `null` is the ordinary value and not a gap. */
   label: string | null;
   lastUsed: number | null;
   revoked: boolean;
   created: number;
 }
 
-/** One store path as this bucket knows it. The bytes are the store's. */
 export interface ObjectRow {
   bucket: string;
   storePath: string;
-  /** The store path's hash part — what a narinfo is named for. */
   hash: string;
-  /** `sha256:<base32>` */
   narHash: string;
   narSize: number;
   references: readonly string[];
   deriver: string | null;
-  /** Nix's `CA:` line, verbatim; `null` for an ordinary input-addressed path. */
   ca: string | null;
-  /** THE PROOF'S VERDICT, persisted so a row is examined once. `unknown` for
-   *  a row whose shape needs its bytes (a self-reference) and has not been
-   *  read yet; `content-addressed` when the path check passed; `not-content-
-   *  addressed` when the check failed and no CA is served. */
   caProof: "unknown" | "content-addressed" | "not-content-addressed";
-  /** What the KEPT bytes are compressed with — `zstd`, `xz`, `bzip2` or
-   *  `none`. The narinfo says it and the object's extension encodes it. */
   compression: string;
-  /** `sha256:<base32>` of the kept compressed NAR file, and its byte size.
-   *  `null` until the file exists (a row from before files were kept, or an
-   *  object whose boot backfill has not finished); the FIFO fallback serves it
-   *  meanwhile without claiming a `FileHash:`. */
   fileHash: string | null;
   fileSize: number | null;
   sigs: readonly string[];
-  /** narinfo reads. What `odu surface cache stats_read` reports — a counter,
-   *  never GC's clock. */
   hits: number;
   created: number;
-  /**
-   * WHEN SOMEBODY LAST WANTED THIS PATH — GC's clock, and the only one.
-   *
-   * Renewed by the `missing` query (whether the path was missing or already
-   * here: a pusher asking about it is a pusher that wants it) and by a stored
-   * push. NOT by a read: reads are leaving odu (PLAN 2.8), so a cache that
-   * expired by read time would start evicting live paths the moment its bytes
-   * are served from a CDN. A fact that will stop arriving cannot be the fact
-   * retention rests on.
-   */
   lastWanted: number;
-  /** WHAT BUILT IT, as the last push that stated anything said. The two
-   *  fields are independent: a bare re-push states neither and changes
-   *  neither, and the GitHub action states only the commit. */
   run: string | null;
   commit: string | null;
 }
 
-/** What one bucket's SQL totals say: the row a subscriber sees, minus the
- *  bucket's own columns. */
 export interface BucketTotals {
   objects: number;
   bytes: number;
-  /** narinfo reads, summed over the bucket's objects. */
   hits: number;
-  /** When the newest narinfo landed; `null` for a bucket nothing was pushed
-   *  to. */
   lastPush: number | null;
 }
 
-/** The same totals for ONE NAMED bucket, with its pins — what `/metrics` reads
- *  per scrape. It lives here, beside the queries that answer it, so the storage
- *  layer does not have to import the metrics module to describe its own rows.
- *  A bucket with nothing in it still has one: a cache that stopped reporting a
- *  bucket and a bucket that went to zero look the same on a graph, and only one
- *  of them is news. */
 export interface BucketGauge {
   readonly bucket: string;
-  /** Rows in `object` — the paths this bucket serves. */
   readonly objects: number;
-  /** Their bytes, as stored. */
   readonly bytes: number;
-  /** Reads counted against those rows. Falls when a collection deletes rows,
-   *  which is why `/metrics` publishes it as a gauge. */
   readonly hits: number;
-  /** Pins holding closures on this bucket. */
   readonly pins: number;
 }
 
-/**
- * WHAT AUTHORITY MADE A PIN — and therefore what may take it back.
- *
- * Two words, not a token id, and the choice is about what survives: a CI
- * secret is rotated and revoked on a schedule, so a pin keyed to the token
- * that made it would stop being re-pointable by the very job whose next push
- * is supposed to re-point it. The question the rule actually asks is "may
- * this caller take back this promise", and there are two answers to it.
- *
- * Write tokens of one bucket are PEERS here: any of them may re-point a pin
- * another made, which is the same authority they already share — each can
- * push any path into the bucket.
- */
 export type PinAuthor = "write" | "admin";
 
-/** A named closure kept out of garbage collection. */
 export interface PinRow {
   bucket: string;
   name: string;
-  /** The closure resolved at pin time. GC also walks the bucket's own
-   *  references from these roots, so a path added to the closure later is
-   *  still protected. */
   rootPaths: readonly string[];
   created: number;
-  /** Who made it. An admin's pin is an admin's to re-point or remove; a write
-   *  token may only re-point one a write token made. */
   createdBy: PinAuthor;
 }
 
-/** What a page of paths may be ordered by. The vocabulary is the CONTRACT's
- *  ({@link PathSort} in `./surface`, which the ledger watches); what each
- *  word means in SQL is this module's, in `PATH_ORDER`. */
 export type { PathSort };
 
-/** What every page read takes: how many, from where, narrowed by what, and
- *  in which order. */
 export interface PathPage {
   limit: number;
   after: string | null;
@@ -225,19 +98,14 @@ export interface PathPage {
   descending: boolean;
 }
 
-/** ONE PACKAGE: every version of one store-path name in a bucket, summed. */
 export interface ObjectGroupRow {
   name: string;
   versions: number;
   bytes: number;
   hits: number;
-  /** The newest version's push, the latest want across all of them, and the
-   *  newest version's own path. */
   pushed: number;
   wanted: number;
   storePath: string;
-  /** The NEWEST version's provenance — the same row `storePath` names, never
-   *  a mixture of two builds. */
   run: string | null;
   commit: string | null;
 }
@@ -245,23 +113,10 @@ export interface ObjectGroupRow {
 export interface CacheRepo {
   putBucket(row: BucketRow): void;
   bucket(name: string): BucketRow | null;
-  /** The bucket a `Host` names, if one has claimed it. The caller normalizes
-   *  the header (lowercase, no port); the domain is stored that way. */
   bucketByDomain(domain: string): BucketRow | null;
   buckets(): BucketRow[];
-  /**
-   * EVERYTHING THAT IS THIS BUCKET'S: the row, its objects, its pins, a
-   * migration record, and the tokens minted FOR IT — a token whose glob is
-   * exactly this name can address nothing else, so leaving it would be a
-   * credential with no bucket. A WIDER glob (`team-*`) is left alone: it
-   * names the buckets beside this one too, and deleting one of them is not
-   * a decision about them.
-   */
   deleteBucket(name: string): void;
-  /** THE MOVE RUNNING ON A BUCKET, or null. One per bucket: a second
-   *  `bucket.migrate` while one is running is refused, not queued. */
   migration(bucket: string): MigrationRow | null;
-  /** Every move in progress — what a boot resumes. */
   migrations(): MigrationRow[];
   putMigration(row: MigrationRow): void;
   deleteMigration(bucket: string): void;
@@ -283,16 +138,7 @@ export interface CacheRepo {
   ): ObjectRow | null;
   objectsByNarHash(bucket: string, narHash: string): ObjectRow[];
   objects(bucket?: string): ObjectRow[];
-  /** ONE READ, counted. The hit count moves; `last_wanted` does not — see
-   *  {@link ObjectRow.lastWanted}. */
   countRead(bucket: string, storePath: string): void;
-  /** SOMEBODY WANTS THESE PATHS: renew their retention clock, and claim the
-   *  ones that have no provenance yet. One statement for the batch, because
-   *  the `missing` query asks about a whole closure and a row write per path
-   *  would be a thousand of them per push.
-   *
-   *  `COALESCE`, exactly as the narinfo write does: a column already set is
-   *  never overwritten, so the FIRST builder to state a fact keeps it. */
   want(
     bucket: string,
     storePaths: readonly string[],
@@ -303,68 +149,21 @@ export interface CacheRepo {
 
   putPin(row: PinRow): void;
   pins(bucket?: string): PinRow[];
-  /** How many pins each bucket holds, COUNTED BY SQL. `/metrics` asks this of
-   *  every bucket at every scrape, and `pins(bucket).length` would deserialise
-   *  every pin's root-path list to learn a number the database already knows. */
   pinCounts(): Map<string, number>;
   deletePin(bucket: string, name: string): boolean;
-  /**
-   * HOW MANY TIMES WHAT HOLDS THIS BUCKET'S PATHS HAS BEEN WRITTEN, in this
-   * process — a number that moves on every write `holdsOf` reads (a bucket,
-   * an object, a want, a pin) and on nothing else, so a caller keeping a
-   * bucket's holds can tell they are still true by comparing one integer.
-   *
-   * In memory, because the daemon is the database's only writer. A read is
-   * not a write here: `countRead` moves `hits`, which is not GC's clock, and
-   * a counter a NAR read wound would throw the holds away once per read.
-   */
   revision(bucket: string): number;
 
-  /**
-   * The uploads a bucket is holding for references. `put` refreshes the
-   * REASON when a drain says something different, so a row's `since` stays
-   * the moment the path first arrived.
-   */
-
-  /** Object count, nar bytes, reads and the newest push per bucket, COUNTED BY
-   *  SQL. A cache with a hundred thousand objects must not answer "how big am
-   *  I" by loading them — and a BOARD asks that question once per bucket per
-   *  publish, which is the same argument one order of magnitude louder. */
   bucketStats(): Map<string, BucketTotals>;
 
-  /**
-   * ONE PAGE of a bucket's paths, in the order asked for — the keyset page
-   * behind `cache.paths`.
-   *
-   * `next` is the cursor for the page AFTER this one, or `null` when this is
-   * the last: a POSITION in the order just read rather than an offset, so a
-   * push landing between two pages shifts nothing the reader is about to
-   * read, which an `OFFSET` would. It is minted HERE, where the order is
-   * known, and it names that order — replayed against another one it starts
-   * again rather than answering an empty page.
-   *
-   * `name` narrows to one package — every version of one store-path name,
-   * which is what opening a group on the board asks for.
-   */
   objectsPage(bucket: string, page: PathPage & { name?: string | null }): {
     rows: ObjectRow[];
     next: string | null;
   };
 
-  /**
-   * THE SAME PAGE, AS PACKAGES — one row per store-path name, counted and
-   * summed over the WHOLE bucket by SQL.
-   *
-   * A client cannot do this: it holds one page, so its totals would be the
-   * page's and would change under the reader at "show more". The aggregate is
-   * therefore the row's, and it pages by the same keyset rule — on the
-   * aggregate being ordered by, with the name settling every tie.
-   */
   objectGroupsPage(
     bucket: string,
     page: PathPage,
   ): { rows: ObjectGroupRow[]; next: string | null };
-  /** The same, over every bucket, plus reads and the newest renewal. */
   objectTotals(): {
     objects: number;
     bytes: number;
@@ -375,11 +174,6 @@ export interface CacheRepo {
   close(): void;
 }
 
-/**
- * Schema history, one entry per version, applied in order. `user_version` is
- * the index of the last applied entry, so a fresh file runs all of them and an
- * existing one runs the tail.
- */
 export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE bucket (
@@ -431,10 +225,6 @@ export const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (bucket, name)
   );
   `,
-  // Migration 2 — WHAT A BUCKET IS HOLDING FOR REFERENCES. Before this the
-  // reason lived only in a drain's memory and died with the process, so a
-  // person looking at a stalled push saw nothing until the next drain happened
-  // to run.
   `
   CREATE TABLE held (
     bucket     TEXT NOT NULL,
@@ -444,100 +234,47 @@ export const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (bucket, store_path)
   );
   `,
-  // Migration 3 — THE FETCH A HOLD REPRESENTS. A missing reference is fetched
-  // OFF the upload request; until it lands, the bucket publishes the progress
-  // rather than a silent 202.
   `
   ALTER TABLE held ADD COLUMN fetching INTEGER NOT NULL DEFAULT 0;
   `,
-  // Migration 4 — A NAME PER BUCKET. One domain, one bucket: the partial
-  // unique index is the rule, not a check in a verb that another caller could
-  // skip.
   `
   ALTER TABLE bucket ADD COLUMN domain TEXT;
   CREATE UNIQUE INDEX bucket_domain ON bucket (domain) WHERE domain IS NOT NULL;
   `,
-  // Migration 5 — WHICH REFERENCES THE FETCH HAS ALREADY LANDED. A hold with a
-  // count told a person how much was left, not which; the page shows both.
-  // APPENDED, never inserted: migrations apply by POSITION against
-  // `user_version`, so an entry added mid-array re-runs every migration after
-  // it on an existing database.
   `
   ALTER TABLE held ADD COLUMN fetched TEXT NOT NULL DEFAULT '[]';
   `,
-  // Migration 6 — A FAILED FETCH IS NOT "NEITHER HERE NOR UPSTREAM". The
-  // last line `nix-store -r` said is stored so the hold names the real fault
-  // (network, disk, lock), and a later retry clears it.
   `
   ALTER TABLE held ADD COLUMN failure TEXT;
   `,
-  // Migration 7 — THE `CA:` LINE, as Nix sent it. A content-addressed rewrite
-  // is importable by its own hash; without this the consumer demands a
-  // signature instead.
   `
   ALTER TABLE object ADD COLUMN ca TEXT;
   `,
-  // Migration 8 — THE COMPRESSED NAR IS KEPT. A push already uploads it, so
-  // the file the cache proved is the file it serves: a sized object Cloudflare
-  // will cache, and no re-dump per puller. Null means the file is not there
-  // yet; the row is served by the FIFO fallback until the boot backfill (or a
-  // re-push) produces it.
   `
   ALTER TABLE object ADD COLUMN file_hash TEXT;
   ALTER TABLE object ADD COLUMN file_size INTEGER;
   `,
-  // Migration 9 — NO HOLDS. A cache that keeps what it was pushed no longer
-  // waits for references: they are names in the narinfo, not paths a store must
-  // hold first. The table is dropped rather than left as dead state.
   `
   DROP TABLE held;
   `,
-  // Migration 10 — THE STORED COMPRESSION. An upload may be zstd, xz, bzip2
-  // or none; the object is kept exactly as sent, so the row records what the
-  // bytes are and the narinfo says it. Rows from before this are zstd (the
-  // only thing odu ever served), hence the default.
   `
   ALTER TABLE object ADD COLUMN compression TEXT NOT NULL DEFAULT 'zstd';
   `,
-  // Migration 11 — THE CA PROOF'S VERDICT, once per row. A self-referencing
-  // row's proof needs its bytes; re-reading it every boot made an ordinary
-  // input-addressed path a permanent startup cost. Rows that already carry a
-  // CA were proved by the old flow.
   `
   ALTER TABLE object ADD COLUMN ca_proof TEXT NOT NULL DEFAULT 'unknown';
   UPDATE object SET ca_proof = 'content-addressed' WHERE ca IS NOT NULL;
   `,
-  // Migration 12 — A STORE PER BUCKET. Every bucket that predates the choice
-  // kept its objects on the local disk, so that is what it names.
   `
   ALTER TABLE bucket ADD COLUMN store TEXT NOT NULL DEFAULT 'local';
   `,
-  // Migration 13 — RETENTION'S CLOCK IS "WANTED", NOT "READ". Reads are about
-  // to leave odu (PLAN 2.8): once a CDN or a presigned URL serves the bytes,
-  // `last_accessed` stops moving for exactly the paths that are busiest, and a
-  // collector reading it would evict them. The column is RENAMED rather than
-  // added beside: an existing row's last access is the best thing known about
-  // when it was last wanted, and two columns would be two answers to one
-  // question. The index follows the column.
   `
   ALTER TABLE object RENAME COLUMN last_accessed TO last_wanted;
   DROP INDEX IF EXISTS object_accessed;
   CREATE INDEX object_wanted ON object (bucket, last_wanted);
   `,
-  // Migration 14 — WHO MADE A PIN. A write token may now pin (so CI can hold
-  // its master closure), and re-pointing a pin releases whatever it held
-  // before — which on an ADMIN's pin would be a write token undoing an
-  // administrator's retention. Every pin that predates this was made with the
-  // root token or an admin's role, so that is what they are.
   `
   ALTER TABLE pin ADD COLUMN created_by TEXT NOT NULL DEFAULT 'admin';
   `,
-  // Migration 15 — A BUCKET MOVES BETWEEN STORES (PLAN 2.8). The move is
-  // long: thousands of objects copied two at a time, and the bucket serves
-  // from the OLD store until every one of them is there. That means the move
-  // must survive a restart, so it is a row rather than a field in memory —
-  // and a row per bucket, because a second move of the same bucket while one
-  // is running is a refusal and not a queue.
   `
   CREATE TABLE bucket_migration (
     bucket      TEXT PRIMARY KEY,
@@ -550,48 +287,18 @@ export const MIGRATIONS: readonly string[] = [
     started     INTEGER NOT NULL
   );
   `,
-  // Migration 16 — A PATH'S PACKAGE NAME, STORED. The board groups a bucket
-  // by it (cache 4.5), and a `GROUP BY substr(store_path, …)` is a read-time
-  // recomputation of a fact decided when the path was written — one no index
-  // can answer, on a table that grows with every push. The backfill is the
-  // same rule as `storePathParts`, said in SQL once, for rows written before
-  // this. The index carries `created` so the newest version of a name is the
-  // first row of its span rather than a sort.
   `
   ALTER TABLE object ADD COLUMN name TEXT NOT NULL DEFAULT '';
   UPDATE object SET name = substr(store_path, instr(store_path, '-') + 1);
   CREATE INDEX object_name ON object (bucket, name, created);
   `,
-  // Migration 17 — WHAT MINTED A TOKEN (PLAN 4.1). A run mints its own
-  // write token for the bucket its flake reads from, and an operator reading
-  // the bucket's Tokens list must be able to tell one of those from a
-  // credential a person issued. Null for every token that predates this, which
-  // is the same thing an administrator's mint still writes.
   `
   ALTER TABLE token ADD COLUMN label TEXT;
   `,
-  // Migration 18 — WHAT BUILT A PATH (PLAN 4.2). A push may now state the run
-  // that produced its paths and the commit they were built from, so a path a
-  // reader does not recognise can be traced to the build that made it. Null
-  // for every row that predates this, and null for every push that states
-  // nothing — which is most of them, and not a gap.
-  //
-  // `commit` is SQL's OWN WORD (a transaction ends with it), so the column is
-  // `commit_sha` and `objectOf` maps it to the row's `commit`. Quoting the
-  // keyword would work and would then have to be remembered in every
-  // statement that ever touches it.
   `
   ALTER TABLE object ADD COLUMN run TEXT;
   ALTER TABLE object ADD COLUMN commit_sha TEXT;
   `,
-  // Migration 19 — A SELF-REFERENCING ROW WAS JUDGED WITH ONE FORM OF TWO.
-  // Nix 2.35 hashes a self-referencing path's occurrence offsets after its
-  // zeroed bytes, and odu knew only the 2.34 form, so a 2.35 rewrite was
-  // stored `not-content-addressed`. A path the bucket holds is never uploaded
-  // again, so nothing would judge it again: its honest state is `unknown`, and
-  // the startup pass (`proveSelf`) proves it from the kept object with both
-  // forms. That costs one read of every such row, once — the cost the pass
-  // had when it first ran.
   `
   UPDATE object SET ca_proof = 'unknown'
   WHERE ca_proof = 'not-content-addressed'
@@ -599,8 +306,6 @@ export const MIGRATIONS: readonly string[] = [
   `,
 ];
 
-/** The schema this build writes. A file carrying a HIGHER number was written by
- *  a newer odu and is refused rather than read. */
 export const CACHE_SCHEMA_VERSION = MIGRATIONS.length;
 
 interface Row {
@@ -622,21 +327,6 @@ const list = (row: Row, column: string): string[] => {
   }
 };
 
-/**
- * A PAGE CURSOR — `<the order>|<the ordered value>|<the key>`, minted from
- * the last row of the page just given: `pushed|<created>|<storePath>` for the
- * default order, `size|<bytes>|<name>` for packages by size.
- *
- * IT NAMES ITS OWN ORDER because it is only a position in one. Replayed
- * against a different `sort` the comparison would be a number read out of a
- * name — `NaN`, which SQLite binds as NULL, so every keyset test fails and
- * the answer is an empty page that claims the bucket ended. A cursor that
- * disagrees is treated as no cursor: the first page, which is the only thing
- * a stale one can mean.
- *
- * Opaque to a caller on purpose, and never leaves this module: both page
- * reads mint their own `next`, so no caller holds the pairing.
- */
 const cursorOf = (
   key: string,
   sort: PathSort,
@@ -649,40 +339,15 @@ const cursorOf = (
   return { value: rest.slice(0, at), key: rest.slice(at + 1) };
 };
 
-/**
- * THE CURSOR FOR A PAGE'S LAST ROW — the mint {@link cursorOf} parses, and
- * the only one.
- *
- * The ordered values are named by the ORDER WORDS themselves, so the pairing
- * of a `sort` with the value a page is positioned by is decided once: both
- * page reads hand over the same record of four facts, and a fifth
- * {@link PathSort} is a type error at each of them rather than a cursor that
- * quietly carries the wrong number.
- */
 const cursorFor = (
   sort: PathSort,
   last: Record<PathSort, string | number>,
   key: string,
 ): string => `${sort}|${last[sort]}|${key}`;
 
-/** THE SUBSTRING A PAGE IS NARROWED BY, or `null` for the whole bucket. An
- *  absent filter and an empty box are one question, and a read that spelled
- *  that out at each of the places it asks could answer them differently. */
 const narrowing = (filter: string | null): string | null =>
   filter === null || filter === "" ? null : filter;
 
-/**
- * WHAT EACH ORDER IS, IN SQL — the column a row is ordered by, the one a
- * GROUP is ordered by, and whether the cursor's value is a number.
- *
- * `size` is `nar_size` rather than the stored `file_size`, because the number
- * the board prints beside a path is its NAR's, and an order that disagreed
- * with the column it is drawn under is worse than no order at all.
- *
- * `name` compares case-insensitively: byte order puts every capitalised
- * package ahead of every lowercase one (`ImageMagick`, `R`, then `acl`),
- * which is not what a header saying A→Z means to a reader.
- */
 const PATH_ORDER: Record<
   PathSort,
   { readonly row: string; readonly group: string; readonly numeric: boolean }
@@ -761,15 +426,9 @@ const pinOf = (row: Row): PinRow => ({
   createdBy: text(row, "created_by") as PinRow["createdBy"],
 });
 
-/** Open (or create) the cache database. `":memory:"` is what the suite uses.
- *
- * **Modes matter here.** The database holds every bucket's ed25519 SECRET key
- * and every token hash, so it is a secret: the directory is 0700 and the file —
- * plus the `-wal` and `-shm` siblings SQLite creates beside it — is 0600.
- * `Database` creates with the process umask, which on a default machine is
- * world-readable, so the mode is set here rather than left to whoever started
- * the process.
- */
+/** `Database` creates with the process umask, which on a default machine is
+ *  world-readable, so the mode is set here rather than left to whoever started
+ *  the process. */
 export function openCacheRepo(path: string): CacheRepo {
   if (path !== ":memory:") {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -778,8 +437,6 @@ export function openCacheRepo(path: string): CacheRepo {
     try {
       chmodSync(dirname(path), 0o700);
     } catch {
-      // A state root somebody else owns is theirs to fix; the file modes below
-      // still apply to what this process creates.
     }
   }
   const db = new Database(path, { create: true });
@@ -825,8 +482,6 @@ export function openCacheRepo(path: string): CacheRepo {
   const all = <T>(sql: string, params: unknown[], map: (row: Row) => T): T[] =>
     (db.query(sql).all(...(params as never[])) as Row[]).map(map);
 
-  // NEVER RESET, so a bucket deleted and created again under its name cannot
-  // land back on a number a reader already holds.
   const revisions = new Map<string, number>();
   const bump = (bucket: string): void => {
     revisions.set(bucket, (revisions.get(bucket) ?? 0) + 1);
@@ -953,11 +608,6 @@ export function openCacheRepo(path: string): CacheRepo {
         [
           row.bucket,
           row.storePath,
-          // THE PACKAGE NAME, WRITTEN ONCE, HERE. It is decided by the store
-          // path and never changes, so re-deriving it inside every `GROUP BY`
-          // was a read-time recomputation of a write-time fact — and an
-          // expression no index could answer, on a table that grows with
-          // every push.
           storePathParts(row.storePath).name,
           row.hash,
           row.narHash,
@@ -1017,18 +667,6 @@ export function openCacheRepo(path: string): CacheRepo {
     want(bucket, storePaths, at, provenance) {
       if (storePaths.length === 0) return;
       bump(bucket);
-      // ONE statement for the batch: a push asks about its whole closure, and
-      // a thousand-path closure must not be a thousand writes.
-      //
-      // AND THE PROVENANCE RIDES ON IT. A path the bucket already holds gets
-      // no narinfo PUT — that is the whole point of asking what is missing —
-      // so without this a run that warmed a path somebody else uploaded would
-      // leave the row saying nothing about where its bytes came from, which
-      // is the common case for a repository whose workflow pushes the same
-      // closure. `COALESCE` and never an overwrite: the first builder to
-      // state a fact keeps it, a run may claim a path its own workflow
-      // uploaded at the same commit, and a later unrelated run changes
-      // nothing.
       const holes = storePaths.map(() => "?").join(", ");
       db.run(
         `UPDATE object SET last_wanted = ?, run = COALESCE(run, ?), ` +
@@ -1104,8 +742,6 @@ export function openCacheRepo(path: string): CacheRepo {
       }
       const after = page.after === null ? null : cursorOf(page.after, page.sort);
       if (after !== null) {
-        // THE KEYSET, in the order being read: the ordered column decides, and
-        // the store path settles a tie so no row is read twice or skipped.
         const compare = page.descending ? "<" : ">";
         where.push(
           `(${order.row} ${compare} ? OR (${order.row} = ? AND store_path ${compare} ?))`,
@@ -1126,8 +762,6 @@ export function openCacheRepo(path: string): CacheRepo {
       const last = rows.at(-1);
       return {
         rows: rows.map(objectOf),
-        // THE CURSOR IS MINTED WHERE THE ORDER IS KNOWN, so a caller never
-        // holds the pairing of a position with the order it is a position in.
         next:
           more && last !== undefined
             ? cursorFor(
@@ -1153,9 +787,6 @@ export function openCacheRepo(path: string): CacheRepo {
         where.push("instr(store_path, ?) > 0");
         params.push(filter);
       }
-      // THE KEYSET IS ON THE AGGREGATE, so it is a HAVING: the count, the sums
-      // and the two clocks exist only after the grouping, and a WHERE could
-      // not see them.
       const having: string[] = [];
       const after = page.after === null ? null : cursorOf(page.after, page.sort);
       if (after !== null) {
@@ -1168,8 +799,7 @@ export function openCacheRepo(path: string): CacheRepo {
       }
       params.push(page.limit + 1);
       const way = page.descending ? "DESC" : "ASC";
-      // THE NEWEST VERSION'S OWN COLUMNS, one correlated subquery each. A
-      // bare column gets the max row's value only when the select holds
+      // A bare column gets the max row's value only when the select holds
       // exactly ONE min/max, and this one holds two — so the newest version
       // is named by a subquery that reads the same span of `object_name` the
       // grouping does, and carries the FILTER so a filtered group answers a
@@ -1177,13 +807,9 @@ export function openCacheRepo(path: string): CacheRepo {
       //
       // THREE SUBQUERIES, NOT ONE, because a SQLite scalar subquery yields a
       // single COLUMN: the path, the run and the commit cannot come out of
-      // one of them. They are built from one expression with one ORDER BY,
-      // and that order is TOTAL — `store_path` is unique within a bucket's
-      // name — so all three resolve to the same row and a group can never
-      // show one build's hash beside another's provenance.
+      // one of them.
       //
-      // NAMED ONCE, so the select list and the bindings cannot be counted
-      // apart. Each subquery carries a `?` when there is a filter, and those
+      // Each subquery carries a `?` when there is a filter, and those
       // `?`s are read before the WHERE's; a column added to the list below
       // without its binding would not be an error SQLite reports — every
       // parameter after the select list would simply shift, and the page

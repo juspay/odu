@@ -1,12 +1,4 @@
 /**
- * A STORE PATH PROVES ITS OWN CONTENT ADDRESS, when Nix's formula says so.
- *
- * A path rewritten by `nix store make-content-addressed` is
- * `fixed:r:sha256:<hash>`; Nix derives its store path from (name, that hash,
- * references, self-reference), so the ROW — which already holds the path, the
- * narHash and the references — can recompute the candidate and accept it only
- * when it equals the path. No pusher line and no store query are trusted.
- *
  * **The formula.** `makeStorePath(type, hash, name)` fingerprints
  * `type:sha256:<hex hash>:/nix/store:<name>`, sha256s it, folds 32 bytes onto
  * 20 (`compressHash`), and encodes Nix's base32. For a recursive fixed output,
@@ -15,9 +7,7 @@
  *
  * **A SELF-REFERENCE IS PROVED FROM ITS BYTES.** Its CA hash is Nix's hash of
  * the NAR with the path's own hash part replaced by zeros (Nix 2.34 records no
- * match positions, so there is no `|pos` fold); the server computes that while
- * verifying the object. The pusher's `CA:` line is parsed and IGNORED: a fact
- * about an object we hold must not depend on who pushed it or when.
+ * match positions, so there is no `|pos` fold).
  */
 
 import { createHash } from "node:crypto";
@@ -25,8 +15,6 @@ import { base32, NarinfoError, narHashBase32 } from "./narinfo";
 
 const BASE32_ALPHABET = "0123456789abcdfghijklmnpqrsvwxyz";
 
-/** nix's `printHash32` inverse: five-bit groups read from the least significant
- *  end of the byte array. */
 export function base32Bytes(text: string): Uint8Array {
   const out = new Uint8Array(Math.floor((text.length * 5) / 8));
   for (let k = 0; k < text.length; k++) {
@@ -41,14 +29,12 @@ export function base32Bytes(text: string): Uint8Array {
   return out;
 }
 
-/** Nix's `compressHash`: fold every byte onto a smaller result. */
 function compressHash(hash: Uint8Array, size: number): Uint8Array {
   const out = new Uint8Array(size);
   for (let i = 0; i < hash.length; i++) out[i % size]! ^= hash[i] as number;
   return out;
 }
 
-/** `makeStorePath`'s hash part, as the 32 characters a path carries. */
 export function storePathHashOf(type: string, hash: Uint8Array, name: string): string {
   const fingerprint = `${type}:sha256:${Buffer.from(hash).toString("hex")}:/nix/store:${name}`;
   const digest = createHash("sha256").update(fingerprint).digest();
@@ -66,21 +52,10 @@ export interface SelfHashes {
   withOffsets: string;
 }
 
-/**
- * The row's `CA:` line, PROVED by recomputing the path it must have produced;
- * `null` when Nix's formula does not reproduce the row's path. Never guesses.
- *
- * A self-referencing row is tried with both forms of its modulo hash. That is
- * not a preference between them: the store path is a hash of the CA hash, the
- * references and the name, so a form that yields the wrong hash cannot rebuild
- * the path, and at most one of them does. Which Nix wrote the path is not
- * read from anywhere; the path is the only witness of it.
- */
 export function contentAddressOf(input: {
   storePath: string;
   narHash: string;
   references: readonly string[];
-  /** The modulo-self hashes computed from the NAR (self-referencing rows). */
   selfHash?: SelfHashes | null;
 }): string | null {
   const path = input.storePath;

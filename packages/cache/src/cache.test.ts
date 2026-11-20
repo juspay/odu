@@ -1,13 +1,3 @@
-/**
- * The ADMIN verbs, called directly.
- *
- * The route suite grades what a Nix client meets; this one grades what the
- * service's port answers, which is where every refusal code is decided. The
- * cases are the ones a caller can actually reach: a service with no root token
- * (the developer's `odu web`), a name that already exists, a name that could
- * not be one, and the two numbers that turn a typo into data loss.
- */
-
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -58,7 +48,6 @@ function cacheWith(rootToken: string | null): Cache {
   });
 }
 
-/** A body for `acceptNarinfo`, which takes a stream because a real one does. */
 const stream = (text: string): ReadableStream<Uint8Array> =>
   new ReadableStream({
     start(controller) {
@@ -67,12 +56,8 @@ const stream = (text: string): ReadableStream<Uint8Array> =>
     },
   });
 
-/** A push that said nothing about what built the path — what every case here
- *  is about, since none of them is testing provenance (`gcStores.test.ts`
- *  is). */
 const NOTHING_SAID = { run: null, commit: null };
 
-/** Bytes, and the NAR hash a narinfo has to claim for them. */
 const bytesStream = (bytes: Uint8Array): ReadableStream<Uint8Array> =>
   new ReadableStream({
     start(controller) {
@@ -224,15 +209,6 @@ describe("describe", () => {
   });
 
   it("answers the substituter's identity and nothing about the operator's cache", async () => {
-    // It takes no credential, so it must not report the object count, the
-    // bytes, the retention or the upstream key names — those are what
-    // `CacheBucket` is for, and `CacheBucket` is the root-token view.
-    //
-    // `store` IS in it since 2.8, and it is not a leak: the row publishes the
-    // store's name already, and it is the one fact the daemon needs to say
-    // whether a read is answered by odu or by the store's own domain
-    // (`readsFrom`, which the server derives — here, a bucket on `local`,
-    // whose objects no store fronts, so reads stay odu's).
     const cache = cacheWith(ROOT);
     await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
     const described = await cache.admin.describe({ bucket: "main" });
@@ -273,8 +249,6 @@ describe("a bucket's domain", () => {
     expect(taken).toMatchObject({ ok: false, code: "bad_input" });
     if (!taken.ok) expect(taken.message).toContain('"main"');
 
-    // A SCHEME IS NOT A NAME: the substituter URL adds it, and a stored
-    // `https://…` would be a host header no request carries.
     expect(
       await cache.admin.domain({
         ...asRoot(ROOT),
@@ -327,8 +301,6 @@ describe("tokenMint", () => {
     expect(minted).toMatchObject({ ok: true });
     if (!minted.ok) return;
     expect(minted.value.facts.bucketGlob).toBe("team-*");
-    // The glob is the authorisation: it covers `team-ci`, and it does NOT cover
-    // the bucket the token was minted under.
     const listed = await cache.admin.tokenList({ ...asRoot(ROOT), bucket: "team-ci" });
     expect(listed).toMatchObject({ ok: true });
     if (listed.ok) expect(listed.value).toHaveLength(1);
@@ -462,12 +434,8 @@ describe("chunked uploads", () => {
       ok: false,
       missing: [2],
     });
-    // TWO COMPLETES OF ONE FILE: the second is the state the first produced,
-    // not an unlink race.
     expect(await cache.completeUpload(bucket, file, 2)).toEqual({ ok: true, parts: 2 });
     expect(await cache.completeUpload(bucket, file, 2)).toEqual({ ok: true, parts: 2 });
-    // The joined bytes are the parts in order, and the narinfo's own proof is
-    // what turns them into a stored path.
     expect(
       readFileSync(join(scratch, "cache", "staging", "main", "nar", file)),
     ).toEqual(Buffer.from([1, 2, 3, 4, 5, 6, 7]));
@@ -491,7 +459,6 @@ describe("chunked uploads", () => {
     const partPath = join(narDir, `${file}.part-0`);
     const markerPath = join(narDir, `${file}.uploading`);
 
-    // AN ABANDONED PART AND ITS MARKER: the sweep takes both.
     utimesSync(partPath, new Date(0), new Date(0));
     utimesSync(markerPath, new Date(0), new Date(0));
     await cache.beginUpload(bucket, "idle.nar.zst");
@@ -500,8 +467,6 @@ describe("chunked uploads", () => {
     }
     expect(existsSync(partPath)).toBe(false);
 
-    // A PART WHOSE MARKER IS FRESH IS AN UPLOAD IN PROGRESS, however old the
-    // part is (a slow 2 GiB closure touches its marker per part).
     const again = await cache.beginPart(bucket, file, 0, 100);
     await again.write(new Uint8Array([4]));
     await again.commit();
@@ -514,12 +479,6 @@ describe("chunked uploads", () => {
 
 describe("gc and a concurrent push", () => {
   it("takes a push while the collection is deleting, instead of making it wait", async () => {
-    // THE LOCK IS FOR DECISIONS, NOT FOR THE NETWORK. A collection of forty
-    // thousand objects held the cache's write lock for the whole hour it ran,
-    // so every push to the daemon queued behind it. Now the plan and each
-    // batch's decision take the lock and the deletes do not — and this is that
-    // claim, falsifiable: the push below completes while a delete is still in
-    // flight, and the arrangement deadlocks if the lock is ever held across it.
     const disk = diskObjectStore({ dir: join(scratch, "cache") });
     const gate = Promise.withResolvers<void>();
     const deleting = Promise.withResolvers<void>();
@@ -561,16 +520,12 @@ describe("gc and a concurrent push", () => {
 
     const collecting = cache.admin.gc({ ...asRoot(ROOT), bucket: "main" });
     await deleting.promise;
-    // A PATH THE PLAN NEVER SAW, pushed with a delete of another one in
-    // flight: it is recorded now, not after the collection.
     const landed = "/nix/store/llllllllllllllllllllllllllllllll-landed";
     expect(await push(landed)).toMatchObject({ ok: true });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(landed))).not.toBeNull();
 
     gate.resolve();
     expect(await collecting).toMatchObject({ ok: true, value: { report: { evicted: 1, stopped: null } } });
-    // The expired path is gone, and the one that landed mid-collection is
-    // whole: its row, and its bytes.
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(expired))).toBeNull();
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(landed))).not.toBeNull();
     expect(
@@ -631,8 +586,6 @@ describe("gc and pin", () => {
 
     const listed = await cache.admin.pinList({ ...asRoot(ROOT), bucket: "main" });
     expect(listed).toMatchObject({ ok: true });
-    // WHAT IT HOLDS, not merely that it exists: the closure resolved at pin
-    // time, which is the question a person reading a bucket is asking.
     if (listed.ok) {
       expect(listed.value).toHaveLength(1);
       expect([...(listed.value[0]?.rootPaths ?? [])].sort()).toEqual([child, root].sort());
@@ -645,8 +598,6 @@ describe("gc and pin", () => {
       ok: true,
       value: [],
     });
-    // A pin that is not there is SAID so, rather than answered as a success
-    // that removed nothing.
     expect(
       await cache.admin.pinDelete({ ...asRoot(ROOT), bucket: "main", name: "release" }),
     ).toMatchObject({ ok: false, code: "bad_input" });
@@ -654,11 +605,6 @@ describe("gc and pin", () => {
   });
 });
 
-/**
- * WHAT KEEPS A PATH, through the verb the bucket page reads — and every write
- * the kept holds must notice. A stale verdict is a column that lies, so each
- * kind of write is made here and the next answer read.
- */
 describe("paths say what keeps them", () => {
   const DAY = 24 * 60 * 60 * 1000;
   const pinned = "/nix/store/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-widget-1.0";
@@ -716,7 +662,7 @@ describe("paths say what keeps them", () => {
 
   it("follows a retention change, an unpin and a missing query", async () => {
     const { cache, travel } = await arranged();
-    await keptOf(cache); // the holds are kept from here on
+    await keptOf(cache);
 
     await cache.admin.retention({ ...asRoot(ROOT), bucket: "main", retentionDays: 7 });
     expect((await keptOf(cache)).get(sibling)?.until).toBe(NOW + DAY + 7 * DAY);
@@ -724,13 +670,10 @@ describe("paths say what keeps them", () => {
     await cache.admin.pinDelete({ ...asRoot(ROOT), bucket: "main", name: "release" });
     expect((await keptOf(cache)).get(pinned)).toMatchObject({ kind: "retention", pins: [] });
 
-    // A BUILD ASKING ABOUT THE PATH WANTS IT, and that winds its clock.
     travel(3 * DAY);
     cache.missing(cache.bucket("main") as never, [{ path: pinned }], NOTHING_SAID, false);
     expect((await keptOf(cache)).get(pinned)?.until).toBe(NOW + 2 * DAY + 3 * DAY + 7 * DAY);
 
-    // AND THE VERDICT IS THE ANSWER'S CLOCK, not the holds': no write, and
-    // the sibling's time is up.
     travel(30 * DAY);
     expect((await keptOf(cache)).get(sibling)?.kind).toBe("nothing");
     await cache.close();
@@ -756,8 +699,6 @@ describe("retention", () => {
     expect(changed).toMatchObject({ ok: true });
     if (changed.ok) expect(changed.value.retentionDays).toBe(7);
     expect(cache.bucket("main")?.retentionDays).toBe(7);
-    // The same rule `create` keeps: a negative is a destructive reading of a
-    // typo, and zero is a deliberate "keep only what is referenced or held".
     expect(
       await cache.admin.retention({ ...asRoot(ROOT), bucket: "main", retentionDays: -1 }),
     ).toMatchObject({ ok: false, code: "bad_input" });
@@ -770,8 +711,6 @@ describe("retention", () => {
 
 describe("the wall behind the route", () => {
   it("refuses a NAR name instead of sanitizing it", async () => {
-    // A sanitizer turns `../..` into a plausible file name, and a caller that
-    // skipped the route would never learn it had.
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
     const bucket = cache.bucket("main");
@@ -786,9 +725,6 @@ describe("the wall behind the route", () => {
 
 describe("missing", () => {
   it("does not read a signature without a colon as an upstream key", async () => {
-    // `sig.slice(0, sig.indexOf(":"))` answers -1 with the whole string minus
-    // its last character — a key name that matches nothing, which silently
-    // defeats the filter.
     const cache = cacheWith(ROOT);
     await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
     const bucket = cache.bucket("main");
@@ -810,9 +746,6 @@ describe("missing", () => {
   });
 
   it("asks a whole push for what an upstream key signed, and only that push", async () => {
-    // A CLOSURE FETCHED FROM THIS BUCKET ALONE needs its nixpkgs paths here
-    // too. The bucket's upstream keys stay as they are: the next push that
-    // does not ask is filtered exactly as before.
     const cache = cacheWith(ROOT);
     await cache.admin.create({ ...createInput, upstreamKeys: ["cache.nixos.org-1"] });
     const bucket = cache.bucket("main");
@@ -834,8 +767,6 @@ describe("missing", () => {
 
 describe("file modes", () => {
   it("keeps the database and its directory private", async () => {
-    // The database holds every bucket's ed25519 SECRET key and every token
-    // hash, so it is a secret rather than a cache.
     const cache = cacheWith(ROOT);
     await cache.close();
     expect(statSync(join(scratch, "cache")).mode & 0o777).toBe(0o700);
@@ -843,9 +774,6 @@ describe("file modes", () => {
   });
 
   it("closes down the WAL the FIRST run creates, not the next one", async () => {
-    // `-wal` appears on the first write, so a chmod issued right after `new
-    // Database` finds nothing and swallows the error — and the bucket's secret
-    // key sits in a world-readable WAL until the process restarts.
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
     const wal = join(scratch, "cache", "cache.sqlite-wal");
@@ -898,7 +826,6 @@ describe("CA is proved from the path", () => {
       `CA: fixed:r:sha256:${hash}`,
     );
 
-    // A ROW FROM BEFORE THE PROOF: null, then proved at boot without a store.
     const db = new Database(join(scratch, "cache", "cache.sqlite"));
     db.run("UPDATE object SET ca = NULL, ca_proof = 'unknown'");
     db.close();
@@ -965,8 +892,6 @@ describe("CA is proved from the path", () => {
         `CA: ${facts.ca}`,
       );
 
-      // A RETRIED PUT takes the second-possession branch (the staged NAR is
-      // gone) and has no selfHash; the same NarHash must keep the proved CA.
       const retried = await cache.acceptNarinfo(
         cache.bucket("main") as never,
         hashOf(path),
@@ -978,8 +903,6 @@ describe("CA is proved from the path", () => {
         `CA: ${facts.ca}`,
       );
 
-      // THE BACKGROUND BACKFILL: the verdict is unknown (though a value may be
-      // stored), so boot does not serve or read it; proveSelf reads once.
       const db = new Database(join(scratch, "cache", "cache.sqlite"));
       db.run("UPDATE object SET ca = ?, ca_proof = 'unknown'", [facts.ca]);
       db.close();
@@ -989,7 +912,6 @@ describe("CA is proved from the path", () => {
       expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(
         `CA: ${facts.ca}`,
       );
-      // A SECOND PASS EXAMINES NOTHING: the verdict is persisted.
       expect(await cache.proveSelf()).toMatchObject({ rows: 0 });
       await cache.close();
     } finally {
@@ -997,8 +919,6 @@ describe("CA is proved from the path", () => {
     }
   });
 
-  /** What Nix 2.35.6 wrote for `echo $out > $out` (`test/nixRecorded.ts`):
-   *  its CA follows the zeroed bytes with `|107`. */
   const SELFREF_235 = {
     path: NIX_RECORDED.selfref235.storePath,
     ca: NIX_RECORDED.selfref235.ca,
@@ -1008,7 +928,6 @@ describe("CA is proved from the path", () => {
     },
   };
 
-  /** One row's verdict, read from the database the cache writes. */
   const caProofOf = (storePath: string): string | null => {
     const db = new Database(join(scratch, "cache", "cache.sqlite"));
     try {
@@ -1021,8 +940,6 @@ describe("CA is proved from the path", () => {
     }
   };
 
-  /** The narinfo OBJECT in the bucket's store: what a client reading the
-   *  store gets, as opposed to odu's own rendering. */
   const storedNarinfo = async (storePath: string): Promise<string> => {
     const object = await diskObjectStore({ dir: join(scratch, "cache") }).get(
       `main/${hashOf(storePath)}.narinfo`,
@@ -1032,10 +949,6 @@ describe("CA is proved from the path", () => {
   };
 
   it("proves a Nix 2.35 self-referencing path it once judged with the 2.34 form alone", async () => {
-    // A row odu stored `not-content-addressed` before it knew the 2.35 form
-    // is set back to `unknown` (migration 19); a retried PUT, which has no
-    // bytes to prove from, keeps that verdict; and the startup pass proves it
-    // and rewrites the narinfo object a store-read bucket serves.
     const { path, ca, payload } = SELFREF_235;
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
@@ -1050,7 +963,6 @@ describe("CA is proved from the path", () => {
     expect(await put()).toMatchObject({ ok: true, status: 200 });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(`CA: ${ca}`);
 
-    // WHAT AN OLDER odu LEFT, and what migration 19 makes of it.
     const db = new Database(join(scratch, "cache", "cache.sqlite"));
     db.run("UPDATE object SET ca = NULL, ca_proof = 'unknown'");
     db.close();
@@ -1059,15 +971,11 @@ describe("CA is proved from the path", () => {
     expect(await storedNarinfo(path)).not.toContain("CA:");
     expect(await cache.proveSelf()).toMatchObject({ rows: 1, proved: 1, refused: 0, skipped: 0 });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(`CA: ${ca}`);
-    // THE OBJECT IN THE STORE TOO, in the same pass: no second restart.
     expect(await storedNarinfo(path)).toContain(`CA: ${ca}`);
     await cache.close();
   });
 
   it("does not put back a row removed while the startup pass was reading it", async () => {
-    // THE PASS READS FROM A SNAPSHOT for minutes. A collection that takes the
-    // row while its bytes are being read must win: the verdict lands on the
-    // row as it is now, and there is none.
     const { path, payload } = SELFREF_235;
     const disk = diskObjectStore({ dir: join(scratch, "cache") });
     let armed = false;
@@ -1115,11 +1023,6 @@ describe("CA is proved from the path", () => {
   });
 
   it("never judges a self-referencing path it has no hash for", async () => {
-    // A NARINFO PUT WITH NO STAGED NAR is proved by an object the bucket
-    // already keeps, and computes no modulo hash. With no row naming the same
-    // bytes, the path is `unknown` for the startup pass, never
-    // `not-content-addressed` — whether there is no row at all, or one naming
-    // other bytes.
     const { path, ca, payload } = SELFREF_235;
     const cache = cacheWith(ROOT);
     await cache.admin.create(createInput);
@@ -1134,13 +1037,10 @@ describe("CA is proved from the path", () => {
     expect(await putFor(path)).toMatchObject({ ok: true, status: 200 });
     expect(caProofOf(path)).toBe("content-addressed");
 
-    // NO ROW AT ALL: a twin naming the kept bytes, under a path never seen.
     const twin = "/nix/store/2222222222222222222222222222222z-selfref";
     expect(await putFor(twin)).toMatchObject({ ok: true, status: 200 });
     expect(caProofOf(twin)).toBe("unknown");
 
-    // A ROW NAMING OTHER BYTES: judged from its own NAR, then named again
-    // with the kept bytes and no NAR of its own.
     const other = "/nix/store/3333333333333333333333333333333z-selfref";
     const otherBytes = nar("other bytes");
     await putNar(cache, "main", otherBytes);
@@ -1156,8 +1056,6 @@ describe("CA is proved from the path", () => {
     expect(await putFor(other)).toMatchObject({ ok: true, status: 200 });
     expect(caProofOf(other)).toBe("unknown");
 
-    // And the pass then judges both from the kept object. Neither is the path
-    // those bytes were made content-addressed as, so neither proves.
     expect(await cache.proveSelf()).toMatchObject({ rows: 2, proved: 0, refused: 2 });
     expect(cache.narinfoText(cache.bucket("main") as never, hashOf(path))).toContain(`CA: ${ca}`);
     await cache.close();
@@ -1182,8 +1080,6 @@ describe("CA is proved from the path", () => {
     db.run("UPDATE object SET file_hash = NULL, file_size = NULL");
     db.close();
 
-    // A crash between put and record, under the bucket's own prefix: the
-    // sweep reads each bucket's prefix, never a whole (maybe shared) store.
     const orphanDir = join(scratch, "cache", "objects", "main", "nar");
     mkdirSync(orphanDir, { recursive: true });
     writeFileSync(join(orphanDir, "dead.nar.zst"), "no row");
@@ -1247,7 +1143,6 @@ describe("CA is proved from the path", () => {
       },
     });
     const migrating = second.migrate();
-    // THE ROW ANSWERS NOW, through the transition path, before the put lands.
     expect(
       await second.narSource(second.bucket("main") as never, `${payload.narHash.slice(7)}.nar`),
     ).toMatchObject({ kind: "legacy" });
@@ -1269,7 +1164,6 @@ describe("CA is proved from the path", () => {
         bucket: "main",
         storePath: `/nix/store/${String(i).padStart(32, "0")}-migrated`,
         hash: String(i).padStart(32, "0"),
-        // Unique per row; the migration never re-parses it.
         narHash: `sha256:${Math.floor(i / 2).toString(36).padEnd(52, "0")}`,
         narSize: 1024,
         references: [],
@@ -1303,8 +1197,6 @@ describe("CA is proved from the path", () => {
     });
     const baseline = process.memoryUsage().rss;
     expect(await second.migrate()).toMatchObject({ migrated: COUNT, complete: true });
-    // A full GC once, then the heap should be near where it started: the bug
-    // was one live dump producer per TWIN row, not the bytes themselves.
     Bun.gc(true);
     await new Promise((resolve) => setTimeout(resolve, 20));
     const growth = process.memoryUsage().rss - baseline;
@@ -1377,7 +1269,6 @@ describe("CA is proved from the path", () => {
       now: () => NOW,
       migrationFreeFloor: 0,
       legacyStore: {
-        // NEVER PRODUCES A BYTE: close must cut the wait, not join it.
         dump: () => new ReadableStream({ start: () => {} }),
       },
     });
@@ -1419,7 +1310,6 @@ describe("CA is proved from the path", () => {
       now: () => NOW,
       migrationFreeFloor: 1024,
       migrationRetryMs: 1,
-      // LOW ONCE, THEN SPACE RETURNS: the same run must resume.
       freeBytes: async () => (++reads === 1 ? 0 : 10 * 1024),
       legacyStore: { dump: () => bytesStream(payload.bytes) },
     });
