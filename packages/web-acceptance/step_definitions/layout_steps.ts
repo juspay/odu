@@ -64,12 +64,12 @@ Then(
     );
     assert.ok(states.length > 0, "the run listed no nodes, so this asserted nothing");
 
-    const shapes: Record<string, (controls: string) => boolean> = {
+    const requiredRowShapes: Record<string, (controls: string) => boolean> = {
       "no controls": (controls) => controls === "",
       "a running node's Cancel": (controls) => controls.includes("Cancel node"),
       "a failed node's Retry": (controls) => controls.includes("Retry"),
     };
-    for (const [wanted, holds] of Object.entries(shapes)) {
+    for (const [wanted, holds] of Object.entries(requiredRowShapes)) {
       assert.ok(
         states.some((node) => holds(node.controls)),
         `no row with ${wanted} on this run — rows are ${states

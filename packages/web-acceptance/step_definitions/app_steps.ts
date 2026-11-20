@@ -2,6 +2,26 @@ import * as assert from "node:assert";
 import { Given, Then, When } from "@cucumber/cucumber";
 import type { OduWorld } from "../support/world.ts";
 
+function errorsBeyondExpectedResponses(
+  errors: readonly string[],
+  expectedResponses: readonly { status: number; url: string }[],
+): string[] {
+  const allowance = new Map<string, number>();
+  for (const expected of expectedResponses) {
+    const key = `${expected.status} (`;
+    allowance.set(key, (allowance.get(key) ?? 0) + 1);
+  }
+  return errors.filter((error) => {
+    for (const [key, left] of allowance) {
+      if (left > 0 && error.includes(key)) {
+        allowance.set(key, left - 1);
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
 Given("I open the board", async function (this: OduWorld) {
   await this.open("#/");
   await this.page.getByRole("heading", { name: "Runs", exact: true }).waitFor();
@@ -71,20 +91,7 @@ Then("there should be no page errors", function (this: OduWorld) {
     `the page received ${unexpected.length} unexpected failed response(s):\n` +
       unexpected.map((one) => `${one.status} ${one.url}`).join("\n"),
   );
-  const allowances = new Map<string, number>();
-  for (const expected of this.expectedResponses) {
-    const key = `${expected.status} (`;
-    allowances.set(key, (allowances.get(key) ?? 0) + 1);
-  }
-  const others = this.errors.filter((one) => {
-    for (const [key, left] of allowances) {
-      if (left > 0 && one.includes(key)) {
-        allowances.set(key, left - 1);
-        return false;
-      }
-    }
-    return true;
-  });
+  const others = errorsBeyondExpectedResponses(this.errors, this.expectedResponses);
   assert.deepStrictEqual(
     others,
     [],

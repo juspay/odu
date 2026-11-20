@@ -99,7 +99,8 @@ export class OduWorld extends World {
         const seen = await locator.first().innerText({ timeout: 1000 });
         if (seen.includes(text)) return;
         last = seen;
-      } catch {
+      } catch (cause) {
+        if (!(cause instanceof Error) || cause.name !== "TimeoutError") throw cause;
       }
       if (Date.now() > deadline) {
         throw new Error(

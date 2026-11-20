@@ -1,9 +1,9 @@
 import { availableParallelism } from "node:os";
 
-export const WORKER_CAP = 2;
+export const WORKERS_A_FOUR_CORE_RUNNER_SURVIVES = 2;
 
 export const defaultWorkers = (cpus) =>
-  Math.max(1, Math.min(WORKER_CAP, cpus - 1));
+  Math.max(1, Math.min(WORKERS_A_FOUR_CORE_RUNNER_SURVIVES, cpus - 1));
 
 export const workerCount = (
   env = process.env,

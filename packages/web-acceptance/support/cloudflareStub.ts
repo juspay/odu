@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 export interface CloudflareStub {
   readonly origin: string;
-  readonly binDir: string;
+  readonly cloudflaredBinDirForPath: string;
   readonly seen: { method: string; path: string }[];
   readonly stop: () => void;
 }
@@ -61,14 +61,14 @@ export function startCloudflareStub(): CloudflareStub {
     },
   });
 
-  const binDir = mkdtempSync(join(tmpdir(), "odu-wa-cloudflared-"));
-  const bin = join(binDir, "cloudflared");
+  const cloudflaredBinDirForPath = mkdtempSync(join(tmpdir(), "odu-wa-cloudflared-"));
+  const bin = join(cloudflaredBinDirForPath, "cloudflared");
   writeFileSync(bin, '#!/bin/sh\necho "Registered tunnel connection connIndex=0"\nexec sleep 600\n');
   Bun.spawnSync(["chmod", "0755", bin]);
 
   return {
     origin: `http://127.0.0.1:${server.port}`,
-    binDir,
+    cloudflaredBinDirForPath,
     seen,
     stop: () => server.stop(true),
   };

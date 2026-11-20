@@ -4,12 +4,22 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reserveWorldPorts, startService, stubPort, workerPort } from "./support/service.ts";
+import {
+  reserveWorldPortsBeforeAnyWorldStarts,
+  startService,
+  stubPort,
+  workerPort,
+} from "./support/service.ts";
 
 const SCRATCH = mkdtempSync(join(tmpdir(), "odu-wa-stale-"));
 afterAll(() => rmSync(SCRATCH, { recursive: true, force: true }));
 
-function fakeOdu(): string {
+interface StandInEnv extends NodeJS.ProcessEnv {
+  FAKE_PIDS: string;
+  FAKE_READY?: "1";
+}
+
+function standInDaemonThatNeverStops(): string {
   const bin = join(SCRATCH, "odu");
   writeFileSync(
     bin,
@@ -64,11 +74,11 @@ async function gone(pid: number): Promise<boolean> {
 
 describe("a web-acceptance worker leaves no daemon behind", () => {
   test("a port asked for before the reservation is refused, not derived", () => {
-    expect(() => workerPort()).toThrow(/before reserveWorldPorts\(\) ran/);
+    expect(() => workerPort()).toThrow(/before reserveWorldPortsBeforeAnyWorldStarts\(\) ran/);
   });
 
   test("every reserved port is free when it is handed out", async () => {
-    await reserveWorldPorts();
+    await reserveWorldPortsBeforeAnyWorldStarts();
     for (const port of [workerPort(), stubPort()]) {
       const { promise, resolve } = Promise.withResolvers<boolean>();
       const server = createServer();
@@ -80,7 +90,8 @@ describe("a web-acceptance worker leaves no daemon behind", () => {
 
   test("a daemon that never says it is ready is killed, process group and all", async () => {
     const pids = mkdtempSync(join(SCRATCH, "never-ready-"));
-    const started = startService(fakeOdu(), workerPort(), { FAKE_PIDS: pids }, 300);
+    const env: StandInEnv = { FAKE_PIDS: pids };
+    const started = startService(standInDaemonThatNeverStops(), workerPort(), env, 300);
     await expect(started).rejects.toThrow(/did not happen within 300ms/);
     const { daemon, child } = await pidsIn(pids);
     expect({ daemon: await gone(daemon), child: await gone(child) }).toEqual({
@@ -93,10 +104,11 @@ describe("a web-acceptance worker leaves no daemon behind", () => {
     const pids = mkdtempSync(join(SCRATCH, "signalled-"));
     const worker = join(SCRATCH, "worker.ts");
     const service = join(import.meta.dirname, "support", "service.ts");
+    const env: StandInEnv = { FAKE_PIDS: pids, FAKE_READY: "1" };
     writeFileSync(
       worker,
       `import { startService } from ${JSON.stringify(service)};
-await startService(${JSON.stringify(fakeOdu())}, 1, { FAKE_PIDS: ${JSON.stringify(pids)}, FAKE_READY: "1" });
+await startService(${JSON.stringify(standInDaemonThatNeverStops())}, 1, ${JSON.stringify(env)});
 console.log("ready");
 process.stdin.resume();
 `,

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { BROWSER_ARGS } from "./browser.ts";
 import { clearCorpus } from "./corpus.ts";
 import { doorEnv, identityOf, OPERATOR_LOGIN, signIn, STUB_LOGIN } from "./authWorld.ts";
-import { DEFAULT_STUB_MODE, startGithubStub, type GithubStub } from "./githubStub.ts";
+import { DEFAULT_STUB_MODE, startGithubStub, withStubMode, type GithubStub } from "./githubStub.ts";
 import {
   activeRunsOf,
   cancelRun,
@@ -19,8 +19,7 @@ import {
   startService,
   stopService,
   stubPort,
-  reserveWorldPorts,
-  verb,
+  reserveWorldPortsBeforeAnyWorldStarts,
   tunnelPort,
   workerPort,
   type Service,
@@ -79,9 +78,19 @@ async function tunnelService(odu: string): Promise<Service> {
     ODU_CLOUDFLARE_API_TOKEN_FILE: tokenFile,
     ODU_CLOUDFLARE_API: cloudflare.origin,
     ODU_CLOUDFLARE_PROBE_BASE: cloudflare.origin,
-    PATH: `${cloudflare.binDir}:${process.env.PATH ?? ""}`,
+    PATH: `${cloudflare.cloudflaredBinDirForPath}:${process.env.PATH ?? ""}`,
   });
   return tunnel;
+}
+
+type Granting = { readonly kind: "root" } | { readonly kind: "session"; readonly token: string };
+
+function grantInput(by: Granting, login: string, role: string): string {
+  return JSON.stringify({ rootToken: by.kind === "root" ? ROOT_TOKEN : "", login, role });
+}
+
+function grantEnv(by: Granting): NodeJS.ProcessEnv {
+  return by.kind === "session" ? { ODU_TOKEN: by.token } : {};
 }
 
 let operatorToken: string | undefined;
@@ -96,7 +105,7 @@ async function operator(odu: string, world: Service): Promise<string> {
     "auth",
     "user_grant",
     "--input",
-    JSON.stringify({ rootToken: ROOT_TOKEN, login: OPERATOR_LOGIN, role: "owner" }),
+    grantInput({ kind: "root" }, OPERATOR_LOGIN, "owner"),
     "--json",
   ]);
   if (bootstrapped.status !== 0) {
@@ -105,25 +114,30 @@ async function operator(odu: string, world: Service): Promise<string> {
         `${bootstrapped.stderr}\n--- daemon log ---\n${readFileSync(world.logPath, "utf-8").slice(-4000)}`,
     );
   }
-  const previous = { ...github.mode };
-  github.mode = { ...DEFAULT_STUB_MODE, login: OPERATOR_LOGIN };
-  const context = await browser.newContext({ baseURL: world.origin });
-  try {
-    const page = await context.newPage();
-    await page.goto(new URL("/auth/github", world.origin).href, {
-      waitUntil: "domcontentloaded",
-    });
-    await page.goto(new URL("#/profile", world.origin).href);
-    await page.getByRole("button", { name: "Create token" }).waitFor({ timeout: 60_000 });
-    await page.getByPlaceholder("token name, e.g. laptop").fill("operator");
-    await page.getByRole("button", { name: "Create token" }).click();
-    const block = page.locator("pre.use-block").first();
-    await block.waitFor({ timeout: 60_000 });
-    operatorToken = (await block.innerText()).trim();
-  } finally {
-    await context.close();
-    github.mode = previous;
-  }
+  const minting = browser;
+  const stub = github;
+  operatorToken = await withStubMode(
+    stub,
+    { ...DEFAULT_STUB_MODE, login: OPERATOR_LOGIN },
+    async () => {
+      const context = await minting.newContext({ baseURL: world.origin });
+      try {
+        const page = await context.newPage();
+        await page.goto(new URL("/auth/github", world.origin).href, {
+          waitUntil: "domcontentloaded",
+        });
+        await page.goto(new URL("#/profile", world.origin).href);
+        await page.getByRole("button", { name: "Create token" }).waitFor({ timeout: 60_000 });
+        await page.getByPlaceholder("token name, e.g. laptop").fill("operator");
+        await page.getByRole("button", { name: "Create token" }).click();
+        const block = page.locator("pre.use-block").first();
+        await block.waitFor({ timeout: 60_000 });
+        return (await block.innerText()).trim();
+      } finally {
+        await context.close();
+      }
+    },
+  );
   return operatorToken;
 }
 
@@ -133,7 +147,7 @@ async function worldFor(odu: string, identity: ReturnType<typeof identityOf>): P
   return doorService(odu);
 }
 
-function installedPlaywrightVersion(): string {
+function playwrightVersionInNodeModules(): string {
   const resolve = createRequire(import.meta.url);
   const manifest = JSON.parse(
     readFileSync(resolve.resolve("playwright/package.json"), "utf-8"),
@@ -155,7 +169,7 @@ BeforeAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
     );
   }
 
-  const npm = installedPlaywrightVersion();
+  const npm = playwrightVersionInNodeModules();
   const driver = process.env.PLAYWRIGHT_DRIVER_VERSION;
   if (driver === undefined || driver === "") {
     throw new Error(
@@ -180,7 +194,7 @@ BeforeAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
     headless: process.env.HEADLESS !== "false",
     args: [...BROWSER_ARGS],
   });
-  await reserveWorldPorts();
+  await reserveWorldPortsBeforeAnyWorldStarts();
   github = await startGithubStub(stubPort());
   service = await loopbackService(odu);
 });
@@ -196,6 +210,7 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
   this.signInLogin = STUB_LOGIN;
   if (identity.kind === "signed-in") {
     const token = await operator(odu, world);
+    const by = { kind: "session", token } as const;
     const granted = oduCli(
       world,
       [
@@ -203,10 +218,10 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
         "auth",
         "user_grant",
         "--input",
-        JSON.stringify({ rootToken: "", login: STUB_LOGIN, role: identity.role }),
+        grantInput(by, STUB_LOGIN, identity.role),
         "--json",
       ],
-      { ODU_TOKEN: token },
+      grantEnv(by),
     );
     if (granted.status !== 0) {
       throw new Error(
@@ -217,7 +232,7 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
   }
   this.browser = browser;
   this.stub = github;
-  github.mode = { login: STUB_LOGIN, orgMember: true, teamMember: true, expires: false };
+  github.mode = { ...DEFAULT_STUB_MODE, login: STUB_LOGIN };
   this.service = world;
   this.scenarioName = scenario.pickle.name;
 

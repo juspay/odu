@@ -21,6 +21,20 @@ export const DEFAULT_STUB_MODE: StubMode = {
   expires: false,
 };
 
+export async function withStubMode<T>(
+  stub: GithubStub,
+  mode: StubMode,
+  during: () => Promise<T>,
+): Promise<T> {
+  const previous = { ...stub.mode };
+  stub.mode = mode;
+  try {
+    return await during();
+  } finally {
+    stub.mode = previous;
+  }
+}
+
 export async function startGithubStub(port: number): Promise<GithubStub> {
   const stub: GithubStub = {
     origin: `http://127.0.0.1:${port}`,

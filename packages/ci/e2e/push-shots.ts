@@ -6,7 +6,7 @@ import { chromium, type Browser, type Page } from "playwright";
 
 import { arrangePushingRun } from "./support/pushFixture.ts";
 import {
-  reserveWorldPorts,
+  reserveWorldPortsBeforeAnyWorldStarts,
   startService,
   stopService,
   workerPort,
@@ -49,7 +49,7 @@ const services: Service[] = [];
 let browser: Browser | undefined;
 
 try {
-  await reserveWorldPorts();
+  await reserveWorldPortsBeforeAnyWorldStarts();
   const service = await startService(odu, workerPort());
   services.push(service);
 

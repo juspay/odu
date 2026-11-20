@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 import {
   FAILING,
@@ -13,7 +13,7 @@ import {
   headOf,
   makeFixture,
   oduCli,
-  reserveWorldPorts,
+  reserveWorldPortsBeforeAnyWorldStarts,
   startRun,
   startService,
   stopService,
@@ -54,10 +54,25 @@ interface Shot {
   readonly act?: (page: Page) => Promise<void>;
 }
 
-async function rest(page: Page): Promise<void> {
+async function settleForShutter(page: Page): Promise<void> {
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.mouse.move(0, 0);
   await page.waitForTimeout(150);
+}
+
+async function pinTheme(
+  context: BrowserContext,
+  theme: (typeof THEMES)[number],
+): Promise<void> {
+  await context.addInitScript(
+    ([key, value]) => {
+      try {
+        window.localStorage.setItem(key, value);
+      } catch {
+      }
+    },
+    ["odu.web.theme", theme] as const,
+  );
 }
 
 async function shoot(browser: Browser, shots: ReadonlyArray<Shot>): Promise<void> {
@@ -69,15 +84,7 @@ async function shoot(browser: Browser, shots: ReadonlyArray<Shot>): Promise<void
         deviceScaleFactor: 2,
         reducedMotion: "reduce",
       });
-      await context.addInitScript(
-        ([key, value]) => {
-          try {
-            window.localStorage.setItem(key, value);
-          } catch {
-          }
-        },
-        ["odu.web.theme", theme] as const,
-      );
+      await pinTheme(context, theme);
       const page = await context.newPage();
       for (const shot of shots) {
         const url = new URL(shot.hash, shot.origin).href;
@@ -94,7 +101,7 @@ async function shoot(browser: Browser, shots: ReadonlyArray<Shot>): Promise<void
             });
         }
         await shot.act?.(page);
-        await rest(page);
+        await settleForShutter(page);
         await page.evaluate(() => document.fonts.ready).catch(() => undefined);
         const file = join(outDir, `${label}-${shot.name}-${theme}-${viewport.name}.png`);
         await page.screenshot({ path: file, fullPage: true });
@@ -105,20 +112,23 @@ async function shoot(browser: Browser, shots: ReadonlyArray<Shot>): Promise<void
   }
 }
 
-function makeBucket(service: Service, name: string, push: string | null): void {
+function makeBucket(service: Service, name: string): boolean {
   const made = oduCli(service, ["cache", "create", name, "-o", "json"]);
   if (made.status !== 0) {
     process.stderr.write(`  ! bucket ${name}: ${made.stderr}\n`);
-    return;
+    return false;
   }
-  if (push === null) return;
+  return true;
+}
+
+function pushStorePath(service: Service, name: string, storePath: string): void {
   const minted = oduCli(service, ["cache", "token", "mint", name, "--write", "-o", "json"]);
   if (minted.status !== 0) {
     process.stderr.write(`  ! token for ${name}: ${minted.stderr}\n`);
     return;
   }
   const token = (JSON.parse(minted.stdout) as { token: string }).token;
-  const pushed = oduCli(service, ["cache", "push", name, push, "-o", "json"], {
+  const pushed = oduCli(service, ["cache", "push", name, storePath, "-o", "json"], {
     ODU_CACHE_TOKEN: token,
   });
   if (pushed.status !== 0) process.stderr.write(`  ! push to ${name}: ${pushed.stderr}\n`);
@@ -128,7 +138,7 @@ const services: Service[] = [];
 let browser: Browser | undefined;
 
 try {
-  await reserveWorldPorts();
+  await reserveWorldPortsBeforeAnyWorldStarts();
 
   const loopback = await startService(odu, workerPort());
   services.push(loopback);
@@ -147,8 +157,8 @@ try {
   });
   await waitSettled(loopback, redRun, 600_000);
   await waitSettled(loopback, greenRun, 600_000);
-  makeBucket(loopback, "kolu", odu);
-  makeBucket(loopback, "localtest", null);
+  if (makeBucket(loopback, "kolu")) pushStorePath(loopback, "kolu", odu);
+  makeBucket(loopback, "localtest");
 
   const github = await startGithubStub(stubPort());
   const secretDir = mkdtempSync(join(tmpdir(), "odu-shots-"));
@@ -172,7 +182,7 @@ try {
     ODU_CLOUDFLARE_API_TOKEN_FILE: tokenFile,
     ODU_CLOUDFLARE_API: cloudflare.origin,
     ODU_CLOUDFLARE_PROBE_BASE: cloudflare.origin,
-    PATH: `${cloudflare.binDir}:${process.env.PATH ?? ""}`,
+    PATH: `${cloudflare.cloudflaredBinDirForPath}:${process.env.PATH ?? ""}`,
   });
   services.push(tunnel);
 
@@ -208,15 +218,7 @@ try {
         deviceScaleFactor: 2,
         reducedMotion: "reduce",
       });
-      await context.addInitScript(
-        ([key, value]) => {
-          try {
-            window.localStorage.setItem(key, value);
-          } catch {
-          }
-        },
-        ["odu.web.theme", theme] as const,
-      );
+      await pinTheme(context, theme);
       const page = await context.newPage();
       await page.goto(new URL("/auth/github", door.origin).href, {
         waitUntil: "domcontentloaded",
@@ -227,7 +229,7 @@ try {
       ] as const) {
         await page.goto(new URL(hash, door.origin).href, { waitUntil: "domcontentloaded" });
         await page.locator("h1").first().waitFor({ timeout: 30_000 }).catch(() => undefined);
-        await rest(page);
+        await settleForShutter(page);
         await page.evaluate(() => document.fonts.ready).catch(() => undefined);
         const file = join(outDir, `${label}-${name}-${theme}-${viewport.name}.png`);
         await page.screenshot({ path: file, fullPage: true });

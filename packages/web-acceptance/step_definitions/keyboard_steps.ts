@@ -5,6 +5,8 @@ import type { OduWorld } from "../support/world.ts";
 
 const TAB_BUDGET = 40;
 
+const tabBudgetFor = (controls: readonly string[]): number => controls.length * 2 + 4;
+
 async function focused(world: OduWorld): Promise<string> {
   return await world.page.evaluate(() => {
     const el = document.activeElement;
@@ -150,7 +152,8 @@ Then("every visible control can be reached by tabbing", async function (this: Od
 
   await this.page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   const reached = new Set<string>();
-  for (let press = 0; press < expected.length * 2 + 4; press += 1) {
+  const budget = tabBudgetFor(expected);
+  for (let press = 0; press < budget; press += 1) {
     await this.page.keyboard.press("Tab");
     const mark = await this.page.evaluate(
       () => (document.activeElement as HTMLElement | null)?.dataset.waTab,

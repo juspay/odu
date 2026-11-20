@@ -4,6 +4,7 @@ import {
   removeFixture,
   startRun,
   waitSettled,
+  type NodeFailure,
   type Service,
 } from "./service.ts";
 import { RUN_SETUP_TIMEOUT } from "./world.ts";
@@ -13,8 +14,8 @@ export interface SharedRun {
   runId: string;
   head: string;
   passed: boolean;
-  failures: { node: string; logKey: string }[];
-  usedBy: string[];
+  failures: NodeFailure[];
+  scenariosThatUsedThisRun: string[];
 }
 
 const cache = new Map<string, Promise<SharedRun>>();
@@ -37,7 +38,7 @@ async function build(
     head,
     passed: settled.passed,
     failures: [...settled.failures],
-    usedBy: [],
+    scenariosThatUsedThisRun: [],
   };
 }
 
@@ -62,10 +63,10 @@ export async function sharedRun(
         `reads ${now.passed ? "green" : "red"} with ${now.failures.length}. ` +
         "A scenario that RETRIES, CANCELS or SUPERSEDES must ask for a private run " +
         `("a fresh settled red run …"), never this one. Scenarios that have used it: ` +
-        `${run.usedBy.join(" · ") || "(none before this)"} — and now "${scenario}".`,
+        `${run.scenariosThatUsedThisRun.join(" · ") || "(none before this)"} — and now "${scenario}".`,
     );
   }
-  run.usedBy.push(scenario);
+  run.scenariosThatUsedThisRun.push(scenario);
   return run;
 }
 

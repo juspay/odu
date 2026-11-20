@@ -4,7 +4,7 @@ import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, realpathSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const BIG = 256 * 1024 * 1024;
+const MAX_CLI_OUTPUT_BYTES = 256 * 1024 * 1024;
 
 export function readOduBin(): string {
   const bin = process.env.ODU_BIN;
@@ -57,7 +57,7 @@ async function freePort(): Promise<number> {
   });
 }
 
-export async function reserveWorldPorts(): Promise<void> {
+export async function reserveWorldPortsBeforeAnyWorldStarts(): Promise<void> {
   for (const key of ["worker", "door", "stub", "tunnel"]) {
     reservedPorts.set(key, await freePort());
   }
@@ -67,7 +67,7 @@ function reserved(key: string): number {
   const port = reservedPorts.get(key);
   if (port === undefined) {
     throw new Error(
-      `web-acceptance: the ${key} port was asked for before reserveWorldPorts() ran. ` +
+      `web-acceptance: the ${key} port was asked for before reserveWorldPortsBeforeAnyWorldStarts() ran. ` +
         "Call it first (BeforeAll does): every port this suite binds is one the kernel " +
         "picked, so a daemon an earlier run left behind cannot be holding it.",
     );
@@ -148,7 +148,7 @@ export async function startService(
   daemon.stdout?.pipe(sink);
   daemon.stderr?.pipe(sink);
   live.add(daemon);
-  sweepOnSignal();
+  killLiveDaemonsOnSignalAndReRaise();
 
   const partial: Pick<Service, "odu" | "env" | "logPath"> = { odu, env, logPath };
   try {
@@ -156,7 +156,7 @@ export async function startService(
       const answer = spawnSync(odu, ["surface", "get", "service"], {
         env,
         encoding: "utf-8",
-        maxBuffer: BIG,
+        maxBuffer: MAX_CLI_OUTPUT_BYTES,
       });
       if (answer.status !== 0) return null;
       try {
@@ -171,7 +171,7 @@ export async function startService(
     }, readyTimeoutMs);
     return { ...partial, origin, daemon, root, daemonHome: cell.identity.home };
   } catch (err) {
-    killGroup(daemon);
+    killProcessGroup(daemon);
     live.delete(daemon);
     throw new Error(`${String(err)}\n--- daemon log ---\n${daemonLog(partial)}`);
   }
@@ -179,7 +179,7 @@ export async function startService(
 
 const live = new Set<ChildProcess>();
 
-function killGroup(daemon: ChildProcess): void {
+function killProcessGroup(daemon: ChildProcess): void {
   try {
     if (daemon.pid !== undefined) process.kill(-daemon.pid, "SIGTERM");
   } catch {
@@ -187,12 +187,12 @@ function killGroup(daemon: ChildProcess): void {
 }
 
 let sweeping = false;
-function sweepOnSignal(): void {
+function killLiveDaemonsOnSignalAndReRaise(): void {
   if (sweeping) return;
   sweeping = true;
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     process.on(signal, () => {
-      for (const daemon of live) killGroup(daemon);
+      for (const daemon of live) killProcessGroup(daemon);
       live.clear();
       process.removeAllListeners(signal);
       process.kill(process.pid, signal);
@@ -201,7 +201,7 @@ function sweepOnSignal(): void {
 }
 
 export function stopService(service: Service): void {
-  killGroup(service.daemon);
+  killProcessGroup(service.daemon);
   live.delete(service.daemon);
   for (const dir of [service.root, service.daemonHome]) {
     try {
@@ -220,7 +220,7 @@ export function oduCli(
   const answer = spawnSync(service.odu, argv, {
     env: { ...service.env, ...env },
     encoding: "utf-8",
-    maxBuffer: BIG,
+    maxBuffer: MAX_CLI_OUTPUT_BYTES,
   });
   return { status: answer.status, stdout: answer.stdout, stderr: answer.stderr };
 }
@@ -232,13 +232,13 @@ export function surfaceCall(
   const res = spawnSync(service.odu, ["surface", ...argv], {
     env: service.env,
     encoding: "utf-8",
-    maxBuffer: BIG,
+    maxBuffer: MAX_CLI_OUTPUT_BYTES,
   });
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
 export function activeRunsOf(service: Service, checkout: string): string[] {
-  const answer = verb(service, "run_list", { checkout });
+  const answer = surfaceVerbJson(service, "run_list", { checkout });
   if (answer.status !== 0) {
     throw new Error(
       `web-acceptance: run_list refused (exit ${answer.status})\n${answer.stderr}`,
@@ -250,7 +250,7 @@ export function activeRunsOf(service: Service, checkout: string): string[] {
 }
 
 export function cancelRun(service: Service, runId: string): boolean {
-  const answer = verb(service, "run_cancel", {
+  const answer = surfaceVerbJson(service, "run_cancel", {
     runId,
     scope: { kind: "run" },
     requestId: `wa-teardown-${crypto.randomUUID()}`,
@@ -258,11 +258,17 @@ export function cancelRun(service: Service, runId: string): boolean {
   return answer.status === 0;
 }
 
-export function verb(
+export interface VerbAnswer {
+  status: number | null;
+  json: unknown;
+  stderr: string;
+}
+
+export function surfaceVerbJson(
   service: Service,
   name: string,
   input: unknown,
-): { status: number | null; json: unknown; stderr: string } {
+): VerbAnswer {
   const res = surfaceCall(service, [name, "--input", JSON.stringify(input), "--json"]);
   let json: unknown = null;
   try {
@@ -284,6 +290,15 @@ beta: alpha
     exit 3
 `;
 
+const SLEEP_PAST_ANY_SCENARIO_SECONDS = 300;
+const LANE_SLEEP_SECONDS = 120;
+const BURST_OPENING_LINES = 40;
+const BURST_OPENING_PACE_SECONDS = 0.15;
+const BURST_LINES = 12_000;
+const NOISY_BURSTS = 20;
+const NOISY_LINES_PER_BURST = 250;
+const NOISY_BURST_PAUSE_SECONDS = 0.05;
+
 export const SLOW = `[metadata("ci")]
 default: alpha slow
 
@@ -292,7 +307,7 @@ alpha:
 
 slow: alpha
     echo "slow start"
-    sleep 300
+    sleep ${SLEEP_PAST_ANY_SCENARIO_SECONDS}
 `;
 
 export const FAST_RED = `[parallel]
@@ -304,7 +319,7 @@ quick:
     exit 1
 
 slow:
-    sleep 120
+    sleep ${LANE_SLEEP_SECONDS}
 `;
 
 export const TIMELINE_SHAPES = `[parallel]
@@ -319,7 +334,7 @@ bad:
     exit 1
 
 slow:
-    sleep 120
+    sleep ${LANE_SLEEP_SECONDS}
 
 last: slow
     echo "never reached in a scenario"
@@ -334,16 +349,16 @@ burst:
     echo "__BURST_BEGIN__"
     # A SLOW OPENING, so a follower catches up and parks in a waiting read —
     # which is the state it has to be in for the rest of this to mean anything.
-    for i in $(seq 1 40); do
+    for i in $(seq 1 ${BURST_OPENING_LINES}); do
       printf 'burst line %06d — padding so every line is the same width in here\\n' "$i"
-      sleep 0.15
+      sleep ${BURST_OPENING_PACE_SECONDS}
     done
     # THEN EVERYTHING AT ONCE, and exit. Several hundred kilobytes land between
     # one read and the next, so the page that first reports "this log can no
     # longer grow" has many more pages behind it. A follower that stops there
     # keeps the first 64 KiB and loses the rest — including the last line, which
     # for a failure is the diagnosis.
-    for i in $(seq 41 12000); do
+    for i in $(seq ${BURST_OPENING_LINES + 1} ${BURST_LINES}); do
       printf 'burst line %06d — padding so every line is the same width in here\\n' "$i"
     done
     echo "__BURST_END__"
@@ -355,21 +370,21 @@ default: noisy
 noisy:
     #!/usr/bin/env bash
     set -euo pipefail
-    for burst in $(seq 0 19); do
-      for i in $(seq 1 250); do
-        printf 'noisy line %06d — padding so every line is the same width here\\n' "$((burst * 250 + i))"
+    for burst in $(seq 0 ${NOISY_BURSTS - 1}); do
+      for i in $(seq 1 ${NOISY_LINES_PER_BURST}); do
+        printf 'noisy line %06d — padding so every line is the same width here\\n' "$((burst * ${NOISY_LINES_PER_BURST} + i))"
       done
-      sleep 0.05
+      sleep ${NOISY_BURST_PAUSE_SECONDS}
     done
-    echo "NOISY SUMMARY: 5000 lines emitted"
+    echo "NOISY SUMMARY: ${NOISY_BURSTS * NOISY_LINES_PER_BURST} lines emitted"
 `;
 
 export function makeFixture(justfile: string): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "odu-wa-repo-")));
-  writeFileSync(join(dir, ".gitignore"), ".ci/\n");
-  writeFileSync(join(dir, "justfile"), justfile);
+  const resolvedFixtureDir = realpathSync(mkdtempSync(join(tmpdir(), "odu-wa-repo-")));
+  writeFileSync(join(resolvedFixtureDir, ".gitignore"), ".ci/\n");
+  writeFileSync(join(resolvedFixtureDir, "justfile"), justfile);
   const git = (...args: string[]): void => {
-    execFileSync("git", args, { cwd: dir, encoding: "utf-8" });
+    execFileSync("git", args, { cwd: resolvedFixtureDir, encoding: "utf-8" });
   };
   git("init", "-q");
   git("add", "-A");
@@ -383,7 +398,7 @@ export function makeFixture(justfile: string): string {
     "-m",
     "fixture",
   );
-  return dir;
+  return resolvedFixtureDir;
 }
 
 export function headOf(dir: string): string {
@@ -405,7 +420,7 @@ export function startRun(
   service: Service,
   input: Record<string, unknown>,
 ): string {
-  const start = verb(service, "run_start", { ...input, noPost: true });
+  const start = surfaceVerbJson(service, "run_start", { ...input, noPost: true });
   if (start.status !== 0) {
     throw new Error(
       `web-acceptance: run_start refused (exit ${start.status})\n${start.stderr}\n` +
@@ -416,21 +431,28 @@ export function startRun(
   return receipt.runId;
 }
 
+export interface NodeFailure {
+  node: string;
+  logKey: string;
+}
+
+export interface Settled {
+  settled: boolean;
+  passed: boolean;
+  failures: NodeFailure[];
+}
+
 export async function waitSettled(
   service: Service,
   runId: string,
   timeoutMs: number,
-): Promise<{ passed: boolean; failures: { node: string; logKey: string }[] }> {
+): Promise<Settled> {
   return await until(
     `run ${runId} to settle`,
     () => {
-      const waited = verb(service, "run_wait", { runId, deadlineMs: 20_000 });
+      const waited = surfaceVerbJson(service, "run_wait", { runId, deadlineMs: 20_000 });
       if (waited.status !== 0) return null;
-      const value = waited.json as {
-        settled: boolean;
-        passed: boolean;
-        failures: { node: string; logKey: string }[];
-      };
+      const value = waited.json as Settled;
       return value.settled ? value : null;
     },
     timeoutMs,

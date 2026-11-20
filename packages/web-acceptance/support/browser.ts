@@ -1,7 +1,9 @@
-export const BROWSER_ARGS: ReadonlyArray<string> = [
+const CONTAINER_ARGS: ReadonlyArray<string> = [
   "--no-sandbox",
   "--disable-setuid-sandbox",
-  "--disable-gpu",
   "--disable-dev-shm-usage",
-  "--headless=new",
 ];
+
+const HEADLESS_ARGS: ReadonlyArray<string> = ["--disable-gpu", "--headless=new"];
+
+export const BROWSER_ARGS: ReadonlyArray<string> = [...CONTAINER_ARGS, ...HEADLESS_ARGS];
