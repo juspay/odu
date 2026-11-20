@@ -1,13 +1,3 @@
-/**
- * WHO THE BOARD THINKS IS HERE — the one decision every control's visibility
- * rests on.
- *
- * It is pure and exported from the shell for exactly one reason: a mistake in
- * it hides buttons instead of throwing. Round 2 shipped one — with no door the
- * page granted nobody any floor, so a loopback daemon lost Start run, Retry,
- * Run again and both cancels, and only a browser would have said so.
- */
-
 import { describe, expect, it } from "bun:test";
 import { doorAfterAnswer, holds, principalOf, showsBoard } from "./app";
 
@@ -57,8 +47,6 @@ describe("with a door", () => {
 
 describe("re-asking the door", () => {
   it("keeps the door a page already knew when the re-ask fails", () => {
-    // A host that cannot be reached has not answered: the wire says so, and the
-    // board stays. Otherwise a dropped connection removes every run control.
     expect(doorAfterAnswer(true, null)).toBe(true);
     expect(doorAfterAnswer(false, null)).toBe(false);
     expect(doorAfterAnswer(null, null)).toBeNull();
@@ -72,8 +60,6 @@ describe("re-asking the door", () => {
 
 describe("with an unknown door", () => {
   it("grants nothing, and draws nothing", () => {
-    // A daemon that never answered is not a loopback daemon: assuming one would
-    // draw every run control for a server that is not there.
     expect(principalOf(null, null)).toBeNull();
     expect(showsBoard(null, null)).toBe(false);
   });

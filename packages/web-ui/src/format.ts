@@ -1,20 +1,4 @@
-/**
- * THE SHELL'S OWN READINGS — the connection indicator's words, and the favicon.
- *
- * These two are the page's CHROME rather than a row's view: every face is drawn
- * under the same wire indicator, and the tab's icon answers "is anything
- * broken" for the whole document. Everything a RUN is painted from lives in
- * `@odu/ci/face`, with the run views — so this module names no row, and the
- * shell can be read without one.
- */
-
 import type { SurfaceReadout, SurfaceReadoutStatus } from "@kolu/surface/solid";
-/** The five semantic hues, from the package that OWNS the vocabulary.
- *
- *  `@odu/face` names no row, so the shell may import the union from there
- *  where it may not import `@odu/run-client`'s canonical one — and the two
- *  are held equal by a type-level assertion in `@odu/ci/face`'s `format`,
- *  which is a file that can see both. */
 import type { StatusHue } from "@odu/face/ui";
 
 export const CONNECTION: Record<
@@ -34,11 +18,6 @@ export const CONNECTION: Record<
   },
 };
 
-/** What the connection indicator SAYS, and in which hue. `degraded` is the one
- *  that names what stopped, so the sentence can never come out with a hole in
- *  it. It lives here rather than in the shell because it is a word: it reads
- *  `CONNECTION`, the table this module already owns, and the shell has eight
- *  other concerns. */
 export function wireText(readout: SurfaceReadout): {
   text: string;
   hue: StatusHue;
@@ -64,5 +43,3 @@ export function faviconSvg(hue: "red" | "amber"): string {
     `</svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
-
-/** A byte count, at the precision a log page needs. */

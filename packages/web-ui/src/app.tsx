@@ -1,34 +1,3 @@
-/**
- * THE SHELL — the address bar's router, the rail of rows, the wire indicator,
- * and the tab. It renders no run and no bucket: those are `@odu/ci/face`,
- * `@odu/cache/face`, `@odu/auth/face` and `@odu/cloudflare/face`, each in the
- * package that owns the row it draws.
- *
- * **Four rows, one page.** The rail on the left is the switch between them,
- * and they are STATES of this page rather than documents: the route decides
- * which face is mounted, and each face gets the client of its own row and the
- * route's slice of the address. A face cannot reach across — the runs' views
- * hold the runs' client, the cache's holds the cache's — and the shell is the
- * one file that wires them.
- *
- * **THE UI EDGE IS HERE, once.** A procedure is an `Effect` — a description —
- * and a click is the moment one becomes execution. `call` below is that
- * crossing for EVERY face (`props.call`), so "a control's whole story" has one
- * home and two views cannot disagree about what a refusal means.
- *
- * **The connection is drawn, not hidden.** The readout is the framework's own
- * five-state fact — connecting, live, degraded, reconnecting, retired — and
- * each is a state a person can be in and needs to know about. `reconnecting`
- * is the honest one: the page keeps showing the last thing the service said,
- * and says so rather than letting stale rows look live.
- *
- * **The rail carries ONE count, and that is deliberate.** A count is a
- * subscription, and the shell already holds exactly one — the ambient monitor
- * it keeps for the tab title. "2 failing" beside Runs is that reading, drawn
- * where a person already looks. A bucket count beside Cache would be a second
- * always-open subscription for a number nobody acts on, so there isn't one.
- */
-
 import type { SurfaceReadout } from "@kolu/surface/solid";
 import {
   CiFace,
@@ -65,19 +34,6 @@ import {
 import { parseRunHash, runHash, logHash } from "@odu/service-client/routes";
 import { faviconSvg, wireText } from "./format";
 
-/**
- * Where the page is, in the URL hash.
- *
- * The RUN ADDRESS itself — what `#/run/<id>` names, and what makes a run and
- * one node's output within it linkable — is `@odu/service-client/routes`,
- * minted and read there because a link is minted by whoever holds the run (an
- * editor, a terminal, another app's panel) and opened here. What stays local
- * is the rest of this page's states: `#/` for the runs, `#/new` for the create
- * form, `#/machines` and `#/maintain` for the runs' operations,
- * `#/cache[/<bucket>]` for the cache, `#/tunnel` for the tunnel, `#/profile`
- * for the signed-in person's sessions and tokens, and `#/people` for an
- * owner's role table.
- */
 type Route =
   | CiRoute
   | { at: "cache"; bucket: string | null }
@@ -85,45 +41,22 @@ type Route =
   | { at: "profile" }
   | { at: "people" };
 
-/**
- * DOES THIS DAEMON HAVE A DOOR? `null` when the answer could not be fetched
- * before the first render — a daemon that is down, not one without a door.
- */
 export type DoorState = boolean | null;
 
-/**
- * WHO THIS PAGE APPLIES A ROW'S FLOOR TO. Pure, and exported, because it is
- * the one decision every control's visibility rests on:
- *
- *   - **no door** (`false`) ⇒ the LOCAL OWNER. A loopback daemon has no
- *     identity provider, so the person at this machine IS its owner and every
- *     floor is held — the same rule `may()` states for `local`.
- *   - **door, whoami still in flight, or anonymous** ⇒ nobody. Nothing
- *     privileged is drawn before the answer arrives, and a sign-in page draws
- *     none of it.
- *   - **door, answered with a person** ⇒ that person, with their role.
- */
 export function principalOf(door: DoorState, who: Who | null): Principal | null {
   if (door === false) return LOCAL_OWNER;
   if (door === null) return null;
   return who === null || who.kind === "anonymous" ? null : who;
 }
 
-/** Does this principal hold `floor`? Nothing held by nobody. */
 export function holds(principal: Principal | null, floor: Role): boolean {
   return principal !== null && may(principal, floor);
 }
 
-/** THE DOOR AFTER AN ANSWER. A re-ask that could not reach the host is not an
- *  answer — the wire already says the connection is down — so a door the page
- *  already knew stays known rather than going back to unknown and taking the
- *  board with it. */
 export function doorAfterAnswer(known: DoorState, answer: DoorState): DoorState {
   return answer === null ? known : answer;
 }
 
-/** May the board be drawn? With no door it always may; with one, only for a
- *  person who is not anonymous; with an unknown door, not until it answers. */
 export function showsBoard(door: DoorState, who: Who | null): boolean {
   if (door === false) return true;
   if (door === null) return false;
@@ -173,27 +106,11 @@ function hashOf(route: Route): string {
 
 export function App(props: {
   client: CiClient;
-  /** ASKS THE HOST WHETHER IT HAS A DOOR, once more — `main.tsx` owns the
-   *  request (it is a host route, and the fence keeps host routes to the
-   *  entry), and this component owns the moment to make it. */
   redialDoor: () => void;
-  /** THE CACHE'S CLIENT — a different row, handed to the one face that renders
-   *  it and to nothing else. */
   cache: CacheClient;
-  /** THE AUTH ROW'S CLIENT. Its surface is always dialled (the bundle carries
-   *  the contract), but the row may not be MOUNTED — `door` is the host's
-   *  answer to that question, read before the first render. */
   auth: AuthClient;
-  /** THE TUNNEL'S CLIENT. The row is mounted only on a daemon with a
-   *  Cloudflare token; the page asks its status read and says so when it is
-   *  absent. */
   cloudflare: CloudflareClient;
-  /** Does this daemon have a DOOR? The host answers `GET /_odu/door` before
-   *  the first render; `null` means the answer did not arrive. */
   door: DoorState;
-  /** WHICH SIBLING ROWS ARE MOUNTED, from `GET /_odu/rows`. A row that is not
-   *  here gets no switch and no subscription — the door's pattern for a
-   *  presence fact. */
   rows: ReadonlyArray<string>;
   readout: SurfaceReadout;
   onReload: () => void;
@@ -216,30 +133,10 @@ export function App(props: {
   globalThis.addEventListener("hashchange", onHash);
   onCleanup(() => globalThis.removeEventListener("hashchange", onHash));
 
-  // A clock the ages read. One interval for the whole page rather than one per
-  // row, and `unref`-less because a browser has no such notion — `onCleanup`
-  // is the disposal that matters here.
   const [now, setNow] = createSignal(Date.now());
   const clock = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(clock));
 
-  // ── the tab ──
-  //
-  // THE TAB IS THE AMBIENT MONITOR, and the counts are the RUNS' — the board's
-  // rows, folded by `@odu/ci/face`. What they must NOT be is the runs' FACE's:
-  // a face unmounts when another row is on screen, and a run that fails while
-  // somebody reads buckets is exactly the fact the tab exists to carry. So the
-  // shell owns the subscription once, here, and the face is handed the same
-  // reading when it is drawn. A page left open is a page nobody is looking at,
-  // and a title and a favicon are the two pixels that stay visible from
-  // another window. Broken outranks busy: a run still going is worth a glance,
-  // a failure is worth coming back for — and it is a WORD as well as a glyph,
-  // because a title read aloud is the only version of this some people get.
-  //
-  // BUILT LAZILY, and that is a door fact: the monitor subscribes to `runs`,
-  // and a server with a door refuses that subscription to a connection with no
-  // session. Opening it on the sign-in page would be a subscription that dies
-  // on arrival, four times a second. So it opens when the board does.
   const [ambient, setAmbient] = createSignal<CiAmbient | null>(null);
   const restingIcon =
     typeof document === "undefined"
@@ -250,7 +147,6 @@ export function App(props: {
     if (typeof document === "undefined") return;
     const held = ambient();
     if (held === null) {
-      // Nobody is looking at runs: the tab says nothing about them.
       document.title = "odu";
       return;
     }
@@ -268,43 +164,13 @@ export function App(props: {
         ? faviconSvg("red")
         : active > 0
           ? faviconSvg("amber")
-          : // No resting icon means the document had no `<link rel="icon">`
-            // when this shell was built, so there is nothing to go back TO.
-            (restingIcon ?? link.href);
+          : (restingIcon ?? link.href);
   });
 
-  // ── the door ──
-  //
-  // TWO FACTS, and neither is guessed. Whether this daemon HAS a door is the
-  // host's own answer, fetched before this page was even rendered (`./main`),
-  // so the shell never opens the board for a moment on a server it turns out
-  // cannot serve it. `whoami` says who this connection is — `anonymous` when
-  // the gate let us in without a session, which is a page before it signs in
-  // rather than an error. With no door, nothing is asked.
   const [who, setWho] = createSignal<Who | null>(null);
 
-  // ── which build is serving ──
-  //
-  // THE SERVICE CELL, subscribed HERE because the shell holds the runs' client
-  // and the cache view holds the cache's: a row never reads another row's
-  // client, so the fact it needs is handed down. `build.commit` is the
-  // revision the cache page offers as the push action's ref — the action
-  // builds its pusher from the commit it is pinned to, so the commit a server
-  // was built from is the pusher that matches it. An ACCESSOR travels, not its
-  // value: a service handover changes the answer without reloading the page.
   const service = props.client.cells.service.use();
 
-  // A LIVE WIRE RE-ASKS WHAT AN OUTAGE MADE STALE. Two questions ride the same
-  // event, so they are one effect:
-  //
-  //   - THE DOOR, always. The ask before the first render can fail while the
-  //     wire is still redialling, and an unknown door draws the frame and
-  //     nothing else; the shell owns the connection, so the shell owns the
-  //     retry. No timer — a timer would be a second opinion about the wire.
-  //   - THE PERSON, on a transition back to live. Signing out in one tab, a
-  //     revocation and an expiry all end the lease; the tab holding it is
-  //     severed and redials, and what comes back is a NEW connection that may
-  //     well be nobody.
   createEffect(
     on(
       () => props.readout.status,
@@ -320,25 +186,15 @@ export function App(props: {
     if (props.door !== true || who() !== null) return;
     void Effect.runPromise(props.auth.procedures.user.whoami()).then(
       (answer) => setWho(answer.who),
-      // A failed whoami on a daemon that says it has a door is a broken
-      // connection, not a person: the wire readout already says so, and a
-      // sign-in form would be a guess.
       () => {},
     );
   });
-  /** THE CONNECTION'S PRINCIPAL, as a row reads it — the one decision every
-   *  control's visibility rests on (see {@link principalOf}). */
   const principal = createMemo(() => principalOf(props.door, who()));
-  /** The rows' rule, read once here and handed to each face as a boolean. */
   const holdsFloor = (floor: Role): boolean => holds(principal(), floor);
   const boardShown = createMemo(() => showsBoard(props.door, who()));
   let ambientRoot: (() => void) | undefined;
   onCleanup(() => ambientRoot?.());
   createEffect(() => {
-    // THE MONITOR FOLLOWS THE BOARD, BOTH WAYS. Its subscriptions belong to a
-    // page that can see runs: built before the door is known they are refused
-    // on every accept, and left standing when the board hides they keep
-    // receiving frames nobody draws. A detachable owner is what lets it go.
     if (boardShown() && ambient() === null) {
       createRoot((dispose) => {
         ambientRoot = dispose;
@@ -353,8 +209,6 @@ export function App(props: {
     }
   });
 
-  // ── the route, read in slices ──
-  //
   // A `Match` narrows nothing into its children, so the readings the rail and
   // the switch need are memos rather than a discriminated `route()` read
   // inside the JSX.
@@ -363,11 +217,7 @@ export function App(props: {
   const atProfile = createMemo(() => route().at === "profile");
   const atPeople = createMemo(() => route().at === "people");
   const atMachines = createMemo(() => route().at === "machines");
-  /** THE TUNNEL ROW'S PRESENCE. Without its token the row is not mounted, and
-   *  a switch would open a subscription nothing answers. */
   const tunnelRow = createMemo(() => props.rows.includes("cloudflare"));
-  /** THE PEOPLE PAGE IS AN OWNER'S, drawn for a signed-in owner only: a local
-   *  owner has no door, so there is no role table to read. */
   const canGrant = createMemo(() => who()?.kind === "user" && holdsFloor("owner"));
   const openBucket = createMemo<string | null>(() => {
     const here = route();
@@ -380,19 +230,12 @@ export function App(props: {
       ? { at: "board" }
       : here;
   });
-  /** The runs are showing when nothing else is. One reading, because the rail
-   *  and the face switch must never disagree about which screen is up. */
   const atRuns = createMemo(
     () => !atCache() && !atTunnel() && !atProfile() && !atPeople(),
   );
 
-  /** What the connection indicator says, and in which hue — one call, because
-   *  the sentence and the colour are two halves of one answer. */
   const wire = createMemo(() => wireText(props.readout));
 
-  /** WHAT THE RAIL SAYS BESIDE "RUNS": the ambient monitor's own tally, the
-   *  subscription this shell already holds. Failing outranks running for the
-   *  same reason it does in the tab — one is worth coming back for. */
   const runsCount = createMemo<{ text: string; hue: string } | null>(() => {
     const held = ambient();
     if (held === null) return null;
@@ -402,20 +245,6 @@ export function App(props: {
     return null;
   });
 
-  /** THE RAIL'S ROWS, spelled out rather than mapped.
-   *
-   *  They used to be a `<For>` over a memo that rebuilt its array — and so
-   *  its objects — whenever ANY of its readings moved, the runs' tally
-   *  included. `For` keys on reference, so every tick that changed "2
-   *  failing" tore down all five buttons and built five new ones: the DOM
-   *  node under the pointer replaced, the focus ring dropped, and the
-   *  keyboard sweep in `features/keyboard.feature` unable to find the
-   *  controls it had just stamped.
-   *
-   *  Five static elements is the fix and also the simpler page: each button
-   *  is one node for the life of the tab, and the only thing that re-runs is
-   *  the binding that actually changed. A list was never buying anything —
-   *  the rows are not data, they are this application's five places. */
   const RailRow = (rail: {
     label: string;
     pressed: boolean;
@@ -430,55 +259,22 @@ export function App(props: {
     </button>
   );
 
-  // ── the sign-in page ──
-  //
-  // OUTSIDE THE FRAME, and that is the design: a person who is not signed in
-  // has no rows to switch between, so drawing an empty rail beside a sign-in
-  // form would be a page offering navigation it will refuse. The auth row
-  // draws the whole screen.
   return (
     <Show when={!anonymous()} fallback={<SignIn />}>
       <div class="app" classList={{ "app-frame": route().at === "run" }}>
-        {/* ── THE RAIL ──
-            The wordmark, what the wire is doing, the rows, and who you are. It
-            is an `<aside>` with a landmark label rather than a `<nav>` holding
-            everything, because the account card at the foot is not navigation.
-
-            The wordmark is `logo.svg`'s own idea spelled in text — `odu` in
-            bold mono, because odu is a shell prompt you attach to — rather
-            than a second drawing of the mark: the logo beside the bundle is
-            content-hashed, so a view that named it would be naming a URL only
-            the build knows. It is a `<span>` and not a link: there is nowhere
-            for it to go that this page is not already, and a decorative
-            control at the top of the document is one Tab stop between a person
-            and the first thing they came here to press. */}
         <aside class="sidebar" aria-label="odu">
           <div class="sidebar-head">
             <span class="brand">
               <span class="brand-name">odu</span>
             </span>
-            {/* The words AND the hue come from `./format`'s `CONNECTION`, so
-                the shell names no status class of its own: which colour
-                "reconnecting" carries is an assignment of meaning, and it
-                belongs in the table with the words rather than in a selector
-                list. The wire is the one fact on this page that must never
-                scroll away, which is why it rides the rail. */}
             <div class={`wire hue-${wire().hue}`} role="status" aria-live="polite">
               {wire().text}
             </div>
           </div>
           <Show when={props.readout.needsReload}>
-            {/* Through `Button` like every other control: this was once a
-                hand-spelled `<button>` re-implementing that component's
-                default branch exactly, which meant every future change to what
-                a control IS — the drawn hint was one — silently skipped it. */}
             <Button onClick={props.onReload}>Reload</Button>
           </Show>
           <Show when={boardShown()}>
-            {/* THE ROWS. Buttons rather than a link list because they are
-                STATES of one page: `aria-pressed` says which, and a person
-                arriving with a screen reader hears "Cache, pressed" rather
-                than a navigation menu's worth of ceremony. */}
             <nav class="nav" aria-label="board rows">
               <RailRow
                 label="Runs"
@@ -496,9 +292,6 @@ export function App(props: {
                 pressed={atMachines()}
                 onPick={() => go({ at: "machines" })}
               />
-              {/* The tunnel row is mounted only on a daemon with a Cloudflare
-                  token, and the role table is an owner's: a switch for either
-                  where it does not apply is a control that only refuses. */}
               <Show when={tunnelRow()}>
                 <RailRow
                   label="Tunnel"
@@ -515,11 +308,6 @@ export function App(props: {
               </Show>
             </nav>
           </Show>
-          {/* WHO IS SIGNED IN, at the foot of the rail, drawn by the ROW that
-              owns the fact: `Who` is the auth row's contract, and a view that
-              renders a row's contract lives in that row's package. A daemon
-              with no auth row never asks who you are, so the shell says what
-              it knows instead — the person at a loopback board IS its owner. */}
           <Show
             when={who()}
             fallback={
@@ -548,9 +336,6 @@ export function App(props: {
         </aside>
 
         <main class="main">
-          {/* THE DOOR, IN FRONT OF THE BOARD. A daemon with a door and no
-              answer yet draws neither the rows nor a sign-in form: it says so.
-              A daemon with NO door never enters this state. */}
           <Show when={props.door === true && who() === null}>
             <p class="hint">checking who you are…</p>
           </Show>
@@ -564,9 +349,6 @@ export function App(props: {
                 onClose={() => go({ at: "board" })}
               />
             </Show>
-            {/* DRAWN for an owner; the row refuses `grant.list` and
-                `user.grant` to anyone else on its own. A non-owner who types
-                the address meets nothing rather than a page of refusals. */}
             <Show when={atPeople() && canGrant()}>
               <PeopleFace
                 client={props.auth}
@@ -595,20 +377,12 @@ export function App(props: {
                 call={(effect) => Effect.runPromise(effect)}
                 onOpen={(bucket) => go({ at: "cache", bucket })}
               />
-              {/* THE ROUTE STRIP: the shell composes the two rows on a bucket
-                  page so the domain's state is visible where the name was set,
-                  without the cache's face knowing what a tunnel is. */}
               <Show when={tunnelRow() ? openBucket() : null}>
                 {(bucket) => (
                   <BucketRoute client={props.cloudflare} bucket={bucket()} now={now()} />
                 )}
               </Show>
             </Show>
-            {/* ONE FACE AT A TIME, and each is BUILT ON ENTRY: the compiler
-                turns a `Show`'s children into a getter, so leaving a run and
-                coming back mints a fresh view rather than re-inserting the one
-                that was disposed on the way out — see `@odu/ci/face`'s `dom`
-                header for the failure that taught us to care. */}
             <Show when={atRuns() ? ambient() : null}>
               {(held) => (
                 <CiFace
@@ -617,9 +391,6 @@ export function App(props: {
                   now={now()}
                   call={(effect) => Effect.runPromise(effect)}
                   onRoute={(next) => go(next)}
-                  // THE ONE SPELLER OF A CROSS-ROW ADDRESS. The run page
-                  // links the bucket it pushes to (PLAN 4.1) through this
-                  // rather than writing `#/cache/<name>` in a face.
                   bucketHref={(bucket) => hashOf({ at: "cache", bucket })}
                   ambient={held()}
                   canRun={holdsFloor("member")}
