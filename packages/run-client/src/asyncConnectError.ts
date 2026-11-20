@@ -5,42 +5,17 @@
  * Under Bun 1.3.10 a unix-path connect whose `connect(2)` fails outright
  * (ENOENT for "nothing is bound there") can emit `'error'` synchronously from
  * inside `Socket.prototype.connect` — observed under `bun test`, not under a
- * plain `bun` run, so it is execution-context dependent rather than a clean
- * either/or. That breaks every caller written to Node's semantics, which is
- * all of them: the canonical shape is `const s = createConnection(path)`
- * followed by `s.once("error", …)`, and a synchronous emit lands before that
- * listener exists. An EventEmitter with no `'error'` listener throws, so the
- * error escapes the caller entirely instead of resolving its promise.
+ * plain `bun` run. A synchronous emit lands before the caller's `'error'`
+ * listener exists, and an EventEmitter with no `'error'` listener throws.
  *
- * Two @kolu/surface call sites depend on the async contract and are the reason
- * this exists — one on each side of the socket, which is why the shim ships
- * with the DIAL rather than with the coordinator that serves it:
- *   - `probeSocket` (unix-socket.ts), which classifies ENOENT as "free to
- *     bind". Serving a socket on a fresh path is the NORMAL case, so the
- *     escaping error turns every successful serve into a thrown ENOENT.
- *   - `unixSocketLink` (links/unix-socket.ts), which rejects with the raw
- *     socket error so a dial against a dead run can be reported honestly.
+ * Only an emit that happened during the `connect()` call is deferred, and only
+ * when the caller had no `'error'` listener of its own at that moment.
  *
- * The patch is deliberately narrow: it only defers an emit that happened
- * *during* the `connect()` call, and only when the caller had no `'error'`
- * listener of its own at that moment. A caller that attached one first has
- * already handled the emit correctly, and re-emitting would deliver it twice.
- * When the runtime behaves (the emit is already async) nothing is captured and
- * this is a pass-through.
- *
- * Importing this module installs the patch — it is a runtime compat shim, so
- * the side effect IS the export. `./dial` imports it, so a consumer that
- * hydrates this package and dials a run is covered without knowing the shim
- * exists. It is published as its own entry for the other caller: odu's
- * coordinator, which SERVES a socket and reaches `probeSocket` without going
- * through any dial, imports it by name.
+ * Importing this module installs the patch; the side effect IS the export.
  */
 
 import { Socket } from "node:net";
 
-/** `connect` is overloaded (path / port / options forms). A transparent
- *  wrapper never inspects the tuple, so it is forwarded unexamined under one
- *  variadic signature rather than re-declaring every overload. */
 // biome-ignore lint/suspicious/noExplicitAny: see above — the argument tuple is whatever the caller passed.
 type Connect = (this: Socket, ...args: any[]) => Socket;
 
@@ -50,7 +25,6 @@ Socket.prototype.connect = function connect(
   this: Socket,
   ...args: Parameters<Connect>
 ): Socket {
-  // Already-handled emits stay the caller's business.
   if (this.listenerCount("error") > 0) return nativeConnect.apply(this, args);
 
   let premature: Error | undefined;
@@ -64,9 +38,6 @@ Socket.prototype.connect = function connect(
     this.off("error", capture);
     if (premature !== undefined) {
       const err = premature;
-      // A microtask lands after the caller's `createConnection(...)` statement
-      // returns, which is where it attaches its listener — the earliest point
-      // that honors the contract.
       queueMicrotask(() => {
         this.emit("error", err);
       });
