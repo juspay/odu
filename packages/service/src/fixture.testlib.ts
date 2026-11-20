@@ -121,8 +121,6 @@ export function crashOwner(
     `${JSON.stringify(
       {
         ...owner,
-        // A pid that cannot be alive. `kill(0)` on it answers ESRCH, which is
-        // what the fence requires before it will call an owner gone.
         pid: opts.pid ?? 0x7ffffff0,
         host: hostname(),
         heartbeatAt: opts.heartbeatAt,
@@ -133,11 +131,6 @@ export function crashOwner(
   );
 }
 
-/**
- * The journal and the attempt store are written in the coordinator's own order
- * — `attempt_started`, then the log, then `node_status`, then `log_finalized` —
- * because the attention fold reads exactly that ordering.
- */
 export function writeNode(
   world: World,
   handle: RunHandle,
@@ -195,11 +188,6 @@ export function writeNode(
   });
 }
 
-/**
- * `pool` and `hostsSource` are OMITTED when not given rather than spelled as
- * empty, because that is the shape a run written before those fields existed
- * has on disk.
- */
 export function writeLane(
   handle: RunHandle,
   token: OwnershipToken,
@@ -267,9 +255,6 @@ export function writeRoster(
   appendEvent(handle, token, { kind: "roster", order: [...order] }, at);
 }
 
-/** Finalize a run the way `finalize` does — the journal line AND the verdict,
- *  because a reader that trusted only one of them is exactly the bug the
- *  catalog's own `resumedSinceFinal` exists to prevent. */
 export function finalizeRun(
   handle: RunHandle,
   token: OwnershipToken,

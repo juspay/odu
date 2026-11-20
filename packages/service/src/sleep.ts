@@ -1,7 +1,3 @@
-/** The wait a polling stream source does between reads.
- *
- *  Resolves on the deadline OR on the subscription's interrupt, whichever comes
- *  first, and detaches its listener either way. */
 export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   const done = (): void => {

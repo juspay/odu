@@ -87,8 +87,6 @@ describe("venue.release happens once", () => {
       requestId: "client-a-release-1",
     };
 
-    // THE SCENARIO, in order: A releases and the answer is recorded; the reply
-    // is lost on the way back; somebody else takes a new hold; A retries.
     const first = await call(service.surface.venue.release(request));
     expect(first.ok).toBe(true);
     expect(ports.releases).toHaveLength(1);
@@ -317,10 +315,6 @@ describe("a receipt knows which inventory it was for", () => {
     expect((await call(first.service.surface.venue.hold(base))).ok).toBe(true);
     await first.close();
 
-    // A receipt outlives the service that wrote it — that is the whole reason
-    // it is a file — so the digest has to survive the trip too. A daemon that
-    // was restarted between a lost reply and its retry is exactly when a caller
-    // repeats an id, and it must not be the moment the distinction is lost.
     expect(w.requestsRoot).not.toBe("");
     const second = serve(recordingPorts({ hold: HOLD }));
     const other = await call(

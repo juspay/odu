@@ -2,8 +2,6 @@ import type { CatalogOptions } from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
 import type { Caller } from "./caller";
 
-/** The target and the credential, as a launch carries them. The engine takes
- *  the same shape — see `@odu/execution/coordinator/launcher`. */
 export interface LaunchPush {
   readonly substituter: string;
   /** `Odu-Origin`: where the push is aimed. */
@@ -28,16 +26,8 @@ export interface LaunchRequest {
   readonly caller: Caller;
   readonly supersede: boolean;
   readonly linger: boolean;
-  /**
-   * Resolved here and NOT part of the request digest: a repeated `requestId`
-   * re-resolves, because the cache a checkout reads from is a fact about the
-   * world and the digest is a fact about what the caller sent.
-   */
   readonly push: LaunchPush | null;
   readonly pushSkipped: string | null;
-  /** A separate field from the one above, not a second meaning of it: a run
-   *  that is pushing and a run that is not are opposite states, and a reader
-   *  holding one sentence had to consult `push` to learn which it held. */
   readonly pushKeyWarning: string | null;
   readonly checkoutMoved: string | null;
 }
@@ -92,10 +82,6 @@ export interface RetryReceipt {
   lifetime?: string;
 }
 
-/**
- * The same union `@odu/execution`'s retry policy declares, spelled here because
- * the arrow runs cli → execution and this package must not import the engine.
- */
 export type RetryRefusal =
   | "bad_input"
   | "unknown_run"
@@ -135,12 +121,6 @@ export type CancelScope =
 export interface CancelRequest {
   endpoint: string;
   runId: string;
-  /**
-   * `<sha>#<seq>` is the identity the coordinator publishes and the catalog
-   * stores, and the adapter compares it before it mutates anything. `seq: null`
-   * is a run that reserved no ordinal and so cannot prove which run it is; the
-   * adapter refuses rather than guessing.
-   */
   expect: { sha: string; seq: number | null };
   scope: CancelScope;
 }
@@ -148,9 +128,6 @@ export interface CancelRequest {
 export type CancelOutcome =
   | { kind: "cancelled"; detail: string | null }
   | { kind: "declined"; detail: string }
-  /** Dispatched, and what became of it is not known. Never recorded as a
-   *  finished request: a repeat must be free to ask again, which is safe
-   *  because cancelling twice cancels once. */
   | { kind: "unresolved"; detail: string };
 
 export type RunCanceller = (request: CancelRequest) => Promise<CancelOutcome>;
@@ -164,10 +141,6 @@ export interface CheckoutFacts {
 
 export type CheckoutProbe = (checkout: string) => CheckoutFacts;
 
-/** BOTH REFS ARE ALREADY CHECKED when a mover is handed this: `run.start`
- *  holds `sha` to hex and `branch` to git's own branch grammar before any of
- *  it is spelled to a subprocess, because a `branch` of `--upload-pack=…` is
- *  a command and `execFile` does nothing about git's option parsing. */
 export interface CheckoutMoveRequest {
   readonly checkout: string;
   readonly branch: string;
@@ -185,7 +158,6 @@ export type CheckoutMover = (
   request: CheckoutMoveRequest,
 ) => Promise<CheckoutMoveOutcome>;
 
-/** One recipe in a resolved DAG. Structurally `@odu/execution`'s `TaskSpec`. */
 export interface TaskFacts {
   readonly id: string;
   readonly name: string | null;

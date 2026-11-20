@@ -1,25 +1,3 @@
-/**
- * The SERVICE RUNTIME — one implementation of `oduServiceSurface`, served
- * through every door.
- *
- * **A ROOTED bundle, and the shape is load-bearing.** The service surface is
- * the unprefixed CORE, so its wire tags are bare (`surface/runs/get`) — which is
- * why a browser dials it with `connectSurface`, the CLI mounts it with bare verb
- * names (`odu surface run_start`), and an agent sees `run_start` rather than
- * `app_run_start`. The daemon's frozen control fragment is mounted as the
- * SIBLING `control`, which is exactly where `@kolu/surface-daemon-supervisor`'s
- * identity probe looks for it. One group, two doors, no adapter between them.
- *
- * **The registry owns the clock; the surface owns the publish.** A single
- * poller re-projects the catalog and drives `ctx`.
- *
- * **The poller shares a thread with every RPC**, so its schedule is the
- * service's responsiveness. It re-arms only after a tick completes (`./poller`)
- * — a tick that outruns its interval delays the next tick, never a caller.
- * What keeps a tick short is the registry's stat-first fingerprint; read
- * its header before reaching for a partial or time-budgeted refresh.
- */
-
 import { hostname } from "node:os";
 import { isAbsolute } from "node:path";
 import {
@@ -70,68 +48,31 @@ import { retryRun } from "./retry";
 import { startRun } from "./start";
 import { readRun, waitForRun } from "./wait";
 
-/** How long the loop idles between two re-projections of the catalog. */
 export const REFRESH_MS = 250;
 
 export interface ServiceOptions {
   ports: ServicePorts;
-  /** WHERE the daemon is bound — the OS's answer, not the request, so a
-   *  caller reading the identity cell learns the address that actually works. */
   origin: string;
-  /** The daemon's on-disk home (gate + control socket live under it). */
   home: string;
   build: ServiceBuild;
-  /** EVERY MOUNTED ROW'S OWN CONTRACT VERSION, by row name — the host's
-   *  composition, published on the identity cell as it was handed in. This
-   *  service reads none of it; the judge is `admitService`. */
   rows: Readonly<Record<string, string>>;
   catalog?: CatalogOptions;
-  /** The service's own state root (request receipts). Injected for tests. */
   requestsRoot?: string;
-  /** Called when the frozen control fragment's `drain` is invoked — the
-   *  supervisor's half of a live upgrade. The daemon aborts its own controller
-   *  here; nothing else in this package knows how a process ends. */
   onDrain: () => void | Promise<void>;
   refreshMs?: number;
   now?: () => number;
-  /** Where a degraded-but-serving fact goes — a refresh tick that outran its
-   *  interval. */
   log?: { warn: (fields: Record<string, unknown>, message: string) => void };
 }
 
 export interface OduService {
   runtime: RootedSurfacesRuntime<(typeof oduServiceSurface)["spec"]>;
   registry: RunRegistry;
-  /** Re-project the catalog once, out of band — what a mutation calls so its
-   *  own effect is on the board before it answers. */
   refresh: () => void;
-  /** The last venue probe of this service's OWN fleet, or `null` when nothing
-   *  has probed since it started — the same value the `venues` cell publishes.
-   *  Exposed so a reader beside the surface (the row's `/metrics` contributor)
-   *  can fold what has ALREADY been dialled instead of dialling a fleet of its
-   *  own on a monitoring system's timer. */
   venues: () => VenueReading;
-  /** Stop the poller and release the runtime. */
   close: () => Promise<void>;
-  /** Structural wiring death. A serving site must observe it and treat a
-   *  rejection as fatal — a runtime that has faulted answers nothing while the
-   *  process stays alive and the socket stays open. */
   done: Promise<void>;
 }
 
-/**
- * Refuse a checkout that is not an ABSOLUTE path, or `null` to proceed.
- *
- * Every verb whose subject is a directory takes it as an absolute path, and
- * this is what makes that a rule rather than a note. A relative one resolves
- * against the DAEMON's working directory — wherever the shell that first
- * started it happened to be, possibly months ago and possibly deleted since —
- * so it names a directory the caller has never seen.
- *
- * `run.start` and `catalog.import` already spell this guard inline. It is here
- * as well because the four verbs below were added without it, and a rule that
- * has to be remembered per handler is a rule that will be missed again.
- */
 export function notAbsolute(
   verb: string,
   checkout: string,
@@ -155,15 +96,6 @@ export function createOduService(opts: ServiceOptions): OduService {
   );
   const startedAt = now();
 
-  /**
-   * THE RUNS' OWN FLOOR, and it is ONE verb's.
-   *
-   * Starting, retrying and cancelling a run is what being a MEMBER of this
-   * daemon means, and the gate has already refused every connection that is
-   * not one — so those verbs state no floor of their own. `protect.apply` is
-   * different: it WRITES branch protection through the daemon's own `gh`
-   * credential, which is an administrator's act.
-   */
   const adminOnly = (): Effect.Effect<Principal, ServiceRefused> =>
     Effect.flatMap(principalOf, (principal) =>
       may(principal, "admin")
@@ -183,11 +115,6 @@ export function createOduService(opts: ServiceOptions): OduService {
 
   const rows = new Map<string, RunRow>();
   const tails = new Map<string, LogTail>();
-  /** Log keys somebody is actually subscribed to. The framework's per-key
-   *  `holders` seam puts a key in here for the life of one subscription and
-   *  takes it out when that subscription's scope closes — so the poller re-reads
-   *  the logs being watched and no others, and an unwatched attempt costs
-   *  nothing at all. */
   const watched = new Set<string>();
 
   const identity: ServiceIdentity = {
@@ -207,7 +134,6 @@ export function createOduService(opts: ServiceOptions): OduService {
     readiness: { state: "starting", since: startedAt, reconciled: 0 },
   });
 
-  /** The last probe's answer — see `VenueReadingSchema`. */
   const venueStore = inMemoryStore<VenueReading>(null);
 
   const runtime = implementRootedSurfaces(
@@ -218,9 +144,6 @@ export function createOduService(opts: ServiceOptions): OduService {
       collections: {
         runs: {
           readAll: () => rows,
-          // PERSISTENCE ONLY — the framework wraps these to publish. The
-          // registry is the authority on what a row says; these are how the
-          // poller's answer reaches subscribers.
           upsert: (key, value) => {
             rows.set(key, value);
           },
@@ -230,10 +153,6 @@ export function createOduService(opts: ServiceOptions): OduService {
         },
         logTails: {
           readAll: () => tails,
-          // A tail is read from disk on demand: the key space is every attempt
-          // of every run, and materialising it would be a directory walk per
-          // subscribe. `readAll` answers what is being WATCHED, which is what a
-          // key listing of a live view honestly is.
           readOne: (key) => tails.get(key) ?? readTail(key, catalog) ?? undefined,
           upsert: (key, value) => {
             tails.set(key, value);
@@ -241,8 +160,6 @@ export function createOduService(opts: ServiceOptions): OduService {
           remove: (key) => {
             tails.delete(key);
           },
-          // The subscription's own lifetime, handed to us by the framework: a
-          // key is watched for exactly as long as somebody is subscribed to it.
           holders: (key) =>
             Effect.acquireRelease(
               Effect.sync(() => {
@@ -262,21 +179,13 @@ export function createOduService(opts: ServiceOptions): OduService {
         nodes: {
           source: nodesSource({
             registry,
-            // The poller owns the clock. A subscription asks for a refresh and
-            // gets whatever the last tick produced — one catalog walk per tick
-            // rather than one per open detail view.
             poll: () => {},
-            // The CATALOG, not the projection: a run accepted a moment ago is
-            // real before the next refresh indexes it, and only the manifest can
-            // say so. See `nodesSource`.
             exists: (runId) => readManifest(handleFor(runId, catalog)) !== null,
           }),
         },
         checkout: {
           source: checkoutSource({
             registry,
-            // The poller owns the clock here too — one catalog walk per tick,
-            // however many checkouts are being watched.
             poll: () => {},
           }),
         },
@@ -301,19 +210,10 @@ export function createOduService(opts: ServiceOptions): OduService {
                   },
                   principal,
                 ),
-                // The board must already show the run this call just started
-                // before the answer leaves: an agent that starts a run and
-                // immediately reads the board is the ordinary case, and "I just
-                // created it and it is not there" is the one thing a projection
-                // must never say.
                 () => Effect.sync(refresh),
               ),
             ),
           wait: ({ input }) => waitForRun(input, { catalog }),
-          // The read half of one question. Same payload as `wait` by
-          // construction — "what is this run's state" has one answer, and a
-          // second shape for the non-blocking case would be a second thing to
-          // keep true.
           read: ({ input }) => readRun(input, { catalog }),
           retry: ({ input }) =>
             Effect.tap(
@@ -361,10 +261,6 @@ export function createOduService(opts: ServiceOptions): OduService {
         },
         log: { read: ({ input }) => readLog(input, { catalog }) },
         catalog: {
-          // Both MUTATE the store the service is reading, which is exactly why
-          // they had to move: an import writing records while the daemon walked
-          // the same tree was two writers with no owner. `refresh` after, so
-          // the board shows what the call just did before the answer leaves.
           import: ({ input }) =>
             Effect.tap(
               importCatalog(input, {
@@ -410,12 +306,6 @@ export function createOduService(opts: ServiceOptions): OduService {
             Effect.flatMap(principalOf, (principal) =>
               Effect.flatMap(
                 Effect.promise(() => {
-                  // KEPT, so the next reader — a page opening Machines — reads
-                  // this answer rather than dialling every machine again. Only
-                  // a probe of the SERVICE'S OWN fleet: a caller's `hostsFile`
-                  // (`odu ci hosts` forwards its shell's `$ODU_HOSTS`) names that
-                  // person's machines, and keeping it would show every reader
-                  // someone else's fleet and someone else's file path.
                   const keep = (reading: VenueReading): void => {
                     venueStore.set(reading);
                     runtime.ctx.cells.venues.set(reading);
@@ -424,10 +314,6 @@ export function createOduService(opts: ServiceOptions): OduService {
                   return opts.ports.probeVenues({
                     platforms: input.platforms ?? [],
                     caller: callerOf(input, principal),
-                    // AS IT HAPPENS, not only at the end. The partials go to
-                    // the same cell under the same rule — a caller's own fleet
-                    // is answered and never published — so nothing a reader
-                    // sees here is something they could not see in the answer.
                     ...(mine
                       ? {
                           onReading: (partial) =>
@@ -475,10 +361,6 @@ export function createOduService(opts: ServiceOptions): OduService {
                 if (bad !== null) return Effect.fail(bad);
                 return Effect.flatMap(principalOf, (principal) =>
                   Effect.promise(() =>
-                  // ONCE ONLY. A repeat replays the recorded answer and takes
-                  // no hold — see `onceOnly` on why "taking a hold you already
-                  // hold is harmless" is true of the operation and false of a
-                  // shared daemon.
                   onceOnly(
                     requests,
                     {
@@ -487,10 +369,6 @@ export function createOduService(opts: ServiceOptions): OduService {
                       digest: digestOf([
                         input.checkout,
                         [...(input.platforms ?? [])].join(","),
-                        // Through `optionalPart`, because the port below keeps
-                        // absent and `""` apart (`?? null`) and a digest that
-                        // did not would answer a request about one fleet with
-                        // a hold taken on another.
                         optionalPart(input.hostsFile),
                         input.noWait ?? false,
                       ]),
@@ -531,11 +409,6 @@ export function createOduService(opts: ServiceOptions): OduService {
                 if (bad !== null) return Effect.fail(bad);
                 return Effect.flatMap(principalOf, (principal) =>
                   Effect.promise(() =>
-                  // THE SHARP ONE. Release A's reply is lost, another client
-                  // takes a new hold on the same platform, and A retries — a
-                  // repeat by its own reckoning, and a release of somebody
-                  // else's hold in fact. A replay answers from the record and
-                  // touches nothing.
                   onceOnly(
                     requests,
                     {
@@ -574,10 +447,6 @@ export function createOduService(opts: ServiceOptions): OduService {
               Effect.suspend(() => {
                 const bad = notAbsolute("protect.apply", input.checkout);
                 if (bad !== null) return Effect.fail(bad);
-                // A DRY RUN IS A READ. It writes nothing, contacts no forge and
-                // has no successor to act on, so putting a receipt in its way
-                // would only mean `--dry-run` twice with one id refusing the
-                // second — a refusal about nothing.
                 if (input.dryRun === true) {
                   return Effect.promise(async () => ({
                     ok: true as const,
@@ -593,10 +462,6 @@ export function createOduService(opts: ServiceOptions): OduService {
                   }));
                 }
                 return Effect.promise(() =>
-                  // A WRITE, and a delayed repeat of one can overwrite a
-                  // ruleset somebody edited in between — the same successor
-                  // problem `venue.release` has, with a branch's merge policy
-                  // as the resource.
                   onceOnly(
                     requests,
                     {
@@ -651,12 +516,6 @@ export function createOduService(opts: ServiceOptions): OduService {
     },
   );
 
-  // The daemon spine's frozen identity/drain fragment, mounted as the sibling
-  // the supervisor's probe looks for. `surfaceVersion` is the HOST's contract —
-  // the fragment and the identity cell are the host's surface, not the runs'.
-  // Nothing in odu compares it: whether a running daemon is adopted or recycled
-  // is `admitService`'s verdict on the identity cell, per row, and a second
-  // comparison here would be a second judge.
   runtime.mount(
     "control",
     controlCoreSurface,
@@ -667,8 +526,6 @@ export function createOduService(opts: ServiceOptions): OduService {
       commit: opts.build.commit ?? "",
       buildId: opts.build.buildId ?? "",
       onDrain: () => {
-        // Say so on the wire BEFORE the process starts going away, so a browser
-        // that is watching sees `draining` rather than a socket that closed.
         serviceStore.set({
           ...serviceStore.get(),
           readiness: { ...serviceStore.get().readiness, state: "draining", since: now() },
@@ -680,10 +537,6 @@ export function createOduService(opts: ServiceOptions): OduService {
   );
 
   const refreshMs = opts.refreshMs ?? REFRESH_MS;
-  // Measured at the POLLER, not inside `refresh`: "did this tick outrun its
-  // interval" is a question about the schedule, and the mutations that call
-  // `refresh` after a write are not ticks — timing them against the poll budget
-  // would log an overrun that never happened and spend the rate limit on it.
   const reportSlow = slowTickReporter(
     refreshMs,
     ({ durationMs, runs }) =>
@@ -693,43 +546,10 @@ export function createOduService(opts: ServiceOptions): OduService {
       ),
   );
 
-  /**
-   * THE RUN TOKENS THIS PROCESS HAS ALREADY LET GO (PLAN 4.1).
-   *
-   * The revoke itself is idempotent, so this is not for correctness — it is so
-   * that a board holding a thousand settled runs does not issue a thousand
-   * SQLite updates on the tick that first projects the catalog.
-   */
   const revokedPushTokens = new Set<string>();
-  /**
-   * A RUN NOBODY IS SERVING ANY MORE GIVES ITS WRITE TOKEN BACK.
-   *
-   * Driven off the PROJECTION rather than off the coordinator, and that is the
-   * design: the coordinator writes `finalized` and then dies, and it holds no
-   * authority over a cache in any case.
-   *
-   * **Settled is not the test; still being SERVED is.** `--linger` exists so a
-   * node can be rerun after the run drains, and a lingering coordinator is a
-   * settled row with a live endpoint. Revoking at first settle met that rerun
-   * with a dead credential.
-   *
-   * **And serving is LIVENESS, not a recorded address.** `row.endpoint` is
-   * whatever the owner file says; a coordinator killed -9 after writing
-   * `finalized` never runs `releaseOwnership`, so its row stays settled with
-   * that endpoint standing for good — and a skip keyed on the address alone
-   * would leave that run's write token live until its expiry. So the skip asks
-   * the projection's own liveness, the same answer an `owner_lost` state is
-   * built from.
-   *
-   * Crash-safe for free: the first refresh after a restart upserts every run
-   * in the catalog, so a token whose daemon died mid-run is revoked the moment
-   * its successor projects that run.
-   */
   const revokeFinishedPushTokens = (rows: readonly RunRow[]): void => {
     for (const row of rows) {
       if (row.state === "provisioning" || row.state === "running") continue;
-      // STILL SERVING: a LIVE lingering coordinator, whose reruns still push.
-      // A recorded endpoint with no process behind it is a dead coordinator.
       if (
         row.endpoint !== null &&
         row.state === "settled" &&
@@ -737,9 +557,6 @@ export function createOduService(opts: ServiceOptions): OduService {
       ) {
         continue;
       }
-      // The id is deliberately NOT on the wire row — a revocation handle is
-      // not something every browser that can list runs needs — so it is read
-      // from the projection that holds the manifest.
       const tokenId = registry.pushTokenOf(row.runId);
       if (tokenId === null || revokedPushTokens.has(tokenId)) continue;
       revokedPushTokens.add(tokenId);
@@ -747,7 +564,6 @@ export function createOduService(opts: ServiceOptions): OduService {
     }
   };
 
-  /** Re-project the catalog and publish what moved. */
   const refresh = (): void => {
     const delta = registry.refresh(now());
     revokeFinishedPushTokens(delta.upserted);
@@ -764,11 +580,6 @@ export function createOduService(opts: ServiceOptions): OduService {
     }
   };
 
-  // ── startup: reconcile, then say ready ──
-  //
-  // A caller that read the board during this window would see a partial catalog
-  // with no way to tell — which is why `starting` is a state on the wire rather
-  // than a gap before the first frame.
   const reconciled = reconcileRequests({ requests, catalog, now: now(), host: hostname() });
   refresh();
   serviceStore.set({
@@ -777,8 +588,6 @@ export function createOduService(opts: ServiceOptions): OduService {
   });
   runtime.ctx.cells.service.set(serviceStore.get());
 
-  // Re-armed after each tick, never on a fixed clock — see `./poller`. The
-  // timer is unref'd there, so the poller never holds the process open.
   const stopPolling = everyAfter(() => {
     const began = performance.now();
     refresh();

@@ -118,9 +118,6 @@ describe("run.list", () => {
       );
       expect(started.ok).toBe(true);
       if (!started.ok) return;
-      // `run.start` refreshes before it answers, so the very next `run.list` —
-      // an agent's "which run is mine" — must find it. The stub launcher
-      // registers the run the way a coordinator would.
       const listed = await call(face.surface.run.list({ checkout: "/code/app" }));
       expect(listed.ok && listed.value.rows.map((r) => r.runId)).toEqual([
         started.value.runId,
@@ -161,7 +158,6 @@ describe("the poller", () => {
     expect(timers.log).toEqual(["arm"]);
     timers.fire();
     timers.fire();
-    // Every arm follows the tick before it; none happens while one is running.
     expect(timers.log).toEqual(["arm", "tick", "arm", "tick", "arm"]);
     stop();
     timers.fire();

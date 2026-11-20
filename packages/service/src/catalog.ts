@@ -49,14 +49,6 @@ const refuse = (
   extra: Partial<Pick<ServiceRefused, "suggestion">> = {},
 ): ServiceRefused => new ServiceRefused({ code, message, ...extra });
 
-/**
- * The rules a catalog mutation needs are `cancel`'s: claimed against the
- * SERVICE's own receipt directory rather than a run's (there is no run for
- * these to belong to), no pre-minted run id to reconcile against, and inert to
- * the startup reconciler, which only settles `start` claims. Filing them as
- * `start` would put them in front of a reconciler that would go looking for a
- * run they can never have produced.
- */
 const RECEIPT_KIND = "catalog" as const;
 
 type Claimed =
@@ -74,9 +66,6 @@ function claim(
     requestId,
     kind: RECEIPT_KIND,
     digest,
-    // Neither verb can ever create a run, so there is nothing to pre-mint. The
-    // empty string is what "this request could never have produced a run" looks
-    // like, and it is also what stops a reconciler from looking for one.
     plannedRunId: "",
     now,
   });
@@ -96,11 +85,6 @@ function claim(
       ),
     };
   }
-  // A recorded answer replays; an unreadable or absent one falls through and
-  // does the work again, which is SAFE for both of these and for the same
-  // reason: an import's run id is derived from the source record's identity so
-  // a second pass skips what the first wrote, and expiry is a tombstone that
-  // an already-tombstoned run is skipped for. Doing it twice does it once.
   return {
     ok: true,
     claim: outcome,
@@ -136,11 +120,6 @@ function runImport(
       ),
     };
   }
-  // Checked BEFORE the claim, because it is a fact about the request alone and
-  // will answer the same way for ever — there is nothing here for a receipt to
-  // protect. Refused rather than resolved: the daemon's cwd is not the caller's
-  // and never was, so a relative path would name a directory the caller has
-  // never seen, and importing from it would be silent and wrong.
   if (!isAbsolute(input.checkout)) {
     return {
       refusal: refuse(
@@ -167,27 +146,18 @@ function runImport(
 
   const facts = deps.probeCheckout(input.checkout);
   if (!facts.isRepo) {
-    // Recorded, so a repeat replays the refusal instead of probing a checkout
-    // that has since been deleted or created and getting a different answer to
-    // the same question.
     const recorded: Recorded<never> = {
       outcome: "refusal",
       code: "checkout_refused",
       message:
         `odu: ${input.checkout} is not a git checkout — catalog.import reads ` +
         "a repository's `.ci` directory, and there is none to read",
-      // ARGV, never a string anything could eval: this is how a caller finds
-      // the root they meant.
       suggestion: ["git", "-C", input.checkout, "rev-parse", "--show-toplevel"],
     };
     completeReceipt(deps.requests, input.requestId, recorded, deps.now());
     return { refusal: refusalOf(recorded) };
   }
 
-  // A DRY RUN dispatches nothing, so it is not marked as having dispatched:
-  // the marker is what tells a reconciler "a mutation may have landed", and
-  // claiming that about a pass which writes no bytes would make a lost reply
-  // look like an unresolved mutation.
   if (!dryRun) {
     markDispatched(deps.requests, input.requestId, [input.checkout], deps.now());
   }
@@ -346,8 +316,6 @@ function replayOf<R>(
 ): { report: R & { replayed: boolean } } | { refusal: ServiceRefused } | null {
   const recorded = recordedOf(stored, isReport);
   if (recorded === null) return null;
-  // A recorded refusal replays as the refusal it was, on the declared error
-  // channel — never as a field on a success.
   if (recorded.outcome === "refusal") return { refusal: refusalOf(recorded) };
   return { report: { ...recorded.report, replayed: true } };
 }

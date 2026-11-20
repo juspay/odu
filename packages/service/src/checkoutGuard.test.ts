@@ -97,11 +97,6 @@ describe("service.ts's checkout-taking handlers", () => {
 
 describe("the two handlers that guard it themselves", () => {
   it("run.start and catalog.import still refuse a relative checkout", () => {
-    // They spell the guard inline rather than calling `notAbsolute`, because
-    // both refuse through their own receipt-recording path — a refusal there
-    // has to be WRITTEN DOWN so a repeat of the same request id replays it
-    // rather than being told the outcome is unknown. Asserted here so the two
-    // spellings cannot silently become one-and-a-half.
     for (const file of ["start.ts", "catalog.ts"]) {
       const text = readFileSync(join(import.meta.dirname, file), "utf-8");
       expect(text, `${file} lost its absolute-path guard`).toContain(

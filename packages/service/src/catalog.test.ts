@@ -137,9 +137,6 @@ describe("catalog.import", () => {
     expect(first._tag).toBe("Success");
     if (first._tag !== "Success") return;
 
-    // A second record appears in the checkout between the two calls. A replay
-    // must report what the FIRST call did — anything else would be a fresh
-    // pass wearing a receipt's clothes.
     legacyCheckoutAppend(checkout, 2);
     const again = await run(importCatalog({ checkout, requestId: "i-3" }, deps));
     expect(again._tag).toBe("Success");
