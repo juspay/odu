@@ -174,8 +174,13 @@ export interface CacheRepo {
   close(): void;
 }
 
-export const MIGRATIONS: readonly string[] = [
-  `
+export interface Migration {
+  readonly name: string;
+  readonly sql: string;
+}
+
+export const MIGRATIONS: readonly Migration[] = [
+  { name: "bucket-token-object-pin", sql: `
   CREATE TABLE bucket (
     name            TEXT PRIMARY KEY,
     is_public       INTEGER NOT NULL,
@@ -224,8 +229,8 @@ export const MIGRATIONS: readonly string[] = [
     created    INTEGER NOT NULL,
     PRIMARY KEY (bucket, name)
   );
-  `,
-  `
+  ` },
+  { name: "held", sql: `
   CREATE TABLE held (
     bucket     TEXT NOT NULL,
     store_path TEXT NOT NULL,
@@ -233,49 +238,49 @@ export const MIGRATIONS: readonly string[] = [
     created    INTEGER NOT NULL,
     PRIMARY KEY (bucket, store_path)
   );
-  `,
-  `
+  ` },
+  { name: "held-fetching", sql: `
   ALTER TABLE held ADD COLUMN fetching INTEGER NOT NULL DEFAULT 0;
-  `,
-  `
+  ` },
+  { name: "bucket-domain", sql: `
   ALTER TABLE bucket ADD COLUMN domain TEXT;
   CREATE UNIQUE INDEX bucket_domain ON bucket (domain) WHERE domain IS NOT NULL;
-  `,
-  `
+  ` },
+  { name: "held-fetched", sql: `
   ALTER TABLE held ADD COLUMN fetched TEXT NOT NULL DEFAULT '[]';
-  `,
-  `
+  ` },
+  { name: "held-failure", sql: `
   ALTER TABLE held ADD COLUMN failure TEXT;
-  `,
-  `
+  ` },
+  { name: "object-ca", sql: `
   ALTER TABLE object ADD COLUMN ca TEXT;
-  `,
-  `
+  ` },
+  { name: "object-file-hash", sql: `
   ALTER TABLE object ADD COLUMN file_hash TEXT;
   ALTER TABLE object ADD COLUMN file_size INTEGER;
-  `,
-  `
+  ` },
+  { name: "drop-held", sql: `
   DROP TABLE held;
-  `,
-  `
+  ` },
+  { name: "object-compression", sql: `
   ALTER TABLE object ADD COLUMN compression TEXT NOT NULL DEFAULT 'zstd';
-  `,
-  `
+  ` },
+  { name: "object-ca-proof", sql: `
   ALTER TABLE object ADD COLUMN ca_proof TEXT NOT NULL DEFAULT 'unknown';
   UPDATE object SET ca_proof = 'content-addressed' WHERE ca IS NOT NULL;
-  `,
-  `
+  ` },
+  { name: "bucket-store", sql: `
   ALTER TABLE bucket ADD COLUMN store TEXT NOT NULL DEFAULT 'local';
-  `,
-  `
+  ` },
+  { name: "object-last-wanted", sql: `
   ALTER TABLE object RENAME COLUMN last_accessed TO last_wanted;
   DROP INDEX IF EXISTS object_accessed;
   CREATE INDEX object_wanted ON object (bucket, last_wanted);
-  `,
-  `
+  ` },
+  { name: "pin-created-by", sql: `
   ALTER TABLE pin ADD COLUMN created_by TEXT NOT NULL DEFAULT 'admin';
-  `,
-  `
+  ` },
+  { name: "bucket-migration", sql: `
   CREATE TABLE bucket_migration (
     bucket      TEXT PRIMARY KEY,
     to_store    TEXT NOT NULL,
@@ -286,31 +291,49 @@ export const MIGRATIONS: readonly string[] = [
     bytes       INTEGER NOT NULL DEFAULT 0,
     started     INTEGER NOT NULL
   );
-  `,
-  `
+  ` },
+  { name: "object-name", sql: `
   ALTER TABLE object ADD COLUMN name TEXT NOT NULL DEFAULT '';
   UPDATE object SET name = substr(store_path, instr(store_path, '-') + 1);
   CREATE INDEX object_name ON object (bucket, name, created);
-  `,
-  `
+  ` },
+  { name: "token-label", sql: `
   ALTER TABLE token ADD COLUMN label TEXT;
-  `,
-  `
+  ` },
+  { name: "object-run-commit", sql: `
   ALTER TABLE object ADD COLUMN run TEXT;
   ALTER TABLE object ADD COLUMN commit_sha TEXT;
-  `,
-  `
+  ` },
+  { name: "self-ref-unknown", sql: `
   UPDATE object SET ca_proof = 'unknown'
   WHERE ca_proof = 'not-content-addressed'
     AND EXISTS (SELECT 1 FROM json_each(object.refs) WHERE json_each.value = object.store_path);
-  `,
+  ` },
 ];
 
 export const CACHE_SCHEMA_VERSION = MIGRATIONS.length;
 
+export function migrationsThrough(name: string): readonly Migration[] {
+  const at = MIGRATIONS.findIndex((migration) => migration.name === name);
+  if (at < 0) throw new Error(`no cache migration named ${name}`);
+  return MIGRATIONS.slice(0, at + 1);
+}
+
 interface Row {
   [column: string]: unknown;
 }
+
+interface Fragment {
+  readonly text: string;
+  readonly binds: readonly unknown[];
+}
+
+const frag = (text: string, ...binds: readonly unknown[]): Fragment => ({ text, binds });
+
+const seq = (parts: readonly Fragment[], sep = ""): Fragment => ({
+  text: parts.map((part) => part.text).join(sep),
+  binds: parts.flatMap((part) => [...part.binds]),
+});
 
 const text = (row: Row, column: string): string => String(row[column]);
 const maybeText = (row: Row, column: string): string | null => {
@@ -426,6 +449,19 @@ const pinOf = (row: Row): PinRow => ({
   createdBy: text(row, "created_by") as PinRow["createdBy"],
 });
 
+interface RevisionCounter {
+  bump(bucket: string): void;
+  at(bucket: string): number;
+}
+
+function revisionCounter(): RevisionCounter {
+  const seen = new Map<string, number>();
+  return {
+    bump: (bucket) => void seen.set(bucket, (seen.get(bucket) ?? 0) + 1),
+    at: (bucket) => seen.get(bucket) ?? 0,
+  };
+}
+
 /** `Database` creates with the process umask, which on a default machine is
  *  world-readable, so the mode is set here rather than left to whoever started
  *  the process. */
@@ -456,7 +492,7 @@ export function openCacheRepo(path: string): CacheRepo {
   for (let version = current; version < CACHE_SCHEMA_VERSION; version++) {
     db.exec("BEGIN");
     try {
-      db.exec(MIGRATIONS[version] as string);
+      db.exec((MIGRATIONS[version] as Migration).sql);
       db.exec(`PRAGMA user_version = ${version + 1};`);
       db.exec("COMMIT");
     } catch (err) {
@@ -482,14 +518,11 @@ export function openCacheRepo(path: string): CacheRepo {
   const all = <T>(sql: string, params: unknown[], map: (row: Row) => T): T[] =>
     (db.query(sql).all(...(params as never[])) as Row[]).map(map);
 
-  const revisions = new Map<string, number>();
-  const bump = (bucket: string): void => {
-    revisions.set(bucket, (revisions.get(bucket) ?? 0) + 1);
-  };
+  const revisions = revisionCounter();
 
   return {
     putBucket(row) {
-      bump(row.name);
+      revisions.bump(row.name);
       db.run(
         `INSERT INTO bucket (name, is_public, retention_days, key_name, secret_key,
            public_key, upstream_keys, created, domain, store)
@@ -523,7 +556,7 @@ export function openCacheRepo(path: string): CacheRepo {
     },
     buckets: () => all("SELECT * FROM bucket ORDER BY name", [], bucketOf),
     deleteBucket(name) {
-      bump(name);
+      revisions.bump(name);
       db.run("DELETE FROM bucket WHERE name = ?", [name]);
       db.run("DELETE FROM object WHERE bucket = ?", [name]);
       db.run("DELETE FROM pin WHERE bucket = ?", [name]);
@@ -583,7 +616,7 @@ export function openCacheRepo(path: string): CacheRepo {
     },
 
     putObject(row) {
-      bump(row.bucket);
+      revisions.bump(row.bucket);
       db.run(
         `INSERT INTO object (bucket, store_path, name, hash, nar_hash, nar_size, refs,
            deriver, ca, ca_proof, compression, file_hash, file_size, sigs, hits, created,
@@ -666,7 +699,7 @@ export function openCacheRepo(path: string): CacheRepo {
     },
     want(bucket, storePaths, at, provenance) {
       if (storePaths.length === 0) return;
-      bump(bucket);
+      revisions.bump(bucket);
       const holes = storePaths.map(() => "?").join(", ");
       db.run(
         `UPDATE object SET last_wanted = ?, run = COALESCE(run, ?), ` +
@@ -676,12 +709,12 @@ export function openCacheRepo(path: string): CacheRepo {
       );
     },
     deleteObject(bucket, storePath) {
-      bump(bucket);
+      revisions.bump(bucket);
       db.run("DELETE FROM object WHERE bucket = ? AND store_path = ?", [bucket, storePath]);
     },
 
     putPin(row) {
-      bump(row.bucket);
+      revisions.bump(row.bucket);
       db.run(
         `INSERT INTO pin (bucket, name, root_paths, created, created_by)
          VALUES (?, ?, ?, ?, ?)
@@ -690,7 +723,7 @@ export function openCacheRepo(path: string): CacheRepo {
         [row.bucket, row.name, JSON.stringify(row.rootPaths), row.created, row.createdBy],
       );
     },
-    revision: (bucket) => revisions.get(bucket) ?? 0,
+    revision: (bucket) => revisions.at(bucket),
     pins: (bucket) =>
       bucket === undefined
         ? all("SELECT * FROM pin ORDER BY created", [], pinOf)
@@ -780,24 +813,8 @@ export function openCacheRepo(path: string): CacheRepo {
 
     objectGroupsPage(bucket, page) {
       const order = PATH_ORDER[page.sort];
-      const where = ["bucket = ?"];
-      const params: unknown[] = [bucket];
       const filter = narrowing(page.filter);
-      if (filter !== null) {
-        where.push("instr(store_path, ?) > 0");
-        params.push(filter);
-      }
-      const having: string[] = [];
       const after = page.after === null ? null : cursorOf(page.after, page.sort);
-      if (after !== null) {
-        const compare = page.descending ? "<" : ">";
-        having.push(
-          `(${order.group} ${compare} ? OR (${order.group} = ? AND name ${compare} ?))`,
-        );
-        const value = order.numeric ? Number(after.value) : after.value;
-        params.push(value, value, after.key);
-      }
-      params.push(page.limit + 1);
       const way = page.descending ? "DESC" : "ASC";
       // A bare column gets the max row's value only when the select holds
       // exactly ONE min/max, and this one holds two — so the newest version
@@ -808,33 +825,47 @@ export function openCacheRepo(path: string): CacheRepo {
       // THREE SUBQUERIES, NOT ONE, because a SQLite scalar subquery yields a
       // single COLUMN: the path, the run and the commit cannot come out of
       // one of them.
-      //
-      // Each subquery carries a `?` when there is a filter, and those
-      // `?`s are read before the WHERE's; a column added to the list below
-      // without its binding would not be an error SQLite reports — every
-      // parameter after the select list would simply shift, and the page
-      // would be wrong rather than refused.
       const perVersion = ["store_path", "run", "commit_sha"];
-      const newest = (column: string): string =>
-        `(SELECT inner.${column} FROM object AS inner ` +
-        "WHERE inner.bucket = object.bucket AND inner.name = object.name " +
-        (filter === null ? "" : "AND instr(inner.store_path, ?) > 0 ") +
-        `ORDER BY inner.created DESC, inner.store_path DESC LIMIT 1) AS ${column}`;
-      const found = db
-        .query(
+      const newest = (column: string): Fragment =>
+        frag(
+          `(SELECT inner.${column} FROM object AS inner ` +
+            "WHERE inner.bucket = object.bucket AND inner.name = object.name " +
+            (filter === null ? "" : "AND instr(inner.store_path, ?) > 0 ") +
+            `ORDER BY inner.created DESC, inner.store_path DESC LIMIT 1) AS ${column}`,
+          ...(filter === null ? [] : [filter]),
+        );
+      const selectList = seq([
+        frag(
           "SELECT name, COUNT(*) AS versions, " +
             "COALESCE(SUM(nar_size), 0) AS bytes, COALESCE(SUM(hits), 0) AS hits, " +
-            "MAX(created) AS pushed, MAX(last_wanted) AS wanted, " +
-            `${perVersion.map(newest).join(", ")} ` +
-            `FROM object WHERE ${where.join(" AND ")} GROUP BY name ` +
-            (having.length === 0 ? "" : `HAVING ${having.join(" AND ")} `) +
-            `ORDER BY ${order.group} ${way}, name ${way} LIMIT ?`,
-        )
-        .all(
-          ...((filter === null
-            ? params
-            : [...perVersion.map(() => filter), ...params]) as never[]),
-        ) as Row[];
+            "MAX(created) AS pushed, MAX(last_wanted) AS wanted, ",
+        ),
+        seq(perVersion.map(newest), ", "),
+        frag(" "),
+      ]);
+      const whereClause = seq([
+        frag("FROM object WHERE bucket = ?", bucket),
+        filter === null ? frag("") : frag(" AND instr(store_path, ?) > 0", filter),
+        frag(" "),
+      ]);
+      const groupBy = frag("GROUP BY name ");
+      const havingValue = after === null ? null : order.numeric ? Number(after.value) : after.value;
+      const having =
+        after === null || havingValue === null
+          ? frag("")
+          : frag(
+              `HAVING (${order.group} ${page.descending ? "<" : ">"} ? OR (${order.group} = ? ` +
+                `AND name ${page.descending ? "<" : ">"} ?)) `,
+              havingValue,
+              havingValue,
+              after.key,
+            );
+      const orderLimit = frag(
+        `ORDER BY ${order.group} ${way}, name ${way} LIMIT ?`,
+        page.limit + 1,
+      );
+      const query = seq([selectList, whereClause, groupBy, having, orderLimit]);
+      const found = db.query(query.text).all(...(query.binds as never[])) as Row[];
       const more = found.length > page.limit;
       const rows = (more ? found.slice(0, page.limit) : found).map((row) => ({
         name: text(row, "name"),
@@ -882,7 +913,7 @@ export function openCacheRepo(path: string): CacheRepo {
         .query("SELECT name FROM pin WHERE bucket = ? AND name = ?")
         .get(bucket, name) as Row | null;
       if (found === null) return false;
-      bump(bucket);
+      revisions.bump(bucket);
       db.run("DELETE FROM pin WHERE bucket = ? AND name = ?", [bucket, name]);
       return true;
     },

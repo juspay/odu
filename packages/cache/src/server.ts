@@ -10,8 +10,11 @@ import {
   BucketDomains,
   type BucketDomains as BucketDomainsFacts,
   CacheGrants,
+  type CacheGrants as CacheGrantsFacts,
   type GrantedBucket,
   CachePurge,
+  type CachePurge as CachePurgeFacts,
+  type HttpRoutes,
   Log,
   Metrics,
   NixStore,
@@ -20,9 +23,14 @@ import {
   Routes,
   StateDir,
 } from "@odu/cordis/services";
-import { type Authority, roleAuthority } from "./authority";
+import type { MetricsSources } from "@odu/cordis/metrics";
+import type { RootedSurfacesRuntime } from "@kolu/surface/server";
+import { Scope } from "effect";
+import { cacheGate } from "./authority";
+import { bucketUrls } from "./bucketUrls";
 import {
   createCache,
+  type BootReport,
   type CacheMountRefusal,
   mountRefusalMessage,
   type BucketFacts,
@@ -30,19 +38,12 @@ import {
   type CacheOutcome,
 } from "./cache";
 import type { GcCollection, GcRemoval, GcReport } from "./gc";
-import { cacheMeter } from "./meter";
+import { cacheMeter, type CacheMeter } from "./meter";
 import { objectStores, type StoreDeclarations, storeFacts } from "./stores";
-import { may, principalOf, type Principal } from "@odu/cordis/principal";
 import { bucketOf, CACHE_MOUNT, CACHE_ROUTE_PATHS } from "./paths";
 import { cacheRoutes } from "./routes";
 import { nixDump, nixPathInfo } from "./store";
-import {
-  cacheInfoKey,
-  narFileKey,
-  narinfoKey,
-  publicBucketUrl,
-  publicObjectUrl,
-} from "./staging";
+import { cacheInfoKey, publicBucketUrl, publicObjectUrl } from "./staging";
 import {
   type CacheBucket,
   CACHE_KEY,
@@ -193,90 +194,20 @@ export function probeStoreEndpoints(input: {
 }
 
 
-function withoutTrailingSlashes(path: string): string {
-  let end = path.length;
-  while (end > 0 && path.charCodeAt(end - 1) === 47) end -= 1;
-  return path.slice(0, end);
-}
-
 export function cacheServer(opts: CacheServerOptions): CacheServer {
   const { cache } = opts;
   const published = new Map<string, string>();
   const rows = new Map<string, CacheBucket>();
   let publisher: CachePublisher | null = null;
 
-  const scheme = ((): string => {
-    try {
-      return new URL(opts.publicOrigin).protocol;
-    } catch {
-      return "https:";
-    }
-  })();
-
-  const storeUrls = new Map(
-    opts.stores.flatMap((store) => (store.publicUrl === null ? [] : [[store.name, store.publicUrl] as const])),
-  );
-
-  const readsFromOf = (facts: { name: string; public: boolean; store: string }): "store" | "odu" =>
-    facts.public && storeUrls.has(facts.store) ? "store" : "odu";
-
-  const urlOf = (facts: { name: string; public: boolean; domain: string | null; store: string }): string =>
-    readsFromOf(facts) === "store"
-      ? publicBucketUrl(storeUrls.get(facts.store) as string, facts.name)
-      : facts.domain === null
-        ? `${opts.publicOrigin}${opts.mount}/${facts.name}`
-        : `${scheme}//${facts.domain}`;
-
-  const pushUrlOf = (name: string): string => `${opts.publicOrigin}${opts.mount}/${name}`;
-  const bucketAt = (substituter: string): GrantedBucket | null => {
-    let url: URL;
-    try {
-      url = new URL(substituter.trim());
-    } catch {
-      return null;
-    }
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    const path = withoutTrailingSlashes(url.pathname);
-    const origin = `${url.protocol}//${url.host}`;
-    const segments = path.split("/").filter((part) => part !== "");
-    const last = segments[segments.length - 1];
-    const row =
-      segments.length === 0
-        ? cache.bucketByDomain(url.host)
-        : last === undefined
-          ? null
-          : cache.bucket(last);
-    if (row === null) return null;
-    const facts = {
-      name: row.name,
-      public: row.isPublic,
-      domain: row.domain,
-      store: row.store,
-    };
-    const advertised = new Map(
-      [
-        urlOf(facts),
-        pushUrlOf(row.name),
-        ...(row.domain === null ? [] : [`${scheme}//${row.domain}`]),
-      ].map((one) => [withoutTrailingSlashes(one), one]),
-    );
-    const confirmed = advertised.get(`${origin}${path}`);
-    if (confirmed === undefined) return null;
-    return {
-      name: row.name,
-      publicKey: row.publicKey,
-      origin: opts.publicOrigin,
-      substituter: confirmed,
-    };
-  };
-
-  const rowOf = (facts: BucketFacts): CacheBucket => ({
-    ...facts,
-    upstreamKeys: [...facts.upstreamKeys],
-    url: urlOf(facts),
-    pushUrl: pushUrlOf(facts.name),
-    readsFrom: readsFromOf(facts),
+  const { readsFromOf, urlOf, rowOf, bucketAt, urlsFor } = bucketUrls({
+    publicOrigin: opts.publicOrigin,
+    mount: opts.mount,
+    stores: opts.stores,
+    rows: cache,
   });
+  const { answer, admin, member } = cacheGate();
+
 
   const publish = (): void => {
     if (publisher === null) return;
@@ -299,40 +230,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
 
   };
 
-  const urlsFor = (input: {
-    bucket: string;
-    alsoStore: string | null;
-    removals: readonly GcRemoval[];
-    cacheInfo?: boolean;
-  }): string[] => {
-    const facts = cache.bucket(input.bucket);
-    const bases = new Set([`${opts.publicOrigin}${opts.mount}/${input.bucket}`]);
-    if (facts?.domain != null) bases.add(`${scheme}//${facts.domain}`);
-    const urls: string[] = [];
-    for (const base of bases) {
-      for (const removal of input.removals) {
-        urls.push(`${base}/${removal.hash}.narinfo`);
-        if (removal.narFile !== null) urls.push(`${base}/nar/${removal.narFile}`);
-      }
-      if (input.cacheInfo === true) urls.push(`${base}/nix-cache-info`);
-    }
-    const fronts = new Set(
-      [facts?.store ?? null, input.alsoStore].flatMap((store) => {
-        const fronted = store === null ? undefined : storeUrls.get(store);
-        return fronted === undefined ? [] : [fronted];
-      }),
-    );
-    for (const front of fronts) {
-      for (const removal of input.removals) {
-        urls.push(publicObjectUrl(front, narinfoKey(input.bucket, removal.hash)));
-        if (removal.narFile !== null) {
-          urls.push(publicObjectUrl(front, narFileKey(input.bucket, removal.narFile)));
-        }
-      }
-      if (input.cacheInfo === true) urls.push(publicObjectUrl(front, cacheInfoKey(input.bucket)));
-    }
-    return urls;
-  };
 
   const announceUrls = (event: string, bucket: string, urls: readonly string[]): void => {
     if (urls.length === 0) return;
@@ -375,51 +272,6 @@ export function cacheServer(opts: CacheServerOptions): CacheServer {
     announced(await cache.collect());
   };
 
-  const answer = <A, B>(
-    work: () => Promise<CacheOutcome<A>>,
-    map: (value: A) => B,
-  ): Effect.Effect<B, CacheRefused> =>
-    Effect.flatMap(Effect.promise(work), (outcome) =>
-      outcome.ok
-        ? Effect.succeed(map(outcome.value))
-        : Effect.fail(new CacheRefused({ code: outcome.code, message: outcome.message })),
-    );
-
-  const authorityOf = (
-    principal: Principal,
-    input: { rootToken: string },
-  ): Authority =>
-    principal.kind === "user"
-      ? roleAuthority(principal.login)
-      : { kind: "root", rootToken: input.rootToken };
-
-  const admin = <A, B>(
-    input: { rootToken: string },
-    work: (authority: Authority) => Promise<CacheOutcome<A>>,
-    map: (value: A) => B,
-  ): Effect.Effect<B, CacheRefused> =>
-    Effect.flatMap(principalOf, (principal) => {
-      if (principal.kind === "user" && !may(principal, "admin")) {
-        return Effect.fail(
-          new CacheRefused({
-            code: "not_permitted",
-            message:
-              `odu: administering a bucket needs an admin — ${principal.login} ` +
-              `is a ${principal.role}`,
-          }),
-        );
-      }
-      return answer(() => work(authorityOf(principal, input)), map);
-    });
-
-  const member = <A, B>(
-    input: { rootToken: string },
-    work: (authority: Authority) => Promise<CacheOutcome<A>>,
-    map: (value: A) => B,
-  ): Effect.Effect<B, CacheRefused> =>
-    Effect.flatMap(principalOf, (principal) =>
-      answer(() => work(authorityOf(principal, input)), map),
-    );
 
   const deps: CacheSurfaceDeps = {
     cells: {
@@ -677,6 +529,162 @@ export class CacheMountRefused extends Data.TaggedError("CacheMountRefused")<{
   }
 }
 
+interface CacheRowDeps {
+  readonly declared: StoreDeclarations;
+  readonly bundle: RootedSurfacesRuntime<never>;
+  readonly routes: HttpRoutes;
+  readonly stateDir: string;
+  readonly rootToken: string | null;
+  readonly nixStore: string | null;
+  readonly purges: CachePurgeFacts;
+  readonly grants: CacheGrantsFacts;
+  readonly log: { info(fields: Record<string, unknown>, message: string): void };
+  readonly metrics: MetricsSources;
+  readonly origin: string;
+  readonly stores: readonly CacheStore[];
+  readonly meter: CacheMeter;
+  readonly say: (event: string, fields: Record<string, unknown>) => void;
+}
+
+interface OpenedCache {
+  readonly cache: Cache;
+  readonly boot: BootReport;
+  readonly purgedTo: (announce: CacheServer["announceMoved"]) => void;
+}
+
+const openCache = (deps: CacheRowDeps): Effect.Effect<OpenedCache, never, Scope.Scope> =>
+  Effect.acquireRelease(
+    Effect.gen(function* () {
+      let sink: CacheServer["announceMoved"] | null = null;
+      const cache = createCache({
+        stateRoot: deps.stateDir,
+        rootToken: deps.rootToken,
+        publicOrigin: deps.origin,
+        stores: objectStores(deps.declared, join(deps.stateDir, "cache")),
+        frontedStores: new Set(
+          deps.stores.flatMap((declaredStore) =>
+            declaredStore.publicUrl === null ? [] : [declaredStore.name],
+          ),
+        ),
+        // `NixStore` NULL IS THE HOST'S OWN /nix/store (the contract).
+        legacyStore: {
+          dump: (path) => nixDump(path, deps.nixStore),
+          pathInfo: (path) => nixPathInfo(path, deps.nixStore),
+        },
+        log: deps.say,
+        purged: (moved) => sink?.(moved),
+      });
+      const booted = yield* Effect.promise(() => cache.boot());
+      if (!booted.ok) {
+        yield* Effect.promise(() => cache.close());
+        // A PLUGIN'S APPLY HAS NO ERROR CHANNEL: the refusal ends the row as a
+        // defect that still carries the value.
+        return yield* Effect.die(new CacheMountRefused({ refusal: booted.refusal }));
+      }
+      return {
+        cache,
+        boot: booted.report,
+        purgedTo: (announce: CacheServer["announceMoved"]) => {
+          sink = announce;
+        },
+      };
+    }),
+    ({ cache }) => Effect.promise(() => cache.close()),
+  );
+
+const mountSurface = (
+  opened: OpenedCache,
+  deps: CacheRowDeps,
+): Effect.Effect<CacheServer, never, Scope.Scope> => {
+  let withdraw: () => Promise<void> = async () => {};
+  return Effect.acquireRelease(
+    Effect.sync(() => {
+      const { cache } = opened;
+      const server = cacheServer({
+        cache,
+        publicOrigin: deps.origin,
+        mount: CACHE_MOUNT,
+        stores: deps.stores,
+        purge: deps.purges,
+        log: deps.say,
+      });
+      opened.purgedTo(server.announceMoved);
+
+      const withdrawGrants = deps.grants.register({
+        bucketAt: (substituter) => server.bucketAt(substituter),
+        mint: (request) => cache.grantRunToken(request),
+        revoke: (id) => cache.revokeToken(id),
+      });
+
+      const mounted = deps.bundle.mount(CACHE_KEY, server.surface, server.deps);
+      server.attach({
+        buckets: {
+          upsert: (key, row) => mounted.ctx.collections.buckets.upsert(key, row),
+          remove: (key) => mounted.ctx.collections.buckets.remove(key),
+        },
+      });
+
+      deps.routes.add(cacheRoutes(cache, (name) => server.substituterUrl(name)));
+
+      const withdrawMetrics = deps.metrics.add({
+        name: CACHE_KEY,
+        read: () => deps.meter.reading(cache.meterGauges()),
+      });
+
+      withdraw = async (): Promise<void> => {
+        withdrawGrants();
+        withdrawMetrics();
+        await mounted.drop();
+        server.detach();
+      };
+      return server;
+    }),
+    () => Effect.promise(() => withdraw()),
+  );
+};
+
+const startBackground = (
+  opened: OpenedCache,
+  server: CacheServer,
+  deps: CacheRowDeps,
+): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const { cache } = opened;
+    yield* Effect.forkScoped(
+      Effect.promise(async () => {
+        await cache.migrate();
+        const backfilled = await cache.backfillObjects();
+        if (backfilled.written > 0 || backfilled.failures > 0) {
+          deps.log.info(
+            { rows: backfilled.rows, written: backfilled.written, failures: backfilled.failures },
+            "odu cache: narinfo objects backfilled",
+          );
+        }
+        await cache.proveSelf();
+        await probePublicStores({
+          stores: deps.stores,
+          buckets: cache.snapshot(),
+          info: cache.cacheInfoText,
+          log: deps.say,
+        });
+      }),
+    );
+
+    yield* Effect.forkScoped(Effect.promise(() => cache.resumeMigrations()));
+
+    exposedBuckets({ stores: deps.stores, buckets: cache.snapshot(), log: deps.say });
+    probeStoreEndpoints({
+      stores: [...deps.declared].map(([name, store]) => ({
+        name,
+        endpoint: store.target.endpoint,
+      })),
+      buckets: cache.snapshot(),
+      log: deps.say,
+    });
+
+    yield* Effect.forkScoped(collectEvery(GC_EVERY_MS, server.collect, deps.say));
+  });
+
 export const cacheRow = (declared: StoreDeclarations) => definePlugin({
   name: CACHE_KEY,
   needs: [
@@ -706,39 +714,28 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     const metrics = yield* Metrics;
 
     const meter = cacheMeter();
-    const say = (event: string, fields: Record<string, unknown>): void => {
-      meter.observe(event, fields);
-      log.info(fields, `odu cache: ${event}`);
+    const deps: CacheRowDeps = {
+      declared,
+      bundle,
+      routes,
+      stateDir,
+      rootToken,
+      nixStore: store,
+      purges,
+      grants,
+      log,
+      metrics,
+      origin: publicOrigin ?? boundOrigin,
+      stores: storeFacts(declared),
+      meter,
+      say: (event, fields) => {
+        meter.observe(event, fields);
+        log.info(fields, `odu cache: ${event}`);
+      },
     };
 
-    let announceMoved: CacheServer["announceMoved"] | null = null;
-    const stores = storeFacts(declared);
-    const cache = createCache({
-      stateRoot: stateDir,
-      rootToken,
-      publicOrigin: publicOrigin ?? boundOrigin,
-      stores: objectStores(declared, join(stateDir, "cache")),
-      frontedStores: new Set(
-        stores.flatMap((declaredStore) =>
-          declaredStore.publicUrl === null ? [] : [declaredStore.name],
-        ),
-      ),
-      // `NixStore` NULL IS THE HOST'S OWN /nix/store (the contract).
-      legacyStore: {
-        dump: (path) => nixDump(path, store),
-        pathInfo: (path) => nixPathInfo(path, store),
-      },
-      log: say,
-      purged: (moved) => announceMoved?.(moved),
-    });
-    const booted = yield* Effect.promise(() => cache.boot());
-    if (!booted.ok) {
-      yield* Effect.promise(() => cache.close());
-      // A PLUGIN'S APPLY HAS NO ERROR CHANNEL: the refusal ends the row as a
-      // defect that still carries the value.
-      return yield* Effect.die(new CacheMountRefused({ refusal: booted.refusal }));
-    }
-    const boot = booted.report;
+    const opened = yield* openCache(deps);
+    const { cache, boot } = opened;
     if (boot.caProved > 0) {
       log.info({ proved: boot.caProved }, "odu cache: boot proved CA");
     }
@@ -760,76 +757,8 @@ export const cacheRow = (declared: StoreDeclarations) => definePlugin({
     };
     yield* offer(BucketDomains, () => domains);
 
-    const server = cacheServer({
-      cache,
-      publicOrigin: publicOrigin ?? boundOrigin,
-      mount: CACHE_MOUNT,
-      stores,
-      purge: purges,
-      log: say,
-    });
-    announceMoved = server.announceMoved;
-
-    const withdrawGrants = grants.register({
-      bucketAt: (substituter) => server.bucketAt(substituter),
-      mint: (request) => cache.grantRunToken(request),
-      revoke: (id) => cache.revokeToken(id),
-    });
-
-    const mounted = bundle.mount(CACHE_KEY, server.surface, server.deps);
-    server.attach({
-      buckets: {
-        upsert: (key, row) => mounted.ctx.collections.buckets.upsert(key, row),
-        remove: (key) => mounted.ctx.collections.buckets.remove(key),
-      },
-    });
-
-    routes.add(cacheRoutes(cache, (name) => server.substituterUrl(name)));
-
-    const withdrawMetrics = metrics.add({
-      name: CACHE_KEY,
-      read: () => meter.reading(cache.meterGauges()),
-    });
-
-    yield* Effect.forkScoped(
-      Effect.promise(async () => {
-        await cache.migrate();
-        const backfilled = await cache.backfillObjects();
-        if (backfilled.written > 0 || backfilled.failures > 0) {
-          log.info(
-            { rows: backfilled.rows, written: backfilled.written, failures: backfilled.failures },
-            "odu cache: narinfo objects backfilled",
-          );
-        }
-        await cache.proveSelf();
-        await probePublicStores({
-          stores,
-          buckets: cache.snapshot(),
-          info: cache.cacheInfoText,
-          log: say,
-        });
-      }),
-    );
-
-    yield* Effect.forkScoped(Effect.promise(() => cache.resumeMigrations()));
-
-    exposedBuckets({ stores, buckets: cache.snapshot(), log: say });
-    probeStoreEndpoints({
-      stores: [...declared].map(([name, store]) => ({ name, endpoint: store.target.endpoint })),
-      buckets: cache.snapshot(),
-      log: say,
-    });
-
-    yield* Effect.addFinalizer(() =>
-      Effect.promise(async () => {
-        server.detach();
-        await cache.close();
-      }),
-    );
-    yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
-    yield* Effect.addFinalizer(() => Effect.sync(withdrawMetrics));
-    yield* Effect.addFinalizer(() => Effect.sync(withdrawGrants));
-    yield* Effect.forkScoped(collectEvery(GC_EVERY_MS, server.collect, say));
+    const server = yield* mountSurface(opened, deps);
+    yield* startBackground(opened, server, deps);
 
     log.info(
       { mount: CACHE_MOUNT, buckets: cache.snapshot().length },

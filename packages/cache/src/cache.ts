@@ -38,10 +38,11 @@ import {
   generateKeypair,
   isDerivationPath,
   isSafeStorePathHash,
-  keyNameOf,
+  isSignedBy,
   compressionOfFile,
   canonicalNarHash,
   type NarInfo,
+  type ServedNarInfo,
   narFileName,
   signFingerprint,
   storePathHash,
@@ -84,7 +85,7 @@ import {
   type UploadedPart,
 } from "@odu/objects";
 import { type KeptFile, keptFileOf } from "./fileHash";
-import { contentAddressOf, type SelfHashes } from "./storePath";
+import { contentAddressOf, selfReferencing, type SelfProof } from "./storePath";
 import { verifyNarStream } from "./store";
 import { createSlots } from "./slots";
 import {
@@ -398,6 +399,14 @@ export interface Cache {
   close(): Promise<void>;
 }
 
+export interface PurgeNotice {
+  bucket: string;
+  store: string;
+  reason: "migrate" | "repush" | "delete";
+  removals: readonly GcRemoval[];
+  cacheInfo?: boolean;
+}
+
 export interface CacheOptions {
   stateRoot: string;
   rootToken: string | null;
@@ -413,13 +422,7 @@ export interface CacheOptions {
   frontedStores?: ReadonlySet<string>;
   now?: () => number;
   log?: (event: string, fields: Record<string, unknown>) => void;
-  purged?: (input: {
-    bucket: string;
-    store: string;
-    reason: "migrate" | "repush" | "delete";
-    removals: readonly GcRemoval[];
-    cacheInfo?: boolean;
-  }) => void;
+  purged?: (input: PurgeNotice) => void;
 }
 
 export const HITS_REFRESH_MS = 1000;
@@ -510,7 +513,9 @@ export function createCache(options: CacheOptions): Cache {
       : { to: row.toStore, state: row.state, copied: row.copied, total: row.total, bytes: row.bytes };
   };
 
-  type WriteOutcome = "written" | "same" | "rewritten";
+  type Stale = Pick<PurgeNotice, "removals" | "cacheInfo">;
+
+  type WriteOutcome = "written" | "same";
 
   function factsOf(
     bucket: BucketRow,
@@ -549,7 +554,7 @@ export function createCache(options: CacheOptions): Cache {
   }
 
   function narinfoFor(bucket: BucketRow, row: ObjectRow): string {
-    const info: NarInfo = {
+    const info: ServedNarInfo = {
       storePath: row.storePath,
       url: `nar/${narFileName(row.narHash, row.compression)}`,
       compression: row.compression,
@@ -570,7 +575,7 @@ export function createCache(options: CacheOptions): Cache {
     key: string,
     text: string,
     contentType: string,
-  ): Promise<WriteOutcome> {
+  ): Promise<WriteOutcome | "rewritten"> {
     const bytes = new TextEncoder().encode(text);
     const counter = factsCounter();
     counter.update(bytes);
@@ -591,10 +596,20 @@ export function createCache(options: CacheOptions): Cache {
 
   async function keepTextObject(
     bucket: BucketRow,
-    what: { key: string; text: string; contentType: string },
+    what: { key: string; text: string; contentType: string; stale: Stale },
   ): Promise<WriteOutcome | "failed"> {
     try {
-      return await writeText(storeOf(bucket), what.key, what.text, what.contentType);
+      const outcome = await writeText(storeOf(bucket), what.key, what.text, what.contentType);
+      if (outcome === "rewritten") {
+        options.purged?.({
+          bucket: bucket.name,
+          store: bucket.store,
+          reason: "repush",
+          ...what.stale,
+        });
+        return "written";
+      }
+      return outcome;
     } catch (err) {
       options.log?.("cache.narinfo.object_failed", {
         bucket: bucket.name,
@@ -609,60 +624,43 @@ export function createCache(options: CacheOptions): Cache {
     bucket: BucketRow,
     row: ObjectRow,
   ): Promise<WriteOutcome | "failed"> {
-    const outcome = await keepTextObject(bucket, {
+    return await keepTextObject(bucket, {
       key: narinfoKey(bucket.name, row.hash),
       text: narinfoFor(bucket, row),
       contentType: NARINFO_CONTENT_TYPE,
+      stale: { removals: [{ storePath: row.storePath, hash: row.hash, narFile: null }] },
     });
-    if (outcome === "rewritten") {
-      options.purged?.({
-        bucket: bucket.name,
-        store: bucket.store,
-        reason: "repush",
-        removals: [{ storePath: row.storePath, hash: row.hash, narFile: null }],
-      });
-    }
-    return outcome;
   }
 
   const cacheInfoText = (bucket: string): string =>
     nixCacheInfo({ origin: options.publicOrigin, bucket });
 
   async function keepCacheInfoObject(bucket: BucketRow): Promise<void> {
-    const outcome = await keepTextObject(bucket, {
+    await keepTextObject(bucket, {
       key: cacheInfoKey(bucket.name),
       text: cacheInfoText(bucket.name),
       contentType: CACHE_INFO_CONTENT_TYPE,
+      stale: { removals: [], cacheInfo: true },
     });
-    if (outcome === "rewritten") {
-      options.purged?.({
-        bucket: bucket.name,
-        store: bucket.store,
-        reason: "repush",
-        removals: [],
-        cacheInfo: true,
-      });
-    }
   }
 
   async function recordNow(
     bucket: BucketRow,
     info: NarInfo,
     file: KeptFile,
-    selfHash: SelfHashes | null,
+    selfHash: SelfProof,
     provenance: Provenance,
   ): Promise<boolean> {
     const existing = repo.object(bucket.name, info.storePath);
     const at = now();
-    const sigs = [...new Set(info.sigs)].filter((sig) => keyNameOf(sig) !== bucket.keyName);
+    const sigs = [...new Set(info.sigs)].filter((sig) => !isSignedBy(sig, bucket.keyName));
     const computed = contentAddressOf({
       storePath: info.storePath,
       narHash: info.narHash,
       references: info.references,
-      selfHash,
+      selfHash: selfHash.kind === "computed" ? selfHash.hashes : null,
     });
-    const unjudged =
-      computed === null && selfHash === null && info.references.includes(info.storePath);
+    const unjudged = selfHash.kind === "unread";
     const keep = unjudged && existing !== null && existing.narHash === info.narHash;
     const ca = keep ? existing.ca : computed;
     const caProof = keep
@@ -1369,10 +1367,10 @@ export function createCache(options: CacheOptions): Cache {
         ]);
         if (checked === null || stopping) return;
         done += 1;
-        if (!checked.ok || checked.selfHash === null) {
+        if (!checked.ok || checked.selfHash.kind !== "computed") {
           unreadable += 1;
         } else {
-          const selfHash = checked.selfHash;
+          const selfHash = checked.selfHash.hashes;
           const outcome = await withWriteLock(async () => {
             const bucket = repo.bucket(row.bucket);
             const current = bucket === null ? null : repo.object(bucket.name, row.storePath);
@@ -1826,10 +1824,7 @@ export function createCache(options: CacheOptions): Cache {
         }
         const signedUpstream =
           upstream === "skip" &&
-          (sigs ?? []).some((sig) => {
-            const key = keyNameOf(sig);
-            return key !== null && bucket.upstreamKeys.includes(key);
-          });
+          (sigs ?? []).some((sig) => bucket.upstreamKeys.some((k) => isSignedBy(sig, k)));
         (signedUpstream ? skipped : missing).push(path);
       }
       repo.want(bucket.name, wanted, now(), provenance);

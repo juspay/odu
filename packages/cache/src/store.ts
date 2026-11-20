@@ -6,7 +6,7 @@ import { ObjectChanged } from "@odu/objects";
 import { fifoStream } from "./fifo";
 import { describeFailure } from "./failure";
 import { base32, canonicalNarHash, NarinfoError, storePathHash } from "./narinfo";
-import type { SelfHashes } from "./storePath";
+import type { SelfHashes, SelfProof } from "./storePath";
 
 export interface PathInfo {
   storePath: string;
@@ -283,6 +283,8 @@ export function narHashModuloHasher(hashPart: string): {
   };
 }
 
+export type NarRefusal = "absent" | "changed" | "bad-bytes";
+
 export type NarCheck =
   | {
       ok: true;
@@ -290,12 +292,12 @@ export type NarCheck =
       narSize: number;
       fileHash: string;
       fileSize: number;
-      selfHash: SelfHashes | null;
+      selfHash: SelfProof;
     }
   | {
       ok: false;
       message: string;
-      why?: "absent" | "changed";
+      why: NarRefusal;
     };
 
 function decompressorOf(compression: string | null): string[] | null | { error: string } {
@@ -381,11 +383,12 @@ function readableOf(stream: ReadableStream<Uint8Array>): Readable {
 const classifyReadFailure = (err: unknown): NarCheck => ({
   ok: false,
   message: String(err),
-  ...(err instanceof ObjectChanged
-    ? { why: "changed" as const }
-    : (err as NodeJS.ErrnoException).code === "ENOENT"
-      ? { why: "absent" as const }
-      : {}),
+  why:
+    err instanceof ObjectChanged
+      ? "changed"
+      : (err as NodeJS.ErrnoException).code === "ENOENT"
+        ? "absent"
+        : "bad-bytes",
 });
 
 interface NarBytes {
@@ -401,7 +404,7 @@ async function verifyNar(
 ): Promise<NarCheck> {
   const decompressor = decompressorOf(compression);
   if (decompressor !== null && !Array.isArray(decompressor)) {
-    return { ok: false, message: decompressor.error };
+    return { ok: false, message: decompressor.error, why: "bad-bytes" };
   }
 
   const { promise, resolve } = Promise.withResolvers<NarCheck>();
@@ -420,7 +423,11 @@ async function verifyNar(
     if (settled || !ended || !fileEnded || code === null) return;
     settled = true;
     if (code !== 0) {
-      resolve({ ok: false, message: `${decompressor?.[0] ?? "the NAR"} exited ${code}${said()}` });
+      resolve({
+        ok: false,
+        message: `${decompressor?.[0] ?? "the NAR"} exited ${code}${said()}`,
+        why: "bad-bytes",
+      });
       return;
     }
     // THE DECOMPRESSOR CAN EXIT 0 EARLY (bzip2 warns about trailing garbage),
@@ -434,7 +441,11 @@ async function verifyNar(
       return;
     }
     if (actual !== fileSize) {
-      resolve({ ok: false, message: `${bytes.name} is ${actual} bytes but ${fileSize} were read` });
+      resolve({
+        ok: false,
+        message: `${bytes.name} is ${actual} bytes but ${fileSize} were read`,
+        why: "bad-bytes",
+      });
       return;
     }
     resolve({
@@ -443,7 +454,7 @@ async function verifyNar(
       narSize: size,
       fileHash: `sha256:${base32(fileHash.digest())}`,
       fileSize,
-      selfHash: modulo === null ? null : modulo.finish(),
+      selfHash: modulo === null ? { kind: "none" } : { kind: "computed", hashes: modulo.finish() },
     });
   };
 
@@ -460,14 +471,14 @@ async function verifyNar(
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
-      resolve({ ok: false, message: `${decompressor[0]}: ${String(err)}` });
+      resolve({ ok: false, message: `${decompressor[0]}: ${String(err)}`, why: "bad-bytes" });
     });
     child.on("close", (exit) => {
       code = exit ?? -1;
       settle();
     });
     if (child.stdout === null) {
-      return { ok: false, message: `${decompressor[0]} produced no output` };
+      return { ok: false, message: `${decompressor[0]} produced no output`, why: "bad-bytes" };
     }
     // EPIPE once the child has had enough is the ordinary end of a pipe.
     child.stdin?.on("error", () => {});

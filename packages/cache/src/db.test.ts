@@ -8,7 +8,7 @@ import {
   type BucketRow,
   CACHE_SCHEMA_VERSION,
   type CacheRepo,
-  MIGRATIONS,
+  migrationsThrough,
   type ObjectRow,
   openCacheRepo,
   type PathSort,
@@ -425,15 +425,16 @@ const SHIPPED_V1_TO_V4_SHA256 =
 
 describe("upgrading an existing database", () => {
   it("opens a v4 file and applies only the appended migrations", () => {
+    const through = migrationsThrough("bucket-domain");
     expect(
-      createHash("sha256").update(MIGRATIONS.slice(0, 4).join("\n")).digest("hex"),
+      createHash("sha256").update(through.map((migration) => migration.sql).join("\n")).digest("hex"),
     ).toBe(SHIPPED_V1_TO_V4_SHA256);
     const dir = mkdtempSync(join(tmpdir(), "odu-cache-upgrade-"));
     const file = join(dir, "cache.sqlite");
     try {
       const old = new Database(file);
-      for (const sql of MIGRATIONS.slice(0, 4)) old.exec(sql);
-      old.exec("PRAGMA user_version = 4;");
+      for (const migration of through) old.exec(migration.sql);
+      old.exec(`PRAGMA user_version = ${through.length};`);
       old.close();
 
       const repo = openCacheRepo(file);
@@ -466,8 +467,9 @@ describe("upgrading an existing database", () => {
     const other = "/nix/store/11111111111111111111111111111111-other";
     try {
       const old = new Database(file);
-      for (const sql of MIGRATIONS.slice(0, 18)) old.exec(sql);
-      old.exec("PRAGMA user_version = 18;");
+      const through = migrationsThrough("object-run-commit");
+      for (const migration of through) old.exec(migration.sql);
+      old.exec(`PRAGMA user_version = ${through.length};`);
       const insert = old.prepare(
         "INSERT INTO object (bucket, store_path, hash, nar_hash, nar_size, refs, sigs, created, " +
           "last_wanted, ca, ca_proof) VALUES ('main', ?, ?, 'sha256:x', 1, ?, '[]', 0, 0, ?, ?)",

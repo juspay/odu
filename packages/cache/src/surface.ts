@@ -575,12 +575,21 @@ export function actionsBlock(input: { readonly url: string; readonly publicKey: 
   extra-trusted-public-keys = ${input.publicKey}`;
 }
 
+export type NetrcHome =
+  | { readonly kind: "absolute"; readonly path: string }
+  | { readonly kind: "placeholder" };
+
+export const PLACEHOLDER_HOME: NetrcHome = { kind: "placeholder" };
+
+export const absoluteHome = (path: string | undefined): NetrcHome =>
+  path === undefined ? PLACEHOLDER_HOME : { kind: "absolute", path };
+
 /**
  * THE CREDENTIAL LINES, for a PRIVATE bucket only: reading it needs a token.
  *
- * `home` is the caller's ABSOLUTE home directory, or `null` when it has none to
- * offer. It cannot be `~`: Nix expands no tilde here — `--netrc-file ~/.netrc`
- * fails with `not an absolute path`.
+ * `home` is the caller's ABSOLUTE home directory, or `placeholder` when it has
+ * none to offer. It cannot be `~`: Nix expands no tilde here —
+ * `--netrc-file ~/.netrc` fails with `not an absolute path`.
  *
  * THE HOST, NEVER THE PORT. A netrc `machine` is matched against the host
  * alone, so `machine 127.0.0.1:18440` matches nothing: Nix sends no
@@ -588,7 +597,7 @@ export function actionsBlock(input: { readonly url: string; readonly publicKey: 
  */
 export function netrcBlock(input: {
   readonly url: string;
-  readonly home: string | null;
+  readonly home: NetrcHome;
 }): string {
   const host = ((): string => {
     try {
@@ -598,7 +607,9 @@ export function netrcBlock(input: {
     }
   })();
   return `# netrc — an absolute path, no ~${
-    input.home === null ? "\nnetrc-file = <home>/.netrc" : `\nnetrc-file = ${input.home}/.netrc`
+    input.home.kind === "placeholder"
+      ? "\nnetrc-file = <home>/.netrc"
+      : `\nnetrc-file = ${input.home.path}/.netrc`
   }
 machine ${host} password ${READ_TOKEN_PLACEHOLDER}`;
 }
@@ -607,7 +618,7 @@ export function useBlock(input: {
   readonly url: string;
   readonly publicKey: string;
   readonly public: boolean;
-  readonly home: string | null;
+  readonly home: NetrcHome;
 }): string {
   return [
     commentLines(MACHINE_CONFIG_NOTE),

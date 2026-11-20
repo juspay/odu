@@ -52,6 +52,14 @@ export interface SelfHashes {
   withOffsets: string;
 }
 
+export type SelfProof =
+  | { kind: "computed"; hashes: SelfHashes }
+  | { kind: "unread" }
+  | { kind: "none" };
+
+export const selfReferencing = (storePath: string, references: readonly string[]): boolean =>
+  references.includes(storePath);
+
 type SelfHashForm = keyof SelfHashes;
 
 const SELF_HASH_FORMS: readonly SelfHashForm[] = ["withoutOffsets", "withOffsets"];

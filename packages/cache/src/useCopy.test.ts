@@ -10,6 +10,7 @@ import {
   nixConfBlock,
   nixOsBlock,
   pushBlock,
+  PLACEHOLDER_HOME,
   READ_TOKEN_PLACEHOLDER,
   useBlock,
   useCommand,
@@ -35,7 +36,7 @@ describe("the copy a bucket page and the docs share", () => {
       nixOsBlock({ url: URL, publicKey: KEY }),
       flakeBlock({ url: URL, publicKey: KEY }),
       actionsBlock({ url: URL, publicKey: KEY }),
-      netrcBlock({ url: URL, home: null }),
+      netrcBlock({ url: URL, home: PLACEHOLDER_HOME }),
     ]) {
       expect({ text, quoted: DOCS.includes(text.trimEnd()) }).toEqual({ text, quoted: true });
     }
@@ -88,24 +89,24 @@ describe("the copy a bucket page and the docs share", () => {
   });
 
   it("names the credential each block needs", () => {
-    const use = useBlock({ url: URL, publicKey: KEY, public: false, home: null });
+    const use = useBlock({ url: URL, publicKey: KEY, public: false, home: PLACEHOLDER_HOME });
     expect(use).toContain(`password ${READ_TOKEN_PLACEHOLDER}`);
     expect(use).toContain("extra-substituters");
     expect(useCommand("main")).toBe("odu cache use main");
   });
 
   it("prints no netrc lines for a public bucket, which is read with no credential", () => {
-    const use = useBlock({ url: URL, publicKey: KEY, public: true, home: null });
+    const use = useBlock({ url: URL, publicKey: KEY, public: true, home: PLACEHOLDER_HOME });
     expect(use).toContain("extra-substituters");
     expect(use).not.toContain("netrc-file");
     expect(use).not.toContain("\nmachine ");
   });
 
   it("names the netrc machine by its host alone, which is all a netrc matches", () => {
-    expect(netrcBlock({ url: URL, home: null })).toContain(
+    expect(netrcBlock({ url: URL, home: PLACEHOLDER_HOME })).toContain(
       `\nmachine 127.0.0.1 password ${READ_TOKEN_PLACEHOLDER}`,
     );
-    expect(netrcBlock({ url: "https://cache.example.com/main", home: null })).toContain(
+    expect(netrcBlock({ url: "https://cache.example.com/main", home: PLACEHOLDER_HOME })).toContain(
       "\nmachine cache.example.com password",
     );
   });

@@ -3,11 +3,12 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { basename, join, relative } from "node:path";
-import { type DirectStore, directUploads, type ObjectStore, TEMP, type UploadedPart } from "@odu/objects";
+import { directUploads, type ObjectStore, type UploadedPart } from "@odu/objects";
+import { createDirectUploads, type DirectUpload } from "./directUpload";
 import { type KeptFile, keptFileOf, objectFactsOf } from "./fileHash";
 import { writeAll } from "./sink";
 import { verifyNarFile, verifyNarStream } from "./store";
-import type { SelfHashes } from "./storePath";
+import { selfReferencing, type SelfProof } from "./storePath";
 import type { BucketRow } from "./db";
 import {
   ODU_BUCKET_FIELD,
@@ -139,7 +140,7 @@ export interface StagingDeps {
     bucket: BucketRow,
     info: NarInfo,
     file: KeptFile,
-    selfHash: SelfHashes | null,
+    selfHash: SelfProof,
     provenance: Provenance,
   ) => Promise<boolean>;
   log?: (event: string, fields: Record<string, unknown>) => void;
@@ -193,38 +194,7 @@ export function createStaging(deps: StagingDeps): Staging {
   const proofs = new Map<string, Chain>();
   const joined = new Map<string, { parts: number; bytes: number; session: string | null }>();
   let lastSweep = 0;
-
-  interface DirectUpload {
-    readonly id: string;
-    readonly bucket: string;
-    readonly file: string;
-    readonly key: string;
-    readonly store: DirectStore;
-    readonly upload: string;
-    readonly partSize: number;
-    touched: number;
-  }
-
-  const directs = new Map<string, DirectUpload>();
-  const landed = new Map<string, DirectUpload>();
-
-  const directKey = (bucket: string, file: string): string => `${bucket}/${file}`;
-
-  function heldUpload(bucket: BucketRow, file: string, upload: string): DirectUpload | null {
-    const direct = directs.get(upload);
-    return direct !== undefined && direct.bucket === bucket.name && direct.file === file
-      ? direct
-      : null;
-  }
-
-  async function dropUpload(direct: DirectUpload): Promise<void> {
-    directs.delete(direct.id);
-    if (landed.get(directKey(direct.bucket, direct.file))?.id === direct.id) {
-      landed.delete(directKey(direct.bucket, direct.file));
-    }
-    await direct.store.abortUpload(direct.key, direct.upload).catch(() => {});
-    await direct.store.delete(direct.key).catch(() => {});
-  }
+  const directs = createDirectUploads({ storeOf, now, log });
 
   async function claim(
     dirForBucket: string,
@@ -267,7 +237,7 @@ export function createStaging(deps: StagingDeps): Staging {
           "absent",
         );
       }
-      const selfHashPart = info.references.includes(info.storePath)
+      const selfHashPart = selfReferencing(info.storePath, info.references)
         ? storePathHash(info.storePath)
         : null;
       const checked = await verifyNarStream(object, info.compression, selfHashPart);
@@ -296,7 +266,7 @@ export function createStaging(deps: StagingDeps): Staging {
         ),
       );
     } finally {
-      await dropUpload(direct);
+      await directs.drop(direct);
     }
   }
 
@@ -319,13 +289,18 @@ export function createStaging(deps: StagingDeps): Staging {
     });
     const claimed = await claim(dirForBucket, name);
     if (claimed === null) {
-      return recordSerially(bucket, info, null, provenance, async (current) =>
-        (await keptFacts(current, info.narHash, info.compression)) ??
-        refuse(`the narinfo names ${info.url}, which was never uploaded to this bucket`),
+      return recordSerially(
+        bucket,
+        info,
+        selfReferencing(info.storePath, info.references) ? { kind: "unread" } : { kind: "none" },
+        provenance,
+        async (current) =>
+          (await keptFacts(current, info.narHash, info.compression)) ??
+          refuse(`the narinfo names ${info.url}, which was never uploaded to this bucket`),
       );
     }
     try {
-      const selfHashPart = info.references.includes(info.storePath)
+      const selfHashPart = selfReferencing(info.storePath, info.references)
         ? storePathHash(info.storePath)
         : null;
       const checked = await verifyNarFile(claimed.path, info.compression, selfHashPart);
@@ -376,11 +351,7 @@ export function createStaging(deps: StagingDeps): Staging {
         }
       }
     }
-    for (const direct of [...directs.values()]) {
-      if (direct.touched >= cutoff) continue;
-      await dropUpload(direct);
-      joined.delete(directKey(direct.bucket, direct.file));
-    }
+    for (const key of await directs.expire(cutoff)) joined.delete(key);
   }
 
   const MAX_PARTS = 10_000;
@@ -638,7 +609,7 @@ export function createStaging(deps: StagingDeps): Staging {
   function recordSerially(
     bucket: BucketRow,
     info: NarInfo,
-    selfHash: SelfHashes | null,
+    selfHash: SelfProof,
     provenance: Provenance,
     keep: (bucket: BucketRow) => Promise<KeptFile | Refusal>,
   ): Promise<NarinfoOutcome> {
@@ -673,84 +644,23 @@ export function createStaging(deps: StagingDeps): Staging {
     async beginDirect(bucket, file, floor) {
       if (!isSafeNarFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
       await sweep();
-      const store = directUploads(storeOf(bucket));
-      if (store === null) return { mode: "staged" };
-      // S3 refuses a part below its minimum, except the last.
-      const partSize = Math.max(store.partSize, floor ?? 0);
-      const key = `${bucket.name}/nar/${TEMP}${randomUUID()}`;
-      const direct: DirectUpload = {
-        id: randomUUID(),
-        bucket: bucket.name,
-        file,
-        key,
-        store,
-        upload: await store.createUpload(key),
-        partSize,
-        touched: now(),
-      };
-      directs.set(direct.id, direct);
-      return {
-        mode: "direct",
-        upload: direct.id,
-        partSize,
-        part: store.presignPart(key, direct.upload, 0, PRESIGN_SECONDS).href,
-      };
+      return await directs.begin(bucket, file, floor);
     },
 
     async directPart(bucket, file, upload, index) {
-      const direct = heldUpload(bucket, file, upload);
-      if (direct === null) {
-        return { ok: false, status: 404, message: `no upload ${upload} for nar/${file}` };
-      }
-      if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_PARTS) {
-        return { ok: false, status: 400, message: `"${index}" is not a part index` };
-      }
-      direct.touched = now();
-      return {
-        ok: true,
-        url: direct.store.presignPart(direct.key, direct.upload, index, PRESIGN_SECONDS).href,
-      };
+      return await directs.part(bucket, file, upload, index);
     },
 
     async completeDirect(bucket, file, upload, parts) {
-      const direct = heldUpload(bucket, file, upload);
-      if (direct === null) {
-        return { ok: false, status: 404, message: `no upload ${upload} for nar/${file}` };
+      const done = await directs.complete(bucket, file, upload, parts);
+      if (done.ok) {
+        joined.set(`${bucket.name}/${file}`, {
+          parts: done.parts,
+          bytes: done.bytes,
+          session: null,
+        });
       }
-      const failed = async (message: string): Promise<DirectComplete> => {
-        await dropUpload(direct);
-        return { ok: false, status: 400, message };
-      };
-      if (parts.length < 1 || parts.length > MAX_PARTS) {
-        return await failed(`${parts.length} is not a part count for one NAR`);
-      }
-      try {
-        const decided = await direct.store.completeUpload(direct.key, direct.upload, parts);
-        if (decided !== "stored") {
-          return await failed(`the store did not join the parts (${decided})`);
-        }
-      } catch (err) {
-        return await failed(String((err as Error).message ?? err));
-      }
-      const bytes = await direct.store.head(direct.key).catch(() => null);
-      if (bytes === null) {
-        await dropUpload(direct);
-        return {
-          ok: false,
-          status: 400,
-          message: `nar/${file} is not in the store: the upload never landed`,
-        };
-      }
-      landed.set(directKey(bucket.name, file), direct);
-      joined.set(directKey(bucket.name, file), { parts: parts.length, bytes, session: null });
-      log?.("cache.nar.uploaded", {
-        bucket: bucket.name,
-        file,
-        mode: "direct",
-        parts: parts.length,
-        bytes,
-      });
-      return { ok: true, parts: parts.length, bytes };
+      return done;
     },
 
     async beginUpload(bucket, file) {
@@ -855,8 +765,8 @@ export function createStaging(deps: StagingDeps): Staging {
         proofs.set(key, chain);
       }
       const proving = serial(chain, () => {
-        const direct = landed.get(key);
-        return direct === undefined
+        const direct = directs.landedFor(bucket.name, name);
+        return direct === null
           ? prove(bucket, hash, info, dirForBucket, name, provenance)
           : proveDirect(bucket, hash, info, direct, provenance);
       });

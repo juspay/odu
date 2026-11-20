@@ -5,4 +5,5 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+  PLACEHOLDER_HOME,
 }

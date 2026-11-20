@@ -62,6 +62,7 @@ import {
   actionsPushBlock,
   type PathSort,
   pushBlock,
+  PLACEHOLDER_HOME,
   storePathParts,
   useCommand,
   type CacheScope,
@@ -401,7 +402,7 @@ const SETUP_TABS: readonly [SetupDestination, ...SetupDestination[]] = [
     text: (facts) =>
       facts.public
         ? nixConfBlock(facts)
-        : `${nixConfBlock(facts)}\n\n${netrcBlock({ url: facts.url, home: null })}`,
+        : `${nixConfBlock(facts)}\n\n${netrcBlock({ url: facts.url, home: PLACEHOLDER_HOME })}`,
     note: MACHINE_CONFIG_NOTE,
   },
   { name: "NixOS", blockClass: "consume-block", text: nixOsBlock, note: MACHINE_CONFIG_NOTE },

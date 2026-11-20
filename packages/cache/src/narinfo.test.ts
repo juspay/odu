@@ -81,7 +81,7 @@ describe("narinfo", () => {
 
   it("writes references and the deriver as basenames, and reads them back", () => {
     const info = parseNarinfo(REAL_NARINFO);
-    const text = formatNarinfo(info);
+    const text = formatNarinfo({ ...info, ca: null });
     expect(text).toContain(
       "References: pa6rydwgjxxmmvdxap7qk9c85h8jbimy-hello-2.12.3 pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57",
     );

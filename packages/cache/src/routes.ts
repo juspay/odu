@@ -373,7 +373,12 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
         domain: bucket.domain,
         url,
         upstreamKeys: [...bucket.upstreamKeys],
-        use: useBlock({ url, publicKey: bucket.publicKey, public: bucket.isPublic, home: null }),
+        use: useBlock({
+          url,
+          publicKey: bucket.publicKey,
+          public: bucket.isPublic,
+          home: PLACEHOLDER_HOME,
+        }),
         command: useCommand(bucket.name),
       };
       if ((request.headers["accept"] ?? "").includes("application/json")) {

@@ -99,8 +99,8 @@ export function keyParts(value: string): { name: string; payload: string } | nul
   return at <= 0 ? null : { name: value.slice(0, at), payload: value.slice(at + 1) };
 }
 
-export function keyNameOf(signature: string): string | null {
-  return keyParts(signature)?.name ?? null;
+export function isSignedBy(signature: string, keyName: string): boolean {
+  return keyParts(signature)?.name === keyName;
 }
 
 export function isSafeNarFileName(value: string): boolean {
@@ -139,8 +139,11 @@ export interface NarInfo {
   narSize: number;
   references: readonly string[];
   deriver: string | null;
-  ca: string | null;
   sigs: readonly string[];
+}
+
+export interface ServedNarInfo extends NarInfo {
+  ca: string | null;
 }
 
 /** Unknown keys are ignored rather than refused: the format is Nix's to
@@ -188,14 +191,13 @@ export function parseNarinfo(text: string): NarInfo {
         : deriverRaw.startsWith("/")
           ? deriverRaw
           : `/nix/store/${deriverRaw}`,
-    ca: one("CA"),
     sigs: fields.get("Sig") ?? [],
   };
 }
 
 /** `References` and `Deriver` are BASENAMES on the wire — Nix resolves them
  *  against its own store directory — so both are stripped here. */
-export function formatNarinfo(info: NarInfo): string {
+export function formatNarinfo(info: ServedNarInfo): string {
   const lines = [
     `StorePath: ${info.storePath}`,
     `URL: ${info.url}`,

@@ -12,9 +12,9 @@ import {
 } from "@odu/credentials";
 import { describeFailure } from "./failure";
 import {
+  formatNarinfo,
   isDerivationPath,
   narHashBase32,
-  storePathBasename,
   storePathHash,
 } from "./narinfo";
 import {
@@ -1403,15 +1403,12 @@ async function uploadOne(
 }
 
 export function formatPushNarinfo(entry: ClosureEntry, narName: string): string {
-  return [
-    `StorePath: ${entry.storePath}`,
-    `URL: nar/${narName}`,
-    "Compression: zstd",
-    `NarHash: ${entry.narHash}`,
-    `NarSize: ${entry.narSize}`,
-    `References: ${entry.references.map(storePathBasename).join(" ")}`,
-    ...(entry.deriver === null ? [] : [`Deriver: ${storePathBasename(entry.deriver)}`]),
-    ...entry.sigs.map((sig) => `Sig: ${sig}`),
-    "",
-  ].join("\n");
+  return formatNarinfo({
+    ...entry,
+    url: `nar/${narName}`,
+    compression: "zstd",
+    fileHash: null,
+    fileSize: null,
+    ca: null,
+  });
 }

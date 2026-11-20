@@ -184,6 +184,7 @@ describe("an upload's bytes", () => {
     expect(await verifyNarFile(path, "lz4")).toEqual({
       ok: false,
       message: "unsupported Compression: lz4",
+      why: "bad-bytes",
     });
     expect(await verifyNarFile(join(scratch, "absent"), "none")).toMatchObject({
       ok: false,
@@ -225,16 +226,17 @@ describe("an upload's bytes", () => {
       writeFileSync(narFile, Buffer.from(vector.nar, "base64"));
       const hashPart = vector.storePath.slice("/nix/store/".length, "/nix/store/".length + 32);
       const checked = await verifyNarFile(narFile, "none", hashPart);
-      if (!checked.ok || checked.selfHash === null) throw new Error("no modulo hash");
+      if (!checked.ok || checked.selfHash.kind !== "computed") throw new Error("no modulo hash");
+      const hashes = checked.selfHash.hashes;
       const other = vector.form === "withOffsets" ? "withoutOffsets" : "withOffsets";
-      expect(checked.selfHash[vector.form]).toBe(`sha256:${vector.ca.slice("fixed:r:sha256:".length)}`);
-      expect(checked.selfHash[other]).not.toBe(checked.selfHash[vector.form]);
+      expect(hashes[vector.form]).toBe(`sha256:${vector.ca.slice("fixed:r:sha256:".length)}`);
+      expect(hashes[other]).not.toBe(hashes[vector.form]);
       expect(
         contentAddressOf({
           storePath: vector.storePath,
           narHash: checked.narHash,
           references: [vector.storePath],
-          selfHash: checked.selfHash,
+          selfHash: hashes,
         }),
       ).toBe(vector.ca);
     });
@@ -275,8 +277,8 @@ describe("an upload's bytes", () => {
       const hashPart = storePath.split("/").at(-1)!.slice(0, 32);
       const checked = await verifyNarFile(narFile, "none", hashPart);
       expect(checked.ok).toBe(true);
-      if (!checked.ok || checked.selfHash === null) throw new Error("no modulo hash");
-      expect(Object.values(checked.selfHash)).toContain(
+      if (!checked.ok || checked.selfHash.kind !== "computed") throw new Error("no modulo hash");
+      expect(Object.values(checked.selfHash.hashes)).toContain(
         `sha256:${facts.ca.replace("fixed:r:sha256:", "")}`,
       );
       expect(
@@ -284,7 +286,7 @@ describe("an upload's bytes", () => {
           storePath,
           narHash: facts.narHash,
           references: facts.references,
-          selfHash: checked.ok ? checked.selfHash : null,
+          selfHash: checked.selfHash.hashes,
         }),
       ).toBe(facts.ca);
 
@@ -298,7 +300,7 @@ describe("an upload's bytes", () => {
           storePath,
           narHash: facts.narHash,
           references: facts.references,
-          selfHash: changed.ok ? changed.selfHash : null,
+          selfHash: changed.ok && changed.selfHash.kind === "computed" ? changed.selfHash.hashes : null,
         }),
       ).toBeNull();
     } finally {
