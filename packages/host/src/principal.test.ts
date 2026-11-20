@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { SurfaceHandler, SurfaceHandlers } from "@kolu/surface/server";
-import { claimsOf } from "./reserved";
+import { routeClaim } from "@odu/cordis/services";
 import {
   admissionFor,
   CurrentPrincipal,
@@ -146,7 +146,7 @@ async function through(
     broker,
     mcpPath: "/mcp",
     signInPage: () => "<title>Sign in to odu</title>",
-    reserved: claimsOf(["/mcp", "/cache/*", "/auth/*", "/assets/*"]),
+    reserved: ["/mcp", "/cache/*", "/auth/*", "/assets/*"].map(routeClaim),
   });
   return Effect.runPromise(
     Effect.provideService(

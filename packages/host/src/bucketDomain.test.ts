@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
-import type { BucketDomains } from "@odu/cordis/services";
+import { type BucketDomains, routeClaim } from "@odu/cordis/services";
 import { bucketDomainGate } from "./bucketDomain";
 
 const PATHS = [
@@ -10,7 +10,7 @@ const PATHS = [
   "/nix-cache-info",
   "/nar/*",
   "~^/[0-9abcdfghijklmnpqrsvwxyz]{32}\\.narinfo$",
-];
+].map(routeClaim);
 
 const bucketOf = (path: string): string | null => {
   for (const prefix of ["/cache/", "/_odu/v1/buckets/"]) {

@@ -94,13 +94,25 @@ export function agentInstructions(
 
 export type RowRoutes = NonNullable<ServeSurfaceAppOptions["routes"]>;
 
+export type RouteClaim =
+  | { readonly kind: "exact"; readonly path: string }
+  | { readonly kind: "walk"; readonly prefix: string }
+  | { readonly kind: "regex"; readonly pattern: RegExp };
+
 /**
- * Each entry is exact, or ends in `*` for a WALK — one or more characters after
- * the prefix (`/cache/*` claims `/cache/b/x`, not `/cache/`).
+ * A spec is exact, or ends in `*` for a WALK — one or more characters after the
+ * prefix (`/cache/*` claims `/cache/b/x`, not `/cache/`) — or starts with `~`
+ * for a regular expression.
  */
+export function routeClaim(spec: string): RouteClaim {
+  if (spec.startsWith("~")) return { kind: "regex", pattern: new RegExp(spec.slice(1)) };
+  if (spec.endsWith("*")) return { kind: "walk", prefix: spec.slice(0, -1) };
+  return { kind: "exact", path: spec };
+}
+
 export interface ClaimedRoutes<Layer extends RowRoutes = RowRoutes> {
   readonly layer: Layer;
-  readonly paths: ReadonlyArray<string>;
+  readonly paths: ReadonlyArray<RouteClaim>;
 }
 
 export interface HttpRoutes {
@@ -216,7 +228,7 @@ export interface BucketDomains {
   current(): readonly BucketDomainFact[];
   subscribe(listener: () => void): () => void;
   /** The paths the cache row answers: its claims are the whole list. */
-  paths: ReadonlyArray<string>;
+  paths: ReadonlyArray<RouteClaim>;
   /** The bucket a path names, in either protocol spelling — or `null` when it
    *  names none. */
   bucketOf(path: string): string | null;

@@ -1,3 +1,5 @@
+import { type RouteClaim, routeClaim } from "@odu/cordis/services";
+
 export const CACHE_MOUNT = "/cache";
 
 export const PARTS_HEADER = "x-odu-parts";
@@ -59,13 +61,13 @@ export const ODU_BUCKET_FIELD = "Odu-Bucket";
  *  store-path hash. */
 export const HASH_PATTERN = "[0-9abcdfghijklmnpqrsvwxyz]{32}";
 
-export const CACHE_ROUTE_PATHS: ReadonlyArray<string> = [
+export const CACHE_ROUTE_PATHS: ReadonlyArray<RouteClaim> = [
   `${CACHE_MOUNT}/*`,
   `${PUSH_API}/*`,
   "/nix-cache-info",
   "/nar/*",
   `~^/${HASH_PATTERN}\\.narinfo$`,
-];
+].map(routeClaim);
 
 export function bucketOf(path: string): string | null {
   for (const prefix of [`${CACHE_MOUNT}/`, `${PUSH_API}/buckets/`]) {

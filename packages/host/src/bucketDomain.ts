@@ -2,7 +2,7 @@ import { Effect } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { SurfaceAppHttpMiddleware } from "@kolu/surface-app/serve";
 import type { BucketDomains } from "@odu/cordis/services";
-import { claimsOf, isReserved } from "./reserved";
+import { isReserved } from "./reserved";
 
 const missing = (): HttpServerResponse.HttpServerResponse =>
   HttpServerResponse.text("no such cache path\n", {
@@ -32,7 +32,7 @@ export function bucketRouting(
   const owner = domains.bucketOf(path);
   if (owner === named.bucket) return { kind: "passthrough" };
   if (owner !== null) return { kind: "notMine" };
-  return isReserved(path, claimsOf(domains.paths))
+  return isReserved(path, domains.paths)
     ? { kind: "passthrough" }
     : { kind: "notMine" };
 }

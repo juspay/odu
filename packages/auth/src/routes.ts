@@ -2,7 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { Logger } from "@kolu/surface-daemon";
-import type { ClaimedRoutes } from "@odu/cordis/services";
+import { type ClaimedRoutes, routeClaim } from "@odu/cordis/services";
 import {
   authorizeUrl,
   exchangeCode,
@@ -269,6 +269,6 @@ export function authRoutes(opts: AuthRoutesOptions): ClaimedRoutes {
 
   return {
     layer: Layer.merge(signIn, Layer.merge(callback, signOut)),
-    paths: [AUTH_SIGN_IN_PATH, AUTH_CALLBACK_PATH, AUTH_SIGN_OUT_PATH],
+    paths: [AUTH_SIGN_IN_PATH, AUTH_CALLBACK_PATH, AUTH_SIGN_OUT_PATH].map(routeClaim),
   };
 }
