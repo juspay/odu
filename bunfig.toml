@@ -1,18 +1,3 @@
-# The @kolu/* surface libraries are hydrated as raw TypeScript from the Nix
-# store (scripts/hydrate-kolu-packages.sh) rather than installed from bun.lock,
-# so their own imports (@orpc/*, zod, solid-js, @modelcontextprotocol/sdk, …)
-# resolve by walking up out of node_modules/@kolu/<name> to the root
-# node_modules. The isolated linker still satisfies every one of them: each is
-# a DIRECT dependency of odu, and isolated symlinks direct dependencies at the
-# root. That is the invariant to protect — if a hydrated package ever imports
-# something odu does not itself depend on, declare it in package.json rather
-# than switching linkers.
-#
-# The workspace member (packages/run-client) is no exception: isolated gives it
-# a node_modules holding only what its OWN manifest declares, so its
-# @kolu/surface import walks up past that to the root copy — the same walk a
-# downstream reproduces when it hydrates the package beside its own kolu pin.
-#
 # Hoisted is NOT usable here. odu's tree carries genuinely conflicting
 # transitive versions — express wants cookie@0.7 while @orpc/server wants
 # cookie@1, and body-parser/type-is want content-type@2 while the MCP SDK and
@@ -24,11 +9,5 @@
 [install]
 linker = "isolated"
 
-# The run catalog is PER USER (`@odu/run-history`), so a suite that drives the
-# real coordinator would otherwise write fixture runs into the developer's own
-# history. The preload redirects it to a temp directory for the whole test
-# process — including the e2e suite's real `odu` subprocesses, which inherit
-# the variable. See the script for why this is a preload and not a hook every
-# suite has to remember.
 [test]
 preload = ["./scripts/test-state-dir.ts"]

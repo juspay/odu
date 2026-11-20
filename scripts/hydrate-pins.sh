@@ -1,14 +1,4 @@
 #!/usr/bin/env sh
-# Materialize EVERY npins-hydrated package into ./node_modules — the one list.
-#
-# The pairs used to live in two recipe bodies (`justfile`'s `install` and
-# `ci/mod.just`'s), and they drifted the first time one grew: the lane hydrated
-# every `@kolu/*` package and not `@olai/effect-cordis`, so `ci::typecheck` on a
-# lane failed on a module the developer's own shell had. A list of (source,
-# destination) pairs that two callers must agree on belongs in ONE file.
-#
-# The sources are the npins pins' store paths, exported by the dev shell
-# (`nix/env.nix`). Run this from the repository root, inside that shell.
 set -eu
 
 if [ -z "${IN_NIX_SHELL:-}" ]; then

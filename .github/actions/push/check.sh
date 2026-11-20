@@ -1,24 +1,4 @@
 #!/usr/bin/env bash
-#
-# ONE PATH'S PROOF, for `.github/actions/push`'s verification.
-#
-#   check.sh <store path> <substituter>
-#
-# Asks what a Nix client asks. The narinfo must answer at the SUBSTITUTER's
-# address — `<substituter>/<hash>.narinfo`, where `<hash>` is the store path's
-# own 32-character hash — and its `URL:` and `FileSize:` lines
-# must be there, and the NAR they name must answer 200 with a `Content-Length`
-# equal to `FileSize:` — the truncated object a proxy's body cap produces is a
-# narinfo that answers perfectly and a NAR that does not.
-#
-# A NARINFO ALONE IS NOT A PROOF. That is the whole reason this asks twice.
-#
-# Prints `OK <store path>` or `FAIL <store path> — <what is wrong>`, one line,
-# and exits 0 or 1. The caller runs these in parallel and counts the lines, so a
-# check that dies without an answer is distinguishable from one that passed.
-#
-# The bearer token, when the bucket needs one, arrives as a curl config file in
-# `$ODU_PUSH_CURL_CONFIG` — never as an argument, where `ps` would read it.
 
 set -u
 
@@ -32,8 +12,7 @@ config=${ODU_PUSH_CURL_CONFIG:-}
 }
 
 # THE NARINFO'S NAME IS THE STORE PATH'S HASH: the 32 characters of the
-# basename before the first dash. Derived HERE rather than handed in, so the one
-# place that asks for a narinfo is the one place that spells its name.
+# basename before the first dash.
 base=${store_path##*/}
 narinfo_url="$substituter/${base:0:32}.narinfo"
 
@@ -46,18 +25,10 @@ field() {
   printf '%s\n' "$1" | tr -d '\r' | sed -n "s/^$2:[[:space:]]*//p" | tail -1
 }
 
-# RETRIED, BECAUSE THE NETWORK IS NOT THE CACHE. A macOS runner saw bursts of
-# `curl (35) Connection reset by peer` against R2 on a bucket that was serving
-# perfectly, and turned a green push red. `--retry-all-errors` is what makes
+# `--retry-all-errors` is what makes
 # `--retry` cover a connection reset as well as a 5xx — without it curl retries
 # only "transient" HTTP statuses and gives up on exactly the failure seen.
-#
-# BOUNDED IN TIME, NOT ONLY IN ATTEMPTS. A reset fails in milliseconds, but a
-# black-holed edge does not answer at all, and curl's default connect timeout
-# is 300 seconds — five retries of that is half an hour for ONE path, eight of
-# them at once under `xargs -P 8`. So a connection gets ten seconds to be made
-# and the whole retry sequence thirty, after which the path is reported FAILED,
-# which is what a step that proves a push is for.
+# curl's default connect timeout is 300 seconds.
 retry=(--retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 30 --connect-timeout 10)
 
 narinfo=$(curl -sS -f "${retry[@]}" -K "$config" "$narinfo_url") ||

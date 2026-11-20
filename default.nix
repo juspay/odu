@@ -1,47 +1,8 @@
-# Root composer for odu's Nix packages. Used by flake.nix (thin wrapper),
-# shell.nix, and nix-build directly.
-#
-# `selfFlake` is odu's OWN flake source (`self.outPath`), threaded in by
-# flake.nix so this file can assemble the AGENT SOURCE a remote host resolves
-# the generic lane runner (`odu-runner`) from — never the consumer's — and bake
-# its store path onto the `odu` wrapper. It is null under plain `nix-build` /
-# `shell.nix` (no `self`): the wrapper bakes nothing, and such a binary refuses
-# to run (there is no override or fallback to the repo under test). `selfRev`
-# is the commit this build is of, when there is one — it keys the closure index
-# the publisher writes, and is absent for a dirty tree.
-#
-# `b2n` carries the bun2nix helpers; passed in from flake.nix via
-# `lib.mkBun2nix { inherit pkgs; }` (juspay/bun2nix rawflake standalone API).
-# Every derivation here is backed by `base`, so a b2n-less import can only
-# reach the overlay attrs — `base` throws on use if bun2nix isn't wired up.
 { pkgs ? import ./nix/nixpkgs.nix { }, b2n ? null, selfFlake ? null, selfRev ? null }:
 let
   version = (pkgs.lib.importJSON ./package.json).version;
   sources = import ./npins;
 
-  # ── the agent source: the tree a remote host resolves `odu-runner` from ──
-  #
-  # The lane runner is odu's OWN — none of the repo under test's code — so it is
-  # resolved from this repository's own flake, never the consumer's
-  # (`packages/execution/src/coordinator/runnerFlake.ts`). `mkAgentSourceTree`
-  # (from the pinned kolu, the same recipe kolu and drishti bake with) makes
-  # that tree flake-shaped: a copy of odu's source, writable, with `flake.nix` at
-  # its root, a `commit-hash` file, and the `binary-cache.json` sidecar
-  # `@kolu/surface-remote` reads on every dial.
-  #
-  # The sidecar's caches are DERIVED from this repository's `nixConfig` (that is
-  # what `binary-cache.nix` inside the recipe does), which is why the elimin-
-  # ated `nix/binary-cache.nix` and its text-match assertion are gone: there is
-  # no longer a second spelling of one fact to keep honest. odu's `nixConfig` is
-  # the only place the cache is written down.
-  #
-  # `closureIndex` is where `nix-cache.yml`'s `publish-closure` step writes each
-  # published `odu-runner`, keyed by the `commit-hash` beside it — the index
-  # `provisionAgent` reads to let a Linux host on Nix 2.17–2.34 pull the build
-  # itself with no trust. It is declared only when this build KNOWS its commit:
-  # the index is keyed by that hash, and a dirty tree (no `self.rev`) would
-  # otherwise name a key nothing was ever published under. No index is an honest
-  # absence — provisioning takes its other steps, unchanged.
   mkAgentSourceTree =
     import "${sources.kolu}/packages/surface-daemon/nix/agent-source-tree.nix"
       { inherit (pkgs) lib; };
@@ -62,15 +23,6 @@ let
           if selfRev == null
           then null
           else { repo = "juspay/odu"; branch = "ca-index"; };
-        # THE DECLARATION NAMES ITS PUSHER'S KIND, and only that: the bucket is
-        # `kolu-r2`, whose substituter is R2 itself
-        # (`https://cache.kolu.dev/kolu-r2`, static files nothing can push to),
-        # so the push goes to an odu origin that is NOT the read address. The
-        # cache states that origin and its bucket in `nix-cache-info`
-        # (`Odu-Origin`/`Odu-Bucket`), and the pinned `publish-closure` pushes
-        # with `odu cache push --cache <substituter>`, which reads them — so the
-        # substituter is the only address anybody spells. (kolu's binder
-        # refuses `bucket` and `origin` here since juspay/kolu#2344.)
         pusher = { kind = "odu"; };
         extraFiles = { "commit-hash" = commitHash; };
       };
@@ -83,19 +35,8 @@ let
       ./bunfig.toml
       ./bun.nix
       ./tsconfig.json
-      # The favicon the browser bundle serves. `scripts/build-web-ui.ts` reads
-      # it from the repo root rather than from a copy beside the bundle, so it
-      # has to be in the source the derivation sees — without this the build
-      # fails inside the sandbox on a file that is right there in the checkout.
       ./logo.svg
       ./src
-      # Every workspace member EXCEPT the acceptance suite's scenarios. That
-      # suite drives this very package, so leaving its features and steps in the
-      # fileset would make `.#odu` — a sandboxed `bun install` and hydrate —
-      # rebuild on every edit to a `.feature` file, which is to say on every edit
-      # made while writing one. Its `package.json` and `cucumber.js` stay in,
-      # because `bun install --frozen-lockfile` has to be able to resolve the
-      # member; nothing in the built binary reads the rest.
       (pkgs.lib.fileset.difference ./packages (pkgs.lib.fileset.unions [
         ./packages/web-acceptance/features
         ./packages/web-acceptance/step_definitions
@@ -105,26 +46,6 @@ let
     ];
   };
 
-  # The BROWSER BUNDLE the web service serves.
-  #
-  # Built from `base` — which already has node_modules and the hydrated
-  # `@kolu/*` sources — by the one call `@kolu/surface-app/bun` publishes, so
-  # the dist satisfies the freshness contract its own server half is built to
-  # serve: content-hashed assets, the commit on the `no-store` shell, module
-  # preloads, and precompressed siblings.
-  #
-  # SOLID'S COMPILER RUNS HERE, and that is the point of building the bundle in
-  # Nix rather than committing one: `packages/web-ui` is written in Solid JSX,
-  # `scripts/build-web-ui.ts` runs `babel-preset-solid` over it as a `Bun.build`
-  # plugin, and the presets are pinned exactly in the root manifest and fetched
-  # through `bun.nix` like every other dependency. So the page a user gets is
-  # compiled by the same toolchain as the page a developer builds, with no step
-  # that depends on what happens to be installed — Nix stays the only supported
-  # way to run odu, compiler included.
-  #
-  # A DERIVATION of its own rather than a step inside `base`: the bundle is what
-  # a browser downloads and `base` is what a coordinator runs, and a lane host
-  # realising the runner closure has no business fetching a stylesheet.
   web-ui =
     if b2n == null
     then throw "odu's web bundle needs `b2n` (lib.mkBun2nix output) — invoke via flake.nix"
@@ -132,10 +53,6 @@ let
       pkgs.runCommand "odu-web-ui"
         {
           nativeBuildInputs = [ pkgs.bun ];
-          # The two typefaces the bundle carries, from nixpkgs rather than
-          # from a font CDN — the same derivation the dev shell exports
-          # (`nix/env.nix`), so a developer's bundle and the packaged one name
-          # the same files.
           ODU_GEIST_FONTS = pkgs.odu-geist-fonts;
           meta.description = "odu's browser bundle";
         } ''
@@ -149,24 +66,6 @@ let
         bun scripts/build-web-ui.ts $out
       '';
 
-  # WHAT `bun install` MAKES, and nothing of the source tree. Keyed on the
-  # manifests and the lockfile, so it is ONE store path for as long as the
-  # dependencies hold still.
-  #
-  # `odu-base` used to be this install and the sources in one derivation, which
-  # made 263 MB of node_modules part of a package whose hash moves with every
-  # commit. The cache measured what that costs: 187 copies of a ~226 MB closure
-  # in eight days, 42 GB of the bucket's 117 GB, every one of them the same
-  # dependencies re-pushed under a new name because a `.ts` file one directory
-  # over had changed. Split out, those bytes are stored once per lockfile and
-  # `odu-base` is left holding only what genuinely differs between two commits.
-  #
-  # The fileset is therefore everything `bun install --frozen-lockfile` READS
-  # and not one file more: the root manifest, the lockfile, `bunfig.toml` (the
-  # linker), `bun.nix` (the fetched tarballs), every workspace member's
-  # `package.json` so the member resolves, and the hydrate script the
-  # post-install hook runs. Adding a source file here gives the per-commit
-  # churn back.
   depsSrc = pkgs.lib.fileset.toSource {
     root = ./.;
     fileset = pkgs.lib.fileset.unions [
@@ -179,11 +78,6 @@ let
     ];
   };
 
-  # Dep fetching: `b2n.fetchBunDeps` reads the committed `bun.nix` and
-  # builds a fake Bun cache via per-tarball FODs (hashes from the
-  # lockfile, no network in the build sandbox). `b2n.hook` installs that
-  # cache into $src via `bun install --ignore-scripts`, and the @kolu/*
-  # surface libraries are hydrated from the npins kolu pin on top of it.
   odu-deps =
     if b2n == null
     then throw "odu's dependency tree needs `b2n` (lib.mkBun2nix output) — invoke via flake.nix"
@@ -202,30 +96,15 @@ let
           bunNix = ./bun.nix;
         };
 
-        # isolated linker, matching `bunfig.toml` — see that file for why
-        # hoisting is not an option here (conflicting transitive versions have
-        # to nest, and bun cannot create the nested trees in the Nix sandbox on
-        # aarch64-darwin). Passed explicitly as well as via bunfig so the flag
-        # survives if the hook ever stops reading bunfig.toml. No
-        # `--production`: odu has no app/test dependency split, and the
-        # hydrated sources and both suites resolve out of the same tree.
         bunInstallFlags = [ "--linker=isolated" ];
 
-        # The fixupPhase walks node_modules and patches shebangs / ELF. For a
-        # Bun app this is pure overhead — Bun runs the source directly, no
-        # shebangs we care about, no native binaries.
         dontFixup = true;
         dontPatchShebangs = true;
 
-        # Skip the hook's default `bun build --compile` invocation — that flag
-        # set targets single-binary executables. odu ships raw TypeScript
-        # exec'd by the wrappers below, so there is no build step at all.
         dontUseBunBuild = true;
         dontBuild = true;
 
-        # The @kolu/* packages are NOT in bun.lock — they're Nix-store
-        # sources supplied by the overlay (same hydration strategy as the dev
-        # shell). Drop the copies in *after* bun install populates
+        # Drop the copies in *after* bun install populates
         # node_modules, otherwise bun install would either overwrite our
         # copies or refuse to proceed.
         postBunNodeModulesInstallPhase = ''
@@ -247,23 +126,6 @@ let
             ${pkgs.cordis.hydrateArgs}
         '';
 
-        # TWO DIRECTORIES, and both are install output. `$out/node_modules` is
-        # exactly what bun wrote at the root — no manifest, no source, nothing
-        # this derivation was handed — because the inputs are already in the
-        # lockfile's hash and a copy of them here would be a second spelling of
-        # a tree whose whole point is not to have one.
-        #
-        # `$out/workspaces/<member>/node_modules` is the SECOND thing bun wrote:
-        # the isolated linker gives every workspace member its own farm beside
-        # its manifest (`bunfig.toml` says why isolated), decided by the
-        # manifests like the rest. It is kept beside node_modules rather than
-        # inside it so that the sentence above stays true of the one directory a
-        # resolver reads.
-        #
-        # The workspace links this leaves in `$out/node_modules/@odu/*` point at
-        # `../../packages/<member>`, which is NOT in this output and is not
-        # meant to be. They stay RELATIVE so they land on real source inside
-        # `base`'s tree; dangling here is the trick, not an accident.
         installPhase = ''
           runHook preInstall
           mkdir -p $out
@@ -278,10 +140,6 @@ let
         '';
       };
 
-  # The repo tree, bun-runnable with no build step (the kolu/drishti
-  # convention) — the source fileset, plus a node_modules that POINTS AT
-  # `odu-deps` rather than containing it. A commit's worth of difference is now
-  # a few megabytes of source and a tree of symlinks.
   base = pkgs.runCommand "odu-base-${version}"
     {
       meta.description = "odu's source tree with node_modules resolved against odu-deps";
@@ -334,9 +192,7 @@ let
     done
   '';
 
-  # Lane agent: the coordinator `nix copy`s this derivation's closure to
-  # each lane host, realises it there, and runs it over
-  # `ssh <host> odu-runner --stdio`. `nix` is deliberately NOT pinned on
+  # `nix` is deliberately NOT pinned on
   # either PATH: the lane host's own nix realised the closure, and a
   # pinned client older than the host daemon corrupts CA-derivation
   # handling — the host that provides the daemon provides the client.
@@ -450,9 +306,5 @@ let
 in
 {
   inherit odu odu-runner base odu-deps web-ui;
-  # The tree a remote host resolves the lane runner from, with the
-  # `binary-cache.json` sidecar and `commit-hash` beside it. The `odu` wrapper
-  # bakes this same derivation; `nix-cache.yml`'s `publish-closure` step
-  # publishes its builds from it.
   agent-flake-source = agentSource;
 }

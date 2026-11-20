@@ -1,4 +1,3 @@
-/** Drive the real coordinator and all public history projections with distinct workers. */
 import { afterEach, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -144,7 +143,6 @@ for (const scenario of [
               });
             }
             setImmediate(() => {
-              // This opens the durable attempts before their first status frame.
               for (const id of ids)
                 opts.onLogFrame(
                   id,
@@ -160,10 +158,7 @@ for (const scenario of [
                   status: id === "check" ? outcome : "ok",
                   exitCode: id === "check" && outcome === "failed" ? 1 : 0,
                 };
-              // Verdicts arrive before log ends and are published later by the gate.
               opts.onNodes(structuredClone(state));
-              // Both of a node's streams end; the recipe's is the one that
-              // carries the node's own terminal, and this fake pushes nothing.
               for (const id of ids) opts.onLogFrame(id, { kind: "end" }, "recipe");
               for (const id of ids) opts.onLogFrame(id, { kind: "end" }, "push");
             });
@@ -219,7 +214,6 @@ for (const scenario of [
         for (const event of journal.filter(
           (e) => e.kind === "attempt_started" && e.node === id,
         )) {
-          // Primary setup can start while claiming, before a host is known.
           if (
             event.kind === "attempt_started" &&
             id !== `_ci-setup@${platform}`
@@ -241,7 +235,6 @@ for (const scenario of [
     expect(
       readAttemptRecord(handle, `check@${platform}`, 1)?.placement.host,
     ).toBe(hosts[0]!);
-    // Aggregate coordination belongs to the primary, even after its lease releases.
     expect(
       projected!.nodes.find((n) => n.id === `check@${platform}`)?.host,
     ).toBe(hosts[0]!);

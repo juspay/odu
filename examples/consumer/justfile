@@ -1,25 +1,6 @@
-# THE PIPELINE IS ONE TAGGED RECIPE'S DEPENDENCY GRAPH.
-#
-# `odu ci run` finds the recipe tagged `[metadata("ci")]`, walks what it
-# depends on, and runs every one of them with `just --no-deps <name>` in
-# dependency order, fanning platforms out to the lanes. Nothing else in this
-# file is odu's: it is a justfile, and `just build` still does what it says.
-
 [metadata("ci")]
 default: build test lint docs e2e
 
-# THE OUT-LINK IS THE PUSH. When a recipe exits 0, every `result*` in the
-# directory it ran in goes to the cache `flake.nix` names, closure and all.
-# A recipe that leaves none pushes nothing; a push that fails makes the node
-# red, so green means the cache is warm.
-#
-# `odu:pin` KEEPS THIS ONE PAST RETENTION, on the repository's DEFAULT branch
-# and no other: bare, it names no ref, so a run on your trunk re-points
-# `<owner>/<repo>@<trunk>/<system>` at what this recipe just pushed while a run
-# on a feature branch pushes exactly as before and pins nothing. You do not
-# have to spell your default branch here; name one — `odu:pin=release-1.x`,
-# repeated for each — only for a ref you ALSO want held. Unlike `odu:shard` it
-# does not have to be a leaf: `test` and `e2e` depend on this recipe, and what
 # it builds is what a developer's machine substitutes.
 [metadata("odu:pin")]
 build:
@@ -32,17 +13,10 @@ test: build
 lint:
     nix fmt -- --check .
 
-# A SECOND OUT-LINK, a second closure in the cache. This example carries NO
-# `[linux]`/`[macos]` attribute on purpose: `just` hides an OS-mismatched
-# recipe from the machine that READS the file, so a `[linux]` recipe here
-# would make `just --dump` refuse this justfile on a Mac — the page's table
 # says which repositories can afford one.
 docs:
     nix build .#docs --out-link result-docs
 
-# `odu:shard=N` RUNS UP TO N COPIES of a leaf with `ODU_SHARD_INDEX` (0-based)
-# and `ODU_SHARD_TOTAL` (the actual count, which may be below the ceiling when
-# capacity is short). The recipe divides its own work; all the shards report
 # as one GitHub context. Only a leaf may shard.
 [metadata("odu:shard=2")]
 e2e: build

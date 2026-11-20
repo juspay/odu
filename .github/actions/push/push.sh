@@ -1,141 +1,7 @@
 #!/usr/bin/env bash
-#
-# THE PUSHER BEHIND `.github/actions/push`.
-#
-# One step in any workflow, for any repository, to any odu bucket:
-#
-#   - uses: juspay/odu/.github/actions/push@<sha>
-#     with:
-#       cache: https://cache.kolu.dev/kolu-r2    # optional: see below
-#       token: ${{ secrets.ODU_CACHE_TOKEN }}
-#       # pin: omitted — the default branch pins itself ("The pin", below)
-#
-# `cache:` is OPTIONAL (PLAN 4.1), and this is where that is made true (#163).
-# Omitted, this script asks THIS checkout what it reads from — `odu cache
-# target`, the one odu substituter in `./flake.nix`'s `nixConfig` — and then
-# pushes to that URL BY NAME, `--cache <url>`, with the token. The inference
-# has one implementation, odu's; this script only decides whether to ask for
-# it.
-#
-# ## Why the token may go to a URL the repository chose, HERE
-#
-# `odu cache push` will not do this on its own, and must not: given no
-# `--cache` it withholds `--token-file` and `$ODU_CACHE_TOKEN` and sends only
-# a credential SAVED for that origin (#159, SEC-5). At a terminal, the person
-# holding a write token and the person who wrote `extra-substituters` are not
-# the same person, and a flake that names somebody else's host would collect
-# the token of everyone who ran a push inside it.
-#
-# IN GITHUB ACTIONS THEY ARE ONE TRUST BOUNDARY. The secret is present only on
-# a workflow this repository already admits, and anyone who can change
-# `flake.nix` with that secret in reach can change `.github/workflows` in the
-# same commit — where they could simply write a `cache:` of their own. The
-# flake is therefore not a less trusted source than the workflow that reads
-# it; it is the same source. Withholding the token bought nothing and made the
-# documented spelling 401 on every run (#163).
-#
-# The CLI's rule is untouched. `odu cache target` only READS, and the push
-# below is the operator-named spelling — this script names the target, having
-# decided to trust the one place a workflow's own author controls.
-#
-# ## The pusher is this checkout's odu
-#
-# `odu` is built from `$repo_root#odu`, where the repo root is derived from this
-# script's own path — `action_path/../../..`. A repository that pins the action
-# to a commit therefore pushes with that commit's odu, and odu's own workflow
-# (`uses: ./.github/actions/push`) pushes with the odu it just built. There is
-# no release to download and no version to drift.
-#
-# THAT BUILD IS ODU'S OWN FLAKE AND NOTHING ELSE — `--accept-flake-config`, so
-# odu's `nixConfig` (which names odu's cache) applies on a Nix that trusts it,
-# and a Nix that does not trust it builds odu instead. This script adds no
-# substituter of its own: the fact of where odu is substitutable from lives in
-# odu's flake, and a copy here would be a second place to keep it right.
-#
-# ## The caller's paths build with the caller's Nix
-#
-# The installables named in `paths` are built with `--accept-flake-config` and
-# NOTHING ELSE: their own flake's `nixConfig`, their own `nix.conf`, whatever
-# the runner is configured with. An action that added a substituter or a trusted
-# key to a user's build would be choosing a cache for a build it does not own.
-#
-# ## Nix must already be on PATH
-#
-# This never installs Nix. Installing one would decide, on a repository's
-# behalf, which Nix it builds with; the bucket page's "GitHub Actions" block is
-# the `nix_conf` for whichever install step the repository already runs.
-#
-# ## The token rule
-#
-#   - no token on a pull request  → build (the PR is owed that), push nothing,
-#                                   say so, succeed
-#   - no token on a `push` event  → fail, naming the missing secret: a push is
-#                                   where this job must publish, and going green
-#                                   having warmed nothing is the state a cache
-#                                   job exists to make impossible
-#   - the token is never echoed, and never appears in a command line: it is
-#     read from the environment, handed to `odu` through the environment, and
-#     handed to curl through a 0600 config file that is removed on exit
-#
-# ## The pin
-#
-# `pin:` IS A BOOLEAN WITH A DEFAULT, and the default is the line every
-# caller was writing by hand: EMPTY pins when this run is on the
-# repository's own default branch — `$GITHUB_REF` equal to
-# `refs/heads/<default branch>`, the branch read off the event payload
-# (`.repository.default_branch`), exactly where the head sha is read from a
-# few lines down. An explicit `true` or `false` is obeyed as given and
-# nothing is inferred from it, so a workflow holding some other rule still
-# writes the expression itself and hands over the answer.
-#
-# OUTSIDE ACTIONS — no payload, no `$GITHUB_REF` — an empty `pin:` pins
-# NOTHING. A laptop's run of this script is on nobody's default branch, and a
-# pin it moved would re-point, from a working copy, the name the repository's
-# own pushes hold.
-#
-# THE NAME IS DERIVED (`pin-name.sh`): `<owner>/<repo>@<ref>/<system>`. Four
-# repositories share one bucket and each matrix job pushes a different
-# system's closure, so a typed name is a name two jobs collide on — and the
-# collision is silent, because re-pointing a pin releases what it held.
-#
-# IT IS THE PUSH THAT PINS — `odu cache push --pin <name>`: one command, the
-# push's own write token, and a pin only when every path landed (a pin over a
-# half-pushed closure would promise paths the bucket does not have). A write
-# token is authority enough because a write token can already keep a closure
-# alive by pushing it again every night; a pin is that same promise made once.
-# It re-points only a pin a WRITE token made: re-pointing releases what the
-# pin held before, so an administrator's pin answers 403 instead of being
-# dropped by a workflow. Deleting a pin stays an administrator's.
-#
-# ## What gets pushed
-#
-# `paths:` as given, or — when it is omitted — EVERY flake output for the
-# runner's system: `packages.<system>`, `devShells.<system>` and
-# `checks.<system>`, enumerated by Nix. That is the set a developer's machine
-# substitutes, and it is what makes a pin worth taking: a pin over three named
-# packages holds three packages.
-#
-# ## It proves what it pushed, where Nix will ask
-#
-# `odu cache push` answers which paths the bucket SERVES (what it already had,
-# plus what this push stored, minus the upstream-signed paths it refuses by
-# design and minus any it refused) and the SUBSTITUTER URL the bucket publishes
-# — its own domain when it has one. For every served path, `check.sh` asks
-# `<substituter>/<hash>.narinfo`, exactly as a Nix client would, reads the
-# narinfo's `URL:` and `FileSize:`, and requires the NAR to answer 200 with
-# a matching `Content-Length`. All of it over plain HTTP: no local narinfo
-# cache can answer for the bucket, and a truncated object — the failure a
-# proxy's body cap causes — is caught rather than counted as landed.
-#
-# ## The readout
-#
-# `$GITHUB_STEP_SUMMARY` gets a table read from `odu cache push --output json`
-# — the command's own result, never its human text.
 
 set -euo pipefail
 
-# The curl config holds the bearer token: nobody else's business, and not long
-# for this world.
 umask 077
 
 say() { printf '%s\n' "$*"; }
@@ -148,23 +14,8 @@ trim() {
   printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
-# ── inputs ──────────────────────────────────────────────────────────────────
-
-# WHERE THIS ACTION LIVES. The pusher is built from the checkout above it
-# (`repo_root` below) and the two helpers beside it are addressed from here.
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# THE ONE FACT THIS ACTION IS GIVEN, and an OPTIONAL one (PLAN 4.1): the
-# substituter URL. Where a push is TAKEN and which bucket it lands in are the
-# cache's to state — `odu cache push --cache` reads them off its
-# `nix-cache-info` — because reads come from the store now and a read address
-# is no longer a push address.
-#
-# EMPTY MEANS "ASK THE FLAKE", below, once the pusher exists: `odu cache
-# target` reads `./flake.nix`'s `nixConfig` and prints the one odu cache named
-# there — the same `extra-substituters` line the repository already keeps in
-# order to READ from that cache. So the inference lives in ONE implementation,
-# odu's, and this script never learns to evaluate a flake.
 cache=$(trim "${ODU_PUSH_CACHE:-}")
 cache=${cache%/}
 token=$(trim "${ODU_PUSH_TOKEN:-}")
@@ -179,39 +30,22 @@ command -v jq >/dev/null 2>&1 ||
 command -v curl >/dev/null 2>&1 ||
   fail "odu push: \`curl\` is not on PATH. GitHub-hosted runners ship it; a self-hosted runner needs it installed."
 
-# THE COMMIT A ROW WILL CARRY, and it must be one a reader can check out.
 # `$GITHUB_SHA` is that commit on every event but one: on `pull_request` it is
 # the synthetic MERGE ref (`refs/pull/N/merge`), which nobody fetches by name,
-# which moves under the pull request and which disappears when it closes — so
-# a bucket page offering it would be offering a commit that cannot be looked
-# at. The pull request's own head sha is the commit that built these paths,
-# and the event payload is where it is (there is no `$GITHUB_HEAD_SHA`). An
-# empty answer falls back to `$GITHUB_SHA` rather than failing the push: the
-# bytes are good, and the pusher reads an empty value as "said nothing".
+# which moves under the pull request and which disappears when it closes.
+# The pull request's own head sha is the commit that built these paths,
+# and the event payload is where it is (there is no `$GITHUB_HEAD_SHA`).
 commit=${GITHUB_SHA:-}
 if [ "$event" = pull_request ] && [ -s "${GITHUB_EVENT_PATH:-}" ]; then
   head=$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || true)
   if [ -n "$head" ]; then commit=$head; fi
 fi
 
-# ── what to push ────────────────────────────────────────────────────────────
-
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/odu-push.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-# NO `paths:` MEANS THE WHOLE FLAKE, for the system this runner is: every
-# `packages.<system>`, `devShells.<system>` and `checks.<system>` output.
-#
-# That is the set a developer's machine actually substitutes — the dev shell
-# is most of what a fresh checkout waits for, and the checks are what CI is
-# about to build anyway — and it is what makes a pin worth having: a
-# pin over three named packages holds three packages, while a pin over this
-# holds the tree.
-#
-# ENUMERATED BY NIX, not by a list somebody keeps current: a flake that gains
-# an output gains it here on the next push. `--impure` is what lets
-# `builtins.currentSystem` name the runner instead of this script guessing,
-# and `getFlake` of the checkout evaluates the same flake the build will.
+# `--impure` is what lets
+# `builtins.currentSystem` name the runner.
 if [ -z "$requested" ]; then
   say "odu push: no paths named — pushing every flake output for this system"
   # shellcheck disable=SC2016 — the `${…}` below are NIX's interpolations,
@@ -232,11 +66,9 @@ if [ -z "$requested" ]; then
     fail "odu push: this flake has no packages, devShells or checks for this system, and \`paths:\` named none either — there is nothing to push."
 fi
 
-# AN INSTALLABLE IS BUILT FIRST and an existing path is used as it is: `nix
-# path-info` (which the pusher uses to walk the closure) does not build, so an
+# `nix path-info` (which the pusher uses to walk the closure) does not build, so an
 # installable that was never built would fail with the store's sentence instead
-# of this step's. The build carries the CALLER'S configuration and no
-# substituter of ours.
+# of this step's.
 : > "$work/built"
 while IFS= read -r item; do
   case "$item" in
@@ -244,8 +76,7 @@ while IFS= read -r item; do
     *)
       if [ -e "$item" ] || [ -L "$item" ]; then
         # A RELATIVE PATH IS SPELLED `./x`. Nix reads a bare word as a flake
-        # reference — `result` fails with "cannot find flake 'flake:result'" —
-        # and a `result` link is exactly the thing this input promises to take.
+        # reference — `result` fails with "cannot find flake 'flake:result'".
         case "$item" in
           ./* | ../*) printf '%s\n' "$item" >> "$work/built" ;;
           *) printf './%s\n' "$item" >> "$work/built" ;;
@@ -264,8 +95,6 @@ while IFS= read -r line; do
   if [ -n "$line" ]; then targets+=("$line"); fi
 done < "$work/built"
 
-# A POSITIVE ASSERTION. A build that produced nothing would otherwise push
-# nothing and still report success.
 [ "${#targets[@]}" -gt 0 ] ||
   fail "odu push: the paths named produced no store paths — there is nothing to push, and a cache step that reports success having published nothing is the bug it exists to prevent."
 count=${#targets[@]}
@@ -278,28 +107,6 @@ summary() {
   fi
 }
 
-# ── the pin ─────────────────────────────────────────────────────────────────
-
-# `pin:` IS A BOOLEAN WITH A DEFAULT. Empty — the default — pins when this
-# run is on the repository's OWN default branch, which is the comparison
-# every caller was pasting into its workflow and the one rule that is right
-# for a repository whose branch is called something else. An explicit `true`
-# or `false` is obeyed exactly: a workflow that holds another rule writes the
-# expression and hands over the answer, and this script infers nothing from a
-# value somebody stated.
-#
-# THE DEFAULT BRANCH IS THE EVENT PAYLOAD'S (`.repository.default_branch`),
-# read with `jq` exactly as the head sha is read above — never guessed, never
-# asked of the network. `$GITHUB_REF` and not `$GITHUB_REF_NAME` is what it
-# is compared against, because `refs/heads/<branch>` says BRANCH: a tag
-# called `master` has the same `ref_name` as the branch and holds no pin.
-# OUTSIDE ACTIONS there is neither payload nor ref, so an empty `pin:` pins
-# nothing — a working copy must not re-point the name the repository's own
-# pushes hold.
-#
-# THE NAME IS DERIVED (`pin-name.sh`), never typed: four repositories share
-# one bucket and each matrix job pushes a different system's closure, so a
-# name a person writes is a name two jobs eventually collide on.
 pin_args=()
 pin_requested=""
 pins=no
@@ -324,9 +131,8 @@ case "$pin" in
 esac
 
 if [ "$pins" = yes ]; then
-  # THE REF THAT WAS PUSHED. A pull request's `GITHUB_REF_NAME` is
-  # `<n>/merge`, a synthetic ref nobody substitutes, so the head branch is
-  # what a pin over that build should be called.
+  # A pull request's `GITHUB_REF_NAME` is
+  # `<n>/merge`, a synthetic ref nobody substitutes.
   ref_name=${GITHUB_HEAD_REF:-}
   [ -n "$ref_name" ] || ref_name=${GITHUB_REF_NAME:-}
   system=$(nix eval --impure --raw --expr 'builtins.currentSystem' < /dev/null) ||
@@ -338,8 +144,6 @@ if [ "$pins" = yes ]; then
   pin_requested=$("$here/pin-name.sh" "$GITHUB_REPOSITORY" "$ref_name" "$system")
   pin_args=(--pin "$pin_requested")
 fi
-
-# ── the token, before anything expensive ────────────────────────────────────
 
 if [ -z "$token" ]; then
   if [ "$event" = "push" ]; then
@@ -355,34 +159,16 @@ if [ -z "$token" ]; then
   exit 0
 fi
 
-# ── the pusher, from this action's own checkout ─────────────────────────────
-
 repo_root=$(cd "$here/../../.." && pwd)
 [ -f "$repo_root/flake.nix" ] ||
   fail "odu push: no flake.nix at $repo_root — this action expects to live at .github/actions/push in the odu checkout it pushes with."
 
 say "odu push: building the pusher from $repo_root"
-# ODU'S OWN FLAKE DECIDES WHERE ODU IS SUBSTITUTABLE FROM (`nixConfig`), and
-# `--accept-flake-config` is the whole of this script's contribution to that
-# decision. Spelling the substituter here would be a second copy of a fact the
-# flake already states, and a copy that could drift from it.
 pusher_out=$(nix build -L --no-link --print-out-paths --accept-flake-config \
   -- "$repo_root#odu")
 odu="$pusher_out/bin/odu"
 [ -x "$odu" ] || fail "odu push: the pusher build at $repo_root produced no executable at $odu."
 
-# ── the target, when the workflow named none ────────────────────────────────
-
-# ASKED OF THE PUSHER ITSELF, now that it exists. `odu cache target` prints
-# the one odu substituter `./flake.nix`'s `nixConfig` names, and refuses —
-# naming the URLs — when there is no flake, no odu cache in it, or two. Those
-# refusals are this step's failure, said in odu's own sentences, instead of a
-# push that goes out aimed at nothing.
-#
-# AND THEN THE URL IS PASSED BACK AS `--cache`, which is what makes the token
-# travel: see the trust-boundary argument at the top of this file. A push with
-# NO `--cache` withholds `$ODU_CACHE_TOKEN` by design and would 401 here
-# (#163).
 if [ -z "$cache" ]; then
   say "odu push: no \`cache:\` input — asking ./flake.nix through \`odu cache target\`"
   cache=$("$odu" cache target) ||
@@ -393,22 +179,10 @@ if [ -z "$cache" ]; then
   say "odu push: ./flake.nix names $cache"
 fi
 
-# ── the push ────────────────────────────────────────────────────────────────
-
 result="$work/push.json"
 set +e
-# The token rides in the environment, which is how `odu cache push` resolves it
-# by design ($ODU_CACHE_TOKEN, second in its order) — not in argv, where `ps`
-# would read it.
 # `${pin_args[@]+…}` and not `"${pin_args[@]}"`: a macOS runner's bash is 3.2,
-# where an empty array expanded under `set -u` is an unbound variable. The pin
-# NAME and the commit are argv's business — neither is a secret; the token is
-# still never there.
-#
-# `--commit` GOES UNCONDITIONALLY, empty and all: the pusher reads an empty
-# value as "said nothing" and leaves the row's own, so this script keeps no
-# guard of its own. No `--run`: a run id is a thing only an odu run has, and
-# this action is a workflow step that may be nobody's run.
+# where an empty array expanded under `set -u` is an unbound variable.
 ODU_CACHE_TOKEN="$token" "$odu" cache push --cache "$cache" --output json \
   ${pin_args[@]+"${pin_args[@]}"} \
   --commit "$commit" \
@@ -416,8 +190,6 @@ ODU_CACHE_TOKEN="$token" "$odu" cache push --cache "$cache" --output json \
 status=$?
 set -e
 
-# A PUSH THAT DIED BEFORE ANSWERING has no JSON: its own message is already in
-# the log, and there is nothing here to summarize.
 if ! jq -e . "$result" >/dev/null 2>&1; then
   fail "odu cache push exited $status without a result — see its message above."
 fi
@@ -429,8 +201,6 @@ failed=$(jq -r '.failed' "$result")
 page=$(jq -r '.pageUrl' "$result")
 substituter=$(jq -r '.substituter' "$result")
 
-# THE PIN FROM THE PUSH'S OWN ANSWER, never from its human text: `pinned` is
-# null when no pin was asked for, and `{name, rootPaths}` when one was moved.
 pinned_name=$(jq -r '.pinned.name // empty' "$result")
 pinned_paths=$(jq -r '.pinned.rootPaths // empty' "$result")
 
@@ -446,16 +216,10 @@ if [ "$failed" != "0" ]; then
   jq -r '.failures[] | "::error::\(.path) — \(.message)"' "$result"
 fi
 
-# THE EXIT STATUS IS THE PUSH'S OWN VERDICT, and a JSON that parses is not a
-# permission to ignore it: a command that failed has not pushed, whatever the
-# counts say.
 if [ "$status" -ne 0 ] || [ "$failed" != "0" ]; then
   fail "odu push: \`odu cache push\` exited $status with $failed refused path(s) — the push did not land."
 fi
 
-# WHAT HAPPENED TO THE PIN, said where the step says what it did. A pin that
-# was asked for and did not come back is red: `odu cache push` pins whenever
-# every path landed, and nothing lands past the check above without having.
 if [ -n "$pinned_name" ]; then
   say "odu push: the pin \"$pinned_name\" now holds $pinned_paths path(s)"
   summary "**Pinned:** \`$pinned_name\` now holds $pinned_paths path(s) — this closure stays out of garbage collection until a later push of this ref, on this system, moves the pin."
@@ -463,16 +227,10 @@ elif [ -n "$pin_requested" ]; then
   fail "odu push: \`--pin $pin_requested\` was asked for and \`odu cache push\` answered no pin — the closure is pushed but nothing holds it."
 fi
 
-# ── proof: every path the bucket serves answers where Nix will ask ─────────
-
-# The auth header lives in a config file, read by curl with `-K`, so the token
-# is never an argument. A public bucket ignores it; a private one needs it.
 auth_config="$work/curl.conf"
 printf 'header = "authorization: Bearer %s"\n' "$token" > "$auth_config"
 export ODU_PUSH_CURL_CONFIG="$auth_config"
 
-# `<store path> <substituter>` per served path — `check.sh` derives the narinfo's
-# URL from those, in the one place that asks for it.
 checks="$work/checks"
 : > "$checks"
 while IFS= read -r store_path; do
@@ -485,9 +243,6 @@ if [ "$expected" = "0" ]; then
   exit 0
 fi
 
-# PARALLEL, one process per path, and every path ANSWERED: `check.sh` prints
-# `OK` or `FAIL` for each, so a check that died silently cannot pass for one
-# that passed.
 checked="$work/checked"
 xargs -n 2 -P 8 "$here/check.sh" < "$checks" > "$checked" || true
 

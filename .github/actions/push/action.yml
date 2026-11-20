@@ -1,116 +1,9 @@
-# PUSH TO AN ODU CACHE, from any workflow, in one step.
-#
-#   - uses: nixbuild/nix-quick-install-action@<sha>   # Nix must already be here
-#     with:
-#       # THE TWO LINES YOUR BUCKET PRINTS under `nix.conf` — a bucket page's
-#       # "Use it" block, or `odu cache use <bucket>` — so THIS repository's
-#       # builds substitute from YOUR bucket. Not odu's: an action that baked
-#       # odu's cache into a caller's Nix configuration would be choosing a
-#       # cache for somebody else's build.
-#       nix_conf: |
-#         extra-substituters = <your bucket's substituter URL>
-#         extra-trusted-public-keys = <bucket>-1:<your bucket's public key>
-#   - uses: actions/checkout@<sha>
-#   - uses: juspay/odu/.github/actions/push@<sha>
-#     with:
-#       # cache: OMITTED — ./flake.nix's extra-substituters line above is it
-#       token: <your ODU_CACHE_TOKEN secret, as a workflow expression>
-#       # pin: OMITTED — your default branch pins itself; `true`/`false` is
-#       #      obeyed as given, and any other rule is an expression YOUR
-#       #      workflow writes (it cannot be written in this file)
-#
-# **ONE FACT, NOT THREE.** `cache:` is the substituter URL a repository
-# already has in its `nix.conf`; the push origin and the bucket name are read
-# off that cache's own `nix-cache-info`, which states them (`Odu-Origin`,
-# `Odu-Bucket`). They cannot be derived any more: reads come from the store
-# (PLAN 2.8), so `https://cache.kolu.dev/kolu-r2` is an R2 domain that answers
-# GET and takes no push at all. A cache that does not state them refuses this
-# step with a sentence naming the URL it asked.
-#
-# **AND WITH NO `cache:` AT ALL, the flake states it.** The step runs `odu
-# cache target` in your checkout, takes the one odu substituter
-# `./flake.nix`'s `nixConfig` names, and pushes to that URL by name — so the
-# token goes with it. A repository that reads from its cache has already
-# declared it once; this is that one declaration doing the work (#163). In a
-# workflow the flake and the workflow are ONE trust boundary — whoever can
-# edit `flake.nix` with a secret in reach can edit the workflow beside it —
-# which is why the Action may do what `odu cache push` on a laptop must not
-# (`push.sh` carries the argument in full).
-#
-# **The pusher is this action's own `odu`.** It is built from the checkout the
-# action itself runs out of — `$GITHUB_ACTION_PATH/../../..` — so pinning the
-# action to a commit pins the pusher to that commit's code, and
-# `uses: ./.github/actions/push` in odu's own repository pushes with the
-# checkout's odu. Nothing is downloaded from a release page, nothing floats.
-#
-# **Nix is required on PATH and is never installed here.** An action that
-# installed a package manager would be an action that decided which Nix a
-# repository builds with; the block above is the `nix_conf` to paste into
-# whichever install step the repository already runs.
-#
-# **Where odu itself is substituted from is odu's own flake's business.** The
-# pusher build passes `--accept-flake-config` and nothing else, so odu's
-# `nixConfig` applies on a Nix that trusts it, and a Nix that does not trust it
-# builds odu instead. The caller's installables are built with the caller's own
-# configuration — no substituter, no key, nothing this action chose.
-#
-# **The token rule, unchanged from the shell this replaced** (see `push.sh`,
-# which is where it is enforced — never in an `if:` here, where an expression
-# would be able to read a secret):
-#
-#   - no token on a pull request  → build, push nothing, say so, succeed
-#   - no token on a `push` event  → fail, naming the missing secret
-#   - the token is never echoed, and never appears in a command line
-#
-# **A PIN KEEPS THIS CLOSURE OUT OF GARBAGE COLLECTION, and `pin:` defaults
-# to your default branch.** Left empty it pins when `github.ref` is
-# `refs/heads/<the repository's default branch>` — the comparison every
-# caller was pasting in, read by the step from the event payload, so the
-# repository whose branch is called something else is right without writing
-# anything. An explicit `true` or `false` is obeyed exactly as given and
-# nothing is inferred from it: a workflow that pins on some OTHER ref writes
-# that expression and passes the answer. The literal expression is in the
+# The literal expression is in the
 # cache docs (`website/src/content/docs/cache/github-actions.md`) and
 # CANNOT be written here —
 # GitHub evaluates workflow expressions while PARSING an action file, where
 # the `github` context does not exist, and one in any string refuses the
 # whole action with "Unrecognized named-value: github".
-#
-# THE NAME IS DERIVED and never typed: `<owner>/<repo>@<ref>/<system>`, e.g.
-# `juspay/kolu@master/x86_64-linux`. Four repositories share one bucket, so
-# the repository is in it; a matrix pushes Linux and macOS closures on the
-# same commit, so the system is in it — under one shared name the second job
-# to finish would re-point the pin and hand the first job's closure to the
-# next collection. A pull request's ref is its head branch, not the synthetic
-# merge ref nobody substitutes. Free-text names stay in the API, for a board
-# and an administrator.
-#
-# A WRITE TOKEN IS ALLOWED TO PIN, and nothing stronger is asked for: a write
-# token can already keep a closure alive by pushing it again every night, so a
-# pin is the same promise made once instead of nightly. The push itself pins
-# (`odu cache push --pin`) — one command, one token — and only when every path
-# landed.
-#
-# It may re-point only a pin a WRITE token made. Re-pointing releases whatever
-# the pin held before, so an administrator's pin answers 403 rather than being
-# dropped by a workflow. Deleting a pin is an administrator's either way.
-#
-# ONE CONSEQUENCE WORTH KNOWING: if an administrator re-points THIS pin from
-# the board, it becomes an administrator's pin — and the next push here is
-# refused and this step goes red. That is deliberate and loud: a cache job
-# that silently stopped holding its closure is the state this input exists to
-# prevent. Have the administrator unpin it.
-#
-# **It proves what it pushed, where Nix will ask.** For every path the bucket
-# serves (`check.sh`): the narinfo must answer at the SUBSTITUTER URL the bucket
-# publishes — its own domain when it has one — and the NAR that narinfo names
-# must answer 200 with a `Content-Length` equal to its `FileSize:`. All of it
-# over plain HTTP, so no local narinfo cache can answer for the bucket, and a
-# NAR truncated by a proxy's body cap is caught rather than counted as landed.
-# Any path that fails turns the step red and is named.
-#
-# The step summary is a table read from `odu cache push --output json`, never
-# scraped from human output.
 name: Push to an odu cache
 description: Push a closure to an odu bucket with the odu built from this action's own checkout, and prove every pushed path answers from the bucket.
 author: odu
@@ -171,8 +64,6 @@ runs:
   steps:
     - name: Push the closure, and prove it landed
       shell: bash
-      # Every input rides as ENVIRONMENT, not interpolated into the script: a
-      # `paths:` value cannot become shell, and a token cannot become shell.
       env:
         ODU_PUSH_CACHE: ${{ inputs.cache }}
         ODU_PUSH_TOKEN: ${{ inputs.token }}

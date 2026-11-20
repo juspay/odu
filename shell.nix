@@ -7,24 +7,13 @@ pkgs.mkShell ({
     just
     jq
     bun
-    nodejs # for npm: `just website` builds website/, a standalone npm project
+    nodejs
     nixpkgs-fmt
-    # What the cache shells out to. `nix` comes from the host on purpose (see
-    # default.nix); compressing and decompressing a NAR is odu's own work, so
-    # the shell provides what the package bakes onto its PATH.
     zstd
     xz
     bzip2
-    # The S3 store's contract suite runs against a real S3 gateway over a temp
-    # directory, started by the test on a free port (packages/cache/test).
     versitygw
   ];
 
-  # The browsers come from nixpkgs, and only in the `e2e` shell (flake.nix) — so
-  # the npm `playwright` package must never fetch its own. Set HERE, in the shell
-  # where `bun install` runs, rather than there, in the shell where the tests
-  # run: a download triggered at install time would land a second, unpinned
-  # browser set in ~/.cache and the version the suite then drove would depend on
-  # which shell somebody happened to install from.
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
 } // oduEnv)

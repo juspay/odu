@@ -1,23 +1,3 @@
-# THE NIXOS MODULE FOR THE SERVICE, which is one process: the board, the CI it
-# runs, and the binary cache it serves.
-#
-# TWO SHAPES, and `github` is the switch between them.
-#
-#   - WITHOUT `services.odu.github`, there is no public board. The daemon binds
-#     a loopback address and nginx proxies exactly the cache's two route
-#     families, because the board and `/mcp` have no authentication of their own
-#     — a module that put them on the internet would open a CI server to the
-#     world.
-#   - WITH it, the daemon has a DOOR: sign-in through a GitHub App, sessions,
-#     personal tokens, roles. nginx then proxies the board, the websocket and
-#     `/mcp` as well, and every caller meets the sign-in page before anything
-#     else. That is server mode, and it is what makes the public board safe.
-#
-# The cache keeps the compressed NAR a pusher sent, as objects — under
-# `stateDir` (the `local` store), or in an S3-compatible bucket declared in
-# `cache.stores` and chosen per bucket — and never imports into a Nix store:
-# references are names in the narinfo, the server signs at read, and the state
-# lives in one SQLite file plus the objects.
 { self }:
 { config, lib, pkgs, ... }:
 
@@ -33,15 +13,9 @@ let
     types
     ;
 
-  # `StateDirectory` takes a NAME under /var/lib, not a path. Deriving it keeps
-  # one authority: whatever `stateDir` says is where the database, the objects
-  # and the staging directory go; `gcroots/` is only migration leftovers.
+  # `StateDirectory` takes a NAME under /var/lib, not a path.
   stateDirName = baseNameOf (toString cfg.stateDir);
 
-  # `http://127.0.0.1:18440`, `http://[::1]:18440`, `http://localhost:18440`.
-  # A loopback literal rather than a resolver call, because this is an assertion
-  # about where the daemon may bind, and a hostname that resolves to something
-  # else today is exactly what it is here to refuse.
   # The IPv6 literal is spelled `.::1.` rather than `\[::1\]`: Nix runs POSIX
   # ERE, where a backslash-escaped bracket is an invalid expression, and the two
   # dots match the brackets a URL puts around an address.
@@ -49,8 +23,7 @@ let
     "https?://(127[.]0[.]0[.]1|localhost|.::1.)(:[0-9]+)?/?"
     cfg.listen != null;
 
-  # Both route families get the same treatment, and the same `extraConfig`
-  # the docs have had since the cache shipped. `client_max_body_size 0` and the
+  # `client_max_body_size 0` and the
   # two buffering switches are not tuning: a NAR is gigabytes, and a proxy that
   # buffers one holds it in memory or in a temp file before odu sees a byte.
   proxyRules = ''
@@ -72,13 +45,6 @@ let
     extraConfig = proxyRules;
   };
 
-  # THE READ CACHE IS FOR NARS, and only for NARs. A narinfo is a few hundred
-  # bytes and its hit count is a fact the bucket publishes, so it must reach
-  # odu; a NAR is the gigabytes, and a second fetch of the same one is the
-  # commonest thing a build farm does. `$host$request_uri` keys the two forms
-  # of the same object apart: a bucket domain and the path form are different
-  # names for the same bytes, and a cache that merged them would answer one
-  # name with the other's header.
   narLocation = {
     proxyPass = daemonUrl;
     # THE SAME STREAMING RULES, EXCEPT BUFFERING: `proxyRules` turns response
@@ -106,9 +72,6 @@ let
     '';
   };
 
-  # THE NIX PROTOCOL'S WHOLE FOOTPRINT AT A BUCKET'S OWN NAME. A bucket domain
-  # answers at `/`, so the vhost proxies exactly the paths the cache claims —
-  # and NOT `/`, which is the board's and stays on `cache.domain`.
   cacheLocations = {
     "/nix-cache-info" = proxyLocation;
     "/nar/" = proxyLocation;
@@ -117,27 +80,11 @@ let
     # nginx parses an unquoted `{32}` in a location regex as a block opener, so
     # the expression is quoted — and `[.]` avoids a backslash in the spelling.
     "~ \"^/[0-9abcdfghijklmnpqrsvwxyz]{32}[.]narinfo$\"" = proxyLocation;
-    # EVERYTHING ELSE GOES TO THE DAEMON, which answers for the bucket only: `/`
-    # is its public page, the paths above are the protocol, and the board,
-    # `/mcp`, `/auth` and `/rpc/ws` are the cache row's 404. nginx cannot decide
-    # that — the bucket a name belongs to is the daemon's fact.
     "/" = proxyLocation;
   };
 
-  # IS THIS A SERVER MODE DEPLOYMENT? All three `github` options set; the
-  # assertion above refuses a partial one.
   serverMode = cfg.github.clientId != null;
 
-  # THE DECLARED STORES, as the daemon reads them: one JSON file in the store,
-  # naming each store and the RUNTIME path of its credentials. The credentials
-  # themselves never enter the Nix store — systemd copies each file into the
-  # unit's private credentials directory (`LoadCredential` below), and this
-  # file names that copy.
-  #
-  # `publicUrl` is written only when the store has one: absent is how the
-  # declaration says "every read of this store goes through odu", and a
-  # `null` in the JSON would be a third answer the parser would have to have
-  # an opinion about.
   storesFile = pkgs.writeText "odu-cache-stores.json" (builtins.toJSON (
     lib.mapAttrs
       (name: store: {
@@ -149,10 +96,6 @@ let
       cfg.cache.stores
   ));
 
-  # STORES WHOSE `publicUrl` IS NOT A BARE ORIGIN, by name. odu appends
-  # `/<bucket>/<key>` to that URL, so a path, a query or a fragment would end
-  # up in the MIDDLE of the address a reader fetches — the assertion below is
-  # what turns that into a refused rebuild rather than a cache nobody can read.
   badPublicUrls = lib.attrNames (
     lib.filterAttrs
       (_: store:
@@ -270,11 +213,6 @@ in
 
     publicOrigin = mkOption {
       type = types.nullOr types.str;
-      # The scheme follows `cache.enableACME`, because that is the scheme the
-      # virtual host actually serves: with ACME off the module forces a plain
-      # HTTP vhost, and publishing `https://<domain>` for it would be a URL the
-      # module itself does not answer on. A host that terminates TLS in front of
-      # this machine sets this by hand.
       default =
         if cfg.cache.domain == null then null
         else "${if cfg.cache.enableACME then "https" else "http"}://${cfg.cache.domain}";
@@ -566,9 +504,6 @@ in
         '';
       }
       {
-        # HALF A DOOR IS A REFUSAL AT BOOT, so it is a refusal here too: a
-        # daemon that silently stopped asking for sign-in because one option was
-        # misspelled would be a door that looks shut and is not.
         assertion =
           (cfg.github.clientId != null) == (cfg.github.clientSecretFile != null)
           && (cfg.github.clientId != null) == (cfg.github.allow != [ ]);
@@ -587,10 +522,6 @@ in
         '';
       }
       {
-        # A PUBLIC URL IS AN ORIGIN, NOT AN ADDRESS. The daemon's declaration
-        # parser refuses the same shape at boot; refusing it here too means a
-        # misspelled name costs a rebuild rather than a service that will not
-        # mount.
         assertion = badPublicUrls == [ ];
         message = ''
           services.odu.cache.stores.${lib.concatStringsSep ", " badPublicUrls} has a
@@ -602,9 +533,6 @@ in
         '';
       }
       {
-        # ONE NAME, ONE VHOST. A duplicate in the list would silently pick one
-        # entry, and `cache.domain` already owns the board's vhost — a bucket
-        # domain there would replace it rather than add to it.
         assertion =
           builtins.length (lib.unique cfg.cache.bucketDomains) == builtins.length cfg.cache.bucketDomains
           && !(builtins.elem cfg.cache.domain cfg.cache.bucketDomains);
@@ -624,7 +552,6 @@ in
       homeMode = "0700";
     };
 
-    # Only for an instance still migrating from the store-backed cache.
     nix.settings.trusted-users = optionals cfg.trustedUser [ cfg.user ];
 
     systemd.services.odu-web = {
@@ -662,8 +589,6 @@ in
         ]
         ++ optionals serverMode [
           "ODU_GITHUB_CLIENT_ID=${cfg.github.clientId}"
-          # The credential's own runtime path: systemd copies the file into a
-          # private directory, and this is the file the daemon reads.
           "ODU_GITHUB_CLIENT_SECRET_FILE=%d/client-secret"
           "ODU_GITHUB_ALLOW=${builtins.concatStringsSep "," cfg.github.allow}"
         ]
@@ -671,8 +596,6 @@ in
           "ODU_WEB_ALLOWED_ORIGINS=${builtins.concatStringsSep "," cfg.allowedOrigins}"
         ]
         ++ optionals (cfg.cloudflare.apiTokenFile != null) [
-          # The credential's runtime path: systemd copies the file into a
-          # private directory, and this is the file the daemon reads.
           "ODU_CLOUDFLARE_API_TOKEN_FILE=%d/cloudflare-api-token"
         ]
         ++ optionals (cfg.cache.stores != { }) [
@@ -702,8 +625,6 @@ in
     services.nginx = mkIf (cfg.cache.domain != null || cfg.cache.bucketDomains != [ ]) {
       enable = true;
       recommendedProxySettings = true;
-      # The zone lives here rather than in a vhost: both vhost shapes read from
-      # it, and one declaration is one place for its size to be argued about.
       appendHttpConfig = ''
         proxy_cache_path /var/cache/nginx/odu-nar levels=1:2 keys_zone=odu_nar:10m
           max_size=10g inactive=7d use_temp_path=off;
@@ -714,20 +635,11 @@ in
             ${cfg.cache.domain} = {
               enableACME = cfg.cache.enableACME;
               forceSSL = cfg.cache.enableACME;
-              # TWO SETS OF LOCATIONS, one per shape.
-              #
-              # WITHOUT a door: the cache's protocol and its admin API, and
-              # NOTHING else. `/` is an explicit 404 rather than an absent
+              # `/` is an explicit 404 rather than an absent
               # location: with no `location /` and no `root`, nginx falls back to
               # its own `html/index.html` and answers "Welcome to nginx" with a
               # 200 — which is not the board, but is not the 404 this module
               # promised either.
-              #
-              # WITH one: everything the daemon serves, because the door is what
-              # makes it safe to. `/rpc/ws` carries the websocket upgrade; `/`
-              # carries the board and every static asset; `/mcp` an agent's
-              # endpoint. `/auth/…` rides `/` — the OAuth redirect and the
-              # callback are ordinary requests.
               locations =
                 if serverMode then {
                   "/rpc/ws" = {
@@ -742,20 +654,11 @@ in
                   "~ ^/cache/[a-z0-9-]+/nar/" = narLocation;
                   "/cache/" = proxyLocation;
                   "/_odu/v1/" = proxyLocation;
-                  # THE SCRAPE, which is the HOST's route rather than the
-                  # cache's: without this location a Prometheus on a
-                  # cache-only deployment meets the `/` 404 below and a
-                  # dashboard goes flat with nothing to read. It carries its
-                  # own credential (the root token or a metrics token), so
-                  # proxying it opens nothing a 401 does not shut.
                   "/metrics" = proxyLocation;
                   "/" = { return = "404"; };
                 };
             };
           }
-        # ONE VHOST PER BUCKET NAME, each with its own certificate and exactly
-        # the Nix protocol's paths. The daemon decides WHICH bucket a `Host`
-        # names; nginx only has to let the request through.
         // lib.listToAttrs (
           map
             (domain: lib.nameValuePair domain {

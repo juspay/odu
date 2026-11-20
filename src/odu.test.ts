@@ -1,10 +1,3 @@
-/**
- * Falsifiability suite for the lane runner, over the real stdio framing —
- * a loopback stream pair, exactly the transport ssh carries in production.
- * Adapted from the mini-ci example's suite, extended for odu's deltas:
- * idle-until-configure, the builtin `_ci-setup` node, configure rejection.
- */
-
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,9 +55,6 @@ interface Harness {
   dispose: () => void;
 }
 
-/** The text a log frame carries. `end` carries none — it says the node has
- *  finished producing output, not what it said — so the assertions below can
- *  read as "what is in this log" instead of as a union narrowing. */
 function frameText(frame: NodeLogMessage | undefined): string {
   return frame !== undefined && frame.kind !== "end" ? frame.text : "";
 }
@@ -90,9 +80,6 @@ async function harness(): Promise<Harness> {
   // it writes the banner on the server half and reads it back off the client
   // half, which is what keeps this round-trip honest evidence about the ssh leg.
   const readiness = await greetLoopback(pair);
-  // Every wire link is ASYNC now (building the protocol layer and its fibers is
-  // an effect) and owns a scope holding those fibers — hence the await here and
-  // the `dispose()` in teardown.
   const link = await stdioLink({
     group: laneSurface.group,
     read: pair.client.read,
@@ -108,13 +95,10 @@ async function harness(): Promise<Harness> {
         states.push(state);
       }
     } catch {
-      // teardown races are unremarkable
     }
   })();
 
   const dispose = (): void => {
-    // Client goes away first (runner sees EOF and disposes), then the
-    // client.s inbound closes so live iterators end — mini-ci.s ordering.
     void link.dispose();
     pair.client.write.end();
     runner.dispose();
@@ -145,7 +129,6 @@ async function until(
   timeoutMs = 8000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  // A throwing predicate is "not yet" — e.g. `last(h)` before the first frame.
   const ready = (): boolean => {
     try {
       return predicate();
@@ -165,23 +148,6 @@ const last = (h: Harness): NodesSnapshot => {
   return state;
 };
 
-/**
- * Wait for a CONFIGURED pipeline of `nodes` nodes to settle.
- *
- * The count is load-bearing, not decoration. `summarize().done` means "no node
- * is pending or running", which an EMPTY node set satisfies VACUOUSLY — so in
- * the window before configure's first frame lands, `done` is already true, and
- * a bare `until(() => summarize(last(h)).done)` returns immediately on a state
- * with no nodes in it. Every assertion after it then reads `undefined` and the
- * test fails with `Expected: "failed" / Received: undefined`.
- *
- * It only loses that race on a loaded machine, which is why it survived here
- * for so long and then went red on a busy CI runner — twice, on two different
- * tests, in the two files that spelled the wait without a count. Waiting for
- * the node set to EXIST and then settle is one thought, so it gets one name
- * rather than a clause each caller has to remember (`_ci-setup` is why the
- * count is tasks + 1).
- */
 const settledWith = (h: Harness, nodes: number): Promise<void> =>
   until(() => last(h).order.length === nodes && summarize(last(h)).done);
 
@@ -203,8 +169,6 @@ describe("odu lane runner over stdio (loopback)", () => {
       expect(final.nodes[id]?.status).toBe("ok");
     }
 
-    // Race-free topo invariant across every captured frame: a node is only
-    // ever running/ok after each of its needs is ok.
     for (const state of h.states) {
       for (const id of state.order) {
         const node = state.nodes[id];
@@ -281,9 +245,6 @@ describe("odu lane runner over stdio (loopback)", () => {
     await h.configure(chain);
     await settledWith(h, 3);
 
-    // A late subscriber still leads with the CURRENT snapshot — the cell.s
-    // snapshot is taken at subscribe time (the stream is lazy), not when the
-    // handler was built.
     const first = await firstFrame(h.client.surface.nodes.get(undefined));
     expect(first?.nodes.test?.status).toBe("ok");
   });
@@ -301,10 +262,6 @@ describe("odu lane runner over stdio (loopback)", () => {
   });
 
   it("ends a finished node's log, so a reader can tell 'that was all'", async () => {
-    // The whole of juspay/odu#87 in one assertion: without a terminal frame,
-    // "the lane still owes me this node's output" is unobservable, and the
-    // coordinator's only option is to guess — which it lost, silently, at
-    // exactly the moment a long recipe's summary was still in flight.
     const h = await harness();
     await h.configure([{ id: "mark", command: "echo MARK-ODU-LOG", needs: [] }]);
     await until(() => last(h).nodes.mark?.status === "ok");
@@ -316,15 +273,10 @@ describe("odu lane runner over stdio (loopback)", () => {
       frames.push(frame.kind);
       if (frame.kind === "end") break;
     }
-    // A LATE subscriber missed the live `end`, so the log replays one: whether
-    // this node is finished is a property of the log, not of when you attached.
     expect(frames).toEqual(["snapshot", "end"]);
   });
 
   it("ends the log of a node that never ran — skipped counts as complete", async () => {
-    // Terminal status and log terminal stay in lockstep on every path, so a
-    // reader waiting for the whole lane can wait on all nodes alike instead of
-    // knowing which ones were going to produce output.
     const h = await harness();
     await h.configure([
       { id: "build", command: "exit 3", needs: [] },
@@ -339,11 +291,6 @@ describe("odu lane runner over stdio (loopback)", () => {
   });
 
   it("re-opens the EMPTY log of a rerun skipped node — the silent case", async () => {
-    // The nastiest shape of "completion is not a latch": a skipped node's log
-    // is empty AND ended, so its rerun's snapshot carries no text over no
-    // buffer. Anything downstream that guards its reset on emptiness will
-    // swallow that frame and keep insisting the log is complete — which is
-    // exactly how a coordinator-side latch stayed stuck (caught in review).
     const h = await harness();
     await h.configure([
       { id: "build", command: "exit 3", needs: [] },
@@ -359,11 +306,9 @@ describe("odu lane runner over stdio (loopback)", () => {
     await until(() => kinds.length === 2); // snapshot(""), end
     expect(kinds).toEqual(["snapshot", "end"]);
 
-    // Rerun the FAILED dep so the skipped node becomes pending again.
     expect(
       (await runUnary(h.client.surface.node.rerun({ id: "build" }))).ok,
     ).toBe(true);
-    // The re-opening snapshot must arrive even though it carries nothing.
     await until(() => kinds.length > 2);
     expect(kinds[2]).toBe("snapshot");
     void sub.return?.();
@@ -374,9 +319,6 @@ describe("odu lane runner over stdio (loopback)", () => {
     await h.configure([{ id: "mark", command: "echo FIRST", needs: [] }]);
     await until(() => last(h).nodes.mark?.status === "ok");
 
-    // Subscribe while the node is already finished, then rerun underneath the
-    // subscription: the ended log must re-open, or a rerun's output would
-    // arrive on a stream its reader had already written off as complete.
     const frames: Array<{ kind: string; text?: string }> = [];
     const sub = subscribe(h.client.surface.nodeLog.get({ id: "mark" }));
     void (async () => {
@@ -389,7 +331,6 @@ describe("odu lane runner over stdio (loopback)", () => {
     expect((await runUnary(h.client.surface.node.rerun({ id: "mark" }))).ok).toBe(
       true,
     );
-    // A fresh snapshot re-opens the log, and the new invocation ends it again.
     await until(() => frames.length > 2 && frames.at(-1)?.kind === "end");
     expect(frames.slice(2).map((f) => f.kind)).toContain("snapshot");
     void sub.return?.();
@@ -429,8 +370,7 @@ describe("odu lane runner over stdio (loopback)", () => {
   it("gives nodes reopenable stdio — `pretty:/dev/stderr` class consumers", async () => {
     // Node's 'pipe' stdio is an AF_UNIX socketpair and Linux can't open() a
     // socket by path, so without the `| cat` interposition this exact shape
-    // (cucumber's pretty:/dev/stderr) dies with ENXIO. Regression for the
-    // first dogfood run's ci::e2e@x86_64-linux failure.
+    // (cucumber's pretty:/dev/stderr) dies with ENXIO.
     const h = await harness();
     await h.configure([
       { id: "reopen", command: "echo REOPENED > /dev/stderr", needs: [] },
@@ -543,14 +483,6 @@ describe("shard aggregation", () => {
   });
 });
 
-// The production leak (juspay/odu#70-class): recipe trees are spawned
-// `detached` — their own process groups — so the ONLY thing that ever kills
-// them is the runner's explicit group kill. These pin the two in-run paths a
-// tree used to escape through: a cancel whose single SIGTERM was ignored, and
-// a node that finished while a backgrounded stray was still alive in its
-// group. (Runner-death-by-signal — the localhost-lane path — is pinned in
-// runner/processTeardown.test.ts; the reaper's own contract in
-// runner/reap.test.ts.)
 describe("recipe process-tree reaping", () => {
   const alive = (pid: number): boolean => {
     try {
@@ -584,8 +516,6 @@ describe("recipe process-tree reaping", () => {
     expect((await runUnary(h.client.surface.node.cancel({ id: "stubborn" }))).ok).toBe(
       true,
     );
-    // SIGTERM → bounded grace → SIGKILL: the tree dies even though it
-    // ignores SIGTERM. Before the reaper this leaked forever (ppid 1).
     await until(() => !alive(pid));
   }, 15_000);
 
@@ -593,8 +523,6 @@ describe("recipe process-tree reaping", () => {
     const dir = mkdtempSync(join(tmpdir(), "odu-reap-"));
     const strayFile = join(dir, "stray");
     const h = await harness();
-    // The stray redirects its stdio, so `cat` sees EOF and the node settles
-    // ok while the stray lives on in the (otherwise unowned) process group.
     await h.configure([
       {
         id: "leaky",
@@ -604,7 +532,6 @@ describe("recipe process-tree reaping", () => {
     ]);
     await until(() => last(h).nodes.leaky?.status === "ok");
     const stray = readPid(strayFile);
-    // Node finish reaps the group: the stray dies instead of leaking to init.
     await until(() => !alive(stray));
   }, 15_000);
 });
@@ -647,11 +574,6 @@ describe("render helpers", () => {
   });
 
   it("exitCode is 0 iff the settled run is clean", () => {
-    // `clean` is done && !red && cancelled === 0. Dropping the cancelled
-    // clause (`s.done && s.failedOverall ? 1 : 0`) still passes red→1 and
-    // all-ok→0; dropping the `done` gate (`!s.clean ? 1 : 0`) still passes
-    // both of those too. The cancelled-only and unsettled arms are what
-    // make the iff real (juspay/odu#68).
     expect(exitCode(state)).toBe(1);
     const allOk: PipelineState = {
       ...state,
@@ -689,9 +611,6 @@ describe("render helpers", () => {
   });
 
   it("an ok node is immune to a post-verdict lane-death overlay", () => {
-    // Production overlay, not a mirror: `terminalizePlatformNodes` calls
-    // `overlayOnLaneStop`. A default: arm that re-terminalized `ok` would
-    // change this function and fail here without waiting on the e2e.
     const onDead = { running: "errored" as const, pending: "skipped" as const };
     expect(overlayOnLaneStop("ok", onDead)).toBeUndefined();
     expect(overlayOnLaneStop("failed", onDead)).toBeUndefined();
@@ -743,16 +662,11 @@ describe("render helpers", () => {
   });
 
   it("verdictLine names the outcome, the counts and the red nodes", () => {
-    // Pure in the state: the host prints it once its viewport is gone, so
-    // there is no "call stop() first" ordering to get wrong.
     const line = verdictLine(state);
     expect(line).toContain(state.name);
     expect(line).toContain(state.sha7);
-    // The outcome mark and the counts, asserted against the same projections
-    // the frame uses — not restated here, or the test pins a second spelling.
     expect(line).toContain(OUTCOME_MARK[outcomeOf(summarize(state))]);
     expect(line).toContain(countsLine(summarize(state)));
-    // The red node is named. A verdict that hides one is worse than none.
     expect(line).toContain("⚠ b");
   });
 

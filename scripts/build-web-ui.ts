@@ -1,15 +1,4 @@
 /**
- * Build the browser bundle the web service serves.
- *
- * ONE call, plus ONE plugin. `buildSurfaceClient` (`@kolu/surface-app/bun`) owns
- * the whole freshness contract the server half is built to serve: content-hashed
- * assets under `/assets/`, the build commit published on the `no-store` shell
- * (never defined into a hashed file — a stamp-only rebuild would change an
- * immutable file's bytes without changing its URL and strand every returning
- * browser), `modulepreload` links for the chunks the entry statically imports,
- * and precompressed `br`/`zstd`/`gzip` siblings for the layer that negotiates
- * them.
- *
  * The plugin is Solid's compiler, and it is not optional. `packages/web-ui` is
  * written in Solid JSX — the conventional way to write a Solid app — and Solid's
  * JSX is a COMPILE TARGET rather than a call convention: `babel-preset-solid`
@@ -21,8 +10,6 @@
  * re-created underneath it. That failure is invisible in a screenshot, so the
  * defence is structural — the loader below claims every `.tsx` file, so no
  * `.tsx` in this app can reach Bun's transform by accident.
- *
- * Usage:  bun scripts/build-web-ui.ts [<distDir>]
  */
 
 import { buildSurfaceClient, type SurfaceClientExtraAsset } from "@kolu/surface-app/bun";
@@ -38,21 +25,9 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const clientDir = join(repoRoot, "packages", "web-ui", "src");
-/** `@odu/face`'s design system: the stylesheet every row's face draws with,
- *  and the two typefaces it names. Read from the package that owns them. */
 const faceDir = join(repoRoot, "packages", "face", "src");
 const distDir = resolve(process.argv[2] ?? join(repoRoot, "packages", "web-ui", "dist"));
 
-/**
- * THE TYPEFACES, FROM NIXPKGS — never from a font CDN.
- *
- * A tailnet-only or air-gapped board must render the same page as a public
- * one, so the two Geist variable fonts travel with the bundle. The directory
- * is `nix/env.nix`'s `ODU_GEIST_FONTS`, which both the dev shell and the
- * `web-ui` derivation set — and it is REQUIRED rather than defaulted: a build
- * that silently fell back to whatever the machine has installed would produce
- * a bundle that looks right where it was built and wrong everywhere else.
- */
 const fontDir = process.env.ODU_GEIST_FONTS;
 if (fontDir === undefined || fontDir.trim() === "") {
   throw new Error(
@@ -62,32 +37,12 @@ if (fontDir === undefined || fontDir.trim() === "") {
   );
 }
 
-/**
- * WHERE AN EXTRA ASSET LANDS, predicted — and then checked.
- *
- * The stylesheet names the two fonts, so it has to know their HASHED urls,
- * and `buildSurfaceClient` computes those AFTER each asset's `build()`
- * returns. There is no hook in between, so this restates its naming rule —
- * `<prefix><name>-<8 hex of Bun.hash>.<ext>` — and then asserts, once the
- * build is done, that every prediction equals what the builder actually
- * emitted. A restated rule that cannot silently rot: the day kolu changes how
- * it hashes, this build fails with the two hrefs side by side rather than
- * shipping a stylesheet pointing at a font nobody serves.
- */
 const ASSET_PREFIX = "/assets/";
 const assetHref = (name: string, ext: string, bytes: Uint8Array): string =>
   `${ASSET_PREFIX}${name}-${Bun.hash(bytes).toString(16).slice(0, 8)}.${ext}`;
 
-/** Filled by each font's `build()` and read by the stylesheet's, which runs
- *  after them because `extraAssets` is walked in order. */
 const fontHrefs = new Map<string, string>();
 
-/** One variable font, hashed beside the bundle. woff2 rather than the ttf
- *  nixpkgs ships, because the asset pipeline precompresses TEXT siblings and
- *  a `.ttf` would go over the wire raw — 320 KB of font on a cold load.
- *  `nix/overlay.nix`'s `odu-geist-fonts` does the conversion, and a woff2 IS
- *  a brotli-compressed TrueType. One file per family covers every weight the
- *  page draws. */
 const font = (name: string, file: string): SurfaceClientExtraAsset => ({
   name,
   ext: "woff2",
@@ -99,15 +54,6 @@ const font = (name: string, file: string): SurfaceClientExtraAsset => ({
   htmlPlaceholder: `href="./${name}.woff2"`,
 });
 
-/**
- * EVERY ROW'S OWN STYLESHEET, found rather than listed.
- *
- * A row's screens are drawn by the row's face and dressed by the row's
- * `face.css`, beside it. This walks `packages/*​/src` for files with that name
- * and answers them in path order, so the assembled sheet is byte-identical on
- * every machine and a row that grows a stylesheet is shipped by adding one
- * file — no list here, no row named in a script that is not a root.
- */
 async function rowSheets(): Promise<string[]> {
   const packagesDir = join(repoRoot, "packages");
   const found: string[] = [];
@@ -137,10 +83,6 @@ async function rowSheets(): Promise<string[]> {
  * recovers by eating the NEXT rule, which in a stylesheet this size is one
  * whole `@layer` block silently gone: every rule in it missing, nothing
  * logged, and a page that still looks like a page.
- *
- * That is exactly what happened once here, so it is checked rather than
- * remembered. Strip every well-formed comment; anything still carrying a
- * close marker was a comment that closed early.
  */
 function commentsClose(css: string): boolean {
   return !css.replace(/\/\*[\s\S]*?\*\//g, "").includes("*" + "/");
@@ -169,8 +111,6 @@ const solidJsx: BunPlugin = {
         filename: args.path,
         babelrc: false,
         configFile: false,
-        // Inline, so Bun's own `linked` sourcemap for the bundle points back at
-        // the `.tsx` a person wrote rather than at babel's output.
         sourceMaps: "inline",
         presets: [
           [typescript, { isTSX: true, allExtensions: true }],
@@ -178,8 +118,6 @@ const solidJsx: BunPlugin = {
         ],
       });
       if (out?.code == null) {
-        // A silent pass-through here is the exact failure this plugin exists to
-        // prevent, so it is a hard stop rather than a fallback.
         throw new Error(`build-web-ui: the Solid compiler produced nothing for ${args.path}`);
       }
       return { contents: out.code, loader: "js" };
@@ -206,30 +144,6 @@ const report = await buildSurfaceClient({
     {
       name: "styles",
       ext: "css",
-      // ONE STYLESHEET, ASSEMBLED FROM THE PACKAGES THAT OWN ITS PARTS.
-      //
-      // `@odu/face`'s `theme.css` first — the tokens, the base, the
-      // primitives `./ui` renders and the page shell every screen sits in —
-      // then every row's own `face.css`, which carries what only that row's
-      // screens have. A shared sheet that knew `.node-track` would change
-      // every time the runs' views did; a row's look belongs in the row,
-      // beside the view that emits the class names.
-      //
-      // FOUND, not listed. This globs `packages/*/src/**/face.css` in path
-      // order rather than naming the rows: a build script is not one of the
-      // four roots the fence lets name them, and a list here would be a fifth
-      // place to remember a row exists. A row ships a sheet by adding a file.
-      //
-      // ORDER is why every row's sheet names its `@layer`: `theme.css`
-      // declares the four up front, so a later `@layer layout { … }` appends
-      // to that layer instead of out-shouting it, and the order rows are
-      // concatenated in cannot decide which rule wins.
-      //
-      // The two font `url()`s are BUILD PLACEHOLDERS, rewritten here to the
-      // hashed hrefs. A miss is a hard stop: a stylesheet shipped still
-      // naming `./geist-sans.woff2` would quietly render the whole board in a
-      // fallback face, which is the kind of failure a screenshot does not
-      // catch because it still looks like a page.
       build: async (): Promise<Uint8Array> => {
         const sheets = [join(faceDir, "theme.css"), ...(await rowSheets())];
         let css = (

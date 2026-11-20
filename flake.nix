@@ -1,22 +1,6 @@
-# IMPORTANT: this flake has ZERO inputs *except* `bun2nix` (the kolu
-# convention) — nixpkgs and the kolu pin are managed by npins and
-# imported via fetchTarball, keeping `nix develop` fast.
-#
-# `bun2nix` is the ONE documented exception: there is no fetchBunDeps /
-# buildBunPackage in nixpkgs, and bun2nix's nix layer is flake-parts-
-# shaped — it cannot be cleanly imported from a non-flake-parts context.
-# juspay/bun2nix's `rawflake` branch exposes `lib.mkBun2nix { pkgs }` so
-# we feed it OUR npins-pinned pkgs (no transitive nixpkgs eval in our
-# flake). The input is only forced when the `packages.*` attrset is
-# evaluated — `nix develop` cold eval stays unchanged. DO NOT add
-# further flake inputs.
 {
   inputs.bun2nix.url = "github:juspay/bun2nix/rawflake";
 
-  # ODU'S OWN CACHE. The bucket is `kolu-r2`, stored on Cloudflare R2 and read
-  # straight from it at `https://cache.kolu.dev/kolu-r2` — the store's URL with
-  # the bucket as a path. odu and its runners are substituted from there, and
-  # `.github/workflows/nix-cache.yml` pushes to the pod's own origin.
   nixConfig = {
     extra-substituters = "https://cache.kolu.dev/kolu-r2";
     extra-trusted-public-keys = "kolu-r2-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=";
@@ -43,32 +27,19 @@
           odu = import ./default.nix {
             inherit pkgs b2n;
             selfFlake = self.outPath;
-            # The commit this build is OF, when there is one. Absent for a dirty
-            # tree, and absent is the honest answer there: a build identity that
-            # named a commit whose tree it was not built from would be worse
-            # than none, because a supervisor compares builds to decide whether
-            # to recycle a running daemon.
             selfRev = self.rev or null;
           };
         in
         {
           inherit (odu) odu odu-runner web-ui agent-flake-source;
           default = odu.odu;
-          # bun2nix CLI — `nix run .#bun2nix -- -l bun.lock -o bun.nix`
-          # regenerates the lockfile-derived nix expression.
           bun2nix = b2n.bun2nix;
         });
-      # THE NIXOS MODULE, for a host that runs the board, its CI and its cache
-      # as one service. `odu` is an alias of `default` because a flake input
-      # reads better spelled either way and there is exactly one module.
       nixosModules = {
         default = import ./nix/module.nix { inherit self; };
         odu = self.nixosModules.default;
       };
 
-      # The VM test that proves the module: two machines, a real nginx, a real
-      # `nix copy` through it, and the board answering 404 from outside. Linux
-      # only — it boots a VM, and the module is for servers.
       checks.x86_64-linux =
         let
           pkgs = import ./nix/nixpkgs.nix { system = "x86_64-linux"; };
@@ -77,15 +48,6 @@
           nixos-module = pkgs.testers.nixosTest (import ./nix/tests/module.nix { inherit self; });
         };
 
-      # Two shells, and the second IS the first plus browsers. Playwright's
-      # browser set is a large closure every non-browser leg would realise for
-      # nothing, so `just e2e-web` enters `.#e2e` and everything else
-      # stays in `default`.
-      #
-      # The attrs go at the TOP level rather than inside an `env = { }` block,
-      # because shell.nix is `pkgs.mkShell ({ packages = …; } // oduEnv)` — its
-      # environment already rides as ordinary derivation attrs, and one spelling
-      # for both is one fewer thing to be wrong about.
       devShells = eachSystem ({ pkgs, ... }:
         let default = import ./shell.nix { inherit pkgs; };
         in {

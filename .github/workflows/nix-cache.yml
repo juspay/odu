@@ -1,34 +1,3 @@
-# Build odu's outputs and push their closures to odu's OWN cache bucket, and
-# then publish the lane runner CONTENT-ADDRESSED, so a dial from a published
-# revision has the host pull its own build with NO trust
-# (`@kolu/surface-remote`'s `provisionAgent` index step; the publisher is
-# `juspay/kolu`'s `publish-closure` action, pinned to the kolu revision odu
-# pins in `npins/sources.json`).
-#
-# BOTH JOBS PUSH TO THE POD'S OWN ORIGIN, `https://odu-k3s.rooster-blues.ts.net`
-# (a Tailscale Funnel), which is where the `kolu-r2` bucket takes a push —
-# reads come from R2 instead. NEITHER JOB SPELLS THAT ORIGIN: both name only
-# the substituter, and `odu cache push --cache` reads `Odu-Origin` off its
-# `nix-cache-info` — the build job through `cache:`, the publish job through
-# the baked declaration's `pusher = { kind = "odu"; }`.
-# The build job pushes with `./.github/actions/push` — the action odu ships for
-# ANY project, which builds its pusher from the checkout it sits in, so this
-# line pushes with this tree's odu, which chunks. The publish job's action is
-# pinned to the kolu revision odu pins, whose publisher pushes with
-# `odu cache push --cache <substituter>` (juspay/kolu#2344).
-#
-# Two jobs, because they are two halves of one question with one ordering:
-# `build-and-push` warms the input-addressed cache a lane host substitutes from
-# (odu's own, with `odu cache push`), and `publish-closures` then rewrites from
-# that same tree and pushes to the SAME bucket: the agent source bakes
-# `pusher = { kind = "odu"; }`, so the action runs
-# `odu cache push --cache <substituter>` under `ODU_CACHE_TOKEN`, with the odu
-# that juspay/kolu pins, which chunks. It must be its OWN job: the action installs the Nix it
-# rewrites with (2.34.8 — see its `action.yml`), which has to be the job's only
-# Nix.
-#
-# `odu`'s `ca-index` branch is born on the first master push. A pull request
-# rewrites, smokes and import-verifies, and writes no index.
 name: nix-cache
 
 on:
@@ -37,7 +6,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Least privilege — only the publish job needs more, and it asks for it itself.
 permissions:
   contents: read
 
@@ -50,26 +18,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu-latest → x86_64-linux; macos-latest → aarch64-darwin. Both are
-        # platforms odu's own required checks (ci::*) run on, so both are
-        # platforms whose closures a lane actually provisions.
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       # `ref:` is LOAD-BEARING on `pull_request`. actions/checkout defaults to
       # `github.ref`, which for that event is `refs/pull/N/merge` — a synthetic
-      # merge of the PR into its base that NOTHING else ever builds. Developers
-      # and odu's own lanes build the branch head, so warming the merge tree
-      # leaves the tree everybody wants cold. `head.sha` is empty on non-PR
-      # events, where checkout's own default is already the right tree. (This is
-      # kolu#2101 F5(a)'s correction, kept here for the same reason.)
+      # merge of the PR into its base that NOTHING else ever builds. `head.sha` is
+      # empty on non-PR events, where checkout's own default is already the right tree.
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      # Pinned by commit (CodeQL: unpinned third-party action). v35 → 9f63be7.
-      # Nix 2.34.7 here; the publish job installs 2.34.8 for the rewrite — see
-      # its action. This job only builds and pushes, which either line does.
       - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
         with:
           nix_conf: |
@@ -77,57 +36,15 @@ jobs:
             extra-trusted-public-keys = kolu-r2-1:7KmFrK05rVrnxkyZi9hJGnJJmRCpg87u6MUQIk7nokQ=
             accept-flake-config = true
 
-      # ONE step, not a step per branch, so the token is never consulted in an
-      # `if`. The rule lives in the action's own script: a pull request with no
-      # token still BUILDS — that is the check this workflow owes a PR — and
-      # pushes nothing; a push with no token FAILS, naming the secret. Going
-      # green having warmed nothing is precisely the state a cache job exists to
-      # make impossible.
-      #
-      # THE SAME ACTION ANY PROJECT USES. `uses: ./.github/actions/push` here
-      # and `uses: juspay/odu/.github/actions/push@<sha>` elsewhere are the same
-      # step: the action builds its pusher from its OWN checkout (so this line
-      # pushes with the odu in this tree, and a pinned sha pushes with that
-      # commit's odu), and it proves the push — every path the bucket serves
-      # must answer its narinfo at `https://cache.kolu.dev/kolu-r2`, the R2 URL
-      # reads come from, or the step is red.
-      #
-      # `odu cache push` computes each closure, asks the bucket what it is
-      # missing in one query, drops what an upstream key signed (the server
-      # fetches those references itself), and CHUNKS a NAR too large for one
-      # request — which keeps the pusher safe behind any proxy with a body cap.
       - name: Build odu's outputs, and push their closures
         uses: ./.github/actions/push
         with:
-          # ONE FACT: the substituter. The push origin and the bucket are read
-          # off `https://cache.kolu.dev/kolu-r2/nix-cache-info`, which states
-          # them (`Odu-Origin`, `Odu-Bucket`) — they cannot be derived from a
-          # read address now that reads are served by R2.
           cache: https://cache.kolu.dev/kolu-r2
           token: ${{ secrets.ODU_CACHE_TOKEN }}
-          # ODU'S MASTER CLOSURE, HELD — and NO `pin:` line, because holding
-          # the default branch is now the step's own default: a push to
-          # master re-points the pin at what it just pushed, so collection
-          # takes yesterday's build and never the one every lane and every
-          # developer substitutes from, while a pull request pushes and moves
-          # nothing. This used to be the expression every caller pasted; the
-          # one repository whose rule is different still writes it. The name
-          # is derived (`juspay/odu@master/<system>`), so the Linux and macOS
-          # jobs hold their own closures instead of evicting each other.
-          # NO `paths:` — the whole flake for this runner's system: every
-          # package, dev shell and check. It covers `.#odu`, `.#odu-runner`
-          # and `.#web-ui` as before, and adds the dev shell a fresh checkout
-          # waits for and the checks CI is about to build anyway.
 
       - name: Bake the declaration the publisher is handed
         run: |
           set -euo pipefail
-          # THE DECLARATION AS THE FLAKE WRITES IT. Its first substituter is
-          # `https://cache.kolu.dev/kolu-r2` — the R2 URL the `kolu-r2` bucket
-          # is read from, which takes no push — and the declaration's pusher
-          # names only its kind (`odu`): the pinned publisher reads the push
-          # origin and bucket off that cache's `nix-cache-info`, so a rewrite
-          # here would be a no-op.
           source=$(nix build .#agent-flake-source --no-link --print-out-paths --accept-flake-config)
           mkdir -p "$RUNNER_TEMP/declaration"
           cp "$source/binary-cache.json" "$RUNNER_TEMP/declaration/binary-cache.json"
@@ -144,43 +61,22 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # Writes the `ca-index` branch of this repository.
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
-          # The same tree `build-and-push` warmed — see its `ref:` note.
           ref: ${{ github.event.pull_request.head.sha }}
 
-      # The declaration the publisher is handed, built by the job that had a
-      # Nix to bake it: the baked sidecar with its first substituter moved to
-      # the live pod. A sidecar is the action's own second spelling, so the
-      # action still reads one declaration rather than being told a URL.
       - uses: actions/download-artifact@v4
         with:
           name: cache-declaration-${{ matrix.os }}
           path: ${{ runner.temp }}/declaration
 
-      # The action still takes a pinned nixpkgs for the client it may install;
-      # the declaration's `pusher` chooses which client pushes.
       - id: inputs
         run: |
           echo "nixpkgs=$(jq -r .pins.nixpkgs.url npins/sources.json)" >> "$GITHUB_OUTPUT"
 
-      # odu's declaration is `.#agent-flake-source`'s own sidecar + commit-hash
-      # (the same derivation the `odu` wrapper bakes), so the action reads them
-      # rather than being told. `odu-runner` is the ONE attr a remote resolves.
-      # The smoke runs out of the REWRITTEN closure: `--help` loads the runner's
-      # whole module graph and exits 0 without needing stdin, which `--stdio`
-      # would (it serves until the pipe closes).
-      #
-      # The pin carries the publisher that reads the cache's own push address:
-      # it runs `odu cache push --cache https://cache.kolu.dev/kolu-r2`, which
-      # takes `Odu-Origin`/`Odu-Bucket` off that substituter's `nix-cache-info`
-      # rather than from anything the declaration spells. WITH `sidecar`,
-      # installables are full flake installables, and the revision the entries
-      # are keyed under defaults to the published commit.
       - uses: juspay/kolu/.github/actions/publish-closure@2371891ca435cfaffdff704b9a07399718a7095d
         with:
           sidecar: ${{ runner.temp }}/declaration/binary-cache.json

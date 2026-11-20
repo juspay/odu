@@ -1,40 +1,3 @@
-# THE VM TEST FOR `services.odu`, and the only place the whole story is one
-# machine: a server with the module, an nginx in front of it, a client with
-# no substituters of its own that has never heard of odu, and a team member's
-# machine where an ordinary user goes through the Nix daemon.
-#
-# What it proves, in order:
-#
-#   * the unit starts as the `odu` user, with the state directory at 0700 and
-#     the database at 0600 — the modes that make the signing keys a secret;
-#   * `odu surface cache bucket_create` answers the PUBLIC url
-#     (`http://cache.test/cache/main`), which is `$ODU_PUBLIC_ORIGIN` doing its
-#     job: the bound origin is loopback, so without it the URL is one no client
-#     can reach;
-#   * a token pushed over HTTP and a path built on the server lands in the
-#     bucket, and the client substitutes it back through the proxy with the
-#     bucket's own key;
-#   * an ORDINARY user on a machine with the Nix daemon fetches a build output
-#     from the bucket only when the address AND the key are in the MACHINE's
-#     configuration — her own command line and her own `nix.conf` are
-#     ignored, and the address without the key is refused as unsigned — and
-#     pushes a build of her own with `odu cache login` and `odu cache push`;
-#   * a bucket on an S3 STORE — a versitygw on the same machine, declared in
-#     `cache.stores` — takes a push into the S3 bucket (not the local disk)
-#     and the client substitutes it back through the same proxy;
-#   * a NAR on that S3 store is a 307 to a PRESIGNED url on the gateway, not
-#     bytes odu copied: the redirect is asserted as itself, and then followed
-#     by a real `nix copy`;
-#   * and the headline of PLAN 2.8 — a public bucket on a store with a
-#     `publicUrl` is read with the daemon STOPPED, because its narinfos,
-#     its `nix-cache-info` and its NARs are objects the store serves itself;
-#   * the board does NOT answer from outside — `/` is 404 and `/mcp` is not 200,
-#     because the virtual host has no `location /`. That is the module's whole
-#     security story and it is asserted, not asserted-in-a-comment.
-#
-# `cache.enableACME = false` because a VM has no certificate authority and no
-# name to prove; the assertion is about ROUTES, and a plain-HTTP vhost tests the
-# same routes.
 { self }:
 {
   name = "odu-module";
@@ -46,17 +9,8 @@
       enable = true;
       rootTokenFile = "/etc/odu-root-token";
       cache.domain = "cache.test";
-      # A BUCKET'S OWN NAME, with its own vhost: `main.test` answers the Nix
-      # protocol at `/`, and the daemon decides which bucket from the `Host`.
       cache.bucketDomains = [ "main.test" ];
       cache.enableACME = false;
-      # AN S3 STORE, on this machine: versitygw over a directory (below). The
-      # credentials file is a systemd credential, exactly as a real R2 key.
-      #
-      # The endpoint is a NAME, not loopback: odu hands clients presigned URLs
-      # built from it, and `127.0.0.1` on the client is the client. `publicUrl`
-      # is the store's own name for readers — the nginx vhost below, standing
-      # in for an R2 custom domain bound to the R2 bucket.
       cache.stores.s3 = {
         endpoint = "http://gateway.test:7070";
         bucket = "odu-objects";
@@ -71,9 +25,6 @@
       AWS_SECRET_ACCESS_KEY=odu-s3-secret
     '';
 
-    # THE S3 SERVICE the store points at: a real gateway (signed requests,
-    # conditional writes, multipart, ranges) over a plain directory. The test
-    # creates its bucket before the first push.
     systemd.services.versitygw = {
       wantedBy = [ "multi-user.target" ];
       before = [ "odu-web.service" ];
@@ -85,28 +36,15 @@
       };
     };
 
-    # A test token. It is `environment.etc` rather than `LoadCredential`'s usual
-    # secret file because a VM has no agenix and the module only needs a path.
     environment.etc."odu-root-token".text = "test-root-token";
 
-    # WHAT THE WORLD READS THE STORE FROM. `publicUrl` names this vhost, and
-    # odu appends `/<bucket>/<key>`; path-style S3 puts the S3 bucket's name
-    # first, so the vhost's root IS the `odu-objects/` prefix and
-    # `http://public.test/far/<hash>.narinfo` lands on the object the push
-    # wrote. Nothing here is odu: that is the point of the test below.
     services.nginx.virtualHosts."public.test".locations."/".proxyPass =
       "http://127.0.0.1:7070/odu-objects/";
 
-    # The gateway and the store's public name both answer on this machine, and
-    # the DAEMON resolves the first one when it signs a URL for a client.
     networking.extraHosts = "192.168.1.2 gateway.test\n192.168.1.2 public.test";
 
-    # The server builds the path it pushes, so it needs the flake-era CLI. A
-    # real host has this for its own reasons; here it is the fixture's.
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-    # 7070 is the gateway: a presigned URL is followed by the CLIENT, so the
-    # port the signature names has to be reachable from off the machine.
     networking.firewall.allowedTCPPorts = [ 80 7070 ];
   };
 
@@ -127,19 +65,10 @@
     '';
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
-      # No substituters: the point is that the only source is the cache under
-      # test, reached through the proxy.
       substituters = [ ];
     };
   };
 
-  # THE SAME MACHINE, IN SERVER MODE — a second node rather than a second
-  # assertion on the first, because the two shapes are exclusive: a daemon with
-  # a door answers `/` with the sign-in page, and the loopback node's assertions
-  # are that it answers 404.
-  #
-  # Named `zdoor` so the driver's sorted numbering leaves `server` at .2; the
-  # assertion above is what notices if a node is inserted alphabetically.
   nodes.zdoor = { config, pkgs, ... }: {
     imports = [ self.nixosModules.default ];
 
@@ -162,21 +91,6 @@
     networking.firewall.allowedTCPPorts = [ 80 ];
   };
 
-  # A TEAM MEMBER'S MACHINE: NixOS with the Nix daemon, one ordinary user, and
-  # no cache of its own. What it shows is the rule an ordinary user lives by —
-  # the daemon takes `substituters` and `trusted-public-keys` only from the
-  # MACHINE's configuration, and ignores the user's own — against the bucket
-  # this file's `server` publishes.
-  #
-  # The bucket's key is minted while the test runs, so the machine's
-  # `nix.conf` cannot hold it at eval time. It includes a file instead, which
-  # the script writes and then restarts the daemon to read: the same two lines
-  # a person adds to `/etc/nix/nix.conf`, in a file the store does not own.
-  # `!include` skips a file that is not there yet, so until then the machine
-  # has no cache at all.
-  #
-  # Named `zlaptop` so it sorts LAST: the driver numbers machines by sorted
-  # name, and every other machine keeps the address `extraHosts` gives it.
   nodes.zlaptop = { lib, ... }: {
     networking.extraHosts = ''
       192.168.1.2 cache.test main.test
@@ -191,14 +105,10 @@
     nix.extraOptions = ''
       !include /etc/nix/odu-bucket.conf
     '';
-    # NOT in `trusted-users`, which is `root` alone by default — the whole
-    # point of this machine.
     users.users.alice.isNormalUser = true;
     environment.systemPackages = [ self.packages.x86_64-linux.odu ];
   };
 
-  # The server is 192.168.1.1 in this test's network; the client resolves the
-  # domain there so the URL the module prints is the one the client uses.
   testScript = ''
     import json
     import shlex

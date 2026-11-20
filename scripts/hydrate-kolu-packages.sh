@@ -1,18 +1,9 @@
 #!/usr/bin/env sh
-# Materialize kolu workspace package sources into ./node_modules/@kolu/<name>.
-#
-# Usage: hydrate-kolu-packages.sh <src1> <dest1> [<src2> <dest2> ...]
-#
-# Each (src, dest) pair: copy <src> to ./node_modules/<dest>. Callers
-# (the justfile install recipe and the build derivation) pass the
-# npins-derived /nix/store paths and the @kolu/<name> destination.
-#
 # cp -rL (not symlink) because TypeScript resolves transitive imports
 # from the *real* file location: a symlink whose target sits in /nix/store
 # has no adjacent node_modules, so @orpc/contract / zod can't be found
 # from surface's source. Copying lets resolution walk up to the consumer's
-# own hoisted node_modules where those packages live. (The drishti
-# pattern, verbatim — see github.com/srid/drishti.)
+# own hoisted node_modules where those packages live.
 set -eu
 
 if [ $(( $# % 2 )) -ne 0 ] || [ $# -eq 0 ]; then

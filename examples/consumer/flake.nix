@@ -1,15 +1,3 @@
-# THE ONE DECLARATION ODU READS FROM A REPOSITORY: the substituter URL in
-# `nixConfig`, and the key it is signed with.
-#
-# Both lines come off the bucket's page on the board (**Use this bucket**) or
-# `odu cache use <bucket>`. They are the same two lines a developer needs in
-# order to READ from the cache, so this is not an odu setting — it is the fact
-# odu reads: `odu ci run` pushes every recipe's `result*` closure here, and
-# the push action with no `cache:` finds this line too.
-#
-# ONE odu cache. A URL odu does not serve is left alone (the run says `not
-# pushing`); two it does serve is refused at start, because a repository
-# builds for one cache.
 {
   description = "A repository that gets its CI and its Nix cache from odu";
 
@@ -26,8 +14,6 @@
       forEach = nixpkgs.lib.genAttrs systems;
     in
     {
-      # WHAT THE PIPELINE BUILDS, and therefore what the cache ends up holding:
-      # a recipe that leaves a `result-*` link pushes that closure.
       packages = forEach (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in {
           default = pkgs.hello;

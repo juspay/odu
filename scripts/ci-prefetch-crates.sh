@@ -12,32 +12,6 @@
 # the BUILD DAEMON's environment, so neither exporting it nor `--option
 # impure-env` reaches the builder on a daemon install. Both were tried; both
 # still 403.
-#
-# Workaround: fetch each missing crate with a non-curl UA, then inject the
-# tarball into the local store with `nix-store --add-fixed sha256`. That yields
-# a content-addressed path identical to the FOD's declared `outputHash`, so the
-# subsequent `nix build` finds the artifact already realised and never touches
-# the network for it.
-#
-# Idempotent: crates whose output is already valid in the store are skipped, so
-# a warm store (or a populated substituter) makes this a few metadata lookups.
-#
-# Drop this script and its CI step once upstream nixpkgs sidesteps the UA
-# filter (e.g. by fetching from `static.crates.io` directly).
-#
-# The Rust here is bun2nix itself: `ci::bun-nix-fresh` and
-# `just regenerate-bun-nix` both `nix run .#bun2nix`, and on a runner whose
-# store lacks it that means building askama / basic-toml / jsonc-parser and
-# friends from crates.io. So that is the attribute walked.
-#
-# Shared, not duplicated by accident: juspay/drishti has carried this for its
-# own bun2nix closure since 2026-05 and juspay/osfacts took it for a cargo
-# package closure. This copy fixes two things the drishti original has: each
-# download URL comes from the derivation's own `urls` attribute rather than
-# being rebuilt from the store basename (rebuilding does not survive cargo's
-# `+build` metadata), and the crate list is read from a file instead of piped
-# into `while read`, so a failed fetch fails the recipe rather than exiting 0
-# half-done.
 
 set -euo pipefail
 
@@ -75,9 +49,7 @@ while IFS= read -r cdrv; do
   # PREFERRED: ask the derivation. Two shapes to survive — nix >= 2.31 wraps the
   # map in `.derivations`, and a `structuredAttrs` derivation carries `urls`
   # there rather than in `env`; `..|objects|.urls?` finds it either way, and
-  # `env.url` is the unstructured fallback. stderr is captured rather than
-  # dropped, so a `nix derivation show` that fails on some other nix build says
-  # WHY instead of arriving here as a silent empty string.
+  # `env.url` is the unstructured fallback.
   show_err="$tmpdir/show.err"
   url=$(
     nix derivation show "$cdrv" 2>"$show_err" \
@@ -93,9 +65,7 @@ while IFS= read -r cdrv; do
   # heuristic: the version begins at the FIRST `-`-separated token that starts
   # with a digit, and runs to the end. That is what keeps cargo's `+build`
   # metadata intact (`wasip2-1.0.4+wasi-0.2.12` → name `wasip2`, version
-  # `1.0.4+wasi-0.2.12`), where splitting on the LAST `-` would 404. A wrong
-  # guess is not silent: the add-fixed assertion below compares the path we
-  # minted against the path the FOD wants, and a wrong tarball cannot match it.
+  # `1.0.4+wasi-0.2.12`), where splitting on the LAST `-` would 404.
   if [ -z "$url" ]; then
     stem=${store_name%.tar.gz}
     stem=${stem#crate-}
@@ -127,8 +97,6 @@ while IFS= read -r cdrv; do
   curl -fsSL -A "$UA" -o "$tmp" "$url"
   added=$(nix-store --add-fixed sha256 "$tmp")
 
-  # Self-check, because the failure mode above is silent: unless the path we
-  # just added IS the FOD's output path, we have cached nothing useful.
   if [ "$added" != "$out" ]; then
     echo "prefetch landed at $added but the FOD wants $out" >&2
     exit 1
