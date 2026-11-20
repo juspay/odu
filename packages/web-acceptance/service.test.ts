@@ -63,7 +63,6 @@ async function gone(pid: number): Promise<boolean> {
 }
 
 describe("a web-acceptance worker leaves no daemon behind", () => {
-  // FIRST, because the reservation is per process and the next test makes it.
   test("a port asked for before the reservation is refused, not derived", () => {
     expect(() => workerPort()).toThrow(/before reserveWorldPorts\(\) ran/);
   });

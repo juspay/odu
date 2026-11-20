@@ -1,11 +1,3 @@
-/**
- * ## Teardown order
- *
- * `AfterAll` stops the service BEFORE closing the browser. A Chromium still
- * holding a socket to a live daemon is a `close()` that never returns, and
- * cucumber then never reaches its summary — a hung leg rather than a red one.
- */
-
 import { After, AfterAll, Before, BeforeAll, setDefaultTimeout, Status } from "@cucumber/cucumber";
 import { chromium, type Browser } from "playwright";
 import { createRequire } from "node:module";
@@ -188,8 +180,6 @@ BeforeAll({ timeout: RUN_SETUP_TIMEOUT }, async () => {
     headless: process.env.HEADLESS !== "false",
     args: [...BROWSER_ARGS],
   });
-  // THE PORTS FIRST, from the kernel, before anything binds: a port picked any
-  // other way can be one a daemon from an earlier, killed run still holds.
   await reserveWorldPorts();
   github = await startGithubStub(stubPort());
   service = await loopbackService(odu);
@@ -200,10 +190,6 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
     throw new Error("web-acceptance: BeforeAll did not complete, so there is nothing to drive");
   }
   const odu = readOduBin();
-  // THE WORLD IS THE TAGS' — a daemon with a door or today's loopback one, and
-  // for a signed-in scenario the role granted BEFORE the session exists (a
-  // grant ends the login's connections, so doing it after would sign the page
-  // out).
   const identity = identityOf(scenario.pickle.tags);
   const world = await worldFor(odu, identity);
   this.identity = identity;
@@ -249,10 +235,6 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
   this.ownFixtures = [];
   this.ownRuns = [];
 
-  // Registered before the first navigation, because the throw this is here to
-  // catch is the app's own boot. A page that renders a plausible board over a
-  // client-side exception is exactly what a DOM snapshot cannot tell from a
-  // healthy one, and what "there should be no page errors" turns into a failure.
   this.page.on("pageerror", (error) => {
     this.errors.push(`pageerror: ${error.message}\n${error.stack ?? "(no stack)"}`);
   });
@@ -268,8 +250,6 @@ Before({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario)
     }
   });
 
-  // AND LAST, so the sign-in's own navigation is one of the requests and its
-  // own page errors are this scenario's.
   if (identity.kind === "signed-in") await signIn(this);
 });
 
@@ -297,9 +277,6 @@ After({ timeout: RUN_SETUP_TIMEOUT }, async function (this: OduWorld, scenario) 
 
   if (github !== undefined) github.mode = { ...DEFAULT_STUB_MODE };
 
-  // A private run goes down before its checkout does: `SLOW` and `FAST_RED` both
-  // sleep for minutes, and a coordinator left running holds a core and a lock on
-  // a directory this is about to remove.
   const stopped = new Set(this.ownRuns);
   for (const dir of this.ownFixtures) {
     try {

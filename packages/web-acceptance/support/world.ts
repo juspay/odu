@@ -40,8 +40,6 @@ export class OduWorld extends World {
   cachePathNames?: string[];
   readonly rowState = new Map<string, unknown>();
 
-  /** Checkouts this scenario created and must remove. A SHARED fixture is not
-   *  in here — it belongs to the worker, not the scenario. */
   ownFixtures: string[] = [];
   ownRuns: string[] = [];
 

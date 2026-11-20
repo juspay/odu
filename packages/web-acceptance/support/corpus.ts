@@ -1,15 +1,3 @@
-/**
- * **Sharing is only ever safe for read-only scenarios**, and that is not left to
- * a comment. Every reuse re-checks that the cached run is still what it was —
- * still settled, still the same verdict, still the same failure set — and a
- * mismatch names every scenario that has touched it. That guard catches the
- * offender one scenario late, which is worth saying plainly: it cannot tell you
- * WHICH of them mutated the run, only that one did and which ones had the
- * chance. A scenario that acts on a run asks for a private one instead, and the
- * step vocabulary keeps the two apart by name ("a settled red run" versus "a
- * fresh settled red run").
- */
-
 import {
   headOf,
   makeFixture,

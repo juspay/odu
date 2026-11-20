@@ -1,15 +1,3 @@
-/**
- * **`HOME` is deliberately NOT redirected**, and that is a correction rather
- * than an omission. `tests/e2e/webHarness.ts` records what happened when it was:
- * a synthetic home takes `~/.config/nix/nix.conf` with it, and on a single-user
- * Nix install — which is what a GitHub runner is — that file holds
- * `experimental-features = nix-command flakes`. Every coordinator started inside
- * such a world could not evaluate a flake, so every run refused with
- * `launch_failed`. It passed locally and failed only on CI, for a reason that
- * had nothing to do with the code under test. A host where odu needs a faked
- * home is a host odu does not work on.
- */
-
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -270,15 +258,6 @@ export function cancelRun(service: Service, runId: string): boolean {
   return answer.status === 0;
 }
 
-/**
- * A verb call with a JSON input, answered as JSON.
- *
- * Used ONLY to arrange a scenario (start the run a feature is then about) and to
- * read facts a browser cannot be asked for (which node the coordinator called
- * `quick@…`). Never to ACT where the scenario is about a control: a feature that
- * cancelled a run through this instead of through the button would be asserting
- * on the service and calling it browser coverage.
- */
 export function verb(
   service: Service,
   name: string,
