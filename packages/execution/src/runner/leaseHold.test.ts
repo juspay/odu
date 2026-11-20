@@ -5,10 +5,37 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, jest } from "bun:test";
 import {
   agentLeaseLockPath,
+  type Clock,
   claimLocal,
   parseHolderBody,
   probeLocal,
 } from "./leaseHold";
+
+function fakeClock(startMs: number): Clock & {
+  advance(ms: number): void;
+  fire(): void;
+} {
+  let nowMs = startMs;
+  const ticks: Array<() => void> = [];
+  return {
+    now: () => nowMs,
+    every: (_ms, tick) => {
+      ticks.push(tick);
+      return {
+        stop: () => {
+          const i = ticks.indexOf(tick);
+          if (i >= 0) ticks.splice(i, 1);
+        },
+      };
+    },
+    advance: (ms) => {
+      nowMs += ms;
+    },
+    fire: () => {
+      for (const tick of [...ticks]) tick();
+    },
+  };
+}
 
 const flockAvailable = (() => {
   const r = spawnSync("flock", ["--version"], { encoding: "utf8" });
@@ -59,7 +86,7 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
     const lock = tmpLock();
     expect(probeLocal(lock).state).toBe("free");
     const c = await claimLocal(lock, { holder: "t@h", run: "abc#1" }, {
-      nowMs: 1_000,
+      clock: fakeClock(1_000),
       maxHoldMs: null,
       deadManMs: 60_000,
     });
@@ -114,34 +141,23 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
 
   it("dead-man self-releases after idle without noteActivity", async () => {
     const lock = tmpLock();
-    let clock = 1_000;
-    const timers: Array<{ cb: () => void; ms: number; at: number }> = [];
+    const clock = fakeClock(1_000);
     const self = jest.fn();
     const c = await claimLocal(
       lock,
       { holder: "t@h", run: null },
       {
-        now: () => clock,
-        nowMs: clock,
+        clock,
         deadManMs: 45_000,
         maxHoldMs: null,
-        setIntervalFn: ((cb: () => void, ms: number) => {
-          const id = { cb, ms, at: clock + ms };
-          timers.push(id);
-          return id as unknown as ReturnType<typeof setInterval>;
-        }) as typeof setInterval,
-        clearIntervalFn: ((id: unknown) => {
-          const i = timers.indexOf(id as (typeof timers)[0]);
-          if (i >= 0) timers.splice(i, 1);
-        }) as typeof clearInterval,
         onSelfRelease: self,
       },
     );
     expect(c.status).toBe("held");
     if (c.status !== "held") return;
 
-    clock += 50_000;
-    for (const t of [...timers]) t.cb();
+    clock.advance(50_000);
+    clock.fire();
     expect(self).toHaveBeenCalledWith("dead-man");
     await new Promise((r) => setTimeout(r, 200));
     expect(probeLocal(lock).state).toBe("free");
@@ -149,40 +165,29 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
 
   it("noteActivity resets the dead-man window", async () => {
     const lock = tmpLock();
-    let clock = 1_000;
-    const timers: Array<{ cb: () => void }> = [];
+    const clock = fakeClock(1_000);
     const self = jest.fn();
     const c = await claimLocal(
       lock,
       { holder: "t@h", run: null },
       {
-        now: () => clock,
-        nowMs: clock,
+        clock,
         deadManMs: 45_000,
         maxHoldMs: null,
-        setIntervalFn: ((cb: () => void) => {
-          const id = { cb };
-          timers.push(id);
-          return id as unknown as ReturnType<typeof setInterval>;
-        }) as typeof setInterval,
-        clearIntervalFn: ((id: unknown) => {
-          const i = timers.indexOf(id as (typeof timers)[0]);
-          if (i >= 0) timers.splice(i, 1);
-        }) as typeof clearInterval,
         onSelfRelease: self,
       },
     );
     expect(c.status).toBe("held");
     if (c.status !== "held") return;
 
-    clock += 40_000;
+    clock.advance(40_000);
     c.hold.noteActivity();
-    clock += 40_000;
-    for (const t of [...timers]) t.cb();
+    clock.advance(40_000);
+    clock.fire();
     expect(self).not.toHaveBeenCalled();
 
-    clock += 10_000;
-    for (const t of [...timers]) t.cb();
+    clock.advance(10_000);
+    clock.fire();
     expect(self).toHaveBeenCalledWith("dead-man");
     c.hold.release();
     await new Promise((r) => setTimeout(r, 200));
@@ -190,35 +195,24 @@ describe.skipIf(!flockAvailable)("claimLocal / probeLocal", () => {
 
   it("max-hold self-releases even when pulsed", async () => {
     const lock = tmpLock();
-    let clock = 1_000;
-    const timers: Array<{ cb: () => void }> = [];
+    const clock = fakeClock(1_000);
     const self = jest.fn();
     const c = await claimLocal(
       lock,
       { holder: "t@h", run: null },
       {
-        now: () => clock,
-        nowMs: clock,
+        clock,
         deadManMs: 45_000,
         maxHoldMs: 3_600_000,
-        setIntervalFn: ((cb: () => void) => {
-          const id = { cb };
-          timers.push(id);
-          return id as unknown as ReturnType<typeof setInterval>;
-        }) as typeof setInterval,
-        clearIntervalFn: ((id: unknown) => {
-          const i = timers.indexOf(id as (typeof timers)[0]);
-          if (i >= 0) timers.splice(i, 1);
-        }) as typeof clearInterval,
         onSelfRelease: self,
       },
     );
     expect(c.status).toBe("held");
     if (c.status !== "held") return;
 
-    clock += 3_600_000;
+    clock.advance(3_600_000);
     c.hold.noteActivity();
-    for (const t of [...timers]) t.cb();
+    clock.fire();
     expect(self).toHaveBeenCalledWith("max-hold");
     await new Promise((r) => setTimeout(r, 200));
   });

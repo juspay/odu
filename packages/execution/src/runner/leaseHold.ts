@@ -103,12 +103,27 @@ export interface LocalHold {
   noteActivity: () => void;
 }
 
+export interface Clock {
+  now(): number;
+  every(ms: number, tick: () => void): { stop(): void };
+}
+
+export const systemClock: Clock = {
+  now: () => Date.now(),
+  every: (ms, tick) => {
+    const id = setInterval(tick, ms);
+    id.unref?.();
+    return {
+      stop: () => {
+        clearInterval(id);
+      },
+    };
+  },
+};
+
 export interface ClaimLocalOpts {
-  nowMs?: number;
   settleTimeoutMs?: number;
-  now?: () => number;
-  setIntervalFn?: typeof setInterval;
-  clearIntervalFn?: typeof clearInterval;
+  clock?: Clock;
   deadManMs?: number;
   maxHoldMs?: number | null;
   onSelfRelease?: (reason: "dead-man" | "max-hold" | "hold-exit") => void;
@@ -123,17 +138,15 @@ export async function claimLocal(
   | { status: "busy"; heldBy: LeaseHolder | null }
   | { status: "error"; error: string }
 > {
-  const nowMs = opts.nowMs ?? (opts.now?.() ?? Date.now());
+  const clock = opts.clock ?? systemClock;
+  const claimedMs = clock.now();
   const settleTimeoutMs = opts.settleTimeoutMs ?? 5_000;
-  const now = opts.now ?? Date.now;
-  const setInt = opts.setIntervalFn ?? setInterval;
-  const clearInt = opts.clearIntervalFn ?? clearInterval;
   const deadMs = opts.deadManMs ?? deadManMs();
   const maxMs = opts.maxHoldMs === undefined ? maxHoldMs() : opts.maxHoldMs;
 
   const holderFile = `${lockPath}.holder`;
   const run = identity.run ?? "-";
-  const body = `${identity.holder}|${run}|${nowMs}`;
+  const body = `${identity.holder}|${run}|${claimedMs}`;
   const cmd = [
     `printf '%s\\n' ${shellQuoteArg(body)} > ${shellQuoteArg(holderFile)}`,
     `printf 'READY\\n'`,
@@ -157,18 +170,18 @@ export async function claimLocal(
   const settle = await settleClaimChild(child, settleTimeoutMs);
   if (settle.kind === "ready") {
     let released = false;
-    let lastActivity = now();
-    const heldSince = now();
+    let lastActivity = clock.now();
+    const heldSince = clock.now();
     const heldBy: LeaseHolder = {
       holder: identity.holder,
       run: identity.run,
-      sinceMs: nowMs,
+      sinceMs: claimedMs,
     };
 
     const doRelease = (): void => {
       if (released) return;
       released = true;
-      clearInt(watch);
+      watch.stop();
       try {
         child.stdin?.end();
       } catch {
@@ -182,9 +195,9 @@ export async function claimLocal(
       }
     };
 
-    const watch = setInt(() => {
+    const watch = clock.every(Math.min(5_000, deadMs, maxMs ?? deadMs), () => {
       if (released) return;
-      const t = now();
+      const t = clock.now();
       if (maxMs !== null && t - heldSince >= maxMs) {
         doRelease();
         opts.onSelfRelease?.("max-hold");
@@ -194,13 +207,12 @@ export async function claimLocal(
         doRelease();
         opts.onSelfRelease?.("dead-man");
       }
-    }, Math.min(5_000, deadMs, maxMs ?? deadMs));
-    watch.unref?.();
+    });
 
     const releaseOnHoldExit = (): void => {
       if (released) return;
       released = true;
-      clearInt(watch);
+      watch.stop();
       try {
         unlinkSync(holderFile);
       } catch {
@@ -218,12 +230,12 @@ export async function claimLocal(
         isHeld: () => !released,
         probe: (requestedPath) => {
           if (released || requestedPath !== lockPath) return { kind: "not-mine" };
-          lastActivity = now();
+          lastActivity = clock.now();
           return { kind: "busy", heldBy };
         },
         release: doRelease,
         noteActivity: () => {
-          lastActivity = now();
+          lastActivity = clock.now();
         },
       },
     };

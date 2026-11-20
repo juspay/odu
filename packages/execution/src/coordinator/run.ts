@@ -47,13 +47,26 @@ import {
 } from "../common/presentation";
 import { gitBranch, gitDefaultBranch, gitTopLevel } from "../common/git";
 import { appendIfOpen, createNodeLogSink } from "./nodeLogSink";
-import { createVerdictGate } from "./verdictGate";
-import { maxLaneResurrections } from "./laneResurrection";
+import { createRunLogs, type NodeLog } from "./runLogs";
+import { createClaimWindows, type ClaimWindow } from "./claimWindows";
+import {
+  type Attempt,
+  laneEpisodes,
+  maxLaneResurrections,
+  type RetryPlan,
+  type VacatedLane,
+} from "./laneResurrection";
+import { createVerdictGate, type PublishedState } from "./verdictGate";
+import {
+  applyNodePatch,
+  type NodePatch,
+  nodePatchChanges,
+} from "../common/nodePatch";
 import type { TaskSpec } from "../common/spec";
 import { laneTasks, loadJustPipeline, parseSelector } from "../just/ingest";
 import { asHostSlot, fanoutPools, loadHosts, shortHost } from "./hosts";
 import { type Lane, startLane } from "./lane";
-import { takePushToken } from "./launcher";
+import { pushTokenHandoff } from "./pushTokenHandoff";
 import { pushEnvFor } from "../runner/pushResults";
 import {
   ExecutionRoster,
@@ -266,6 +279,35 @@ function tryGit(repo: string, args: string[]): string | null {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
+export interface ForgeCoords {
+  originUrl: string | null;
+  github: { owner: string; repo: string } | null;
+  repo: string | null;
+  ref: string | null;
+  defaultBranch: string | null;
+}
+
+export function readForgeCoords(
+  repoRoot: string,
+  posting: boolean,
+): ForgeCoords {
+  const originUrl = tryGit(repoRoot, ["remote", "get-url", "origin"]);
+  const github = originUrl !== null ? parseGithubRemote(originUrl) : null;
+  if (posting && github === null) {
+    throw new Error(
+      "odu: posting commit statuses needs a github.com origin remote " +
+        "(pass --no-post for non-GitHub strict runs)",
+    );
+  }
+  return {
+    originUrl,
+    github,
+    repo: github !== null ? repoSlug(github) : null,
+    ref: gitBranch(repoRoot),
+    defaultBranch: gitDefaultBranch(repoRoot),
+  };
+}
+
 export interface RunDeps {
   claimVenues?: typeof claimVenues;
   leaseBurstSlots?: typeof leaseBurstSlots;
@@ -439,19 +481,13 @@ async function orchestrate(
     }
   }
 
-  const originUrl = tryGit(repoRoot, ["remote", "get-url", "origin"]);
-  const github = originUrl !== null ? parseGithubRemote(originUrl) : null;
-  if (ctx.posting && github === null) {
-    throw new Error(
-      "odu: posting commit statuses needs a github.com origin remote " +
-        "(pass --no-post for non-GitHub strict runs)",
-    );
-  }
-  const repo = github !== null ? repoSlug(github) : null;
-  const ref = gitBranch(repoRoot);
-  const defaultBranch = gitDefaultBranch(repoRoot);
+  const { originUrl, github, repo, ref, defaultBranch } = readForgeCoords(
+    repoRoot,
+    ctx.posting,
+  );
 
-  const pushToken = args.push === undefined ? null : takePushToken(args.runId);
+  const pushToken =
+    args.push === undefined ? null : pushTokenHandoff.take(args.runId);
   const pushing = args.push !== undefined && pushToken !== null ? args.push : null;
   type PinDecision =
     | { kind: "named"; name: string }
@@ -736,46 +772,12 @@ async function orchestrate(
     startedAt: Date.now(),
   }))();
 
-  const logs = createNodeLogSink(repoRoot, sha7);
-  const nodeHosts = new Map<string, string>();
+  const sink = createNodeLogSink(repoRoot, sha7);
+  const logs = createRunLogs(sink, history);
   let flushSetupLines: () => void = () => {};
-  const appendLocal = (
-    id: string,
-    text: string,
-    stream: LogStream = "recipe",
-  ): void => {
-    if (logs.isEnded(id, stream)) return;
-    logs.append(id, text, stream);
-    history.log(id, text, nodeHosts.get(id) ?? null, stream);
-  };
-  const resetLocal = (
-    id: string,
-    text: string,
-    stream: LogStream = "recipe",
-  ): void => {
-    logs.reset(id, text, stream);
-    history.replaceLog(id, text, nodeHosts.get(id) ?? null, stream);
-  };
-  const endLocal = (id: string, stream: LogStream = "recipe"): void => {
-    logs.end(id, stream);
-    if (stream === "recipe") history.logFinalized(id, true, null);
-  };
-  const sealNodeLogs = (id: string): void => {
-    endLocal(id);
-    endLocal(id, "push");
-  };
 
   const endRunLogs = (): void => {
-    for (const id of store.get().order) sealNodeLogs(id);
-  };
-
-  const stampTruncated = (id: string, cause: string): void => {
-    appendLocal(
-      id,
-      `\n[odu] log truncated: ${cause} with this node's output still owed` +
-        " — what follows the last line was never received\n",
-    );
-    history.logFinalized(id, false, cause);
+    logs.sealAll(store.get().order);
   };
 
   const stampUnfinishedLogs = (): void => {
@@ -786,7 +788,7 @@ async function orchestrate(
         continue;
       }
       if (splitFanId(id).namepath === SETUP && status !== "running") continue;
-      stampTruncated(id, "the run was stopped");
+      logs.of(id).truncate("the run was stopped");
     }
   };
 
@@ -802,10 +804,9 @@ async function orchestrate(
             ? `went silent for ${drained.idleMs / 1000}s`
             : "went away (closed or died)";
         for (const laneId of drained.undrained) {
-          stampTruncated(
-            lane.publicId(laneId),
-            `${lane.handle.platform} ${why}`,
-          );
+          logs
+            .of(lane.publicId(laneId))
+            .truncate(`${lane.handle.platform} ${why}`);
         }
       }),
     );
@@ -866,7 +867,7 @@ async function orchestrate(
     startedAt: null,
     durationMs: null,
     exitCode: null,
-  } as const satisfies Partial<NodeState>;
+  } as const satisfies NodePatch;
 
   const laneDeath = (
     detail: string,
@@ -906,16 +907,16 @@ async function orchestrate(
       const next = overlayOnLaneStop(node.status, strategy);
       if (next === undefined) continue;
       if (node.status === "running") {
-        appendLocal(id, strategy.log);
+        logs.of(id).append(strategy.log);
         const startedAt = node.startedAt ?? now;
-        updateNode(id, {
+        verdicts.offer(id, {
           status: next,
           durationMs: now - startedAt,
         });
       } else {
-        updateNode(id, { status: next });
+        verdicts.offer(id, { status: next });
       }
-      if (splitFanId(id).namepath !== SETUP) sealNodeLogs(id);
+      if (splitFanId(id).namepath !== SETUP) logs.of(id).seal();
     }
   };
 
@@ -926,7 +927,7 @@ async function orchestrate(
     if (!hasNodes) return false;
     executions.ensure(platform);
     executions.cancel(platform);
-    if (claimInFlight(platform)) {
+    if (claims.has(platform)) {
       deferredPlatformStops.set(platform, CANCELLED_BY_OPERATOR);
       return true;
     }
@@ -986,10 +987,10 @@ async function orchestrate(
   ) => void = () => {};
 
   const watchLease = (platform: string, lease: LeaseHandle): void => {
-    const episode = episodeOf(platform);
+    const episode = episodes.current(platform);
     void lease.lost?.then(() => {
       const reason = `venue lease lost on ${shortHost(lease.host)}`;
-      if (episode !== episodeOf(platform)) return;
+      if (episodes.stale(platform, episode)) return;
       if (!burstLeaseUsers.has(lease) && isResurrectable(platform)) {
         laneDied(platform, episode, reason);
         return;
@@ -1142,19 +1143,7 @@ async function orchestrate(
   const allSettled = new Promise<void>((resolve) => {
     settled = resolve;
   });
-  const claimsInFlight = new Map<string, number>();
-  const claimInFlight = (platform?: string): boolean =>
-    platform === undefined
-      ? claimsInFlight.size > 0
-      : claimsInFlight.has(platform);
-  const beginClaim = (platform: string): void => {
-    claimsInFlight.set(platform, (claimsInFlight.get(platform) ?? 0) + 1);
-  };
-  const endClaim = (platform: string): void => {
-    const left = (claimsInFlight.get(platform) ?? 0) - 1;
-    if (left > 0) claimsInFlight.set(platform, left);
-    else claimsInFlight.delete(platform);
-  };
+  const claims = createClaimWindows();
   const deferredPlatformStops = new Map<
     string,
     {
@@ -1165,15 +1154,16 @@ async function orchestrate(
   >();
 
   const verdicts = createVerdictGate({
-    isLogEnded: logs.isEnded,
+    isLogEnded: (id) => logs.of(id).isEnded(),
     publishedStatus: (id) => store.get().nodes[id]?.status,
     nodeIds: () => store.get().order,
-    publish: (id, patch) => updateNode(id, patch),
+    write: (id, patch) => writeNode(id, patch),
     drainLogs: () => drainLaneLogs(executions.lanes()),
+    snapshot: () => store.get(),
   });
 
   const checkSettled = (): void => {
-    if (claimInFlight()) return;
+    if (claims.any()) return;
     if (shuttingDown) return;
     const state = store.get();
     const done = state.order.every(
@@ -1187,23 +1177,12 @@ async function orchestrate(
     verdicts.boundIfOnlyLogsOutstanding();
   };
 
-  const updateNode = (
-    id: string,
-    patch: Partial<NodeState>,
-    drop: readonly (keyof NodeState)[] = [],
-  ): void => {
+  const writeNode = (id: string, patch: NodePatch): void => {
     const cur = store.get();
     const prev = cur.nodes[id];
     if (prev === undefined) return;
-    const next = { ...prev, ...patch };
-    for (const key of drop) delete next[key];
-    const keys = Object.keys(patch) as (keyof NodeState)[];
-    if (
-      keys.every((k) => next[k] === prev[k]) &&
-      drop.every((k) => prev[k] === undefined)
-    ) {
-      return;
-    }
+    if (!nodePatchChanges(prev, patch)) return;
+    const next = applyNodePatch(prev, patch);
     runtime.ctx.cells.nodes.set({
       ...cur,
       nodes: { ...cur.nodes, [id]: next },
@@ -1222,7 +1201,7 @@ async function orchestrate(
       history.nodeStatus(id, next.status, {
         exitCode: next.exitCode,
         durationMs: next.durationMs,
-        host: nodeHosts.get(id) ?? null,
+        host: logs.hostOf(id),
       });
       const payload = postableNodeIds.has(id)
         ? statusFor(id, next.status, next.durationMs, sha7)
@@ -1239,11 +1218,11 @@ async function orchestrate(
     recipeDurationMs: number | null,
   ): void => {
     if (push === undefined) {
-      updateNode(id, {}, ["push"]);
+      verdicts.offer(id, { clearPush: true });
       lastJournalledPush.delete(id);
       return;
     }
-    updateNode(id, { push });
+    verdicts.offer(id, { push });
     if (pushing === null) return;
     const stamp = JSON.stringify(push);
     if (lastJournalledPush.get(id) === stamp) return;
@@ -1298,11 +1277,12 @@ async function orchestrate(
         logical.status === "pending" &&
         nodes.some((node) => node!.status !== "pending")
       ) {
-        appendLocal(
-          logicalId,
-          `[odu] ${plan.total} shards started; details are adjacent nodes\n`,
-        );
-        updateNode(logicalId, { status: "running", startedAt: Date.now() });
+        logs
+          .of(logicalId)
+          .append(
+            `[odu] ${plan.total} shards started; details are adjacent nodes\n`,
+          );
+        verdicts.offer(logicalId, { status: "running", startedAt: Date.now() });
       }
       return;
     }
@@ -1311,12 +1291,9 @@ async function orchestrate(
     const status = shardAggregateStatus(statuses);
     const startedAt = logical.startedAt ?? Date.now();
     const durationMs = shardAggregateDuration(nodes.map((node) => node!));
-    appendLocal(
-      logicalId,
-      `[odu] shards settled: ${statuses.join(", ")}\n`,
-    );
-    sealNodeLogs(logicalId);
-    updateNode(logicalId, {
+    logs.of(logicalId).append(`[odu] shards settled: ${statuses.join(", ")}\n`);
+    logs.of(logicalId).seal();
+    verdicts.offer(logicalId, {
       status,
       exitCode: status === "ok" ? 0 : 1,
       startedAt,
@@ -1327,22 +1304,23 @@ async function orchestrate(
   const startSetup = (platform: string): void => {
     const id = fanId(SETUP, platform);
     if (store.get().nodes[id]?.status !== "pending") return;
-    updateNode(id, { status: "running", startedAt: Date.now() });
+    verdicts.offer(id, { status: "running", startedAt: Date.now() });
     if (args.checkoutMoved !== undefined) {
-      appendLocal(id, `[odu] ${args.checkoutMoved}\n`);
+      logs.of(id).append(`[odu] ${args.checkoutMoved}\n`);
     }
     if (pushing !== null) {
-      appendLocal(
-        id,
-        `[odu] pushing results to ${pushing.substituter} (bucket ${pushing.bucket})\n`,
-      );
+      logs
+        .of(id)
+        .append(
+          `[odu] pushing results to ${pushing.substituter} (bucket ${pushing.bucket})\n`,
+        );
       if (args.pushKeyWarning !== undefined) {
-        appendLocal(id, `[odu] ${args.pushKeyWarning}\n`);
+        logs.of(id).append(`[odu] ${args.pushKeyWarning}\n`);
       }
       for (const task of tasksByPlatform.get(platform) ?? []) {
         const pin = pinDecisionFor(task, platform);
         if (pin.kind === "skipped") {
-          appendLocal(id, `[odu] not pinning: ${pin.why}\n`);
+          logs.of(id).append(`[odu] not pinning: ${pin.why}\n`);
         }
       }
     } else {
@@ -1350,7 +1328,7 @@ async function orchestrate(
         args.push !== undefined
           ? "the run's write token was not handed over"
           : (args.pushSkipped ?? "this run was launched with no cache target");
-      appendLocal(id, `[odu] not pushing: ${why}\n`);
+      logs.of(id).append(`[odu] not pushing: ${why}\n`);
     }
   };
 
@@ -1360,7 +1338,7 @@ async function orchestrate(
     if (setupFlush !== undefined) clearImmediate(setupFlush);
     setupFlush = undefined;
     for (const [platform, lines] of pendingSetupLines) {
-      appendLocal(fanId(SETUP, platform), lines.join(""));
+      logs.of(fanId(SETUP, platform)).append(lines.join(""));
     }
     pendingSetupLines.clear();
   };
@@ -1383,7 +1361,7 @@ async function orchestrate(
     if (node === undefined) return;
     if (node.status !== "pending" && node.status !== "running") return;
     const startedAt = node.startedAt ?? Date.now();
-    updateNode(id, {
+    verdicts.offer(id, {
       status,
       exitCode,
       startedAt,
@@ -1506,9 +1484,8 @@ async function orchestrate(
   const buildLane = deps.startLane ?? startLane;
   const claimOne = deps.claimVenues ?? claimVenues;
 
-  const laneEpisode = new Map<string, number>();
-  const episodeOf = (platform: string): number => laneEpisode.get(platform) ?? 0;
   const maxResurrections = maxLaneResurrections();
+  const episodes = laneEpisodes(maxResurrections);
   const remotePlatforms = new Set<string>();
 
   const isResurrectable = (platform: string): boolean =>
@@ -1518,8 +1495,9 @@ async function orchestrate(
 
   const unfinishedTasksFor = (
     platform: string,
-    state: PipelineState,
+    published: PublishedState,
   ): TaskSpec[] => {
+    const state = published.state;
     const all = tasksByPlatform.get(platform) ?? [];
     const statusOf = (localId: string): NodeStatus | undefined =>
       state.nodes[fanId(localId, platform)]?.status;
@@ -1545,20 +1523,20 @@ async function orchestrate(
 
   const laneDied = (platform: string, episode: number, reason: string): void => {
     if (!laneAccepting(platform)) return;
-    if (episode !== episodeOf(platform)) return;
+    if (episodes.stale(platform, episode)) return;
     const spent = episode;
     if (spent < maxResurrections && isResurrectable(platform)) {
-      beginClaim(platform);
-      try {
-        verdicts.releaseAll((id) => onPlatform(id, platform));
-        const state = store.get();
-        const unfinished = unfinishedTasksFor(platform, state);
-        if (unfinished.length > 0) {
-          resurrectLane(platform, episode, reason, unfinished, state);
+      using window = claims.open(platform);
+      const published = verdicts.publishedSnapshot((id) =>
+        onPlatform(id, platform),
+      );
+      const unfinished = unfinishedTasksFor(platform, published);
+      if (unfinished.length > 0) {
+        const attempt = episodes.bump(platform, episode);
+        if (attempt !== null) {
+          void reclaim(vacate(narrate(attempt, reason, unfinished, published)));
           return;
         }
-      } finally {
-        endClaim(platform);
       }
     }
     const exhausted =
@@ -1570,28 +1548,25 @@ async function orchestrate(
       setupLine(`[odu] lane died: ${reason}${exhausted}`, platform);
     }
     executions.cancel(platform);
-    if (claimInFlight(platform)) deferredPlatformStops.set(platform, strategy);
+    if (claims.has(platform)) deferredPlatformStops.set(platform, strategy);
     else terminalizePlatformNodes(platform, strategy);
     checkSettled();
   };
 
-  const resurrectLane = (
-    platform: string,
-    episode: number,
+  const narrate = (
+    attempt: Attempt,
     reason: string,
-    retryTasks: TaskSpec[],
-    state: PipelineState,
-  ): void => {
-    const attempt = episode + 1;
-    laneEpisode.set(platform, attempt);
-    beginClaim(platform);
-
+    tasks: TaskSpec[],
+    published: PublishedState,
+  ): RetryPlan => {
+    const platform = attempt.platform;
+    const state = published.state;
     setupLine(
       `[odu] lane died: ${reason} — reclaiming a venue and retrying unfinished` +
-        ` nodes (attempt ${attempt} of ${maxResurrections})`,
+        ` nodes (attempt ${attempt.attempt} of ${attempt.of})`,
       platform,
     );
-    const retryIds = new Set(retryTasks.map((task) => fanId(task.id, platform)));
+    const ids = new Set(tasks.map((task) => fanId(task.id, platform)));
     const cutOff = state.order.filter(
       (id) => onPlatform(id, platform) && state.nodes[id]?.status === "running",
     );
@@ -1603,66 +1578,72 @@ async function orchestrate(
         platform,
       );
     }
+    return { attempt, reason, tasks, ids };
+  };
 
+  const vacate = (plan: RetryPlan): VacatedLane => {
+    const platform = plan.attempt.platform;
+    const window = claims.open(platform);
     const dead = primaryLanes.get(platform);
     if (dead !== undefined) retireLane(platform, dead);
     executions.releaseLeases(platform);
 
-    updateNode(fanId(SETUP, platform), REOPENED);
+    verdicts.offer(fanId(SETUP, platform), REOPENED);
     startSetup(platform);
 
     delete lanesByPlatform[platform];
     publishRoster(true);
+    return { plan, window };
+  };
 
-    void (async () => {
-      const outcome = await claimOne({
-        repoRoot,
-        pools: resolvedPools,
-        platforms: [platform],
-        identity: { holder: localHolderId(), run: runLabel },
-        noWait: args.noWait,
-        runLabel,
-        onLine: setupLine,
-        resolveDrvPath: laneRunnerDrvPath,
-      });
-      endClaim(platform);
-      publishRoster(false);
-      if (shuttingDown) {
-        if (outcome.ok) for (const lease of outcome.leases) lease.release();
-        return;
-      }
-      if (executions.isCancelled(platform)) {
-        if (outcome.ok) for (const lease of outcome.leases) lease.release();
-        terminalizePlatformNodes(
-          platform,
-          deferredPlatformStops.get(platform) ?? CANCELLED_BY_OPERATOR,
-        );
-        checkSettled();
-        return;
-      }
-      if (!outcome.ok) {
-        executions.cancel(platform);
-        terminalizePlatformNodes(
-          platform,
-          laneDeath(`lane died: ${reason}\n[odu] ${outcome.error.message}`),
-        );
-        checkSettled();
-        return;
-      }
-      for (const id of retryIds) {
-        updateNode(id, REOPENED);
-        history.resetNode(
-          id,
-          "the lane running this node died; it was re-run on another venue",
-        );
-        const nextHost = outcome.lanes[platform];
-        if (nextHost === undefined) nodeHosts.delete(id);
-        else nodeHosts.set(id, nextHost);
-        resetLocal(id, "");
-      }
-      acceptClaim(platform, outcome, retryTasks);
+  const reclaim = async (vacated: VacatedLane): Promise<void> => {
+    const { plan, window } = vacated;
+    const platform = plan.attempt.platform;
+    const outcome = await claimOne({
+      repoRoot,
+      pools: resolvedPools,
+      platforms: [platform],
+      identity: { holder: localHolderId(), run: runLabel },
+      noWait: args.noWait,
+      runLabel,
+      onLine: setupLine,
+      resolveDrvPath: laneRunnerDrvPath,
+    });
+    window.close();
+    publishRoster(false);
+    if (shuttingDown) {
+      if (outcome.ok) for (const lease of outcome.leases) lease.release();
+      return;
+    }
+    if (executions.isCancelled(platform)) {
+      if (outcome.ok) for (const lease of outcome.leases) lease.release();
+      terminalizePlatformNodes(
+        platform,
+        deferredPlatformStops.get(platform) ?? CANCELLED_BY_OPERATOR,
+      );
       checkSettled();
-    })();
+      return;
+    }
+    if (!outcome.ok) {
+      executions.cancel(platform);
+      terminalizePlatformNodes(
+        platform,
+        laneDeath(`lane died: ${plan.reason}\n[odu] ${outcome.error.message}`),
+      );
+      checkSettled();
+      return;
+    }
+    for (const id of plan.ids) {
+      verdicts.offer(id, REOPENED);
+      history.resetNode(
+        id,
+        "the lane running this node died; it was re-run on another venue",
+      );
+      logs.place(id, outcome.lanes[platform] ?? null);
+      logs.of(id).reset("");
+    }
+    acceptClaim(platform, outcome, plan.tasks);
+    checkSettled();
   };
 
   const laneSource = (host: string) => {
@@ -1684,7 +1665,7 @@ async function orchestrate(
     tasks: TaskSpec[],
   ): Lane => {
     executions.ensure(platform);
-    nodeHosts.set(fanId(SETUP, platform), host);
+    logs.place(fanId(SETUP, platform), host);
     startSetup(platform);
     const setupId = fanId(SETUP, platform);
     const publicMainId = (laneId: string): string => {
@@ -1694,12 +1675,12 @@ async function orchestrate(
         : fanId(laneId, platform);
     };
     for (const task of tasks) {
-      nodeHosts.set(fanId(task.id, platform), host);
-      nodeHosts.set(publicMainId(task.id), host);
+      logs.place(fanId(task.id, platform), host);
+      logs.place(publicMainId(task.id), host);
     }
     const local = isLocalHost(host);
     if (!local) remotePlatforms.add(platform);
-    const episode = episodeOf(platform);
+    const episode = episodes.current(platform);
     const lane = buildLane({
       platform,
       host,
@@ -1707,7 +1688,7 @@ async function orchestrate(
       pipelineName: spec.name,
       ...laneSource(host),
       resolveDrvPath: laneRunnerDrvPath,
-      onSetupLine: (line) => appendLocal(setupId, `${line}\n`),
+      onSetupLine: (line) => logs.of(setupId).append(`${line}\n`),
       onNodes: (laneState) => {
         if (!laneAccepting(platform)) return;
         for (const laneId of laneState.order) {
@@ -1738,12 +1719,12 @@ async function orchestrate(
       onLogFrame: (laneId, frame, stream) => {
         const id = publicMainId(laneId);
         if (frame.kind === "append") {
-          appendLocal(id, frame.text, stream);
+          logs.of(id).append(frame.text, stream);
         } else if (frame.kind === "end") {
           if (stream === "push") {
-            endLocal(id, "push");
+            logs.of(id).end("push");
           } else if (laneId !== SETUP) {
-            endLocal(id);
+            logs.of(id).end();
             verdicts.release(id);
             const plan = planFor(platform, laneId);
             if (plan !== undefined) {
@@ -1751,9 +1732,9 @@ async function orchestrate(
             }
           }
         } else if (laneId === SETUP) {
-          if (frame.text !== "") appendLocal(id, frame.text, stream);
+          if (frame.text !== "") logs.of(id).append(frame.text, stream);
         } else if (!logs.isNoopReset(id, frame.text, stream)) {
-          resetLocal(id, frame.text, stream);
+          logs.of(id).reset(frame.text, stream);
         }
       },
       onDead: (error) => laneDied(platform, episode, error),
@@ -1792,14 +1773,18 @@ async function orchestrate(
 
   const seeded =
     ctx.posting && github !== null ? poster.seed() : Promise.resolve();
-  for (const id of store.get().order) logs.claim(id);
-  for (const platform of platformsToClaim) beginClaim(platform);
+  logs.claim(store.get().order);
+  const claimWindows = platformsToClaim.map((platform) =>
+    claims.open(platform),
+  );
   const claimEpisode = new Map(
-    platformsToClaim.map((platform) => [platform, episodeOf(platform)] as const),
+    platformsToClaim.map(
+      (platform) => [platform, episodes.current(platform)] as const,
+    ),
   );
   const venueSuperseded = (platform: string): boolean =>
-    episodeOf(platform) !== (claimEpisode.get(platform) ?? 0);
-  const claims = claimPlatformsIndependently(
+    episodes.stale(platform, claimEpisode.get(platform) ?? 0);
+  const claiming = claimPlatformsIndependently(
     platformsToClaim,
     async (platform) => {
       const pending = claimOne({
@@ -1837,8 +1822,8 @@ async function orchestrate(
     if (earlyTasks.length > 0) startPrimaryLane(platform, host, earlyTasks);
   }
 
-  const claimResults = await claims;
-  for (const platform of platformsToClaim) endClaim(platform);
+  const claimResults = await claiming;
+  for (const window of claimWindows) window.close();
   const failedClaim = claimResults.find(({ outcome }) => !outcome.ok);
   const claimedOutcome: ClaimOutcome =
     failedClaim !== undefined && !failedClaim.outcome.ok
@@ -1871,7 +1856,9 @@ async function orchestrate(
   if (claimedOutcome.ok) {
     publishRoster(false);
 
-    for (const request of burstRequests) beginClaim(request.platform);
+    const burstWindows = burstRequests.map((request) =>
+      claims.open(request.platform),
+    );
     const preparing = prepareVenues({
         claimed: claimedOutcome,
         existingLanes: lanesByPlatform,
@@ -1887,7 +1874,7 @@ async function orchestrate(
       });
 
     outcome = await preparing;
-    for (const request of burstRequests) endClaim(request.platform);
+    for (const window of burstWindows) window.close();
     if (outcome.ok) {
       const moved = [...outcome.venues].find(
         ([platform, venue]) =>
@@ -1968,7 +1955,7 @@ async function orchestrate(
   }
   if (shuttingDown) return await parkForShutdown();
 
-  for (const id of store.get().order) logs.claim(id);
+  logs.claim(store.get().order);
 
   const cancelledDuringClaim = (platform: string): boolean =>
     executions.isCancelled(platform);
@@ -2035,8 +2022,8 @@ async function orchestrate(
           : fanId(laneId, platform);
       };
       for (const root of roots) {
-        nodeHosts.set(fanId(root.id, platform), host);
-        nodeHosts.set(publicMainId(root.id), host);
+        logs.place(fanId(root.id, platform), host);
+        logs.place(publicMainId(root.id), host);
       }
       const routed = executions.extendLane(
         platform,
@@ -2064,7 +2051,7 @@ async function orchestrate(
         const publicIdFor = projection.publicId;
         const setupId = projection.setupId;
         const publicLaneIds = projection.nodeIds;
-        for (const id of publicLaneIds) nodeHosts.set(id, lease.host);
+        for (const id of publicLaneIds) logs.place(id, lease.host);
         let burstLane: Lane | undefined;
         let finished = false;
         const finishBurst = (): void => {
@@ -2083,7 +2070,7 @@ async function orchestrate(
             return;
           }
           finished = true;
-          endLocal(setupId);
+          logs.of(setupId).end();
           burstLane?.close();
           releaseBurstLease(platform, lease);
         };
@@ -2095,7 +2082,9 @@ async function orchestrate(
           ...laneSource(lease.host),
           resolveDrvPath: laneRunnerDrvPath,
           onSetupLine: (line) =>
-            appendLocal(setupId, `[host ${shortHost(lease.host)}] ${line}\n`),
+            logs
+              .of(setupId)
+              .append(`[host ${shortHost(lease.host)}] ${line}\n`),
           onNodes: (laneState) => {
             if (!laneAccepting(platform)) return;
             for (const laneId of laneState.order) {
@@ -2108,8 +2097,7 @@ async function orchestrate(
                 startedAt: laneNode.startedAt,
                 durationMs: laneNode.durationMs,
               };
-              if (laneId === SETUP) updateNode(publicId, patch);
-              else verdicts.offer(publicId, patch);
+              verdicts.offer(publicId, patch);
               notePush(publicId, laneNode.push, laneNode.durationMs);
               if (laneId === plan.rootId) {
                 refreshShardAggregate(platform, plan);
@@ -2119,20 +2107,23 @@ async function orchestrate(
           onLogFrame: (laneId, frame, stream) => {
             if (!laneAccepting(platform)) return;
             const publicId = publicIdFor(laneId);
-            if (frame.kind === "append") appendLocal(publicId, frame.text, stream);
-            else if (frame.kind === "snapshot") {
+            if (frame.kind === "append") {
+              logs.of(publicId).append(frame.text, stream);
+            } else if (frame.kind === "snapshot") {
               if (laneId === SETUP) {
-                if (frame.text !== "") appendLocal(publicId, frame.text, stream);
+                if (frame.text !== "") {
+                  logs.of(publicId).append(frame.text, stream);
+                }
               } else if (!logs.isNoopReset(publicId, frame.text, stream)) {
-                resetLocal(publicId, frame.text, stream);
+                logs.of(publicId).reset(frame.text, stream);
               }
             } else if (frame.kind === "end") {
               if (stream === "push") {
-                endLocal(publicId, "push");
+                logs.of(publicId).end("push");
                 return;
               }
               if (laneId !== SETUP) {
-                endLocal(publicId);
+                logs.of(publicId).end();
                 verdicts.release(publicId);
               }
               if (laneId === plan.rootId) {
@@ -2147,12 +2138,12 @@ async function orchestrate(
               const status = store.get().nodes[id]?.status;
               const unfinished = status === "pending" || status === "running";
               if (unfinished) {
-                appendLocal(id, `\n[odu] shard lane died: ${error}\n`);
+                logs.of(id).append(`\n[odu] shard lane died: ${error}\n`);
               }
-              sealNodeLogs(id);
+              logs.of(id).seal();
               if (unfinished) {
                 verdicts.release(id);
-                updateNode(id, {
+                verdicts.offer(id, {
                   status: status === "running" ? "errored" : "skipped",
                   exitCode: 1,
                 });

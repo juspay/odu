@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { NodeState, NodeStatus } from "@odu/run-client/surface";
+import {
+  EMPTY_STATE,
+  type NodeState,
+  type NodeStatus,
+} from "@odu/run-client/surface";
 import { createVerdictGate, type VerdictGate } from "./verdictGate";
 
 function harness(ids: string[]): {
@@ -26,7 +30,7 @@ function harness(ids: string[]): {
     isLogEnded: (id) => ended.has(id),
     publishedStatus: (id) => statuses.get(id),
     nodeIds: () => ids,
-    publish: (id, patch) => {
+    write: (id, patch) => {
       published.push([id, patch]);
       if (patch.status !== undefined) statuses.set(id, patch.status);
     },
@@ -36,6 +40,7 @@ function harness(ids: string[]): {
         releaseDrain = resolve;
       });
     },
+    snapshot: () => EMPTY_STATE,
   });
   return state;
 }

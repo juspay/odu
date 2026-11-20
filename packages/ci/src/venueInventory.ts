@@ -1,4 +1,9 @@
-import { asHostSlot, type HostPool, loadHosts } from "@odu/execution/coordinator/hosts";
+import {
+  asHostSlot,
+  type HostPool,
+  hostsOverrideOf,
+  loadHosts,
+} from "@odu/execution/coordinator/hosts";
 import {
   isMixedPool,
   probeAllHosts,
@@ -66,7 +71,7 @@ export async function venueInventory(request: {
     rows: readonly VenueRowFacts[];
   }) => void;
 }): Promise<VenueProbeOutcome> {
-  const config = loadHosts(request.caller.hostsFile ?? undefined);
+  const config = loadHosts(hostsOverrideOf(request.caller.hostsFile));
   const configured = Object.keys(config.hosts).sort();
   if (configured.length === 0) {
     return {

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { Result, Schema } from "effect";
 import { fanId } from "@odu/run-client/nodeId";
-import { loadHosts } from "@odu/execution/coordinator/hosts";
+import { hostsOverrideOf, loadHosts } from "@odu/execution/coordinator/hosts";
 import { parseGithubRemote } from "@odu/execution/coordinator/statuses";
 import type { Forge } from "@odu/execution/common/forge";
 import type { PipelineSpec } from "@odu/execution/common/spec";
@@ -52,7 +52,7 @@ function protectPlatforms(
     }
     return { kind: "explicit", platforms: [...new Set(explicit)].sort() };
   }
-  const config = loadHosts(hostsFile ?? undefined);
+  const config = loadHosts(hostsOverrideOf(hostsFile));
   const platforms = Object.keys(config.hosts).sort();
   if (config.source === null || platforms.length === 0) {
     return { kind: "none", source: config.source };

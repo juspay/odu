@@ -126,9 +126,8 @@ function stubPusher(
   };
 }
 
-const announce = (hooks: PushHooks): void => {
-  hooks.begin();
-  hooks.say(PUSH_LINE);
+const announce = (narration: PushHooks): void => {
+  narration.begin().say(PUSH_LINE);
 };
 
 const timesIn = (haystack: string, needle: string): number =>

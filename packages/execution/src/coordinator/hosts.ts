@@ -27,12 +27,31 @@ interface HostsCandidate {
   path: string | null;
 }
 
-function hostsCandidates(override?: string): HostsCandidate[] {
-  const oduHosts = override ?? process.env.ODU_HOSTS;
+export type HostsOverride =
+  | { readonly kind: "ambient" }
+  | { readonly kind: "none" }
+  | { readonly kind: "file"; readonly path: string };
+
+export function hostsOverrideOf(
+  wire: string | null | undefined,
+): HostsOverride {
+  if (wire === null || wire === undefined) return { kind: "ambient" };
+  return wire === "" ? { kind: "none" } : { kind: "file", path: wire };
+}
+
+function hostsCandidates(override: HostsOverride): HostsCandidate[] {
+  const ambient = process.env.ODU_HOSTS;
   return [
     {
       label: "$ODU_HOSTS",
-      path: oduHosts !== undefined && oduHosts !== "" ? oduHosts : null,
+      path:
+        override.kind === "file"
+          ? override.path
+          : override.kind === "none"
+            ? null
+            : ambient !== undefined && ambient !== ""
+              ? ambient
+              : null,
     },
     {
       label: "~/.config/odu/hosts.json",
@@ -103,7 +122,9 @@ function parsePool(
   return pool;
 }
 
-export function loadHosts(override?: string): HostsConfig {
+export function loadHosts(
+  override: HostsOverride = { kind: "ambient" },
+): HostsConfig {
   const candidates = hostsCandidates(override)
     .map((c) => c.path)
     .filter((p): p is string => p !== null);
@@ -127,7 +148,7 @@ export function loadHosts(override?: string): HostsConfig {
 }
 
 function noHostsConfiguredError(config: HostsConfig): Error {
-  const chain = hostsCandidates()
+  const chain = hostsCandidates({ kind: "ambient" })
     .map((c) => `       ${c.label}`)
     .join("\n");
   const why =

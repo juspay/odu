@@ -18,6 +18,7 @@ import {
 } from "@odu/run-client/surface";
 import { logStreamKey, SETUP_NAMEPATH } from "@odu/run-client/nodeId";
 import { createLogTail } from "../common/logTail";
+import { applyNodePatch, type NodePatch } from "../common/nodePatch";
 import { validatePipeline } from "../common/spec";
 import {
   type ConfigureInput,
@@ -39,6 +40,7 @@ import { describeFailure } from "@odu/cache/push";
 import {
   createLanePusher,
   type LanePusher,
+  type PushedFact,
   pushConfigOf,
   PUSH_TOKEN_ENV,
 } from "./pushResults";
@@ -72,6 +74,11 @@ function stopwatch(): { restart: () => void; elapsedMs: () => number } {
     elapsedMs: () => Date.now() - startedAt,
   };
 }
+
+type PushOutcome =
+  | { state: "none" }
+  | ({ state: "pushed" } & PushedFact)
+  | { state: "failed"; message: string };
 
 export function createLaneRunner(
   deps: {
@@ -213,16 +220,32 @@ export function createLaneRunner(
 
   const ctx = runtime.ctx;
   const reaper = createGroupReaper();
-  interface Invocation {
-    phase: "running" | "settled" | "closed";
-    child: ChildProcess | null;
+  class Invocation {
+    #phase: "running" | "settled" | "closed" = "running";
+    child: ChildProcess | null = null;
+    get running(): boolean {
+      return this.#phase === "running";
+    }
+    get closed(): boolean {
+      return this.#phase === "closed";
+    }
+    settle(): boolean {
+      if (this.#phase !== "running") return false;
+      this.#phase = "settled";
+      return true;
+    }
+    close(): boolean {
+      if (this.#phase === "closed") return false;
+      this.#phase = "closed";
+      return true;
+    }
   }
   const invocations = new Map<string, Invocation>();
   const isCurrent = (id: string, inv: Invocation): boolean =>
     !disposed && invocations.get(id) === inv;
   const beginInvocation = (id: string): Invocation => {
     retireInvocationAndKillGroup(id);
-    const inv: Invocation = { phase: "running", child: null };
+    const inv = new Invocation();
     invocations.set(id, inv);
     return inv;
   };
@@ -239,26 +262,14 @@ export function createLaneRunner(
   const getState = (): PipelineState => stateStore.get();
   const statusOf = (id: string): NodeStatus | undefined =>
     getState().nodes[id]?.status;
-  /** Merge a patch onto one node. `drop` removes keys outright — a
-   *  `Partial<NodeState>` cannot, because the wire's `optionalKey` fields
-   *  reject a present-but-`undefined` spelling. */
-  const setNode = (
-    id: string,
-    patch: Partial<NodeState>,
-    drop: readonly (keyof NodeState)[] = [],
-  ): void => {
+  const setNode = (id: string, patch: NodePatch): void => {
     const cur = getState();
     const prev = cur.nodes[id];
     if (prev === undefined) return;
-    const next: NodeState = { ...prev, ...patch };
-    for (const key of drop) delete next[key];
     ctx.cells.nodes.set({
       ...cur,
-      nodes: { ...cur.nodes, [id]: next },
+      nodes: { ...cur.nodes, [id]: applyNodePatch(prev, patch) },
     });
-  };
-  const resetPush = (id: string, patch: Partial<NodeState>): void => {
-    setNode(id, patch, ["push"]);
   };
 
   const configure = (input: ConfigureInput): ConfigureOutput => {
@@ -378,7 +389,7 @@ export function createLaneRunner(
           setNode(id, { status: "skipped" });
           endRecipeAndPushLogs(id);
           changed = true;
-        } else if (runnable(node) && invocations.get(id)?.phase !== "running") {
+        } else if (runnable(node) && !(invocations.get(id)?.running ?? false)) {
           if (id === SETUP_NODE_ID) runSetup();
           else spawnNode(node);
           changed = true;
@@ -395,13 +406,13 @@ export function createLaneRunner(
     setNode(SETUP_NODE_ID, { status: "running", startedAt });
     const live = (): boolean => isCurrent(SETUP_NODE_ID, inv);
     const finish = (ok: boolean): void => {
-      if (!live() || inv.phase !== "running") return;
+      if (!live() || !inv.settle()) return;
       setNode(SETUP_NODE_ID, {
         status: ok ? "ok" : "failed",
         exitCode: ok ? 0 : 1,
         durationMs: Date.now() - startedAt,
       });
-      inv.phase = "closed";
+      inv.close();
       endRecipeAndPushLogs(SETUP_NODE_ID);
       tick();
     };
@@ -428,7 +439,7 @@ export function createLaneRunner(
         } }),
       },
       (line) => {
-        if (live() && inv.phase === "running") {
+        if (live() && inv.running) {
           tail.append(SETUP_NODE_ID, `${line}\n`);
         }
       },
@@ -487,18 +498,20 @@ export function createLaneRunner(
     let pushing = false;
     const pushTimer = stopwatch();
     const endLog = (): void => {
-      if (inv.phase === "closed") return;
-      inv.phase = "closed";
+      if (!inv.close()) return;
       endRecipeAndPushLogs(node.id);
     };
     const endLogWhenPushSettles = (): void => {
       if (pushing) return;
       endLog();
     };
+    const nodePushOf = (
+      outcome: Exclude<PushOutcome, { state: "none" }>,
+    ): NodePush => ({ ...outcome, durationMs: pushTimer.elapsedMs() });
     const stampAfterPush = (
       status: NodeStatus,
       exitCode: number | null,
-      push: NodePush | null,
+      outcome: PushOutcome,
       durationMs: number,
     ): void => {
       if (!current()) return;
@@ -506,7 +519,7 @@ export function createLaneRunner(
         status,
         exitCode,
         durationMs,
-        ...(push === null ? {} : { push }),
+        ...(outcome.state === "none" ? {} : { push: nodePushOf(outcome) }),
       });
       if (closeSeen) endLog();
       tick();
@@ -523,20 +536,16 @@ export function createLaneRunner(
             "(set working-directory), outside the run's workspace\n",
         );
       }
-      stampAfterPush(status, exitCode, null, durationMs);
+      stampAfterPush(status, exitCode, { state: "none" }, durationMs);
     };
     const finish = (status: NodeStatus, exitCode: number | null): void => {
-      // `exit` and `error` can BOTH fire for one invocation (a child that fails
-      // to spawn emits no exit; one that spawns and dies emits no error), so the
-      // phase — not a second flag beside it — is what makes the first one win.
-      if (!current() || inv.phase !== "running") return;
-      inv.phase = "settled";
+      if (!current() || !inv.settle()) return;
       if (child.pid === undefined) endLog();
       if (child.pid !== undefined) reaper.reap(child.pid);
       const durationMs = Date.now() - startedAt;
       const pushConfig = status === "ok" ? pushConfigOf(taskEnv) : null;
       if (pushConfig === null || workspace === undefined) {
-        stampAfterPush(status, exitCode, null, durationMs);
+        stampAfterPush(status, exitCode, { state: "none" }, durationMs);
         return;
       }
       if (runsOutsideWorkspace(task?.workdir)) {
@@ -556,9 +565,13 @@ export function createLaneRunner(
             if (current()) {
               setNode(node.id, { push: { state: "pushing" }, durationMs });
             }
-          },
-          say: (line) => {
-            if (current()) tail.append(logStreamKey(node.id, "push"), `${line}\n`);
+            return {
+              say: (line) => {
+                if (current()) {
+                  tail.append(logStreamKey(node.id, "push"), `${line}\n`);
+                }
+              },
+            };
           },
         })
         .then((pushed) => {
@@ -567,8 +580,8 @@ export function createLaneRunner(
             "ok",
             exitCode,
             pushed === null
-              ? null
-              : { state: "pushed", ...pushed, durationMs: pushTimer.elapsedMs() },
+              ? { state: "none" }
+              : { state: "pushed", ...pushed },
             durationMs,
           );
         })
@@ -582,7 +595,7 @@ export function createLaneRunner(
           stampAfterPush(
             "failed",
             exitCode,
-            { state: "failed", message, durationMs: pushTimer.elapsedMs() },
+            { state: "failed", message },
             durationMs,
           );
         });
@@ -594,13 +607,8 @@ export function createLaneRunner(
       finish("failed", null);
     });
     child.on("exit", (code) => finish(code === 0 ? "ok" : "failed", code));
-    // `close`, not `exit`: exit fires when the process dies, close only once
-    // its stdio has drained, so the last chunks of a recipe's output — its
-    // summary, the part worth reading — arrive between the two. Ending the log
-    // here is what makes "I have all of this node's output" a fact the
-    // coordinator can wait on instead of a race it loses (juspay/odu#87).
     child.on("close", () => {
-      if (!current() || inv.phase === "closed") return;
+      if (!current() || inv.closed) return;
       closeSeen = true;
       endLogWhenPushSettles();
     });
@@ -627,11 +635,12 @@ export function createLaneRunner(
       retireInvocationAndKillGroup(rid);
       tail.reset(rid, "");
       tail.reset(logStreamKey(rid, "push"), "");
-      resetPush(rid, {
+      setNode(rid, {
         status: "pending",
         exitCode: null,
         startedAt: null,
         durationMs: null,
+        clearPush: true,
       });
     }
     tick();

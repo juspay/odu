@@ -516,6 +516,21 @@ export interface PushFailure {
   attempts: readonly PushRefusal[];
 }
 
+export function describeRefusal(failure: PushFailure): string {
+  const last = failure.attempts.at(-1);
+  const facts =
+    last === undefined
+      ? []
+      : [
+          last.url === null ? null : `url=${last.url}`,
+          last.status === null ? null : `status=${last.status}`,
+          last.body === null || last.body === "" ? null : `body=${last.body}`,
+        ].filter((fact): fact is string => fact !== null);
+  return facts.length === 0
+    ? `${failure.path}: ${failure.message}`
+    : `${failure.path}: ${failure.message} (${facts.join(", ")})`;
+}
+
 export interface PushSummary {
   pushed: number;
   /**

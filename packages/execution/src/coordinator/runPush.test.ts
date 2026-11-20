@@ -14,7 +14,7 @@ import {
   pendingNode,
 } from "@odu/run-client/surface";
 import { waitFor } from "../common/scaffoldForTest";
-import type { Lane, LaneOptions } from "./lane";
+import { recordingLanes } from "./laneForTest";
 import type { LeaseHandle } from "./lease";
 import type { ClaimOutcome } from "./runEnv";
 import { type RunArgs, runCommand } from "./run";
@@ -166,31 +166,8 @@ function laneState(
   };
 }
 
-interface FakeLane {
-  opts: LaneOptions;
-  closed: boolean;
-}
-
 function harness() {
-  const lanes: FakeLane[] = [];
-  const startLane = (laneOpts: LaneOptions): Lane => {
-    const entry: FakeLane = { opts: laneOpts, closed: false };
-    lanes.push(entry);
-    for (const id of ["_ci-setup", ...laneOpts.tasks.map((t) => t.id)]) {
-      laneOpts.onLogFrame(id, { kind: "snapshot", text: "" }, "recipe");
-      laneOpts.onLogFrame(id, { kind: "snapshot", text: "" }, "push");
-    }
-    return {
-      platform: laneOpts.platform,
-      extend: async () => true,
-      rerun: async () => true,
-      cancel: async () => true,
-      drain: async () => ({ reason: "complete" as const }),
-      close: () => {
-        entry.closed = true;
-      },
-    };
-  };
+  const { lanes, startLane } = recordingLanes();
   const claimVenues = async (): Promise<ClaimOutcome> => ({
     ok: true,
     lanes: { [PLATFORM]: HOST },

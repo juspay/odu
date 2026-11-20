@@ -1,6 +1,10 @@
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { pushToCache, type PushFailure, type PushSummary } from "@odu/cache/push";
+import {
+  describeRefusal,
+  pushToCache,
+  type PushSummary,
+} from "@odu/cache/push";
 
 export interface PushConfig {
   readonly origin: string;
@@ -106,15 +110,20 @@ function pathsToSend(
     : [...found];
 }
 
+export interface PushStep {
+  say(line: string): void;
+}
+
+export interface PushNarration {
+  note(line: string): void;
+  begin(): PushStep;
+}
+
 export interface LanePusher {
   push(
     workdir: string,
     config: PushConfig,
-    hooks: {
-      note: (line: string) => void;
-      begin: () => void;
-      say: (line: string) => void;
-    },
+    narration: PushNarration,
   ): Promise<PushedFact | null>;
 }
 
@@ -131,12 +140,12 @@ export function createLanePusher(
   };
 
   return {
-    async push(workdir, config, hooks) {
+    async push(workdir, config, narration) {
       let found: string[];
       try {
         found = resultPathsIn(workdir, deps.storeDir);
       } catch (err) {
-        hooks.note(
+        narration.note(
           `[odu] not pushing: ${workdir} could not be read ` +
             `(${err instanceof Error ? err.message : String(err)})`,
         );
@@ -144,8 +153,8 @@ export function createLanePusher(
       }
       const sending = pathsToSend(config, found, sent);
       if (sending.length === 0) return null;
-      hooks.begin();
-      hooks.say(
+      const step = narration.begin();
+      step.say(
         `[odu] pushing ${sending.length} result path${sending.length === 1 ? "" : "s"} ` +
           `to bucket ${config.bucket} at ${config.origin}`,
       );
@@ -160,7 +169,7 @@ export function createLanePusher(
           ...(config.run === undefined ? {} : { run: config.run }),
           ...(config.commit === undefined ? {} : { commit: config.commit }),
           env: {},
-          onLine: (line) => hooks.say(`[odu] ${line}`),
+          onLine: (line) => step.say(`[odu] ${line}`),
         });
       } catch (err) {
         throw new Error(
@@ -181,21 +190,6 @@ function assertNoFailures(summary: PushSummary, config: PushConfig): void {
   throw new Error(
     `odu: ${summary.failed} path${summary.failed === 1 ? "" : "s"} could not be ` +
       `pushed to ${config.bucket} at ${config.origin} — ` +
-      summary.failures.map(refusalLine).join("; "),
+      summary.failures.map(describeRefusal).join("; "),
   );
-}
-
-function refusalLine(failure: PushFailure): string {
-  const last = failure.attempts.at(-1);
-  const facts =
-    last === undefined
-      ? []
-      : [
-          last.url === null ? null : `url=${last.url}`,
-          last.status === null ? null : `status=${last.status}`,
-          last.body === null || last.body === "" ? null : `body=${last.body}`,
-        ].filter((fact): fact is string => fact !== null);
-  return facts.length === 0
-    ? `${failure.path}: ${failure.message}`
-    : `${failure.path}: ${failure.message} (${facts.join(", ")})`;
 }

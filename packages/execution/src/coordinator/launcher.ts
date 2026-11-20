@@ -1,13 +1,4 @@
-import { dirname, join } from "node:path";
-import {
-  closeSync,
-  constants,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { join } from "node:path";
 import { runSocketPath } from "@odu/run-client/dial";
 import { RUN_FILES } from "@odu/run-history/paths";
 import {
@@ -22,6 +13,7 @@ import {
   spawnCoordinator,
   waitForReadiness,
 } from "./spawn";
+import { pushTokenHandoff } from "./pushTokenHandoff";
 
 export interface LaunchPush {
   readonly substituter: string;
@@ -144,20 +136,11 @@ async function attemptLaunch(
 ): Promise<Attempt> {
   const argv = [...oduSelfArgv(env), ...launchArgv(request)];
   if (request.push !== null) {
-    const tokenPath = pushTokenPath(request.runId, request.catalog ?? {});
-    mkdirSync(dirname(tokenPath), { recursive: true });
-    rmSync(tokenPath, { force: true });
-    // `O_NOFOLLOW` has no string spelling in `fs`'s flag grammar, so the
-    const handle = openSync(
-      tokenPath,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
+    pushTokenHandoff.write(
+      request.runId,
+      request.catalog ?? {},
+      request.push.token,
     );
-    try {
-      writeFileSync(handle, request.push.token);
-    } finally {
-      closeSync(handle);
-    }
   }
   const spawned = spawnCoordinator(
     argv,
@@ -217,7 +200,7 @@ export function packagedLauncher(): RunLauncher {
   return async (request) => {
     const receipt = await launchOnce(request);
     if (!receipt.ok && request.push !== null) {
-      dropPushToken(request.runId, request.catalog ?? {});
+      pushTokenHandoff.drop(request.runId, request.catalog ?? {});
     }
     return receipt;
   };
@@ -256,28 +239,3 @@ export function coordinatorLogPath(
   return join(handleFor(runId, catalog).dir, RUN_FILES.coordinatorLog);
 }
 
-export function pushTokenPath(
-  runId: string,
-  catalog: CatalogOptions = {},
-): string {
-  return join(handleFor(runId, catalog).dir, RUN_FILES.pushToken);
-}
-
-export function takePushToken(
-  runId: string | undefined,
-  catalog: CatalogOptions = {},
-): string | null {
-  if (runId === undefined) return null;
-  const path = pushTokenPath(runId, catalog);
-  try {
-    const token = readFileSync(path, "utf-8").trim();
-    rmSync(path, { force: true });
-    return token === "" ? null : token;
-  } catch {
-    return null;
-  }
-}
-
-export function dropPushToken(runId: string, catalog: CatalogOptions = {}): void {
-  rmSync(pushTokenPath(runId, catalog), { force: true });
-}

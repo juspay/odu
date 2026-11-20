@@ -1,32 +1,39 @@
-import type { NodeState, NodeStatus } from "@odu/run-client/surface";
+import type { NodeStatus, PipelineState } from "@odu/run-client/surface";
+import type { NodePatch } from "../common/nodePatch";
 import { NON_TERMINAL_STATUSES } from "../common/verdict";
+
+export interface PublishedState {
+  readonly state: PipelineState;
+}
 
 export interface VerdictGateDeps {
   isLogEnded: (id: string) => boolean;
   publishedStatus: (id: string) => NodeStatus | undefined;
   nodeIds: () => readonly string[];
-  publish: (id: string, patch: Partial<NodeState>) => void;
+  write: (id: string, patch: NodePatch) => void;
   drainLogs: () => Promise<void>;
+  snapshot: () => PipelineState;
 }
 
 export interface VerdictGate {
-  offer: (id: string, patch: Partial<NodeState>) => void;
+  offer: (id: string, patch: NodePatch) => void;
   release: (id: string) => void;
   releaseAll: (of?: (id: string) => boolean) => void;
   boundIfOnlyLogsOutstanding: () => void;
+  publishedSnapshot: (of?: (id: string) => boolean) => PublishedState;
 }
 
 const isTerminal = (status: NodeStatus | undefined): boolean =>
   status !== undefined && !NON_TERMINAL_STATUSES.has(status);
 
 export function createVerdictGate(deps: VerdictGateDeps): VerdictGate {
-  const held = new Map<string, Partial<NodeState>>();
+  const held = new Map<string, NodePatch>();
 
   const release = (id: string): void => {
     const patch = held.get(id);
     if (patch === undefined) return;
     held.delete(id);
-    deps.publish(id, patch);
+    deps.write(id, patch);
   };
 
   const releaseAll = (of: (id: string) => boolean = () => true): void => {
@@ -56,13 +63,17 @@ export function createVerdictGate(deps: VerdictGateDeps): VerdictGate {
   return {
     offer: (id, patch) => {
       const status = patch.status;
+      if (status === undefined) {
+        deps.write(id, patch);
+        return;
+      }
       if (!isTerminal(status)) {
         held.delete(id);
-        deps.publish(id, patch);
+        deps.write(id, patch);
         return;
       }
       if (isTerminal(deps.publishedStatus(id)) || deps.isLogEnded(id)) {
-        deps.publish(id, patch);
+        deps.write(id, patch);
         return;
       }
       held.set(id, patch);
@@ -71,5 +82,9 @@ export function createVerdictGate(deps: VerdictGateDeps): VerdictGate {
     release,
     releaseAll,
     boundIfOnlyLogsOutstanding,
+    publishedSnapshot: (of) => {
+      releaseAll(of);
+      return { state: deps.snapshot() };
+    },
   };
 }

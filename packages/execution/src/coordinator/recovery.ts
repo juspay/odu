@@ -43,7 +43,12 @@ import {
   resolveRerunTargets,
   transitiveDependents,
 } from "../common/nodeId";
-import { fanoutPools, type HostsConfig, loadHosts } from "./hosts";
+import {
+  fanoutPools,
+  type HostsConfig,
+  hostsOverrideOf,
+  loadHosts,
+} from "./hosts";
 import type { LaunchRequest, RunLauncher } from "./launcher";
 export type RetryRefusal =
   | "bad_input"
@@ -501,7 +506,7 @@ async function relaunch(
   };
   try {
     fanoutPools(
-      (input.hosts ?? (() => loadHosts(hostsFile)))(),
+      (input.hosts ?? (() => loadHosts(hostsOverrideOf(hostsFile))))(),
       hostPins,
       scope.platforms,
     );

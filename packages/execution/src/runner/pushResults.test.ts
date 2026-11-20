@@ -81,9 +81,11 @@ function sinks(): {
       },
       begin: () => {
         begins += 1;
-      },
-      say: (line) => {
-        said.push(line);
+        return {
+          say: (line) => {
+            said.push(line);
+          },
+        };
       },
     },
     notes,

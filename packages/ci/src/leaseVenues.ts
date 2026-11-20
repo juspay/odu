@@ -1,7 +1,12 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
-import { fanoutPools, loadHosts, shortHost } from "@odu/execution/coordinator/hosts";
+import {
+  fanoutPools,
+  hostsOverrideOf,
+  loadHosts,
+  shortHost,
+} from "@odu/execution/coordinator/hosts";
 import { formatHolder, type HolderInfo } from "@odu/execution/coordinator/lease";
 import {
   heldHostForPlatform,
@@ -75,7 +80,7 @@ function resolvePlatforms(
   requested: readonly string[],
   hostsFile: string | null,
 ): string[] {
-  const hostsConfig = loadHosts(hostsFile ?? undefined);
+  const hostsConfig = loadHosts(hostsOverrideOf(hostsFile));
   const pools = fanoutPools(
     hostsConfig,
     [],

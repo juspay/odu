@@ -21,7 +21,7 @@ import {
 } from "@odu/run-client/surface";
 import { runUnary, subscribe } from "../common/effectEdge";
 import { waitFor } from "../common/scaffoldForTest";
-import type { Lane, LaneOptions } from "./lane";
+import { recordingLanes } from "./laneForTest";
 import type { LeaseHandle } from "./lease";
 import type { ClaimOutcome } from "./runEnv";
 import { maxLaneResurrections } from "./laneResurrection";
@@ -151,11 +151,6 @@ function laneState(statuses: Record<string, NodeStatus>): PipelineState {
   };
 }
 
-interface FakeLane {
-  opts: LaneOptions;
-  closed: boolean;
-}
-
 interface FakeLease extends LeaseHandle {
   released: boolean;
   die: () => void;
@@ -179,30 +174,13 @@ function fakeLease(host: string): FakeLease {
 }
 
 function harness(opts: { hold?: () => Promise<void> } = {}) {
-  const lanes: FakeLane[] = [];
+  const { lanes, startLane } = recordingLanes((laneOpts, started) => {
+    if (started.length > 0)
+      expect(laneOpts.snapshot?.commit).toBe(started[0]!.opts.snapshot?.commit);
+    expect(laneOpts.snapshot?.commit).toMatch(/^[0-9a-f]{40}$/);
+  });
   const leases: FakeLease[] = [];
   const claimHosts: string[] = [];
-
-  const startLane = (laneOpts: LaneOptions): Lane => {
-    const entry: FakeLane = { opts: laneOpts, closed: false };
-    if (lanes.length > 0) expect(laneOpts.snapshot?.commit).toBe(lanes[0]!.opts.snapshot?.commit);
-    expect(laneOpts.snapshot?.commit).toMatch(/^[0-9a-f]{40}$/);
-    lanes.push(entry);
-    for (const id of ["_ci-setup", ...laneOpts.tasks.map((t) => t.id)]) {
-      laneOpts.onLogFrame(id, { kind: "snapshot", text: "" }, "recipe");
-      laneOpts.onLogFrame(id, { kind: "snapshot", text: "" }, "push");
-    }
-    return {
-      platform: laneOpts.platform,
-      extend: async () => true,
-      rerun: async () => true,
-      cancel: async () => true,
-      drain: async () => ({ reason: "complete" as const }),
-      close: () => {
-        entry.closed = true;
-      },
-    };
-  };
 
   const claimVenues = async (): Promise<ClaimOutcome> => {
     const host = claimHosts.length % 2 === 0 ? HOST_A : HOST_B;

@@ -163,12 +163,30 @@ export const NO_HISTORY: RunHistory = {
   close: () => {},
 };
 
+interface AttemptOutcome {
+  status: NodeStatus;
+  exitCode: number | null;
+}
+
+interface LogWord {
+  complete: boolean;
+  reason: string | null;
+}
+
+type Seal =
+  | { readonly kind: "complete"; readonly outcome: AttemptOutcome; readonly log: LogWord }
+  | {
+      readonly kind: "abandoned";
+      readonly outcome: AttemptOutcome | null;
+      readonly reason: string;
+    };
+
 interface OpenAttempt {
   attempt: number;
   placement: Placement;
-  outcome?: { status: NodeStatus; exitCode: number | null };
-  log?: { complete: boolean; reason: string | null };
   sink: AttemptLogSink;
+  outcome?: AttemptOutcome;
+  log?: LogWord;
 }
 
 export function openRunHistory(init: RunHistoryInit): RunHistory {
@@ -254,25 +272,21 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     host,
   });
 
-  const seal = (
-    node: string,
-    current: OpenAttempt,
-    fallbackReason: string | null,
-  ): void => {
+  const seal = (node: string, current: OpenAttempt, how: Seal): void => {
     open.delete(node);
     if (fenced) return;
-    const log = current.log;
+    const log: LogWord =
+      how.kind === "complete"
+        ? how.log
+        : (current.log ?? { complete: false, reason: how.reason });
     try {
       sealAttempt(handle, token, node, current.attempt, {
         endedAt: now(),
-        status: current.outcome?.status ?? null,
-        exitCode: current.outcome?.exitCode ?? null,
-        signal: signalFromExit(current.outcome?.exitCode ?? null),
-        logComplete: log?.complete ?? false,
-        logTruncationReason:
-          log === undefined
-            ? (fallbackReason ?? "no producer said this log was finished")
-            : log.reason,
+        status: how.outcome?.status ?? null,
+        exitCode: how.outcome?.exitCode ?? null,
+        signal: signalFromExit(how.outcome?.exitCode ?? null),
+        logComplete: log.complete,
+        logTruncationReason: log.reason,
       });
     } catch {
     }
@@ -281,8 +295,10 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
   const sealIfComplete = (node: string): void => {
     const current = open.get(node);
     if (current === undefined) return;
-    if (current.outcome === undefined || current.log === undefined) return;
-    seal(node, current, null);
+    const outcome = current.outcome;
+    const log = current.log;
+    if (outcome === undefined || log === undefined) return;
+    seal(node, current, { kind: "complete", outcome, log });
   };
 
   const beginAttempt = (node: string, host: string | null): void => {
@@ -412,7 +428,11 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     resetNode: (node, reason) => {
       const current = open.get(node);
       if (current === undefined) return;
-      seal(node, current, reason);
+      seal(node, current, {
+        kind: "abandoned",
+        outcome: current.outcome ?? null,
+        reason,
+      });
     },
     postingDebt: (rows) => {
       for (const row of rows) {
@@ -455,11 +475,11 @@ export function openRunHistory(init: RunHistoryInit): RunHistory {
     finalize: (verdict) => {
       if (fenced) return;
       for (const [node, current] of [...open.entries()]) {
-        seal(
-          node,
-          current,
-          "the run ended before this node's output was complete",
-        );
+        seal(node, current, {
+          kind: "abandoned",
+          outcome: current.outcome ?? null,
+          reason: "the run ended before this node's output was complete",
+        });
       }
       try {
         writeVerdict(handle, token, {

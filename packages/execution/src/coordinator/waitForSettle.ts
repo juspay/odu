@@ -153,6 +153,11 @@ function shaMatches(observed: string, expected: string): boolean {
   return o.startsWith(e) || e.startsWith(o);
 }
 
+type SubscriptionOutcome =
+  | { readonly kind: "verdict"; readonly verdict: SettleVerdict }
+  | { readonly kind: "lost" }
+  | { readonly kind: "empty" };
+
 export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
   const failFast = opts.failFast ?? true;
   const timeoutMs = opts.timeoutMs ?? 600_000;
@@ -266,35 +271,30 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
     };
   };
 
-  try {
-    for (;;) {
-      let delivered = false;
-      try {
-        // The subscription is the WAIT: a `Stream` registers nothing until it is
-        // pulled, so the settle watcher is armed by this loop's first `next()`, not
-        // by the call that produced the stream value. `subscribe` wires the
-        // controller's abort to closing the subscription (fiber interruption), which
-        // is what the `{ signal }` call option used to do — there is no signal on a
-        // surface call any more (kolu PLAN D10/#18).
-        for await (const snap of subscribe(
-          opts.client.surface.nodes.get(undefined),
-          controller.signal,
-        )) {
-          delivered = true;
-          if (!snap.run) continue;
-          lastLiveRunFrame = snap;
-          if (
-            opts.expectedSha !== undefined &&
-            !shaMatches(snap.sha7, opts.expectedSha)
-          ) {
-            throw new NoLiveRunError(
-              `no live run matching ${opts.expectedSha} (this checkout is running ${formatRef(snap.sha7, snap.seq)})`,
-            );
-          }
-          const { done, failed, errored, cancelled: cancelledNodes } =
-            agentSummary(snap);
-          if (failFast && failed.length + errored.length > 0) {
-            return {
+  const oneSubscription = async (): Promise<SubscriptionOutcome> => {
+    let delivered = false;
+    try {
+      for await (const snap of subscribe(
+        opts.client.surface.nodes.get(undefined),
+        controller.signal,
+      )) {
+        delivered = true;
+        if (!snap.run) continue;
+        lastLiveRunFrame = snap;
+        if (
+          opts.expectedSha !== undefined &&
+          !shaMatches(snap.sha7, opts.expectedSha)
+        ) {
+          throw new NoLiveRunError(
+            `no live run matching ${opts.expectedSha} (this checkout is running ${formatRef(snap.sha7, snap.seq)})`,
+          );
+        }
+        const { done, failed, errored, cancelled: cancelledNodes } =
+          agentSummary(snap);
+        if (failFast && failed.length + errored.length > 0) {
+          return {
+            kind: "verdict",
+            verdict: {
               settled: done,
               passed: false,
               failed,
@@ -306,13 +306,17 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
               duration_ms: now() - started,
               ...identityOf(snap),
               unposted: debtOf(snap),
-            };
-          }
-          if (done) {
-            return {
+            },
+          };
+        }
+        if (done) {
+          return {
+            kind: "verdict",
+            verdict: {
               settled: true,
               passed:
-                failed.length + errored.length === 0 && cancelledNodes.length === 0,
+                failed.length + errored.length === 0 &&
+                cancelledNodes.length === 0,
               failed,
               errored,
               cancelled_nodes: cancelledNodes,
@@ -322,24 +326,32 @@ export async function waitForSettle(opts: WaitOptions): Promise<SettleVerdict> {
               duration_ms: now() - started,
               ...identityOf(snap),
               unposted: debtOf(snap),
-            };
-          }
+            },
+          };
         }
-        if (delivered) return await streamEndedVerdict();
-        if (controller.signal.aborted) return abortedVerdict();
-      } catch (err) {
-        // A deliberate loud refusal ALWAYS propagates.
-        if (err instanceof NoLiveRunError) throw err;
-        if (controller.signal.aborted) return abortedVerdict();
-        // Peer process/socket death used to end the async iterator cleanly; the
-        // surface fails it instead. The discriminant is the error's `_tag`
-        // (`SurfaceStdioTransportClosed` / `SurfaceTransportRetired`), read
-        // through the shared predicate rather than compared against a magic code
-        // string — which also survives a second `effect` module instance, where
-        // an `instanceof` would silently stop recognising it.
-        if (!isDeadTransportError(err)) throw err;
       }
-      if (!delivered) {
+      if (delivered) {
+        return { kind: "verdict", verdict: await streamEndedVerdict() };
+      }
+      if (controller.signal.aborted) {
+        return { kind: "verdict", verdict: abortedVerdict() };
+      }
+      return { kind: "empty" };
+    } catch (err) {
+      if (err instanceof NoLiveRunError) throw err;
+      if (controller.signal.aborted) {
+        return { kind: "verdict", verdict: abortedVerdict() };
+      }
+      if (!isDeadTransportError(err)) throw err;
+      return delivered ? { kind: "lost" } : { kind: "empty" };
+    }
+  };
+
+  try {
+    for (;;) {
+      const out = await oneSubscription();
+      if (out.kind === "verdict") return out.verdict;
+      if (out.kind === "empty") {
         await pause(STREAM_RETRY_DELAY_MS, controller.signal);
         if (controller.signal.aborted) return abortedVerdict();
       }

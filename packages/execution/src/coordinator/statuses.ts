@@ -112,10 +112,20 @@ export interface StatusPosterOptions {
   backoffCapMs?: number;
 }
 
+type Send =
+  | { readonly kind: "idle"; readonly confirmed: StatusPayload | null }
+  | {
+      readonly kind: "inFlight";
+      readonly payload: StatusPayload;
+      readonly confirmed: StatusPayload | null;
+    };
+
+const dedupable = (s: Send): StatusPayload | null =>
+  s.kind === "idle" ? s.confirmed : null;
+
 interface ContextPost {
   desired?: StatusPayload;
-  confirmed?: StatusPayload;
-  inFlight?: StatusPayload;
+  send: Send;
   lastError?: string;
   attempts: number;
   wake?: ReturnType<typeof setTimeout>;
@@ -138,7 +148,11 @@ export class StatusPoster {
   private entry(context: string): ContextPost {
     let post = this.posts.get(context);
     if (post === undefined) {
-      post = { attempts: 0, owned: false };
+      post = {
+        attempts: 0,
+        owned: false,
+        send: { kind: "idle", confirmed: null },
+      };
       this.posts.set(context, post);
     }
     return post;
@@ -159,7 +173,8 @@ export class StatusPoster {
   private owedDesired(post: ContextPost): StatusPayload | undefined {
     const d = post.desired;
     if (d === undefined) return undefined;
-    if (post.confirmed !== undefined && payloadEqual(post.confirmed, d)) {
+    const confirmed = post.send.confirmed;
+    if (confirmed !== null && payloadEqual(confirmed, d)) {
       return undefined;
     }
     return d;
@@ -168,7 +183,7 @@ export class StatusPoster {
   private prune(context: string, post: ContextPost): void {
     if (
       post.desired === undefined &&
-      post.confirmed === undefined &&
+      post.send.confirmed === null &&
       post.wake === undefined &&
       post.attempts === 0 &&
       post.lastError === undefined &&
@@ -235,10 +250,13 @@ export class StatusPoster {
         seen.add(s.context);
         if (!isGithubState(s.state)) continue;
         const post = this.entry(s.context);
-        post.confirmed = {
-          state: s.state,
-          context: s.context,
-          description: s.description ?? "",
+        post.send = {
+          kind: "idle",
+          confirmed: {
+            state: s.state,
+            context: s.context,
+            description: s.description ?? "",
+          },
         };
         seeded += 1;
       }
@@ -266,11 +284,8 @@ export class StatusPoster {
     if (!this.opts.enabled || this.phase === "closed") return;
     const post = this.entry(payload.context);
     post.owned = true;
-    if (
-      post.inFlight === undefined &&
-      post.confirmed !== undefined &&
-      payloadEqual(post.confirmed, payload)
-    ) {
+    const dedup = dedupable(post.send);
+    if (dedup !== null && payloadEqual(dedup, payload)) {
       this.dropStaleNonTerminalDesired(payload.context, post, payload);
       return;
     }
@@ -294,7 +309,7 @@ export class StatusPoster {
     for (const [context, post] of this.posts) {
       if (!post.owned) continue;
       if (post.desired?.state === "pending") out.add(context);
-      if (post.confirmed?.state !== "pending") continue;
+      if (post.send.confirmed?.state !== "pending") continue;
       const d = post.desired;
       if (d === undefined || d.state === "pending") out.add(context);
     }
@@ -374,10 +389,16 @@ export class StatusPoster {
       return;
     }
 
-    post.inFlight = payload;
+    post.send = {
+      kind: "inFlight",
+      payload,
+      confirmed: post.send.confirmed,
+    };
     const result = await this.send(payload);
-    post.inFlight = undefined;
-    if (result.ok) post.confirmed = payload;
+    post.send = {
+      kind: "idle",
+      confirmed: result.ok ? payload : post.send.confirmed,
+    };
     if (this.currentPhase() === "closed") return;
 
     const still = post.desired;
