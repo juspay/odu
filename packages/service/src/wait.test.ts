@@ -449,7 +449,7 @@ describe("run.cancel", () => {
     );
     const sent = ports.cancels[0];
     expect(sent?.runId).toBe(fixture.runId);
-    expect(sent?.expect.sha).toBe(SHA);
+    expect(sent?.coordinator.sha).toBe(SHA);
   });
 
   it("keeps an UNCONFIRMED cancel unresolved, and the receipt open", async () => {

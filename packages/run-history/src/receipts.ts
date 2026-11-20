@@ -58,6 +58,23 @@ export const ReceiptSchema = Schema.Struct({
 });
 export type ReceiptRecord = typeof ReceiptSchema.Type;
 
+export type ReceiptKind = ReceiptRecord["kind"];
+
+export interface ReceiptRule {
+  readonly preMintsRun: boolean;
+  readonly reconciled: boolean;
+}
+
+export const RECEIPT_RULES: Readonly<Record<ReceiptKind, ReceiptRule>> = {
+  retry: { preMintsRun: true, reconciled: false },
+  start: { preMintsRun: true, reconciled: true },
+  cancel: { preMintsRun: false, reconciled: false },
+  catalog: { preMintsRun: false, reconciled: false },
+  "venue.hold": { preMintsRun: false, reconciled: false },
+  "venue.release": { preMintsRun: false, reconciled: false },
+  "protect.apply": { preMintsRun: false, reconciled: false },
+};
+
 const decodeReceipt = Schema.decodeUnknownResult(ReceiptSchema);
 
 /** WHERE a set of receipts lives — a directory, and nothing else. */
@@ -107,9 +124,9 @@ export function claimReceipt(
   store: ReceiptStore,
   input: {
     requestId: string;
-    kind: ReceiptRecord["kind"];
+    kind: ReceiptKind;
     digest: string;
-    plannedRunId: string;
+    mint?: () => string;
     /** Injected by tests; production stamps this process. */
     claimant?: { pid: number; host: string };
     now?: number;
@@ -124,7 +141,9 @@ export function claimReceipt(
     state: "accepted",
     acceptedAt: input.now ?? Date.now(),
     completedAt: null,
-    plannedRunId: input.plannedRunId,
+    plannedRunId: RECEIPT_RULES[input.kind].preMintsRun
+      ? (input.mint as () => string)()
+      : "",
     claimant: input.claimant ?? { pid: process.pid, host: hostname() },
     result: null,
   };

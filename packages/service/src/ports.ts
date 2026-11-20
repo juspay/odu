@@ -1,6 +1,7 @@
 import type { CatalogOptions } from "@odu/run-history/store";
 import type { RunScope } from "@odu/run-history/schema";
 import type { Caller } from "./caller";
+import type { BranchName, Sha } from "./refs";
 
 export interface LaunchPush {
   readonly substituter: string;
@@ -118,10 +119,15 @@ export type CancelScope =
   | { kind: "node"; node: string }
   | { kind: "lane"; platform: string };
 
+export interface CoordinatorIdentity {
+  readonly endpoint: string;
+  readonly sha: string;
+  readonly seq: number | null;
+}
+
 export interface CancelRequest {
-  endpoint: string;
+  coordinator: CoordinatorIdentity;
   runId: string;
-  expect: { sha: string; seq: number | null };
   scope: CancelScope;
 }
 
@@ -145,8 +151,8 @@ export type CheckoutProbe = (checkout: string) => CheckoutFacts;
 
 export interface CheckoutMoveRequest {
   readonly checkout: string;
-  readonly branch: string;
-  readonly sha: string;
+  readonly branch: BranchName;
+  readonly sha: Sha;
 }
 
 export type CheckoutMoveOutcome =

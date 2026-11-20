@@ -146,7 +146,7 @@ export async function retryRun(input: RetryInput): Promise<RetryOutcome> {
       requestId: input.requestId,
       kind: "retry",
       digest,
-      plannedRunId,
+      mint: () => plannedRunId,
     });
     if (claim === null) {
       return {

@@ -59,9 +59,8 @@ export async function stopLiveRun(
   }
   if (ownerProvablyAlive(handle.dir, deps.now()) === false) return { kind: "stopped" };
   const outcome = await deps.cancel({
-    endpoint: owner.endpoint,
+    coordinator: { endpoint: owner.endpoint, sha: manifest.sha, seq: manifest.seq },
     runId,
-    expect: { sha: manifest.sha, seq: manifest.seq },
     scope: { kind: "run" },
   });
   if (outcome.kind === "cancelled") return { kind: "stopped" };
@@ -112,7 +111,6 @@ async function run(
     requestId: input.requestId,
     kind: "cancel",
     digest,
-    plannedRunId: "",
     now: deps.now(),
   });
   if (claim === null) {
@@ -160,9 +158,8 @@ async function run(
 
   markDispatched(deps.requests, input.requestId, [input.scope.kind], deps.now());
   const outcome = await deps.cancel({
-    endpoint: owner.endpoint,
+    coordinator: { endpoint: owner.endpoint, sha: manifest.sha, seq: manifest.seq },
     runId: input.runId,
-    expect: { sha: manifest.sha, seq: manifest.seq },
     scope: input.scope,
   });
   if (outcome.kind === "unresolved") {

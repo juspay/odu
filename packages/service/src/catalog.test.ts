@@ -352,7 +352,6 @@ describe("catalog.prune", () => {
       requestId: "p-9",
       kind: "cancel",
       digest: digestOf([DEFAULT_RETENTION_DAYS, false]),
-      plannedRunId: "",
       now: NOW,
     });
     const answer = await run(

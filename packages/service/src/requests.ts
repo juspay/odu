@@ -123,7 +123,6 @@ export async function onceOnly<T>(
     requestId: request.requestId,
     kind: request.kind,
     digest: request.digest,
-    plannedRunId: "",
     now: request.now,
   });
   if (claim === null) {

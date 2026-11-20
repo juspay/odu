@@ -329,18 +329,17 @@ async function confirmTeardown(
 }
 
 async function dispatchCancel({
-  endpoint,
+  coordinator,
   runId,
-  expect,
   scope,
 }: CancelRequest): Promise<CancelDispatch> {
-  const dialed = await dialRun(endpoint);
+  const dialed = await dialRun(coordinator.endpoint);
   if (dialed === null) {
     return { kind: "declined", detail: "nothing is serving this run's socket" };
   }
   try {
     const state = await firstFrame(dialed.client.surface.nodes.get(undefined));
-    if (state === undefined || !isSameRun(expect, state)) {
+    if (state === undefined || !isSameRun(coordinator, state)) {
       return {
         kind: "declined",
         detail:

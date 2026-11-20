@@ -301,9 +301,13 @@ describe("run.start, moving a checkout onto a branch", () => {
     expect(result._tag).toBe("Success");
     if (result._tag !== "Success") return;
     expect(result.success.accepted).toBe(true);
-    expect(ports.moves).toEqual([
-      { checkout: "/code/app", branch: "main", sha: HEAD },
-    ]);
+    expect(
+      ports.moves.map((move) => ({
+        checkout: move.checkout,
+        branch: String(move.branch),
+        sha: String(move.sha),
+      })),
+    ).toEqual([{ checkout: "/code/app", branch: "main", sha: HEAD }]);
     expect(ports.launches[0]?.expectedSha).toBe(HEAD);
     expect(ports.launches[0]?.checkoutMoved).toBe(
       `moved /code/app to main at ${HEAD.slice(0, 7)}`,
@@ -478,7 +482,7 @@ describe("run.start, moving a checkout onto a branch", () => {
     const d = deps(w, ports);
     const result = await d.run({ branch: "release/1.2-rc_3" });
     expect(result._tag).toBe("Success");
-    expect(ports.moves[0]?.branch).toBe("release/1.2-rc_3");
+    expect(String(ports.moves[0]?.branch)).toBe("release/1.2-rc_3");
   });
 
   it("refuses an expectedSha that is not a commit", async () => {
@@ -627,7 +631,7 @@ describe("crash reconciliation", () => {
       requestId: "orphan-1",
       kind: "start",
       digest: "d",
-      plannedRunId: run.runId,
+      mint: () => run.runId,
     });
     expect(claim?.kind).toBe("claimed");
     markDispatched(store, "orphan-1", ["ci"]);
@@ -656,7 +660,7 @@ describe("crash reconciliation", () => {
       requestId: "orphan-2",
       kind: "start",
       digest: "d",
-      plannedRunId: "0zzzzzzzz-zzzzzzzz",
+      mint: () => "0zzzzzzzz-zzzzzzzz",
     });
     markDispatched(store, "orphan-2", ["ci"]);
     const settled = reconcileRequests({
@@ -677,7 +681,7 @@ describe("crash reconciliation", () => {
       requestId: "req-1",
       kind: "start",
       digest: startDigest(),
-      plannedRunId: run.runId,
+      mint: () => run.runId,
       claimant: { pid: 1, host: "another-host" },
     });
     markDispatched(store, "req-1", ["ci"]);

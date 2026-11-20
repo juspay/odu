@@ -233,6 +233,10 @@ export interface AttemptState {
   logReason: string | null;
 }
 
+export type FoldLane =
+  | { readonly state: "claiming"; readonly pool: readonly string[] }
+  | { readonly state: "leased"; readonly host: string };
+
 /** Fold the journal into the run's current shape. */
 export function foldJournal(journal: readonly JournalEntry[]): {
   roster: string[];
@@ -247,14 +251,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   phase: "provisioning" | "lanes" | "no_lanes" | null;
   /** Per platform, last write wins — the coordinator republishes a lane's whole
    *  state on every change, so the newest line is the lane. */
-  lanes: Map<
-    string,
-    {
-      state: "claiming" | "leased";
-      host: string | null;
-      pool: readonly string[];
-    }
-  >;
+  lanes: Map<string, FoldLane>;
   /** The hosts file the lanes were declared in, from the newest lane line that
    *  carried one. Null for a run written before the field existed. */
   hostsSource: string | null;
@@ -268,10 +265,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   let resumed = false;
   let phase: "provisioning" | "lanes" | "no_lanes" | null = null;
   let hostsSource: string | null = null;
-  const lanes = new Map<
-    string,
-    { state: "claiming" | "leased"; host: string | null; pool: readonly string[] }
-  >();
+  const lanes = new Map<string, FoldLane>();
   const latest = new Map<string, AttemptState>();
   const debt = new Map<
     string,
@@ -294,11 +288,12 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         phase = e.phase;
         break;
       case "lane":
-        lanes.set(e.platform, {
-          state: e.state,
-          host: e.host,
-          pool: e.pool === undefined ? [] : [...e.pool],
-        });
+        lanes.set(
+          e.platform,
+          e.state === "leased" && e.host !== null
+            ? { state: "leased", host: e.host }
+            : { state: "claiming", pool: e.pool === undefined ? [] : [...e.pool] },
+        );
         if (e.hostsSource !== undefined) hostsSource = e.hostsSource;
         break;
       case "attempt_started": {

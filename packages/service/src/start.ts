@@ -20,6 +20,7 @@ import type {
 } from "./ports";
 import { stopLiveRun } from "./cancel";
 import { preparePush } from "./pushGrant";
+import { type BranchName, parseBranchName, parseSha } from "./refs";
 import {
   CLAIMANT_STILL_STARTING,
   claimReceipt,
@@ -69,27 +70,6 @@ export function digestOfRequest(input: StartInput, scope: RunScope): string {
     input.noPost ?? false,
     input.supersede ?? false,
   ]);
-}
-
-function branchNameProblem(name: string): string | null {
-  if (name === "") return "it is empty";
-  if (name.startsWith("-")) return "git reads a leading dash as an option";
-  if (/[\x00-\x20\x7f~^:?*[\\]/.test(name)) {
-    return "it holds a character git refuses in a ref (space, control, or one of ~^:?*[\\)";
-  }
-  if (name.includes("..")) return "`..` separates two refs";
-  if (name.includes("@{")) return "`@{` names a reflog entry";
-  if (name === "@") return "`@` is git's own name for HEAD";
-  if (name.startsWith("/") || name.endsWith("/") || name.includes("//")) {
-    return "a ref's path components cannot be empty";
-  }
-  if (name.endsWith(".") || name.endsWith(".lock")) {
-    return "a ref cannot end with `.` or `.lock`";
-  }
-  if (name.split("/").some((part) => part.startsWith(".") || part.endsWith(".lock"))) {
-    return "no path component may begin with `.` or end with `.lock`";
-  }
-  return null;
 }
 
 export type Recorded =
@@ -194,12 +174,11 @@ async function start(
   }
 
   const scope = scopeOf(input);
-  const plannedRunId = mintRunId(deps.now());
   const claim = claimReceipt(deps.requests, {
     requestId: input.requestId,
     kind: "start",
     digest: digestOfRequest(input, scope),
-    plannedRunId,
+    mint: () => mintRunId(deps.now()),
     now: deps.now(),
   });
   if (claim === null) {
@@ -289,7 +268,8 @@ async function start(
         "directory does not exist. Point $ODU_HOSTS at an absolute path.",
     );
   }
-  if (!/^[0-9a-fA-F]{7,40}$/.test(input.expectedSha)) {
+  const sha = parseSha(input.expectedSha);
+  if (sha === null) {
     return refuseAndRecord(
       deps,
       input.requestId,
@@ -298,18 +278,20 @@ async function start(
         "hex characters, the sha a caller read with `git rev-parse HEAD`",
     );
   }
+  let branch: BranchName | null = null;
   if (input.branch !== undefined) {
-    const wrong = branchNameProblem(input.branch);
-    if (wrong !== null) {
+    const parsed = parseBranchName(input.branch);
+    if (!parsed.ok) {
       return refuseAndRecord(
         deps,
         input.requestId,
         "bad_input",
-        `odu: "${input.branch}" is not a usable branch name — ${wrong}. ` +
+        `odu: "${input.branch}" is not a usable branch name — ${parsed.problem}. ` +
           "run.start moves a checkout with git, and a name git would read as " +
           "an option is a command, not a branch.",
       );
     }
+    branch = parsed.name;
   }
   const facts = deps.probeCheckout(input.checkout);
   if (!facts.isRepo) {
@@ -330,10 +312,10 @@ async function start(
         "commit for a run to be about",
     );
   }
-  const wanted = input.expectedSha.toLowerCase();
+  const wanted = sha.toLowerCase();
   const onWanted = facts.head.toLowerCase().startsWith(wanted);
   let head = facts.head;
-  if (!onWanted && input.branch === undefined) {
+  if (!onWanted && branch === null) {
     return refuseAndRecord(
       deps,
       input.requestId,
@@ -363,7 +345,7 @@ async function start(
   }
 
   let movedNote: string | null = null;
-  if (input.branch !== undefined && !onWanted) {
+  if (branch !== null && !onWanted) {
     if (facts.liveRunId !== null) {
       const stopped = await stopLiveRun(facts.liveRunId, {
         cancel: deps.cancel,
@@ -385,8 +367,8 @@ async function start(
     }
     const outcome = await deps.moveCheckout({
       checkout: input.checkout,
-      branch: input.branch,
-      sha: input.expectedSha,
+      branch,
+      sha,
     });
     if (outcome.kind === "dirty") {
       return refuseAndRecord(

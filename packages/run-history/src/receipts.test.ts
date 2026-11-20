@@ -57,7 +57,7 @@ function claim(
     requestId: "req-1",
     kind: "retry",
     digest: digestOf([RUN_ID, "unit"]),
-    plannedRunId: PLANNED,
+    mint: () => PLANNED,
     now: T0,
     ...over,
   });

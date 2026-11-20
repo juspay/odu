@@ -45,7 +45,6 @@ describe("the nodes stream", () => {
     const registry = createRegistry({ root: w.catalogRoot });
     const source = nodesSource({
       registry,
-      exists: () => true,
       poll: () => registry.refresh(),
       sleep: async () => {},
     });
@@ -65,7 +64,6 @@ describe("the nodes stream", () => {
     const registry = createRegistry({ root: w.catalogRoot });
     const source = nodesSource({
       registry,
-      exists: () => true,
       poll: () => registry.refresh(),
       sleep: (ms, signal) =>
         new Promise((resolve) => {
@@ -102,7 +100,6 @@ describe("the nodes stream", () => {
     let polls = 0;
     const source = nodesSource({
       registry,
-      exists: () => true,
       poll: () => {
         polls += 1;
         if (polls === 2) {
@@ -128,7 +125,6 @@ describe("the nodes stream", () => {
     const registry = createRegistry({ root: w.catalogRoot });
     const source = nodesSource({
       registry,
-      exists: () => false,
       poll: () => registry.refresh(),
       sleep: async () => {},
     });
@@ -161,7 +157,6 @@ describe("the nodes stream", () => {
     const registry = createRegistry({ root: w.catalogRoot });
     const source = nodesSource({
       registry,
-      exists: () => true,
       poll: () => registry.refresh(),
       sleep: async () => {},
     });
@@ -188,7 +183,6 @@ describe("the nodes stream", () => {
     let polls = 0;
     const source = nodesSource({
       registry,
-      exists: () => true,
       poll: () => {
         polls += 1;
         if (polls === 2) {
@@ -225,7 +219,6 @@ describe("the nodes stream", () => {
     let polls = 0;
     const source = nodesSource({
       registry,
-      exists: () => true,
       poll: () => {
         polls += 1;
         if (polls === 2) writePhase(fixture.handle, fixture.token, "no_lanes");

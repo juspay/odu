@@ -982,7 +982,7 @@ describe("a reply that was lost mid-flight", () => {
       requestId: REQUEST,
       kind: "retry",
       digest: digestOf([PARENT_RUN, "unit", "", 0]),
-      plannedRunId,
+      mint: () => plannedRunId,
       claimant: { pid: 31337, host: CLAIM_HOST },
       now: T0 + 5,
     });

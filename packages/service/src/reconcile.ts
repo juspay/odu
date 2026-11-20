@@ -1,4 +1,4 @@
-import { listReceipts } from "@odu/run-history/receipts";
+import { listReceipts, RECEIPT_RULES } from "@odu/run-history/receipts";
 import { formatCursor } from "@odu/run-history/ids";
 import type { RunManifest } from "@odu/run-history/schema";
 import { type CatalogOptions, handleFor, readManifest } from "@odu/run-history/store";
@@ -19,7 +19,7 @@ export function reconcileRequests(opts: ReconcileOptions): number {
   let settled = 0;
   for (const receipt of listReceipts(opts.requests)) {
     if (receipt.state === "completed") continue;
-    if (receipt.kind !== "start") continue;
+    if (!RECEIPT_RULES[receipt.kind].reconciled) continue;
     const outcome = reconcileStart(receipt, {
       catalog,
       now: opts.now,

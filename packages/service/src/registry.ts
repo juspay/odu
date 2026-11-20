@@ -1,6 +1,11 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import { attentionFor, type AttemptState, foldJournal } from "@odu/run-history/attention";
+import {
+  attentionFor,
+  type AttemptState,
+  type FoldLane,
+  foldJournal,
+} from "@odu/run-history/attention";
 import { formatCursor } from "@odu/run-history/ids";
 import { currentOwner, ownerAlive } from "@odu/run-history/owner";
 import { RUN_FILES, runDir } from "@odu/run-history/paths";
@@ -48,6 +53,8 @@ function wirePush(push: FoldNodePush): NodePush {
       return { state: "failed", message: push.message, durationMs: push.durationMs };
   }
 }
+
+const INDEX_GRACE_MS = 30_000;
 
 const FINGERPRINTED = [
   RUN_FILES.events,
@@ -170,21 +177,12 @@ function fallbackPhase(latest: ReadonlyMap<string, AttemptState>): RunPhase {
   return hasStartedWork(latest) ? "lanes" : "provisioning";
 }
 
-function lanesOf(
-  lanes: ReadonlyMap<
-    string,
-    { state: "claiming" | "leased"; host: string | null; pool: readonly string[] }
-  >,
-): RunLane[] {
+function lanesOf(lanes: ReadonlyMap<string, FoldLane>): RunLane[] {
   const out: RunLane[] = [];
   for (const platform of [...lanes.keys()].sort()) {
     const lane = lanes.get(platform);
     if (lane === undefined) continue;
-    if (lane.state === "leased" && lane.host !== null) {
-      out.push({ state: "leased", platform, host: lane.host });
-      continue;
-    }
-    out.push({ state: "claiming", platform, pool: [...lane.pool] });
+    out.push({ ...lane, platform });
   }
   return out;
 }
@@ -275,6 +273,15 @@ export interface RegistryDelta {
   removed: string[];
 }
 
+export type RunLookup = "indexed" | "not_indexed_yet" | "unknown";
+
+export interface IndexWait {
+  poll: () => void;
+  sleep: (ms: number, signal: AbortSignal) => Promise<void>;
+  pollMs: number;
+  signal: AbortSignal;
+}
+
 export interface RunRegistry {
   rows: () => RunRow[];
   row: (runId: string) => RunRow | undefined;
@@ -286,6 +293,8 @@ export interface RunRegistry {
   refresh: (now?: number) => RegistryDelta;
   size: () => number;
   catalog: string;
+  lookup: (runId: string) => RunLookup;
+  awaitIndexed: (runId: string, wait: IndexWait) => Promise<RunLookup>;
 }
 
 export interface RunQuery {
@@ -372,6 +381,27 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
     return { rows, total };
   };
 
+  const lookup = (runId: string): RunLookup => {
+    if (entryOf(runId) !== undefined) return "indexed";
+    return readManifest(handleFor(runId, opts)) !== null
+      ? "not_indexed_yet"
+      : "unknown";
+  };
+
+  const awaitIndexed = async (
+    runId: string,
+    wait: IndexWait,
+  ): Promise<RunLookup> => {
+    const indexBy = Date.now() + INDEX_GRACE_MS;
+    for (;;) {
+      const found = lookup(runId);
+      if (found !== "not_indexed_yet" || Date.now() >= indexBy) return found;
+      await wait.sleep(wait.pollMs, wait.signal);
+      if (wait.signal.aborted) return found;
+      wait.poll();
+    }
+  };
+
   return {
     rows: () =>
       order
@@ -393,6 +423,8 @@ export function createRegistry(opts: RegistryOptions = {}): RunRegistry {
     refresh,
     size: () => order.length,
     catalog: catalogPath(opts),
+    lookup,
+    awaitIndexed,
   };
 }
 

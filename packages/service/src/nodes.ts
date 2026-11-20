@@ -13,7 +13,6 @@ export const NODES_POLL_MS = 250;
 
 export interface NodesDeps {
   registry: RunRegistry;
-  exists: (runId: string) => boolean;
   poll: () => void;
   pollMs?: number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -92,8 +91,6 @@ function sameEnv(a: NewsworthyEnv, b: NewsworthyEnv): boolean {
   return true;
 }
 
-const INDEX_GRACE_MS = 30_000;
-
 function terminal(state: NodesFrame["state"]): boolean {
   return state === "settled" || state === "expired" || state === "owner_lost";
 }
@@ -106,18 +103,19 @@ export function nodesSource(
   return ({ runId }) =>
     streamFromAbortableSource<NodesFrame>(async function* (signal) {
       let previous: { nodes: RunNode[]; env: NewsworthyEnv } | null = null;
-      const indexBy = Date.now() + INDEX_GRACE_MS;
       for (;;) {
         deps.poll();
         const row = deps.registry.row(runId);
         const nodes = deps.registry.nodes(runId) ?? [];
         if (row === undefined) {
-          if (deps.exists(runId) && Date.now() < indexBy) {
-            if (signal.aborted) return;
-            await sleep(pollMs, signal);
-            if (signal.aborted) return;
-            continue;
-          }
+          const found = await deps.registry.awaitIndexed(runId, {
+            poll: deps.poll,
+            sleep,
+            pollMs,
+            signal,
+          });
+          if (signal.aborted) return;
+          if (found === "indexed") continue;
           yield {
             order: [],
             nodes: [],

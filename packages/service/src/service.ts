@@ -9,11 +9,7 @@ import {
   inMemoryStore,
   type RootedSurfacesRuntime,
 } from "@kolu/surface/server";
-import {
-  type CatalogOptions,
-  handleFor,
-  readManifest,
-} from "@odu/run-history/store";
+import type { CatalogOptions } from "@odu/run-history/store";
 import {
   oduServiceSurface,
   HOST_CONTRACT_VERSION,
@@ -180,7 +176,6 @@ export function createOduService(opts: ServiceOptions): OduService {
           source: nodesSource({
             registry,
             poll: () => {},
-            exists: (runId) => readManifest(handleFor(runId, catalog)) !== null,
           }),
         },
         checkout: {

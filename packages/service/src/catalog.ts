@@ -66,7 +66,6 @@ function claim(
     requestId,
     kind: RECEIPT_KIND,
     digest,
-    plannedRunId: "",
     now,
   });
   if (outcome === null) {
