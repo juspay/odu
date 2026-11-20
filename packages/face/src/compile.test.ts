@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -30,7 +30,9 @@ function compile(source: string, filename: string): string {
   return code;
 }
 
-const VIEWS = ["ui.tsx", "theme.tsx"];
+const VIEWS = readdirSync(SRC)
+  .filter((entry) => entry.endsWith(".tsx"))
+  .sort();
 
 describe("the Solid compiler that builds the shared primitives", () => {
   it.each(VIEWS)("compiles %s to cloned templates, not to component calls", (view) => {
@@ -48,7 +50,7 @@ describe("the Solid compiler that builds the shared primitives", () => {
     const code = compile(readFileSync(join(SRC, "ui.tsx"), "utf-8"), "ui.tsx");
     const start = code.indexOf("function Button(props)");
     expect(start, "ui.tsx no longer compiles a Button component").toBeGreaterThan(-1);
-    const body = code.slice(start, code.indexOf("function Hint(props)", start));
+    const body = code.slice(start, code.indexOf("function TitleTooltip(props)", start));
     const effect = body.indexOf("_$effect(");
     expect(effect, "Button compiled with no effect at all").toBeGreaterThan(-1);
     expect(

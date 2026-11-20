@@ -32,11 +32,12 @@ function tsFilesUnder(dir: string): string[] {
 }
 
 function specifiersIn(source: string, fileName: string): string[] {
+  const setParentNodes = false;
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    false,
+    setParentNodes,
     fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const out: string[] = [];

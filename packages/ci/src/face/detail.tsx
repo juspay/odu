@@ -22,11 +22,11 @@ import {
   BackLink,
   Button,
   Confirm,
-  Hint,
   LaneStrip,
   PageHead,
   Pill,
   Receipt,
+  TitleTooltip,
 } from "@odu/face/ui";
 import { bytes } from "@odu/cordis/format";
 import { CommitRef } from "./commit";
@@ -221,7 +221,7 @@ function NodeRow(props: {
         <Show when={props.node.exitCode !== null && props.node.exitCode !== 0}>
           <span class="node-exit">{`exit ${props.node.exitCode ?? 0}`}</span>
         </Show>
-        <Hint text={hint()} />
+        <TitleTooltip text={hint()} />
       </button>
       <Show when={props.canRun}>
       <span class="node-controls">

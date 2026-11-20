@@ -34,15 +34,20 @@ export function readTheme(): Theme {
   }
 }
 
+function themeAttribute(theme: Theme): string | null {
+  return theme === "system" ? null : theme;
+}
+
 export function applyTheme(theme: Theme): void {
+  const attribute = themeAttribute(theme);
   const root = globalThis.document?.documentElement;
   if (root !== undefined) {
-    if (theme === "system") root.removeAttribute("data-theme");
-    else root.setAttribute("data-theme", theme);
+    if (attribute === null) root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", attribute);
   }
   try {
-    if (theme === "system") globalThis.localStorage?.removeItem(THEME_KEY);
-    else globalThis.localStorage?.setItem(THEME_KEY, theme);
+    if (attribute === null) globalThis.localStorage?.removeItem(THEME_KEY);
+    else globalThis.localStorage?.setItem(THEME_KEY, attribute);
   } catch {
   }
 }

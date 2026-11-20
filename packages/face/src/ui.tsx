@@ -2,6 +2,10 @@ import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "soli
 
 export type StatusHue = "grey" | "amber" | "green" | "red" | "violet";
 
+function classes(base: string, extra: string | undefined): string {
+  return extra === undefined ? base : `${base} ${extra}`;
+}
+
 type ButtonAction =
   | { type?: "button"; onClick: () => void }
   | { type: "submit"; onClick?: never };
@@ -22,7 +26,7 @@ export function Button(props: ButtonProps): JSX.Element {
   return (
     <button
       type={props.type ?? "button"}
-      class={props.class === undefined ? "btn" : `btn ${props.class}`}
+      class={classes("btn", props.class)}
       disabled={props.disabled}
       title={props.title}
       value={props.value}
@@ -31,12 +35,12 @@ export function Button(props: ButtonProps): JSX.Element {
       onClick={props.onClick}
     >
       {props.children}
-      <Hint text={props.title} />
+      <TitleTooltip text={props.title} />
     </button>
   );
 }
 
-export function Hint(props: { text: string | undefined }): JSX.Element {
+export function TitleTooltip(props: { text: string | undefined }): JSX.Element {
   return (
     <Show when={props.text !== undefined}>
       <span class="tip" aria-hidden="true" data-hint={props.text} />
@@ -90,7 +94,7 @@ export function SearchInput(props: {
   class?: string;
 }): JSX.Element {
   return (
-    <label class={props.class === undefined ? "search" : `search ${props.class}`}>
+    <label class={classes("search", props.class)}>
       <svg aria-hidden="true" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
         <circle cx="7" cy="7" r="4.5" />
         <path d="M10.5 10.5 14 14" />
@@ -194,7 +198,7 @@ export function Panel(props: {
 }): JSX.Element {
   return (
     <section
-      class={props.class === undefined ? "panel" : `panel ${props.class}`}
+      class={classes("panel", props.class)}
       aria-label={props.label}
     >
       <Show when={props.title !== undefined}>
@@ -227,13 +231,15 @@ export function KeyValue(props: {
   );
 }
 
+export type ColumnWidth = `${number}rem` | `${number}ch` | `${number}%`;
+
 export interface TableColumn<T> {
   /** Also the sort key this header asks for, when `sortable`. */
   readonly key: string;
   readonly label: string;
   readonly align?: "left" | "right";
   /** A fixed width. The column that gives none takes what is left. */
-  readonly width?: string;
+  readonly width?: ColumnWidth;
   readonly sortable?: boolean;
   readonly cell: (row: T) => JSX.Element;
 }
@@ -262,7 +268,7 @@ export function Table<T>(props: {
     </For>
   );
   return (
-    <table class={props.class === undefined ? "table" : `table ${props.class}`} aria-label={props.label}>
+    <table class={classes("table", props.class)} aria-label={props.label}>
       <thead>
         <tr>
           <For each={props.columns}>
@@ -451,7 +457,7 @@ export function PageHead(props: {
   class?: string;
 }): JSX.Element {
   return (
-    <header class={props.class === undefined ? "page-head" : `page-head ${props.class}`}>
+    <header class={classes("page-head", props.class)}>
       <div>
         <h1 class={props.mono === true ? "mono" : undefined}>{props.title}</h1>
         <Show when={props.sub !== undefined}>
@@ -462,6 +468,11 @@ export function PageHead(props: {
     </header>
   );
 }
+
+type DialogAnswer = "confirm" | "cancel";
+
+const ANSWER_CONFIRM: DialogAnswer = "confirm";
+const ANSWER_CANCEL: DialogAnswer = "cancel";
 
 export function Confirm(props: {
   open: boolean;
@@ -490,19 +501,19 @@ export function Confirm(props: {
       class="confirm"
       ref={dialog}
       onClose={() => {
-        if (dialog?.returnValue === "confirm") props.onConfirm();
+        if (dialog?.returnValue === ANSWER_CONFIRM) props.onConfirm();
         props.onClose();
       }}
     >
       <h2>{props.title}</h2>
       <p>{props.body}</p>
       <form method="dialog" class="confirm-actions">
-        <Button type="submit" value="cancel">
+        <Button type="submit" value={ANSWER_CANCEL}>
           {props.cancelLabel}
         </Button>
         <Button
           type="submit"
-          value="confirm"
+          value={ANSWER_CONFIRM}
           class={props.danger === true ? "btn-danger" : undefined}
         >
           {props.confirmLabel}

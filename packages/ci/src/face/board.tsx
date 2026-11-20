@@ -1,11 +1,11 @@
 import { ago } from "@odu/cordis/format";
 import {
   Button,
-  Hint,
   LaneStrip,
   PageHead,
   Pill,
   SearchInput,
+  TitleTooltip,
 } from "@odu/face/ui";
 import {
   isActive,
@@ -153,7 +153,7 @@ function Row(props: {
           <span class="row-earlier">{`${props.earlier} earlier`}</span>
         </Show>
       </span>
-      <Hint text={props.run.repoRoot} />
+      <TitleTooltip text={props.run.repoRoot} />
     </button>
   );
 }
