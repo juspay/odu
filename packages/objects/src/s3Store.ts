@@ -325,7 +325,12 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     return { ok: false, refusal: { kind: "exists", key, facts } };
   }
 
-  function partReader(stream: ReadableStream<Uint8Array>) {
+  interface PartSource {
+    fill(buffer: Uint8Array): Promise<number>;
+    cancel(reason?: unknown): Promise<void>;
+  }
+
+  function partReader(stream: ReadableStream<Uint8Array>): PartSource {
     const reader = stream.getReader();
     let carry: Uint8Array | null = null;
     let done = false;
@@ -442,61 +447,22 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     }
   }
 
-  async function putOnce(
-    key: string,
-    stream: ReadableStream<Uint8Array>,
-    expected?: ObjectFacts,
-    options?: PutOptions,
-  ): Promise<PutOutcome> {
-    safeKey(key);
-    if ((await headOf(key)) !== null) {
-      await stream.cancel().catch(() => {});
-      return exists(key);
-    }
-    const parts = partReader(stream);
-    const counter = factsCounter();
-    const buffer = new Uint8Array(partSize);
-    let filled: number;
-    try {
-      filled = await parts.fill(buffer);
-    } catch (err) {
-      await parts.cancel(err);
-      throw err;
-    }
-    const first = buffer.subarray(0, filled);
-    counter.update(first);
-    const mismatch = (facts: ObjectFacts): PutOutcome | null =>
-      expected !== undefined && !sameFacts(expected, facts)
-        ? { ok: false, refusal: { kind: "facts_mismatch", key, expected, actual: facts } }
-        : null;
+  async function refuseIfTaken(key: string, stream: ReadableStream<Uint8Array>): Promise<PutOutcome | null> {
+    if ((await headOf(key)) === null) return null;
+    await stream.cancel().catch(() => {});
+    return exists(key);
+  }
 
-    if (filled < partSize) {
-      const facts = counter.facts();
-      const refused = mismatch(facts);
-      if (refused !== null) return refused;
-      const decided = await untilDecided(async () => {
-        const response = await call("PUT", key, {
-          headers: {
-            "if-none-match": "*",
-            "content-length": String(filled),
-            ...metaOf(facts),
-            ...headersOf(options),
-          },
-          body: first as Uint8Array<ArrayBuffer>,
-        });
-        const text = await response.text();
-        const decided = decidedBy(response);
-        if (decided === "stored" && !response.ok) throw new S3Failure(`PUT ${key}`, response.status, text);
-        return decided;
-      });
-      if (decided === "conflict") return conflicted(key, CONFLICT_TRIES);
-      return decided === "stored" ? { ok: true, facts } : exists(key);
-    }
+  interface StagedStream {
+    parts: PartSource;
+    first: Uint8Array;
+    buffer: Uint8Array<ArrayBuffer>;
+    counter: { update(chunk: Uint8Array): void; facts(): ObjectFacts };
+  }
 
-    const direct = expected !== undefined;
-    const uploadKey = direct ? key : `${key.slice(0, key.lastIndexOf("/") + 1)}${TEMP}${randomUUID()}`;
-    const uploadId = await createUpload(uploadKey, direct ? { ...metaOf(expected), ...headersOf(options) } : {});
-    const etags: string[] = [];
+  async function uploadParts(uploadKey: string, uploadId: string, staged: StagedStream): Promise<string[]> {
+    const { parts, first, buffer, counter } = staged;
+    const etags = new Map<number, string>();
     const control = new AbortController();
     const inFlight = new Set<Promise<void>>();
     const free: Uint8Array<ArrayBuffer>[] = [];
@@ -512,7 +478,7 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
         const text = await response.text();
         const etag = response.headers.get("etag");
         if (!response.ok || etag === null) throw new S3Failure(`UploadPart ${uploadKey}`, response.status, text);
-        etags[number - 1] = etag;
+        etags.set(number, etag);
       })().then(
         () => {
           inFlight.delete(tracked);
@@ -552,19 +518,38 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
       await abort(uploadKey, uploadId);
       throw err;
     }
-    const facts = counter.facts();
-    const refused = mismatch(facts);
-    if (refused !== null) {
-      await abort(uploadKey, uploadId);
-      return refused;
-    }
-    if (direct) {
-      const decided = await complete(key, uploadId, etags, true);
-      if (decided === "stored") return { ok: true, facts };
+    return [...etags].sort(([a], [b]) => a - b).map(([, etag]) => etag);
+  }
+
+  async function putWithPromisedFacts(
+    key: string,
+    expected: ObjectFacts,
+    options: PutOptions | undefined,
+    staged: StagedStream,
+  ): Promise<PutOutcome> {
+    const uploadId = await createUpload(key, { ...metaOf(expected), ...headersOf(options) });
+    const etags = await uploadParts(key, uploadId, staged);
+    const facts = staged.counter.facts();
+    if (!sameFacts(expected, facts)) {
       await abort(key, uploadId);
-      if (decided === "conflict") return conflicted(key, 1);
-      return exists(key);
+      return { ok: false, refusal: { kind: "facts_mismatch", key, expected, actual: facts } };
     }
+    const decided = await complete(key, uploadId, etags, true);
+    if (decided === "stored") return { ok: true, facts };
+    await abort(key, uploadId);
+    if (decided === "conflict") return conflicted(key, 1);
+    return exists(key);
+  }
+
+  async function putThenCopy(
+    key: string,
+    options: PutOptions | undefined,
+    staged: StagedStream,
+  ): Promise<PutOutcome> {
+    const uploadKey = `${key.slice(0, key.lastIndexOf("/") + 1)}${TEMP}${randomUUID()}`;
+    const uploadId = await createUpload(uploadKey, {});
+    const etags = await uploadParts(uploadKey, uploadId, staged);
+    const facts = staged.counter.facts();
     await complete(uploadKey, uploadId, etags, false);
     try {
       const decided = await untilDecided(() => copyInto(key, uploadKey, facts, { ...options, facts }));
@@ -573,6 +558,58 @@ export function s3ObjectStore(options: S3ObjectStoreOptions): ObjectStore {
     } finally {
       await deleteKey(uploadKey).catch(() => {});
     }
+  }
+
+  async function putOnce(
+    key: string,
+    stream: ReadableStream<Uint8Array>,
+    expected?: ObjectFacts,
+    options?: PutOptions,
+  ): Promise<PutOutcome> {
+    safeKey(key);
+    const taken = await refuseIfTaken(key, stream);
+    if (taken !== null) return taken;
+    const parts = partReader(stream);
+    const counter = factsCounter();
+    const buffer = new Uint8Array(partSize);
+    let filled: number;
+    try {
+      filled = await parts.fill(buffer);
+    } catch (err) {
+      await parts.cancel(err);
+      throw err;
+    }
+    const first = buffer.subarray(0, filled);
+    counter.update(first);
+
+    if (filled < partSize) {
+      const facts = counter.facts();
+      if (expected !== undefined && !sameFacts(expected, facts)) {
+        return { ok: false, refusal: { kind: "facts_mismatch", key, expected, actual: facts } };
+      }
+      const decided = await untilDecided(async () => {
+        const response = await call("PUT", key, {
+          headers: {
+            "if-none-match": "*",
+            "content-length": String(filled),
+            ...metaOf(facts),
+            ...headersOf(options),
+          },
+          body: first as Uint8Array<ArrayBuffer>,
+        });
+        const text = await response.text();
+        const decided = decidedBy(response);
+        if (decided === "stored" && !response.ok) throw new S3Failure(`PUT ${key}`, response.status, text);
+        return decided;
+      });
+      if (decided === "conflict") return conflicted(key, CONFLICT_TRIES);
+      return decided === "stored" ? { ok: true, facts } : exists(key);
+    }
+
+    const staged: StagedStream = { parts, first, buffer, counter };
+    return expected === undefined
+      ? putThenCopy(key, options, staged)
+      : putWithPromisedFacts(key, expected, options, staged);
   }
 
   const fetchWindow = (

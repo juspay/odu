@@ -27,17 +27,17 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
+function parse(source: string, fileName: string): ts.SourceFile {
+  // TypeScript's parser resolves `<T>(x) => x` one way in a `.ts` and another
+  // in a `.tsx`, so a JSX file parsed as TS produces a tree with the imports
+  // still in it and the markup mangled.
+  const kind = fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const setParentNodes = false;
+  return ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, setParentNodes, kind);
+}
+
 function specifiersIn(source: string, fileName: string): string[] {
-  const parsed = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    false,
-    // TypeScript's parser resolves `<T>(x) => x` one way in a `.ts` and another
-    // in a `.tsx`, so a JSX file parsed as TS produces a tree with the imports
-    // still in it and the markup mangled.
-    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
+  const parsed = parse(source, fileName);
   const out: string[] = [];
   const literal = (node: ts.Node | undefined): void => {
     if (node !== undefined && ts.isStringLiteralLike(node)) out.push(node.text);
@@ -65,16 +65,7 @@ function specifiersIn(source: string, fileName: string): string[] {
 }
 
 function readsProcessEnv(source: string, fileName: string): boolean {
-  const parsed = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    false,
-    // TypeScript's parser resolves `<T>(x) => x` one way in a `.ts` and another
-    // in a `.tsx`, so a JSX file parsed as TS produces a tree with the imports
-    // still in it and the markup mangled.
-    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
+  const parsed = parse(source, fileName);
   let found = false;
   const walk = (node: ts.Node): void => {
     if (

@@ -3,7 +3,15 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
-import { TEMP, type ObjectFacts, type ObjectStore, type PutOutcome, type UploadedPart } from "../src/objectStore";
+import {
+  type DirectStore,
+  directUploads,
+  TEMP,
+  type ObjectFacts,
+  type ObjectStore,
+  type PutOutcome,
+  type UploadedPart,
+} from "../src/objectStore";
 import type { StoreSpec } from "./storeMemory";
 
 export interface ContractSubject {
@@ -62,20 +70,6 @@ const kept = (outcome: PutOutcome): ObjectFacts => {
   if (!outcome.ok) throw new Error(`expected a put to keep, got ${outcome.refusal.kind}`);
   return outcome.facts;
 };
-
-type DirectStore = ObjectStore &
-  Required<Pick<ObjectStore, "partSize" | "createUpload" | "presignPart" | "completeUpload" | "abortUpload" | "copy">>;
-
-function directly(store: ObjectStore): DirectStore | null {
-  const offered =
-    store.partSize !== undefined &&
-    store.createUpload !== undefined &&
-    store.presignPart !== undefined &&
-    store.completeUpload !== undefined &&
-    store.abortUpload !== undefined &&
-    store.copy !== undefined;
-  return offered ? (store as DirectStore) : null;
-}
 
 async function uploadedTemp(direct: DirectStore, key: string, payload: Uint8Array): Promise<void> {
   const uploadId = await direct.createUpload(key);
@@ -455,7 +449,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
 
     it("signs no URL that can write a finished object", async () => {
       const { store, dispose } = await make();
-      const direct = directly(store);
+      const direct = directUploads(store);
       if (direct === null) {
         await dispose();
         return;
@@ -475,7 +469,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
 
     it("takes a multipart upload a writer sent part by part, in any order it reports them", async () => {
       const { store, dispose } = await make();
-      const direct = directly(store);
+      const direct = directUploads(store);
       if (direct === null) {
         await dispose();
         return;
@@ -496,7 +490,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
       // One part, nowhere near S3's 5 MiB floor — which applies to every part
       // BUT the last, and a single part is the last one.
       const { store, dispose } = await make();
-      const direct = directly(store);
+      const direct = directUploads(store);
       if (direct === null) {
         await dispose();
         return;
@@ -512,7 +506,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
 
     it("refuses a completion whose parts are not 0..n-1", async () => {
       const { store, dispose } = await make();
-      const direct = directly(store);
+      const direct = directUploads(store);
       if (direct === null) {
         await dispose();
         return;
@@ -529,7 +523,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
 
     it("drops an aborted upload: it cannot be completed, and no sweep has it to remove", async () => {
       const { store, dispose } = await make();
-      const direct = directly(store);
+      const direct = directUploads(store);
       if (direct === null) {
         await dispose();
         return;
@@ -547,7 +541,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
 
     it("copies bytes inside the store, with the facts the caller proved", async () => {
       const { store, dispose } = await make();
-      const direct = directly(store);
+      const direct = directUploads(store);
       if (direct === null) {
         await dispose();
         return;
@@ -572,7 +566,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
 
     it("refuses a copy whose source changed under the version the caller read", async () => {
       const { store, dispose } = await make();
-      const direct = directly(store);
+      const direct = directUploads(store);
       if (direct === null) {
         await dispose();
         return;
@@ -613,7 +607,7 @@ export function objectStoreContract(name: string, make: () => Promise<ContractSu
 
     it("keeps a direct upload's temp key out of `list`, and lets a sweep remove it", async () => {
       const { store, dispose } = await make();
-      const direct = directly(store);
+      const direct = directUploads(store);
       if (direct === null) {
         await dispose();
         return;

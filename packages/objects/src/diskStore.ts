@@ -6,7 +6,6 @@ import {
   type ObjectBody,
   type ObjectFacts,
   type ObjectStore,
-  type PutOptions,
   type PutOutcome,
   safeKey,
   sameFacts,
@@ -101,7 +100,11 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
 
   /** `link` refuses an existing name, so of two writers of one key exactly one
    *  makes the object. */
-  async function linkInto(key: string, file: string, facts: ObjectFacts): Promise<PutOutcome | "cross-device"> {
+  async function linkConsumingSource(
+    key: string,
+    file: string,
+    facts: ObjectFacts,
+  ): Promise<PutOutcome | "cross-device"> {
     const target = pathOf(key);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
     try {
@@ -117,7 +120,7 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     return { ok: true, facts };
   }
 
-  async function put(key: string, body: ObjectBody, expected?: ObjectFacts, _options?: PutOptions): Promise<PutOutcome> {
+  async function put(key: string, body: ObjectBody, expected?: ObjectFacts): Promise<PutOutcome> {
     const stream = body instanceof Blob ? body.stream() : body;
     const target = pathOf(key);
     if ((await isFile(target)) !== null) {
@@ -143,7 +146,7 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
       if (expected !== undefined && !sameFacts(expected, facts)) {
         return { ok: false, refusal: { kind: "facts_mismatch", key, expected, actual: facts } };
       }
-      const linked = await linkInto(key, temp, facts);
+      const linked = await linkConsumingSource(key, temp, facts);
       if (linked === "cross-device") throw new Error(`${temp} and ${target} are one directory`);
       return linked;
     } finally {
@@ -163,7 +166,7 @@ export function diskObjectStore(options: DiskObjectStoreOptions): ObjectStore {
     put,
 
     async link(key, file, facts) {
-      const linked = await linkInto(key, file, facts);
+      const linked = await linkConsumingSource(key, file, facts);
       if (linked !== "cross-device") return linked;
       const copied = await put(key, Bun.file(file), facts);
       if (copied.ok) await unlink(file).catch(() => {});
