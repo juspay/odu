@@ -61,9 +61,27 @@ export function reconcile(
 ): Reconciled {
   const seen = evidenceFor(requestId, receipt, handle, catalog);
   if (seen !== null) return seen;
+  const claimant = claimantGone(receipt, now, host, isAlive);
+  if (!claimant.gone) {
+    return { kind: "unresolved", reason: claimant.reason };
+  }
+  const fresh = readReceipt(handle, requestId) ?? receipt;
+  const late = evidenceFor(requestId, fresh, handle, catalog);
+  if (late !== null) return late;
+  return { kind: "nothing_happened" };
+}
+
+type ClaimantProbe = { gone: true } | { gone: false; reason: string };
+
+function claimantGone(
+  receipt: ReceiptRecord,
+  now: number,
+  host: string,
+  isAlive: (pid: number) => boolean,
+): ClaimantProbe {
   if (now - receipt.acceptedAt < RETRY_DISPATCH_GRACE_MS) {
     return {
-      kind: "unresolved",
+      gone: false,
       reason:
         "it was accepted moments ago and has not reached the wire yet — the " +
         "caller that claimed it may still be dispatching it, and two callers " +
@@ -73,7 +91,7 @@ export function reconcile(
   const claimant = receipt.claimant;
   if (claimant === undefined) {
     return {
-      kind: "unresolved",
+      gone: false,
       reason:
         "the receipt does not name the process that claimed it (an older " +
         "build wrote it), so whether that caller can still dispatch is not a " +
@@ -82,7 +100,7 @@ export function reconcile(
   }
   if (claimant.host !== host) {
     return {
-      kind: "unresolved",
+      gone: false,
       reason:
         `it was claimed by pid ${claimant.pid} on ${claimant.host}, and this ` +
         "host cannot see whether that process is still running — across hosts " +
@@ -91,17 +109,33 @@ export function reconcile(
   }
   if (isAlive(claimant.pid)) {
     return {
-      kind: "unresolved",
+      gone: false,
       reason:
         `the caller that claimed it (pid ${claimant.pid}) is STILL RUNNING — ` +
         "it has not dispatched yet, but it can, and telling a second caller to " +
         "re-issue while the first is alive is how one request becomes two",
     };
   }
-  const fresh = readReceipt(handle, requestId) ?? receipt;
-  const late = evidenceFor(requestId, fresh, handle, catalog);
-  if (late !== null) return late;
-  return { kind: "nothing_happened" };
+  return { gone: true };
+}
+
+type RequestOutcome =
+  | { kind: "pending"; unresolved: string[] }
+  | { kind: "declined"; declined: string[] }
+  | { kind: "partial"; applied: string[]; declined: string[] }
+  | { kind: "applied"; applied: string[] };
+
+function foldRequestOutcome(
+  intended: readonly string[],
+  resolved: ReadonlyMap<string, boolean>,
+): RequestOutcome {
+  const unresolved = intended.filter((node) => !resolved.has(node));
+  if (unresolved.length > 0) return { kind: "pending", unresolved };
+  const applied = intended.filter((node) => resolved.get(node) === true);
+  const declined = intended.filter((node) => resolved.get(node) !== true);
+  if (applied.length === 0) return { kind: "declined", declined };
+  if (declined.length > 0) return { kind: "partial", applied, declined };
+  return { kind: "applied", applied };
 }
 
 /**
@@ -194,36 +228,34 @@ function reconcileLive(
   }
   if (asked.length === 0) return null;
   const intended = receipt.roots === undefined ? asked : [...receipt.roots];
-  const unresolved = intended.filter((node) => !resolved.has(node));
-  if (unresolved.length > 0) {
+  const outcome = foldRequestOutcome(intended, resolved);
+  if (outcome.kind === "pending") {
     return {
       kind: "unresolved",
       reason:
         `this request names ${intended.join(", ")}, and nothing has recorded what ` +
-        `became of ${unresolved.join(", ")} — either it is still being dispatched ` +
+        `became of ${outcome.unresolved.join(", ")} — either it is still being dispatched ` +
         "root by root, or the coordinator died between accepting a reset and " +
         "performing it. Either way the request is not finished, so its outcome is " +
         "not knowable yet",
     };
   }
-  const applied = intended.filter((node) => resolved.get(node) === true);
-  const declined = intended.filter((node) => resolved.get(node) !== true);
-  if (applied.length === 0) {
+  if (outcome.kind === "declined") {
     return {
       kind: "unresolved",
       reason:
         `this run's coordinator declined every root it was asked to reset ` +
-        `(${declined.join(", ")}), which is what selects a replacement RUN rather ` +
+        `(${outcome.declined.join(", ")}), which is what selects a replacement RUN rather ` +
         "than the end of the request — so the caller that claimed it is very " +
         "likely inside that launch now, and its outcome is not settled here",
     };
   }
-  if (declined.length > 0) {
+  if (outcome.kind === "partial") {
     return {
       kind: "refused",
       message:
-        `odu: request "${requestId}" was applied in part — ${applied.join(", ")} ` +
-        `was re-run, ${declined.join(", ")} was declined by its lane. The retry did ` +
+        `odu: request "${requestId}" was applied in part — ${outcome.applied.join(", ")} ` +
+        `was re-run, ${outcome.declined.join(", ")} was declined by its lane. The retry did ` +
         "not do everything it was asked for, so it is reported rather than replayed " +
         "as a whole.",
     };
@@ -235,7 +267,7 @@ function reconcileLive(
       mode: "live",
       effective_run: handle.runId,
       parent_run: null,
-      roots: applied,
+      roots: outcome.applied,
       reset_dependants: [],
       attempts: [],
       scope: manifest.scope,

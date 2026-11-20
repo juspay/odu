@@ -70,21 +70,24 @@ function readOwnerFile(path: string): Owner | null {
   return Result.isSuccess(decoded) ? decoded.success : null;
 }
 
+function readPublishedOwner(dir: string): Owner | null {
+  return readOwnerFile(join(dir, RUN_FILES.owner));
+}
+
 /**
  * The run's current owner, or `null` when nobody has ever claimed it.
  */
 export function currentOwner(dir: string): Owner | null {
-  const published = readOwnerFile(join(dir, RUN_FILES.owner));
-  let best = published;
-  for (const entry of listClaims(dir)) {
-    if (best !== null && entry.epoch <= best.epoch) continue;
-    const claimed = readOwnerFile(claimPath(dir, entry.epoch));
-    if (claimed !== null) best = claimed;
+  let highest = readPublishedOwner(dir);
+  for (const { epoch } of listClaims(dir)) {
+    if (highest !== null && epoch <= highest.epoch) continue;
+    const claimed = readOwnerFile(claimPath(dir, epoch));
+    if (claimed !== null) highest = claimed;
   }
-  return best;
+  return highest;
 }
 
-function highestClaimedEpoch(dir: string): number {
+function nextEpochFloorFromClaimFiles(dir: string): number {
   let highest = 0;
   for (const entry of listClaims(dir)) {
     highest = Math.max(highest, entry.epoch);
@@ -109,12 +112,16 @@ function listClaims(dir: string): { epoch: number }[] {
   return out;
 }
 
+export type TakeoverVerdict =
+  | { lost: true }
+  | { lost: false; reason: string };
+
 export function ownershipProvablyLost(
   incumbent: Owner,
   now: number,
   host: string = hostname(),
   isAlive: (pid: number) => boolean = pidAlive,
-): { lost: true } | { lost: false; reason: string } {
+): TakeoverVerdict {
   if (now - incumbent.heartbeatAt < OWNERSHIP_GRACE_MS) {
     const ago = Math.max(0, Math.round((now - incumbent.heartbeatAt) / 1000));
     return {
@@ -131,7 +138,10 @@ export function ownershipProvablyLost(
   return { lost: true };
 }
 
-export function beingWritten(owner: Owner | null, now: number): boolean {
+export function heartbeatFreshWithinGrace(
+  owner: Owner | null,
+  now: number,
+): boolean {
   return owner !== null && now - owner.heartbeatAt < OWNERSHIP_GRACE_MS;
 }
 
@@ -168,7 +178,7 @@ export function claimOwnership(input: ClaimInput): ClaimResult {
       }
     }
     const epoch =
-      Math.max(incumbent?.epoch ?? 0, highestClaimedEpoch(input.dir)) + 1;
+      Math.max(incumbent?.epoch ?? 0, nextEpochFloorFromClaimFiles(input.dir)) + 1;
     const owner: Owner = {
       epoch,
       pid,
@@ -203,7 +213,7 @@ export function claimOwnership(input: ClaimInput): ClaimResult {
  * the run must not write to it.
  */
 export function stillOwner(token: OwnershipToken): boolean {
-  const owner = readOwnerFile(join(token.dir, RUN_FILES.owner));
+  const owner = readPublishedOwner(token.dir);
   return owner !== null && owner.epoch === token.epoch;
 }
 

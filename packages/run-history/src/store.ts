@@ -33,10 +33,10 @@ import {
   type StateEnv,
 } from "./paths";
 import {
-  beingWritten,
   claimOwnership,
   type ClaimRefusal,
   currentOwner,
+  heartbeatFreshWithinGrace,
   type OwnershipToken,
   ownershipProvablyLost,
   stillOwner,
@@ -528,7 +528,7 @@ export function readExpiry(handle: RunHandle): Expiry | null {
  * whether it did anything.
  */
 export function expireRun(handle: RunHandle, now: number = Date.now()): boolean {
-  if (beingWritten(currentOwner(handle.dir), now)) return false;
+  if (heartbeatFreshWithinGrace(currentOwner(handle.dir), now)) return false;
   const verdict = readVerdict(handle);
   const expiry: Expiry = {
     version: RUN_RECORD_FORMAT,

@@ -35,6 +35,17 @@ export function runIdStartedAt(runId: string): number | null {
 
 const SAFE_KEY_CHAR = /^[A-Za-z0-9._-]$/;
 
+function isSafeUnescaped(ch: string, atStart: boolean): boolean {
+  if (!SAFE_KEY_CHAR.test(ch)) return false;
+  return !(atStart && ch === ".");
+}
+
+function parseNonNegativeDigits(text: string): number | null {
+  if (!/^\d+$/.test(text)) return null;
+  const value = Number(text);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 /**
  * A node id as ONE path segment: every character outside the portable filename
  * set becomes `~<2 hex>`.
@@ -42,7 +53,7 @@ const SAFE_KEY_CHAR = /^[A-Za-z0-9._-]$/;
 export function encodeNodeKey(nodeId: string): string {
   let out = "";
   for (const ch of nodeId) {
-    if (SAFE_KEY_CHAR.test(ch) && !(ch === "." && out === "")) {
+    if (isSafeUnescaped(ch, out === "")) {
       out += ch;
       continue;
     }
@@ -126,9 +137,8 @@ export function parseCursor(token: string): Cursor | null {
   const runId = token.slice(0, at);
   const tail = token.slice(at + 1);
   if (!isRunId(runId)) return null;
-  if (!/^\d+$/.test(tail)) return null;
-  const seq = Number(tail);
-  if (!Number.isSafeInteger(seq) || seq < 0) return null;
+  const seq = parseNonNegativeDigits(tail);
+  if (seq === null) return null;
   return { runId, seq };
 }
 

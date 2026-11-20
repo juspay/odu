@@ -34,6 +34,8 @@ import {
 /** The default bounded observation deadline. Reaching it means `still_running`. */
 export const DEFAULT_ATTENTION_DEADLINE_MS = 30_000;
 
+const UTF8_TAIL_SLACK = 4;
+
 export type RunResolution =
   | { ok: true; handle: RunHandle }
   | { ok: false; message: string };
@@ -160,7 +162,7 @@ export function readAttention(
       endpoint: owner?.endpoint ?? null,
       readExcerpt: (node, attempt, maxBytes) => {
         const slice = readAttemptLog(handle, node, attempt, {
-          offset: -Math.max(maxBytes * 4, EXCERPT_BUDGET_BYTES),
+          offset: -Math.max(maxBytes * UTF8_TAIL_SLACK, EXCERPT_BUDGET_BYTES),
         });
         return slice === null
           ? null
@@ -198,15 +200,12 @@ export async function waitForAttention(
   const deadline = now() + (opts.deadlineMs ?? DEFAULT_ATTENTION_DEADLINE_MS);
   const pollMs = Math.max(10, opts.pollMs ?? 150);
   const eventsPath = join(handle.dir, RUN_FILES.events);
-  let lastSize = -1;
+  let lastSize: number | null = null;
+  let looked = false;
   for (;;) {
-    let size = -1;
-    try {
-      size = statSync(eventsPath).size;
-    } catch {
-      size = -1;
-    }
-    if (size !== lastSize || lastSize === -1) {
+    const size = fileSize(eventsPath);
+    if (!looked || size !== lastSize) {
+      looked = true;
       lastSize = size;
       const attention = readAttention(handle, opts, now());
       if (isAnswer(attention, opts)) return attention;
@@ -269,27 +268,32 @@ export async function waitForLogGrowth(
     attemptLogFile(opts.stream),
   );
   for (;;) {
-    let size = -1;
-    try {
-      size = statSync(logPath).size;
-    } catch {
-      size = -1;
-    }
-    if (size > opts.from) return "grew";
-    if (size >= 0 && size < opts.from) return "shrank";
+    const size = fileSize(logPath);
+    if (size !== null && size > opts.from) return "grew";
+    if (size !== null && size < opts.from) return "shrank";
     if (readAttemptRecord(handle, node, attempt)?.logComplete === true) {
       return "complete";
     }
-    if (
-      readVerdict(handle) !== null ||
-      readExpiry(handle) !== null ||
-      ownerAliveFor(handle, now()) === false
-    ) {
-      return "run_terminal";
-    }
+    if (runTerminal(handle, now())) return "run_terminal";
     if (opts.signal?.aborted === true || now() >= deadline) return "deadline";
     await sleep(Math.min(pollMs, Math.max(1, deadline - now())), opts.signal);
   }
+}
+
+function fileSize(path: string): number | null {
+  try {
+    return statSync(path).size;
+  } catch {
+    return null;
+  }
+}
+
+function runTerminal(handle: RunHandle, now: number): boolean {
+  return (
+    readVerdict(handle) !== null ||
+    readExpiry(handle) !== null ||
+    ownerAliveFor(handle, now) === false
+  );
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

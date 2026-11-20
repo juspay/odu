@@ -70,6 +70,26 @@ export function writeRunRecord(
   writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
 }
 
+const MAX_RESERVATION_PROBES = 1024;
+
+function claimSlotExclusive(
+  path: string,
+  seq: number,
+): "claimed" | "taken" | "failed" {
+  try {
+    writeFileSync(
+      path,
+      `${JSON.stringify({ [RESERVED_MARKER]: true, seq }, null, 2)}\n`,
+      { flag: "wx" },
+    );
+    return "claimed";
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EEXIST"
+      ? "taken"
+      : "failed";
+  }
+}
+
 /**
  * Atomically select AND reserve the next seq for a commit, returning the
  * reserved seq — or `null` if it couldn't be claimed (a write failure).
@@ -84,18 +104,17 @@ export function reserveNextSeq(repoRoot: string, sha7: string): number | null {
     return null;
   }
   let candidate = allocateSeq(repoRoot, sha7);
-  for (let attempt = 0; attempt < 1024; attempt += 1, candidate += 1) {
-    try {
-      writeFileSync(
-        recordPath(repoRoot, sha7, candidate),
-        `${JSON.stringify({ [RESERVED_MARKER]: true, seq: candidate }, null, 2)}\n`,
-        { flag: "wx" },
-      );
-      return candidate;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
-      return null;
-    }
+  for (
+    let probe = 0;
+    probe < MAX_RESERVATION_PROBES;
+    probe += 1, candidate += 1
+  ) {
+    const claim = claimSlotExclusive(
+      recordPath(repoRoot, sha7, candidate),
+      candidate,
+    );
+    if (claim === "claimed") return candidate;
+    if (claim === "failed") return null;
   }
   return null;
 }

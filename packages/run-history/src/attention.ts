@@ -317,7 +317,7 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         };
         byAttempt.set(key(e.node, e.attempt), state);
         latest.set(e.node, state);
-        push.delete(e.node);
+        retractPushClaim(push, e.node);
         break;
       }
       case "node_status": {
@@ -365,21 +365,16 @@ export function foldJournal(journal: readonly JournalEntry[]): {
         break;
       case "pushing": {
         push.set(e.node, { state: "pushing", bucket: e.bucket });
-        if (e.durationMs !== undefined) {
-          const state = latest.get(e.node);
-          if (state !== undefined && state.durationMs === null) {
-            state.durationMs = e.durationMs;
-          }
-        }
+        backfillRecipeDuration(latest.get(e.node), e.durationMs);
         break;
       }
       case "pushed": {
-        const present = e.present ?? 0;
+        const counts = splitStoredAndPresent(e);
         push.set(e.node, {
           state: "pushed",
           bucket: e.bucket,
-          stored: Math.max(0, e.paths - present),
-          present,
+          stored: counts.stored,
+          present: counts.present,
           bytes: e.bytes,
           durationMs: e.durationMs ?? 0,
         });
@@ -415,17 +410,38 @@ export function foldJournal(journal: readonly JournalEntry[]): {
   };
 }
 
+function rankOrLast(rank: ReadonlyMap<string, number>, node: string): number {
+  return rank.get(node) ?? Number.MAX_SAFE_INTEGER;
+}
+
+function retractPushClaim(push: Map<string, NodePush>, node: string): void {
+  push.delete(node);
+}
+
+function backfillRecipeDuration(
+  state: AttemptState | undefined,
+  durationMs: number | undefined,
+): void {
+  if (durationMs === undefined || state === undefined) return;
+  if (state.durationMs !== null) return;
+  state.durationMs = durationMs;
+}
+
+function splitStoredAndPresent(event: {
+  readonly paths: number;
+  readonly present?: number | undefined;
+}): { stored: number; present: number } {
+  const present = event.present ?? 0;
+  return { stored: Math.max(0, event.paths - present), present };
+}
+
 function inRosterOrder(
   nodes: readonly string[],
   roster: readonly string[],
 ): readonly string[] {
   if (nodes.length < 2 || roster.length === 0) return nodes;
   const rank = new Map(roster.map((node, i) => [node, i]));
-  return [...nodes].sort(
-    (a, b) =>
-      (rank.get(a) ?? Number.MAX_SAFE_INTEGER) -
-      (rank.get(b) ?? Number.MAX_SAFE_INTEGER),
-  );
+  return [...nodes].sort((a, b) => rankOrLast(rank, a) - rankOrLast(rank, b));
 }
 
 const RED = new Set(["failed", "errored"]);
@@ -541,37 +557,69 @@ export function attentionFor(
         }),
   };
 
-  const build = (
-    events: readonly JournalEntry[],
-    fails: readonly AttentionFailure[],
-    debt: readonly Attention["reporting_debt"][number][],
-    overBudget: boolean,
-  ): Attention => ({
+  const build = (payload: AttentionPayload, overBudget: boolean): Attention => ({
     ...identity,
-    events: events.map((e) => ({ seq: e.seq, at: e.at, event: e.event })),
-    cursor: formatCursor({ runId: sources.runId, seq: events.at(-1)?.seq ?? afterSeq }),
-    has_more: events.length < pending.length,
-    remaining: pending.length - events.length,
-    unresolved_failures: [...fails],
+    events: payload.events.map((e) => ({ seq: e.seq, at: e.at, event: e.event })),
+    cursor: formatCursor({
+      runId: sources.runId,
+      seq: cursorThrough(payload.events, afterSeq),
+    }),
+    has_more: payload.events.length < pending.length,
+    remaining: pending.length - payload.events.length,
+    unresolved_failures: [...payload.fails],
     unresolved_failures_total: failures.length,
-    failures_omitted: failures.length - fails.length,
-    reporting_debt: [...debt],
-    debt_omitted: debtRows.length - debt.length,
+    failures_omitted: failures.length - payload.fails.length,
+    reporting_debt: [...payload.debt],
+    debt_omitted: debtRows.length - payload.debt.length,
     over_budget: overBudget,
   });
 
-  const fits = (a: Attention): boolean => encodedBytes(a) <= budget;
-  const keep = pending.length > 0 ? 1 : 0;
-  let events = pending.slice(0, limit);
-  let fails: AttentionFailure[] = [...failures];
-  let debt = debtRows;
+  return shedToBudget(
+    { events: pending.slice(0, limit), fails: failures, debt: debtRows },
+    {
+      reservedEvents: 1,
+      excerptBudget,
+      build,
+      fits: (a) => encodedBytes(a) <= budget,
+    },
+  );
+}
 
-  while (events.length > keep && !fits(build(events, fails, debt, false))) {
-    events = events.slice(0, Math.max(keep, Math.floor(events.length / 2)));
+function cursorThrough(
+  events: readonly JournalEntry[],
+  afterSeq: number,
+): number {
+  return events.at(-1)?.seq ?? afterSeq;
+}
+
+interface AttentionPayload {
+  events: readonly JournalEntry[];
+  fails: readonly AttentionFailure[];
+  debt: readonly Attention["reporting_debt"][number][];
+}
+
+function shedToBudget(
+  start: AttentionPayload,
+  opts: {
+    reservedEvents: number;
+    excerptBudget: number;
+    build: (payload: AttentionPayload, overBudget: boolean) => Attention;
+    fits: (attention: Attention) => boolean;
+  },
+): Attention {
+  let { events, fails, debt } = start;
+  const tooBig = (): boolean =>
+    !opts.fits(opts.build({ events, fails, debt }, false));
+
+  while (events.length > opts.reservedEvents && tooBig()) {
+    events = events.slice(
+      0,
+      Math.max(opts.reservedEvents, Math.floor(events.length / 2)),
+    );
   }
   for (
-    let cap = excerptBudget;
-    cap > 0 && !fits(build(events, fails, debt, false));
+    let cap = opts.excerptBudget;
+    cap > 0 && tooBig();
     cap = Math.floor(cap / 2)
   ) {
     fails = fails.map((f) => {
@@ -583,14 +631,11 @@ export function attentionFor(
       };
     });
   }
-  while (fails.length > 0 && !fits(build(events, fails, debt, false))) {
-    fails = fails.slice(0, fails.length - 1);
-  }
-  while (debt.length > 0 && !fits(build(events, fails, debt, false))) {
-    debt = debt.slice(0, debt.length - 1);
-  }
-  const fitted = build(events, fails, debt, false);
-  return fits(fitted) ? fitted : build(events, fails, debt, true);
+  while (fails.length > 0 && tooBig()) fails = fails.slice(0, fails.length - 1);
+  while (debt.length > 0 && tooBig()) debt = debt.slice(0, debt.length - 1);
+
+  const fitted = opts.build({ events, fails, debt }, false);
+  return opts.fits(fitted) ? fitted : opts.build({ events, fails, debt }, true);
 }
 
 function encodedBytes(value: unknown): number {

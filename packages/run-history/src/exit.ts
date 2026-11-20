@@ -10,10 +10,12 @@ const NAMES: Record<number, string> = {
   15: "SIGTERM",
 };
 
+const MAX_SIGNAL_NUMBER = 64;
+
 /** The signal an exit status implies, or `null` when it implies none. */
 export function signalFromExit(code: number | null): string | null {
   if (code === null) return null;
   const n = code - 128;
-  if (n <= 0 || n > 64) return null;
+  if (n <= 0 || n > MAX_SIGNAL_NUMBER) return null;
   return NAMES[n] ?? `SIG${n}`;
 }

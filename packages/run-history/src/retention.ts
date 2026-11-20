@@ -7,7 +7,11 @@ import {
   readVerdict,
   runsStartedBefore,
 } from "./store";
-import { beingWritten, currentOwner, ownershipProvablyLost } from "./owner";
+import {
+  currentOwner,
+  heartbeatFreshWithinGrace,
+  ownershipProvablyLost,
+} from "./owner";
 
 /** The default keep-window for finished runs. */
 export const DEFAULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -49,7 +53,7 @@ export function pruneCatalog(opts: PruneOptions = {}): PruneReport {
       });
       continue;
     }
-    if (beingWritten(currentOwner(handle.dir), now)) {
+    if (heartbeatFreshWithinGrace(currentOwner(handle.dir), now)) {
       report.kept.push({ runId, reason: "still owned by a live coordinator" });
       continue;
     }
