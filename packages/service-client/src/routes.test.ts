@@ -1,14 +1,3 @@
-/**
- * A run address round-trips, and refuses everything that names no run.
- *
- * The two behaviours that matter are the ones a LINK depends on: what a caller
- * mints opens the page the caller meant — the run, or one attempt's output within
- * it — and anything else is `null` rather than a partial read that would navigate
- * somewhere plausible and wrong. The log address is checked with a key carrying
- * `::` and a platform, because that is the ordinary shape of an odu node and the
- * one a hand-rolled split gets wrong.
- */
-
 import { describe, expect, it } from "bun:test";
 import { formatLogKey } from "./logKey";
 import { logHash, parseRunHash, runHash } from "./routes";
@@ -33,8 +22,6 @@ describe("run addresses", () => {
   });
 
   it("falls back to the run page for an address that is not three segments", () => {
-    // A truncated or hand-edited address still names a run worth showing; the
-    // page opens on the run rather than on a log nobody addressed.
     expect(parseRunHash("#/run/0abc-def/ci::unit@x86_64-linux")).toEqual({
       runId: "0abc-def",
       log: null,

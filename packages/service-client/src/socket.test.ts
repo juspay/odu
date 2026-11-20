@@ -1,19 +1,3 @@
-/**
- * The local half: the daemon's address, and what a dial to it calls absence.
- *
- * `{ kind: "absent" }` is the answer a face turns into "no odu on this machine"
- * — kolu's Inspector draws no chip at all — so the set of failures that produce
- * it is a contract rather than an implementation detail: a socket somebody IS
- * serving that failed for some other reason arriving as `absent` would have
- * every face report "odu is not installed" about a daemon that is up.
- *
- * The absent case is exercised against a real path with nothing bound, and the
- * refusals through a stubbed `Socket.prototype.connect` — the same instrument
- * and the same reasons `@odu/run-client`'s dial test keeps (Bun reports ENOENT
- * for every unbound unix path, so a permission-denied dial cannot be staged for
- * real here).
- */
-
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -22,14 +6,8 @@ import { describe, expect, it } from "bun:test";
 import { DEFAULT_SERVICE_ORIGIN, SERVICE_APP } from "./endpoint";
 import { dialServiceSocket, serviceSocketPath, webAppNamespace } from "./socket";
 
-/** An origin nobody runs a service on — so its home is a name no daemon has
- *  ever created, which is what makes the purity assertions deterministic. */
 const UNUSED_ORIGIN = "http://127.0.0.1:59999";
 
-/** Run `fn` with every `connect()` failing asynchronously — with `code` when
- *  given, and with none at all when not (the shape a post-connect wire failure
- *  has). Async, because that is the contract `asyncConnectError` restores and
- *  the one `unixSocketLink` is written against. */
 async function withFailingConnect<T>(
   code: string | undefined,
   fn: () => Promise<T>,
@@ -52,8 +30,6 @@ async function withFailingConnect<T>(
 
 describe("webAppNamespace", () => {
   it("keeps the plain namespace for the default origin", () => {
-    // An ordinary install must not move: this is the home every existing
-    // daemon and gate already lives in.
     expect(webAppNamespace(DEFAULT_SERVICE_ORIGIN)).toBe(SERVICE_APP);
   });
 
@@ -64,8 +40,6 @@ describe("webAppNamespace", () => {
   });
 
   it("treats two spellings of one port as two addresses", () => {
-    // The reason the namespace is a digest of the ORIGIN rather than of the
-    // port: `127.0.0.1:9000` and `[::1]:9000` are different listeners.
     expect(webAppNamespace("http://127.0.0.1:9000")).not.toBe(
       webAppNamespace("http://[::1]:9000"),
     );
@@ -74,29 +48,17 @@ describe("webAppNamespace", () => {
 
 describe("serviceSocketPath", () => {
   it("names the socket inside the daemon's own home", () => {
-    // `{}`, not the ambient environment: what this pins is the DEFAULT placement
-    // (kolu's `~/.local/state/<app>`), and a machine or a test runner with
-    // `$ODU_STATE_DIR` set would otherwise be pinning something else.
     const path = serviceSocketPath(DEFAULT_SERVICE_ORIGIN, {});
     expect(path.endsWith(`${SERVICE_APP}.sock`)).toBe(true);
-    // …and that home is named by the namespace rule, which is the whole reason
-    // the daemon and a local client can derive the same path.
     expect(basename(dirname(path))).toBe(
       webAppNamespace(DEFAULT_SERVICE_ORIGIN),
     );
   });
 
   it("follows $ODU_STATE_DIR, which already holds the catalog and the cache", () => {
-    // A container has no writable $HOME for two files, and odu already has the
-    // explicit knob: one state directory for the catalog, the cache, the gate
-    // and the socket. kolu's home algebra takes this as a `socketOverride`,
-    // which puts the socket where it is told and the gate beside it.
     const env = { ODU_STATE_DIR: "/data/odu" };
     const path = serviceSocketPath(DEFAULT_SERVICE_ORIGIN, env);
     expect(path).toBe(join("/data/odu", SERVICE_APP, `${SERVICE_APP}.sock`));
-    // A non-default origin keeps its own namespace under the same directory,
-    // and a socket FILE name to match — one directory, two services, no path
-    // shared between them.
     const other = serviceSocketPath(UNUSED_ORIGIN, env);
     const namespace = webAppNamespace(UNUSED_ORIGIN);
     expect(other).toBe(join("/data/odu", namespace, `${namespace}.sock`));
@@ -104,9 +66,6 @@ describe("serviceSocketPath", () => {
   });
 
   it("ignores $XDG_STATE_HOME, which is kolu's rule and not ours to break", () => {
-    // `$XDG_STATE_HOME` moves with the launch context; a home that moves is a
-    // daemon whose clients dial a path nobody bound. `$ODU_STATE_DIR` is the
-    // deliberate spelling of "move it", and it is the only one honoured.
     const withXdg = serviceSocketPath(DEFAULT_SERVICE_ORIGIN, {
       XDG_STATE_HOME: "/tmp/xdg-state",
       HOME: "/home/someone",
@@ -116,18 +75,12 @@ describe("serviceSocketPath", () => {
   });
 
   it("treats an empty $ODU_STATE_DIR as unset", () => {
-    // A blank variable is the same absence as no variable at all; reading it as
-    // a directory would put the socket at `/odu-web/…` relative to the cwd.
     expect(serviceSocketPath(DEFAULT_SERVICE_ORIGIN, { ODU_STATE_DIR: "  " })).toBe(
       serviceSocketPath(DEFAULT_SERVICE_ORIGIN, {}),
     );
   });
 
   it("creates nothing — asking where a daemon is must not make its home", () => {
-    // The purity claim: `daemonHome` (what the LAUNCHER uses) makes and verifies
-    // the directory; a client that only wants to dial must not. A client that
-    // created the home would be the second thing in the tree that decides a
-    // daemon exists.
     const path = serviceSocketPath(UNUSED_ORIGIN, {});
     expect(existsSync(dirname(path))).toBe(false);
   });
@@ -135,7 +88,6 @@ describe("serviceSocketPath", () => {
 
 describe("dialServiceSocket", () => {
   it("answers absent for a path nothing is bound to", async () => {
-    // The ordinary state of a machine that has never run `odu web`.
     expect(await dialServiceSocket(UNUSED_ORIGIN)).toEqual({
       kind: "absent",
       socketPath: serviceSocketPath(UNUSED_ORIGIN),
@@ -154,10 +106,6 @@ describe("dialServiceSocket", () => {
   });
 
   it("raises anything else, so a live socket never reads as no service", async () => {
-    // EACCES on a socket somebody IS serving, and a rejection with no `code` —
-    // the shape a connect that succeeded and then failed to speak the wire has.
-    // Reporting either as absence is the bug this narrowing exists to prevent:
-    // the face would say odu is not installed about a daemon that is up.
     for (const code of ["EACCES", "ENOTSOCK", undefined]) {
       await expect(
         withFailingConnect(code, () => dialServiceSocket(UNUSED_ORIGIN)),
@@ -167,17 +115,12 @@ describe("dialServiceSocket", () => {
   });
 
   it("refuses a daemon that accepts the socket and never publishes its cell", async () => {
-    // The wedge: `connect(2)` succeeds, so this is not absence, and nothing is
-    // ever written back, so the handshake has nothing to read. Unbounded, the
-    // dial's three-way answer simply never arrives (juspay/odu#113) — the
-    // caller waits on a promise nothing will settle.
     const home = mkdtempSync(join(tmpdir(), "odu-socket-test-"));
     const realHome = process.env.HOME;
     process.env.HOME = home;
     const socketPath = serviceSocketPath(UNUSED_ORIGIN);
     mkdirSync(dirname(socketPath), { recursive: true });
     const server = createServer(() => {
-      /* accept, and say nothing at all */
     });
     await new Promise<void>((resolve) => server.listen(socketPath, resolve));
     try {

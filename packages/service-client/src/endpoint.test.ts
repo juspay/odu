@@ -1,13 +1,3 @@
-/**
- * WHERE the service is — derived once, and identically by every face.
- *
- * The whole value of this module is that the browser, the CLI and the MCP
- * bridge compute the same address. So these tests are about the derivations
- * agreeing, and about the one shape that would silently break the listener: a
- * trailing slash, which `serveSurfaceApp` compares its websocket path for
- * EQUALITY against and would destroy the socket over.
- */
-
 import { describe, expect, it } from "bun:test";
 import {
   DEFAULT_SERVICE_ORIGIN,
@@ -35,8 +25,6 @@ describe("the service origin", () => {
   });
 
   it("trims a trailing slash, which the listener would otherwise refuse", () => {
-    // `serveSurfaceApp` compares `pathname` for EQUALITY, so a hand-typed
-    // trailing slash produces `//rpc/ws` and the upgrade is destroyed.
     expect(serviceWsUrl("http://127.0.0.1:18440/")).toBe(
       `ws://127.0.0.1:18440${SERVICE_WS_PATH}`,
     );
@@ -52,8 +40,6 @@ describe("derivations from an origin", () => {
       host: "127.0.0.1",
       port: 18440,
     });
-    // `hostname`, not `host`: an IPv6 literal arrives bracketed and `listen`
-    // wants the bare address.
     expect(serviceBind("http://[::1]:18440")).toEqual({ host: "::1", port: 18440 });
   });
 
@@ -92,9 +78,6 @@ describe("the origin a bucket is published under", () => {
   });
 
   it("refuses a path, a query or a fragment instead of rewriting it", () => {
-    // odu appends `/cache/<bucket>` to whatever this is. A path here would be
-    // concatenated into a URL the operator never asked for, and the failure it
-    // causes — a substituter that 404s for every client — names nothing.
     for (const value of [
       "https://cache.example.com/nix",
       "https://cache.example.com?x=1",

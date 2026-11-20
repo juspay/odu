@@ -1,10 +1,3 @@
-/**
- * ADMISSION PER ROW — `admitService` judges the host's contract and then only
- * the rows a client NEEDS. These tests pin the four answers it gives (adopt, a
- * host refusal, a row refusal, an absent row) and the reading of a daemon from
- * before 2.5, which publishes no `rows`.
- */
-
 import { describe, expect, it } from "bun:test";
 import {
   admitService,
@@ -32,7 +25,6 @@ function daemon(protocolVersion: string, rows?: Record<string, string>): Service
   };
 }
 
-/** A daemon whose cache has moved a major past the runs. */
 const MOVED = daemon(HOST_CONTRACT_VERSION, { [CI_ROW]: CI_CONTRACT_VERSION, other: "3.0" });
 
 describe("admitService, per row", () => {
@@ -74,7 +66,6 @@ describe("admitService, per row", () => {
   });
 
   it("reads a daemon from before 2.5 as speaking its one number for every row", () => {
-    // The composed-wire era: `protocolVersion` covered every row at once.
     expect(admitService(daemon("2.4"), WHERE, CI_NEEDS).kind).toBe("adopt");
     expect(admitService(daemon("2.4"), WHERE, { other: requires("3.0") })).toMatchObject({
       kind: "refuse",

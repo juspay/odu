@@ -1,73 +1,24 @@
-/**
- * WHERE the odu service is, and what it is called there.
- *
- * One fixed default origin, and one env var that moves it. Both halves are
- * here rather than at the three faces that need them, because "the browser and
- * the CLI and the MCP bridge all talk to the same service" is a claim that is
- * only true if they compute the same address — and three copies of a port
- * number is exactly how it stops being true.
- *
- * The port is FIXED and not searched for. A service that fell back to "any
- * free port" would answer the concurrency question by making the address
- * unfindable: a second launcher would bind a second port, both would claim to
- * be the odu service, and a browser tab pointed at the first would be watching
- * a daemon nobody else can reach. The singleton is the point, and a singleton
- * with a variable address is not one. So a fixed port occupied by something
- * that is NOT an odu service is an actionable refusal, never a quiet
- * relocation.
- */
-
 /** The one address `odu web` prints and every face defaults to. 18440 is
  *  outside the ephemeral range on Linux and macOS, so the kernel will not hand
  *  it to an unrelated program's outbound socket while odu is down. */
 export const DEFAULT_SERVICE_ORIGIN = "http://127.0.0.1:18440";
 
-/** The env var that moves the whole service — the daemon binds it and every
- *  face dials it, so a developer running a second odu against a scratch
- *  catalog moves both halves with one export. */
 export const SERVICE_ORIGIN_ENV = "ODU_WEB_ORIGIN";
 
-/** The app namespace the per-user daemon home is derived from. `web`, not
- *  `odu`: the run catalog already owns `odu` under the state root, and a
- *  daemon home is a different thing living beside it (a gate and a control
- *  socket) rather than a second opinion about where runs go. */
 export const SERVICE_APP = "odu-web";
 
-/** The framework's websocket route. Re-exported so a face spells one import
- *  rather than reaching into `@kolu/surface-app` for a constant — the browser
- *  gets it from `connectSurface`'s own default, and this is for the CLI and
- *  the bridge, which have no `location` to derive one from. */
 export const SERVICE_WS_PATH = "/rpc/ws";
 
-/** Where MCP-over-HTTP answers. */
 export const SERVICE_MCP_PATH = "/mcp";
 
-/**
- * Drop trailing slashes from an origin.
- *
- * A LOOP rather than `replace(/\/+$/, "")`. The regex is correct but its cost
- * is quadratic in a string of slashes: the engine restarts the `\/+$` match at
- * every position, so `"/".repeat(100_000)` is a hundred million steps. The
- * origin comes from an environment variable and from callers, which is close
- * enough to untrusted for the shape to matter — and a backwards walk is both
- * linear and easier to read than the regex it replaces.
- */
+/** Drop trailing slashes from an origin. */
 function withoutTrailingSlashes(origin: string): string {
   let end = origin.length;
-  while (end > 0 && origin.charCodeAt(end - 1) === 47 /* "/" */) end -= 1;
+  while (end > 0 && origin.charCodeAt(end - 1) === 47) end -= 1;
   return origin.slice(0, end);
 }
 
-/**
- * THE ORIGIN THE ENVIRONMENT NAMES, or `undefined` when it names none.
- *
- * Split out of {@link serviceOrigin} because two callers want opposite halves
- * of one rule: most want "where do I dial", which is this or the default;
- * `odu ci run --checkout` wants "did anybody SAY where", which is this and the
- * absence. Spelling the trim-and-empty test twice would let
- * `ODU_WEB_ORIGIN="  "` mean "unset" to one of them and "named" to the other,
- * and the second reader is the one deciding whether to refuse.
- */
+/** THE ORIGIN THE ENVIRONMENT NAMES, or `undefined` when it names none. */
 export function namedOrigin(
   env: Record<string, string | undefined> = process.env,
 ): string | undefined {
@@ -85,7 +36,7 @@ export function serviceOrigin(
 }
 
 /** The env var naming the address a BUCKET is reachable at from outside, when
- *  that is not the address this process binds — a proxy, in other words. */
+ *  that is not the address this process binds. */
 export const PUBLIC_ORIGIN_ENV = "ODU_PUBLIC_ORIGIN";
 
 /** What `$ODU_PUBLIC_ORIGIN` came to: absent, an origin, or the reason it is
@@ -98,11 +49,8 @@ export type PublicOriginReading =
  * The origin a bucket's substituter URL is published under, or the reason the
  * setting is unusable.
  *
- * It is an ORIGIN and nothing else: `<scheme>://<host>[:port]`. A path here
- * would be concatenated into `<origin>/cache/<bucket>` and silently mean
- * something else than the operator wrote — the one kind of mistake a person
- * cannot see by reading their own config — so a path, a query or a fragment is
- * a refusal with a sentence rather than a rewrite.
+ * It is an ORIGIN and nothing else: `<scheme>://<host>[:port]`; a path, a
+ * query or a fragment is a refusal rather than a rewrite.
  */
 export function readPublicOrigin(
   env: Record<string, string | undefined> = process.env,
@@ -132,25 +80,16 @@ export function readPublicOrigin(
   return { ok: true, origin: `${url.protocol}//${url.host}` };
 }
 
-/** The host and port a listener binds, parsed out of an origin. Returned as a
- *  pair rather than as a URL because `server.listen` takes two arguments and a
- *  caller that re-parsed the string would be the second parser of one fact. */
+/** The host and port a listener binds, parsed out of an origin. */
 export function serviceBind(origin: string): { host: string; port: number } {
   const url = new URL(origin);
   const port = url.port === "" ? (url.protocol === "https:" ? 443 : 80) : Number(url.port);
-  // `hostname` rather than `host`, because the latter carries the port. And the
-  // BRACKETS come off: a URL keeps an IPv6 literal bracketed (`[::1]`) because
-  // that is how a URL disambiguates it from a port separator, while
-  // `server.listen` wants the address itself. Handing `listen` the bracketed
-  // form is an `EINVAL` at bind time, on the one address family a developer is
-  // least likely to be testing.
   const host = url.hostname.startsWith("[") && url.hostname.endsWith("]")
     ? url.hostname.slice(1, -1)
     : url.hostname;
   return { host, port };
 }
 
-/** The websocket URL a non-browser face dials. */
 export function serviceWsUrl(origin: string): string {
   const url = new URL(origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -160,7 +99,6 @@ export function serviceWsUrl(origin: string): string {
   return url.toString();
 }
 
-/** The MCP endpoint an HTTP agent posts to. */
 export function serviceMcpUrl(origin: string): string {
   return `${withoutTrailingSlashes(origin)}${SERVICE_MCP_PATH}`;
 }

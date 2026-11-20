@@ -1,36 +1,3 @@
-/**
- * The board's readings, as readings — the words and the folds every face shares.
- *
- * Four claims are worth executing here rather than asserting in a docstring.
- *
- * The first is `runStatus`'s PRECEDENCE: a run that was cancelled or whose
- * coordinator was interrupted settles `passed: false` with `outcome:
- * "incomplete"`, and a face that read the state first would call it `failed` and
- * send somebody looking for a test that broke.
- *
- * The second is that a scope is what a run COVERED. A selection is not a
- * pipeline: `selectors: ["ci::unit"]` is one recipe and its dependencies, so the
- * handful of lanes behind it says nothing about the rest of the DAG. A qualifier
- * therefore has to be about the whole pipeline (nothing to say, `null`) or name
- * the selection — and the one reader that cannot say nothing is a board row,
- * where an empty cell would read as a run that tested nothing.
- *
- * The third is that a run's duration STOPS AT ITS VERDICT. Every face reads it
- * through `runElapsedMs`, and a settled row that counted against `now` would
- * report how long ago somebody last looked at the board.
- *
- * The fourth is the lane TIMELINE's geometry: a bar says where a lane sat in
- * its run, measured against the run's own elapsed — so a live run's track stays
- * full as it grows, and a lane that never started has no bar at all rather than
- * a sliver at the origin.
- *
- * The fifth is the PUSH's geometry, which is a second segment on the same bar
- * and was asserted nowhere until a review found the arm that matters — a push
- * in flight — drawing nothing at all. It hangs off the recipe's own span, so
- * every case is about what the recipe left behind it: room, no room, or no
- * recipe.
- */
-
 import { describe, expect, it } from "bun:test";
 import {
   boardTally,
@@ -49,9 +16,6 @@ import {
 } from "./board";
 import type { RunNode, RunRow } from "./surface";
 
-/** A row is the wire's own shape, so a reading is exercised against what a
- *  service actually sends rather than against a narrowed stand-in. Only the
- *  fields a reading touches carry meaning; the rest are the wire's defaults. */
 function row(over: Partial<RunRow> & Pick<RunRow, "runId">): RunRow {
   return {
     repo: null,
@@ -95,8 +59,6 @@ describe("what a run is called", () => {
   });
 
   it("does NOT call a torn-down run failed", () => {
-    // The precedence, in the one shape that makes it matter: the outcome wins
-    // over the settled state, so a cancelled run reads as what it is.
     expect(
       runStatus(row({ runId: "a", state: "settled", outcome: "incomplete" })),
     ).toEqual({ label: "incomplete", hue: "amber" });
@@ -104,7 +66,6 @@ describe("what a run is called", () => {
 });
 
 describe("a run's scope", () => {
-  /** A scope the way the wire carries one: the optional `--root` absent. */
   const scope = (
     over: Partial<RunRow["scope"]> = {},
   ): RunRow["scope"] => ({
@@ -138,9 +99,6 @@ describe("a run's scope", () => {
   });
 
   it("names a --root, which is a scoped run like any other", () => {
-    // A run rooted at a NAMEPATH expanded the DAG under it, so its lanes say
-    // nothing about the rest of the pipeline either — the same misreading a
-    // selection would cause, and the reason the qualifier reads `root` too.
     expect(scopeSuffix(scope({ root: "ci::install" }))).toBe(
       "under ci::install",
     );
@@ -150,18 +108,11 @@ describe("a run's scope", () => {
   });
 
   it("a board row never renders an empty scope cell", () => {
-    // The row has nothing else to say about what the run covered, so an empty
-    // selector is the WHOLE pipeline and says so — "" would read as a run that
-    // tested nothing.
     expect(scopeLabel(scope())).toBe("whole pipeline");
-    // And it leads with that even when the rest of the scope is named, which is
-    // where the row and the qualifier deliberately differ.
     expect(scopeLabel(scope({ platforms: ["x86_64-linux"] }))).toBe(
       "whole pipeline · x86_64-linux",
     );
     expect(scopeLabel(scope({ noDeps: true }))).toBe("whole pipeline · no deps");
-    // A `--root` narrows what RAN, so the cell names the root alone — this is
-    // not a whole-pipeline run with a qualifier, it is a run of a subgraph.
     expect(scopeLabel(scope({ root: "ci::install" }))).toBe(
       "under ci::install",
     );
@@ -188,9 +139,6 @@ describe("the board, narrowed", () => {
       row({ runId: "a", createdAt: 5 }),
       row({ runId: "c", createdAt: 9 }),
     ];
-    // The tie runs the catalog's way — later id first — so a board and the
-    // catalog under it never disagree about which of two same-millisecond runs
-    // comes first.
     expect(newestFirst(rows).map((r) => r.runId)).toEqual(["c", "b", "a"]);
   });
 
@@ -204,9 +152,6 @@ describe("the board, narrowed", () => {
   });
 
   it("counts the board's two buckets off the run each checkout stands for", () => {
-    // What the board SHOWS is what the summary counts: it is handed the runs
-    // the checkouts stand for, so an older failing run of a checkout that is
-    // green now cannot reach it.
     const tally = boardTally([
       row({ runId: "new-ok", createdAt: 2 }),
       row({
@@ -234,9 +179,6 @@ describe("how long a run took", () => {
   it("stops at the verdict, so a settled row says the same number forever", () => {
     const settled = row({ runId: "a", createdAt: 1_000, finishedAt: 61_000 });
     expect(runElapsedMs(settled, 61_000)).toBe(60_000);
-    // A week later, the same answer. This is the whole reason the finish
-    // instant rides the row: a duration read against `now` would tell a reader
-    // how long ago they last looked.
     expect(runElapsedMs(settled, 61_000 + 7 * 86_400_000)).toBe(60_000);
   });
 
@@ -247,8 +189,6 @@ describe("how long a run took", () => {
   });
 
   it("floors at zero when a lane host's clock ran behind the registrar's", () => {
-    // A verdict stamped before the run was registered is clock skew, not a
-    // negative duration — and a negative duration is not a fact about anything.
     expect(runElapsedMs(row({ runId: "a", createdAt: 5_000, finishedAt: 4_000 }), 9_000))
       .toBe(0);
   });
@@ -262,14 +202,11 @@ describe("how long a run took", () => {
 });
 
 describe("where a lane sat in its run", () => {
-  /** A ten-minute run, settled — the fixture every span below is read against,
-   *  so a fraction in an assertion is legible as a clock time. */
   const run = row({
     runId: "a",
     createdAt: 1_000_000,
     finishedAt: 1_000_000 + 600_000,
   });
-  /** A node as the wire sends one, narrowed to what the geometry reads. */
   const lane = (
     status: RunNode["status"],
     startedAt: number | null,
@@ -281,7 +218,6 @@ describe("where a lane sat in its run", () => {
   });
 
   it("places a settled lane by WHERE it ran, not just how long", () => {
-    // Started two minutes in, took three: a fifth across, three tenths wide.
     expect(laneSpan(lane("ok", 1_120_000, 180_000), run, 9e15)).toEqual({
       kind: "settled",
       left: 0.2,
@@ -289,15 +225,12 @@ describe("where a lane sat in its run", () => {
       startedAfterMs: 120_000,
       tookMs: 180_000,
     });
-    // Same LENGTH, later start — the whole point of a Gantt over a bar chart.
     expect(laneSpan(lane("ok", 1_300_000, 180_000), run, 9e15)?.left).toBe(0.5);
   });
 
   it("grows a running lane against the clock, inside a track that grows too", () => {
     const live = row({ runId: "a", createdAt: 1_000_000, finishedAt: null });
     const going = lane("running", 1_060_000, null);
-    // Two minutes in: the lane has been going for one of them, and the track
-    // is two minutes long — so it occupies the second half of the run.
     expect(laneSpan(going, live, 1_120_000)).toEqual({
       kind: "running",
       left: 0.5,
@@ -305,32 +238,20 @@ describe("where a lane sat in its run", () => {
       startedAfterMs: 60_000,
       tookMs: 60_000,
     });
-    // Four minutes in, the same lane still going: it started a quarter of the
-    // way through what the run has now become.
     expect(laneSpan(going, live, 1_240_000)?.left).toBe(0.25);
   });
 
   it("says NOTHING about a lane that has not started", () => {
-    // Not a zero-width bar at the origin: a lane waiting for a machine has no
-    // place on the timeline, and an empty track is the signal.
     expect(laneSpan(lane("pending", null, null), run, 9e15)).toBeNull();
   });
 
   it("says NOTHING about a lane that stopped without ever running", () => {
-    // `skipped` (a dependency failed) and a lane torn down in provisioning both
-    // carry a start and no duration. Reading "still arriving" off that null
-    // drew a nine-minute bar — the longest on the page, the apparent critical
-    // path — beside the row's own empty duration cell.
     for (const status of ["skipped", "cancelled", "errored", "failed"] as const) {
       expect(laneSpan(lane(status, 1_060_000, null), run, 9e15)).toBeNull();
     }
   });
 
   it("settles a finished run's open lane at the VERDICT, and stops calling it live", () => {
-    // A torn journal leaves a lane reading `running` inside a run that has
-    // finished. The scale stopped at the verdict, so a width measured against
-    // `now` would widen the picture of a settled run for ever — and a hatch
-    // would tell a reader work is still arriving on a run that is over.
     const open = laneSpan(lane("running", 1_060_000, null), run, 9e15);
     expect(open).toEqual({
       kind: "settled",
@@ -339,20 +260,12 @@ describe("where a lane sat in its run", () => {
       startedAfterMs: 60_000,
       tookMs: 540_000,
     });
-    // …and it is the same answer a week later, like every other settled fact.
     expect(laneSpan(lane("running", 1_060_000, null), run, 9e15 + 7 * 86_400_000))
       .toEqual(open);
-    // The end is the run's VERDICT and not the reader's clock, which only a
-    // clock BEHIND the verdict can tell apart: a browser two minutes behind the
-    // registrar would otherwise draw this lane an eighth of its real length.
     expect(laneSpan(lane("running", 1_060_000, null), run, 1_120_000)).toEqual(open);
   });
 
   it("clamps a skewed lane host into the track, ms and fractions alike", () => {
-    // A box whose clock is behind the registrar's reports a start before the
-    // run began. That is skew, not a negative offset — and the ms a tooltip
-    // spells are clamped with the fraction the bar is drawn at, so the two
-    // cannot tell different stories.
     expect(laneSpan(lane("ok", 900_000, 60_000), run, 9e15)).toEqual({
       kind: "settled",
       left: 0,
@@ -360,15 +273,9 @@ describe("where a lane sat in its run", () => {
       startedAfterMs: 0,
       tookMs: 60_000,
     });
-    // One that overruns the run's own end stops AT the edge rather than
-    // painting past it.
     const over = laneSpan(lane("ok", 1_540_000, 600_000), run, 9e15);
     expect(over?.left).toBe(0.9);
     expect((over?.left ?? 0) + (over?.width ?? 0)).toBeCloseTo(1, 10);
-    // And a start past the end lands at the END, not swept back to the origin:
-    // a bar at `left: 0` would say the work began with the run. Clamping in MS
-    // is what makes that true even of an offset that would divide to
-    // `Infinity` — the arithmetic never reaches the division.
     expect(laneSpan(lane("ok", 9e15, 1_000), run, 9e15)).toEqual({
       kind: "settled",
       left: 1,
@@ -376,8 +283,6 @@ describe("where a lane sat in its run", () => {
       startedAfterMs: 600_000,
       tookMs: 0,
     });
-    // TOTAL over every number on the wire: an instant no arithmetic can
-    // subtract must not reach a style attribute as `width: NaN%`.
     expect(
       laneSpan(lane("ok", Number.POSITIVE_INFINITY, 1_000), run, 9e15),
     ).toEqual({
@@ -390,8 +295,6 @@ describe("where a lane sat in its run", () => {
   });
 
   it("answers zero rather than NaN for a run with no elapsed time yet", () => {
-    // The ONE place a zero-length track is answered is the division; there is
-    // no second guard upstream to mask it.
     const instant = row({ runId: "a", createdAt: 5_000, finishedAt: 5_000 });
     expect(laneSpan(lane("ok", 5_000, 0), instant, 5_000)).toEqual({
       kind: "settled",
@@ -403,17 +306,12 @@ describe("where a lane sat in its run", () => {
   });
 
   it("marks the axis against the RUN, in whole milliseconds", () => {
-    // The same pair `laneSpan` takes, so an axis cannot be drawn against a
-    // scale no bar on the page was measured with. POSITIONS and numbers, no
-    // strings: how a face spells a duration is its own vocabulary.
     expect(timelineTicks(run, 9e15)).toEqual([
       { at: 0, ms: 0 },
       { at: 1 / 3, ms: 200_000 },
       { at: 2 / 3, ms: 400_000 },
       { at: 1, ms: 600_000 },
     ]);
-    // A live run's axis grows with it — and lands on whole milliseconds, so a
-    // short run's ticks are not `833.3333333333334ms`.
     const live = row({ runId: "a", createdAt: 1_000, finishedAt: null });
     expect(timelineTicks(live, 3_500).map((tick) => tick.ms)).toEqual([
       0, 833, 1_667, 2_500,
@@ -422,17 +320,11 @@ describe("where a lane sat in its run", () => {
 });
 
 describe("where a node's PUSH sat in its run", () => {
-  /** The same ten-minute settled run the lane spans are read against, so a
-   *  fraction here is legible as a clock time and the two segments can be
-   *  compared against one scale. */
   const run = row({
     runId: "a",
     createdAt: 1_000_000,
     finishedAt: 1_000_000 + 600_000,
   });
-  /** A node as the wire sends one, narrowed to the four fields the geometry
-   *  reads. `push` absent is a node that pushed nothing, which is most of
-   *  them. */
   const node = (
     over: Partial<Pick<RunNode, "status" | "startedAt" | "durationMs" | "push">>,
   ): Pick<RunNode, "status" | "startedAt" | "durationMs" | "push"> => ({
@@ -443,17 +335,10 @@ describe("where a node's PUSH sat in its run", () => {
   });
 
   it("says NOTHING about a node that pushed nothing", () => {
-    // Not a zero-width segment at the end of the recipe's bar: most nodes
-    // push nothing (no `result`, or a run with no cache target) and a step
-    // they never had must not be drawn at all.
     expect(pushSpan(node({}), run, 9e15)).toBeNull();
   });
 
   it("starts a settled push exactly where the recipe's bar ENDS", () => {
-    // The push begins when the recipe exits 0 — that is the whole reason it
-    // has no `startedAt` of its own on the wire — so the two segments are
-    // adjacent to the pixel, by construction rather than by a face's
-    // arithmetic.
     const recipe = laneSpan(node({}), run, 9e15);
     const push = pushSpan(
       node({ push: { state: "pushed", stored: 4, present: 0, bytes: 2_097_152, durationMs: 60_000 } }),
@@ -471,9 +356,6 @@ describe("where a node's PUSH sat in its run", () => {
   });
 
   it("draws a FAILED push as its own settled segment, not as a gap", () => {
-    // A failed push is a step that happened and took time. The recipe's
-    // segment stays green beside it — which half failed is the thing a bare
-    // red node cannot say.
     expect(
       pushSpan(
         node({ status: "failed", push: { state: "failed", message: "413 too large", durationMs: 30_000 } }),
@@ -490,12 +372,6 @@ describe("where a node's PUSH sat in its run", () => {
   });
 
   it("runs a push IN FLIGHT to the end of a live track, hatched", () => {
-    // THE CASE THE STEP EXISTS FOR, and the one that did not draw: while the
-    // closure goes up the node is still `running`, and the recipe's own
-    // duration — published with the `pushing` state, a fact since the child
-    // exited — is what gives the recipe's bar an end and the push the rest of
-    // the track. `kind: "running"` is the hatch: a push still sending has no
-    // end to draw, and a zero-width one would say it had already finished.
     const live = row({ runId: "a", createdAt: 1_000_000, finishedAt: null });
     const uploading = node({
       status: "running",
@@ -517,8 +393,6 @@ describe("where a node's PUSH sat in its run", () => {
       startedAfterMs: 180_000,
       tookMs: 60_000,
     });
-    // And it GROWS with the track, like every live bar: two minutes later the
-    // run is six minutes long and the upload owns the last four of them.
     expect(pushSpan(uploading, live, 1_360_000)).toEqual({
       kind: "running",
       left: 0.5,
@@ -529,11 +403,6 @@ describe("where a node's PUSH sat in its run", () => {
   });
 
   it("says NOTHING when the recipe has not published its duration yet", () => {
-    // The degenerate case: a recipe with no duration reads as still running,
-    // its bar fills the track, and there is no room left for a push. A
-    // zero-width segment at `left: 1` is not a smaller truth about the
-    // upload — it is a bar claiming the push began when the run ended and
-    // took no time — so the honest answer is no segment.
     const live = row({ runId: "a", createdAt: 1_000_000, finishedAt: null });
     expect(
       pushSpan(
@@ -550,9 +419,6 @@ describe("where a node's PUSH sat in its run", () => {
   });
 
   it("clamps a push that outran its own run into the track", () => {
-    // A duration that reaches past the run's end paints to the edge rather
-    // than past it — the same clamp the recipe's bar takes, against the room
-    // the recipe left rather than against the whole scale.
     const over = pushSpan(
       node({ push: { state: "pushed", stored: 1, present: 0, bytes: 10, durationMs: 9_000_000 } }),
       run,

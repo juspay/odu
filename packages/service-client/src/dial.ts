@@ -1,28 +1,3 @@
-/**
- * Dialling the service from OUTSIDE a browser — the generated CLI and the stdio
- * MCP bridge.
- *
- * A browser gets `connectSurface` from `@kolu/surface-app/solid`, which bundles
- * the socket, the link, the client and the liveness watchdog into one call and
- * derives the URL from the page's own origin. Nothing here duplicates that.
- * What a CLI and a bridge need is the SAME websocket route with none of the
- * page machinery: they dial once, do one thing, and exit (or, for the bridge,
- * hold one connection open for its host's lifetime).
- *
- * **The same route, deliberately.** This is not a second door with its own
- * protocol: `serviceWsUrl` is the framework's `/rpc/ws`, and the group is the
- * surface's own, so a frame this connection sends is byte-identical to one the
- * browser sends. The acceptance gate that says a start looks the same through
- * every face is only meetable if there is one wire under all of them.
- *
- * `WebSocket` is read off `globalThis` rather than imported. Node has had a
- * global `WebSocket` since 22, which is the floor odu already runs on (bun's
- * is likewise global), so an import of `ws` here would put a second websocket
- * implementation in the closure of every face — for a constructor the runtime
- * already has. A runtime without one is told so in a sentence rather than
- * failing as `undefined is not a constructor` inside the link.
- */
-
 import { unenrolledStreamCall } from "@kolu/surface/client";
 import { firstFrameOrThrow } from "@kolu/surface/first-frame";
 import type { SurfaceDispatch } from "@kolu/surface/link";
@@ -43,22 +18,13 @@ import {
  *  exits. */
 export interface ServiceConnection {
   client: OduServiceClient;
-  /** The transport-neutral dispatch under {@link ServiceConnection.client}.
-   *
-   *  Exposed because a face may need a DIFFERENTLY-TYPED view of the same
-   *  connection: `@kolu/surface-cli` holds its client opaquely (leaves typed as
-   *  callable) while everything else here wants the spec-precise face, and both
-   *  are `buildSurfaceFace` over this one dispatch. Handing back the dispatch is
-   *  what stops a consumer casting its way from one face to the other. */
+  /** The transport-neutral dispatch under {@link ServiceConnection.client}. */
   dispatch: SurfaceDispatch;
   /** The URL that was dialled, for an error message that has to name it. */
   url: string;
   /**
    * Subscribe to this connection's transport LEAVING `open` — a daemon that
-   * died, was upgraded, or dropped the socket. The MCP adapter's redial is
-   * built on exactly this announcement (`OwnedSurfaceConnection.onClose`):
-   * without it the adapter keeps handing out a connection that is already
-   * dead, and every later call fails on it forever. The link RECONNECTS on its
+   * died, was upgraded, or dropped the socket. The link RECONNECTS on its
    * own, and that is the face's business — the announcement says only that
    * what this connection WAS is gone.
    */
@@ -66,7 +32,6 @@ export interface ServiceConnection {
   dispose: () => Promise<void>;
 }
 
-/** The runtime's websocket constructor, or a sentence saying there is none. */
 function webSocketCtor(): typeof WebSocket {
   const ctor = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
   if (ctor === undefined) {
@@ -78,11 +43,6 @@ function webSocketCtor(): typeof WebSocket {
   return ctor;
 }
 
-/** The constructor as the platforms odu runs on spell it. Bun's and Node's
- *  `WebSocket` both accept an options object carrying `headers` on the upgrade;
- *  the DOM typing has no place for it because a browser page cannot set one.
- *  odu only ever dials from a process, so this is the ONE cast on that seam —
- *  named, with its reason, rather than repeated at a call site. */
 type UpgradeableWebSocket = new (
   url: string,
   options: { headers: Record<string, string> },
@@ -101,17 +61,7 @@ function withHeaders(
  * How long a dial waits for the socket to actually open before reporting that
  * nothing is serving.
  *
- * A websocket link is RESILIENT by construction: it re-dials, and it is right
- * to, because a browser tab must survive a server restart. A one-shot CLI is
- * the opposite case — it dials, does one thing and exits — and a link that
- * quietly retried forever would turn "odu web is not running" from an exit code
- * into a hang, which is the single most confusing thing a command-line tool can
- * do. So the FIRST open is bounded here and every subsequent re-dial is not.
- *
- * Three seconds because this is loopback: a service that is up answers in
- * microseconds, and a service that is starting is being waited for by
- * `odu web`, which has its own much longer readiness deadline and a cell to
- * read rather than a socket to guess at.
+ * The FIRST open is bounded here and every subsequent re-dial is not.
  */
 export const DIAL_READY_MS = 3_000;
 
@@ -119,9 +69,7 @@ export const DIAL_READY_MS = 3_000;
  * Dial the service.
  *
  * Rejects when nothing is serving, and the rejection is what a face turns into
- * its own "nothing serving" exit. It does NOT start the service: bootstrapping
- * is `odu web`'s job and only `odu web`'s, because a face that silently spawned
- * a daemon would make every mistyped `--origin` a reason to start a second one.
+ * its own "nothing serving" exit.
  */
 export async function dialService(
   origin: string = serviceOrigin(),
@@ -129,26 +77,14 @@ export async function dialService(
     readyMs?: number;
     /**
      * THE TAGS THIS FACE WILL ADDRESS — the composed wire, when the daemon
-     * serves more than one row.
-     *
-     * A link encodes each request from the `Rpc` it looks up by tag, so a
-     * client that addressed a SIBLING's member through a link built from the
-     * core's group alone would find no descriptor for it. This package cannot
-     * compose that group itself — the siblings' contracts belong to their own
-     * packages, and this one is browser-safe and knows only the core — so the
-     * composition root hands it in. Absent means "the core and nothing else",
+     * serves more than one row. Absent means "the core and nothing else",
      * which is what a single-surface client is.
      */
     group?: typeof oduServiceSurface.group;
     /**
      * REQUEST HEADERS THE UPGRADE CARRIES — `Authorization: Bearer <token>`
-     * when this machine (or `$ODU_TOKEN`) holds one for that origin.
-     *
-     * The websocket is the only door a CLI has, and the daemon reads the
-     * credential off the UPGRADE rather than off any frame: a per-request header
-     * has no place in the socket protocol, so it is presented once, when the
-     * connection is made. Absent means "no credential", which is loopback and is
-     * unconditional there.
+     * when this machine (or `$ODU_TOKEN`) holds one for that origin. Absent
+     * means "no credential", which is loopback and is unconditional there.
      */
     headers?: Record<string, string>;
   } = {},
@@ -158,22 +94,12 @@ export async function dialService(
   const headers = opts.headers ?? {};
   const link = await websocketLink({
     group: opts.group ?? oduServiceSurface.group,
-    // A thunk, re-evaluated on every re-dial. The address does not move under
-    // this process, but the link's contract is that it asks each time, and a
-    // constant that pretended otherwise would be the one place a future
-    // per-connection query string could not be added.
     url: () => url,
-    // The server closes a socket bound to a PREVIOUS process with this code.
-    // Terminal by construction: re-dialling would present the same stale
-    // handshake and be closed again, forever.
     isTerminalClose: (code) => code === STALE_PROCESS_CLOSE_CODE,
     connect: (target) => withHeaders(ctor, target, headers),
   });
   const opened = await firstOpen(link, opts.readyMs ?? DIAL_READY_MS);
   if (!opened) {
-    // Disposed rather than left retrying: the link owns dial, ping and response
-    // fibers, and a caller about to report "nothing is serving" must not leave
-    // a background reconnect loop behind it.
     await link.dispose();
     throw new Error(`odu: nothing is serving ${url} — run \`odu web --background\``);
   }
@@ -183,17 +109,12 @@ export async function dialService(
     url,
     onClose: (cb) =>
       link.wire.onStatus((status) => {
-        // `connecting` is a RE-dial in progress, not a loss: the link owns the
-        // retry, and announcing it would make every redial look like a death.
         if (status === "closed" || status === "retired") cb();
       }),
     dispose: () => link.dispose(),
   };
 }
 
-/** Wait for the wire's FIRST open, bounded. `true` the moment it opens, `false`
- *  at the deadline; a wire that is already open answers immediately without
- *  going near a timer. */
 function firstOpen(
   link: { wire: { status: () => string; onStatus: (cb: (s: string) => void) => () => void } },
   deadlineMs: number,
@@ -208,23 +129,12 @@ function firstOpen(
     const timer = setTimeout(() => settle(false), deadlineMs);
     const off = link.wire.onStatus((status) => {
       if (status === "open") settle(true);
-      // `retired` is terminal — the server will not talk to this socket ever
-      // again — so there is nothing to wait for and saying so now beats
-      // burning the whole deadline on it.
       if (status === "retired") settle(false);
     });
   });
 }
 
-/**
- * The service's own account of itself, read once.
- *
- * A cell opens with a snapshot, so the first frame IS the read — and
- * `firstFrameOrThrow` treats an empty stream as a link failure rather than as a
- * silent empty, which is the difference between "the service says it is not
- * ready" and "there is no service". Used by `odu web` to verify readiness
- * before it prints a URL a person is about to open.
- */
+/** The service's own account of itself, read once. */
 export function readServiceCell(
   client: OduServiceClient,
 ): Effect.Effect<ServiceCell, unknown> {

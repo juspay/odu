@@ -1,76 +1,4 @@
 /**
- * `@odu/service-client/surface` — `oduServiceSurface`, the typed contract the
- * singleton odu web service serves on `http://127.0.0.1:18440`, and the whole
- * vocabulary its three faces speak.
- *
- * The coordinator's own surface (`@odu/run-client/surface`) is about ONE run:
- * it is served on a checkout's `.ci/odu.sock`, it exists only while that run
- * does, and everything it says is about the pipeline in front of it. This
- * surface is about EVERY run — the ones still going, the ones that finished
- * last week, the ones started from a checkout that has since been deleted —
- * because the question the web face exists to answer ("what is my CI doing,
- * across all my repositories") is not a question any one coordinator can be
- * asked.
- *
- *   service.cells.service      — who is serving, which build, and is it ready
- *   service.collections.runs   — the board: every registered run, one row each
- *   service.collections.logTails — one attempt's live tail, addressed by log key
- *   service.streams.nodes      — one run's DAG and environment: snapshot, then
- *                                updates
- *   service.streams.checkout   — one checkout, whole: the run it stands for,
- *                                that run's work, and what ran before
- *   service.run.start          — start a run, addressed by an explicit checkout
- *   service.run.wait           — bounded, resumable attention on one run
- *   service.run.read           — the same answer, without waiting
- *   service.run.list           — the board, filtered, in one call
- *   service.run.retry          — live attempt or linked replay; odu decides which
- *   service.run.cancel         — explicit run / node / lane scope
- *   service.log.read           — one attempt's bytes, by offset — and, with
- *                                `waitMs`, the follow
- *   service.catalog.import     — bring a checkout's legacy records in
- *   service.catalog.prune      — expire finished runs past the window
- *   service.pipeline.read      — the resolved DAG a checkout declares
- *   service.venue.probe        — the machines, and the holds on them
- *   service.venue.hold         — take a venue across runs
- *   service.venue.release      — drop one
- *   service.protect.apply      — required status checks on a branch
- *
- * **...and the cache's verbs are NOT here any more.** A bucket is a row of this
- * board, served by its own surface (`@odu/cache/surface`) beside this one, so
- * `cache_bucket_create` and its neighbours are the cache's verbs rather than
- * this contract's. The cut is the point: the cache owns its contract, its
- * refusals and its URLs, and this file stops spelling a bucket at all.
- *
- * **AND THE VERSION HERE COVERS ONLY THIS SURFACE.** {@link CI_CONTRACT_VERSION}
- * versions the runs; the cache, the door and the tunnel each version their own
- * surface beside it, and the host versions its own verbs and the admission
- * cell ({@link HOST_CONTRACT_VERSION}). One number for the whole composed wire
- * meant a change to the cache refused kolu, which reads nothing but the runs.
- *
- * **Every public command is one of these.** Not most of them: the inventory is
- * the contract. A capability odu offers a person that has no operation here
- * would be a capability the browser and an agent cannot reach, and — worse —
- * one whose implementation lives in whichever face happened to grow it. That
- * is not a hypothetical; it is where `odu ci status`, `odu ci hosts` and
- * `odu ci history import` each held an authority of their own, and each of them
- * held a DIFFERENT one.
- *
- * **Three faces, one contract.** The browser dials this over the framework's
- * websocket route; the generated CLI (`odu surface run_start …`) dials the same
- * route from a terminal; an agent reaches it as MCP tools and resources, over
- * Streamable HTTP at `/mcp` or over the `odu mcp` stdio bridge. None of them
- * carries domain logic: the procedures below ARE the vocabulary, and the
- * projections are derived from this spec by `@kolu/surface-cli` and
- * `@kolu/surface-mcp` rather than hand-written per face. That is why a verb
- * cannot mean one thing to an agent and another to a terminal.
- *
- * **Run keys are host-global.** Every address on this surface is a run id, or a
- * key built from one — never a path relative to whoever is calling. An MCP host
- * whose cwd is somebody's home directory must be able to name the same run the
- * browser is looking at, so nothing here is scoped to a working directory. The
- * one place a filesystem path appears is `run.start`'s `checkout`, where it is
- * the SUBJECT of the call rather than an implicit frame around it.
- *
  * The zod→Effect Schema laws this repo already keeps apply here verbatim:
  * `.optional()` is `Schema.optionalKey` (absent means ABSENT), never
  * `Schema.optional`, which would round-trip an explicit `undefined` through
@@ -93,26 +21,13 @@ import {
 import { RunScopeSchema } from "@odu/run-history/schema";
 import { Schema } from "effect";
 
-/** A node's status, re-exported from the live wire's own vocabulary.
- *
- *  RE-EXPORTED rather than re-declared, and reachable from here rather than
- *  from `@odu/run-client`, so a consumer of this surface — the browser, a
- *  generated face — imports ONE contract module. The values are the coordinator
- *  surface's: a node means the same seven things whether it is being watched
- *  live or read out of the catalog, and a second enum would be a second answer
- *  to what "errored" is. */
+/** A node's status, re-exported from the live wire's own vocabulary. */
 export type { NodeStatus };
 
-/** The glyph and the semantic hue a status is DRAWN with, re-exported for the
- *  same reason `NodeStatus` is: a face reads its vocabulary out of ONE contract
- *  module, and `STATUS_META`'s own doc says no face keeps a second table. What
- *  a status is on the wire and what it means to a reader arrive together. */
+/** The glyph and the semantic hue a status is DRAWN with. */
 export { STATUS_META, type StatusHue } from "@odu/run-client/surface";
 
-/** What a node's push is doing, and which of its two logs a reader means —
- *  re-exported for `STATUS_META`'s reason: one contract module, one
- *  vocabulary. A face branches on `push.state` and names a `stream` without
- *  reaching past this surface for either. */
+/** What a node's push is doing, and which of its two logs a reader means. */
 export { type NodePush } from "@odu/run-client/surface";
 export { type LogStream, LOG_STREAMS } from "@odu/run-client/nodeId";
 
@@ -120,10 +35,7 @@ export { type LogStream, LOG_STREAMS } from "@odu/run-client/nodeId";
  * THE HOST'S CONTRACT VERSION, `major.minor` — its own verbs (the frozen control
  * fragment), the identity cell below, and the rule a client is admitted by.
  *
- * A daemon and the client that dialled it are routinely DIFFERENT BUILDS — the
- * whole point of a singleton is that it outlives the process that started it,
- * including across an upgrade — so the two have to be able to discover they
- * disagree. {@link admitService} is the one judge, and its rule is ADDITIVE, for
+ * {@link admitService} is the one judge, and its rule is ADDITIVE, for
  * this number and for every row's:
  *
  *   - **the MINOR moves when the surface only GROWS** — a new verb, a new row
@@ -137,29 +49,13 @@ export { type LogStream, LOG_STREAMS } from "@odu/run-client/nodeId";
  *     retyped, a refusal code a reader branches on taken away. A different
  *     major is refused, with a sentence.
  *
- * **EACH ROW VERSIONS ITS OWN SURFACE.** This number used to version the whole
- * composed wire, so a change to the cache refused a client that reads only the
- * runs. Now the runs are {@link CI_CONTRACT_VERSION}, the cache, the door and
+ * **EACH ROW VERSIONS ITS OWN SURFACE.** The runs are
+ * {@link CI_CONTRACT_VERSION}, the cache, the door and
  * the tunnel each declare theirs beside their surface, the host publishes every
  * mounted row's version on the identity cell (`rows`), and a client is admitted
  * against the rows it NEEDS. Each version is pinned to a fingerprint of the
  * surface it describes (`contract.test.ts` beside each), so a surface cannot
  * move without its number.
- *
- * 2.2: `auth.grant.list` and the `venues` cell (PR 2.5); six kinds of input
- * loosened so the verb, not the schema, refuses an empty field. Additive.
- *
- * 2.3: `cache.bucket.domain`, the `held` collection, `Bucket.domain` and
- * `Bucket.pushUrl`, and `auth.token.create`'s optional `expiresDays`. Additive.
- *
- * 2.4: a chunked upload's parts may carry `x-odu-upload: <session>`. Additive.
- *
- * — until here this number versioned the composed wire; each row starts at the
- * 2.4 it already spoke —
- *
- * 2.5: the identity cell's `rows`, every mounted row's own version, and
- * admission per row. Additive: a 2.x client ignores the field and is admitted as
- * before.
  */
 export const HOST_CONTRACT_VERSION = "2.5";
 
@@ -170,54 +66,6 @@ export const HOST_CONTRACT_VERSION = "2.5";
  * The identity cell is SERVED on this surface (its tag is the root's, and every
  * deployed reader dials it there) but it is the host's fact, so its shape is the
  * host's version, not this one.
- *
- * 2.4: where the composed wire stood when each row took a version of its own.
- * 2.5: a run's `push` — where it pushes and what it warmed — on a board row
- *      and on `run_read`/`run_wait`, and `pushed` on a node (PLAN 4.1). Three
- *      optional output fields; additive.
- * 2.6: TWO unreleased changes, one number, because a version describes a
- *      SURFACE and there is one of those.
- *
- *      A run's `actor` — who started it, a login or `@local` — on a board row
- *      and on `run_read`/`run_wait` (PLAN 4.4), and `probing` as a fifth
- *      venue state, so the kept reading can be republished while a probe is
- *      still dialling. Two optional output fields and one widened literal.
- *
- *      And the push became a STEP (PLAN 4.1): a node's `pushed` becomes
- *      `push` — `pushing | pushed | failed`, carrying `stored` and `present`
- *      apart, so the run page can draw the push while it is still running and
- *      say what it failed at — `log_read` takes `stream: "recipe" | "push"`,
- *      the node's two logs having been split apart, and the wait/read
- *      answer's `push` gains `failedOn` and `present`. MINOR, and this is
- *      what each direction costs, plainly:
- *
- *      A 2.5 READER ON A 2.6 DAEMON ignores the node's `push` and the
- *      answer's `failedOn` — excess output properties on both — and loses the
- *      push readout. Nothing else.
- *
- *      A 2.6 READER ON A 2.5 DAEMON gets no `push` on a node, so no push step
- *      — and reads `failedOn` as ABSENT, which is why it is `optionalKey`
- *      rather than required: the answer's `push` SHIPPED in 2.5, so a
- *      required field added to it would make every `run_read`/`run_wait`
- *      answer about a run with a push target fail to decode outright, losing
- *      the whole answer rather than one readout. The same reasoning keeps
- *      that struct's `paths` where it is, with `present` optional beside it.
- *      The one thing such a reader genuinely cannot have is the push LOG:
- *      `stream` is an excess INPUT property on a 2.5 daemon, dropped on the
- *      way in, and what came back would be the recipe's log wearing the
- *      push's name. That is the one place a version has to be read before a
- *      call rather than after — `odu ci logs --stream push` refuses on
- *      {@link CI_LOG_STREAM_SINCE} instead of answering with the wrong file.
- *
- *      Neither reader is stranded, and neither branches on a refusal that
- *      moved.
- * 2.7: `run.start`'s `branch` — the branch a service-side clone should be ON
- *      for the commit it is being handed (PLAN 4.4). One optional INPUT key;
- *      additive. A 2.6 daemon drops it as excess and keeps today's rule, so
- *      a clone that is not already on the commit is REFUSED rather than
- *      moved — the answer a caller gets without the field at all, and the
- *      reason this needs no `*_SINCE` constant: the skew shows up as the
- *      refusal it always was, not as a run against the wrong commit.
  */
 export const CI_CONTRACT_VERSION = "2.7";
 
@@ -225,39 +73,22 @@ export const CI_CONTRACT_VERSION = "2.7";
  * THE RUNS' VERSION THAT INTRODUCED `log_read`'s `stream`, named because one
  * caller must read it BEFORE it calls.
  *
- * The additive rule's usual cost is an "unknown verb" a caller can report. A
- * new optional INPUT key has no such answer: a daemon from before it drops the
- * key as excess and serves the request it understood — here, the attempt's
- * RECIPE log in place of its push log, with nothing in the page to say which
- * file it came from. Silence is the one skew a caller cannot be left to
- * discover from the answer, so a face that means `stream: "push"` compares
+ * A face that means `stream: "push"` compares
  * this against what the daemon publishes for {@link CI_ROW}
  * ({@link rowSpeaks}) and refuses when it is behind.
  */
 export const CI_LOG_STREAM_SINCE = "2.6";
 
 /** THE RUNS' ROW NAME — the word the identity cell's `rows` publishes them
- *  under, a face's needs name them by, and the plugin's own name (what the
- *  runtime binds its fibre under and `settled()` waits on). One word, one
- *  constant: the runs are the wire's ROOT, so it is never a sibling segment. */
+ *  under, a face's needs name them by, and the plugin's own name. */
 export const CI_ROW = "ci";
-
-// ── refusals ────────────────────────────────────────────────────────────────
 
 /**
  * Why a call was refused, as data.
  *
- * A REFUSAL is not a failure of the transport and not a failure of CI: it is
- * this service declining to do what it was asked, for a reason the caller can
- * act on. The three outcomes stay separate all the way out to a process exit
- * code (`0` answered — including an answer that reports red CI, `1` refused,
- * `3` nothing serving), which is only possible if the refusal travels on the
- * procedure's DECLARED error channel rather than as a field on a success.
- *
  * `code` is what a caller branches on; `message` is the sentence a person
  * reads. `resync` and `suggestion` carry the recovery where there is one —
- * `suggestion` as ARGV, never a string anything evals, the same rule the retry
- * policy already keeps.
+ * `suggestion` as ARGV, never a string anything evals.
  */
 export const RefusalCodeSchema = Schema.Literals([
   /** The caller's input could not have meant anything — a malformed run id, a
@@ -293,32 +124,18 @@ export const RefusalCodeSchema = Schema.Literals([
   /** The service could not start the coordinator. */
   "launch_failed",
   /** The checkout has no `justfile`, or the one it has could not be read as a
-   *  pipeline. Distinct from `checkout_refused`, which is about the repository:
-   *  a perfectly good git checkout with a broken recipe file is a different
-   *  problem with a different fix. */
+   *  pipeline. */
   "pipeline_refused",
   /** A forge write was asked for and the service has no credential to make it.
    *  Carries the `gh auth login` recovery as `suggestion`, as ARGV. */
   "no_credential",
-  /** The caller is not allowed to do this. The service is not in loopback mode,
-   *  so "who is asking" is a real question — and this row's answer is its own
-   *  (a state change needs a member). Reaching it means a signed-in person
-   *  whose role is below what the verb needs. */
+  /** The caller is not allowed to do this: a signed-in person whose role is
+   *  below what the verb needs. */
   "not_permitted",
 ]);
 export type RefusalCode = typeof RefusalCodeSchema.Type;
 
-/**
- * The one declared failure every procedure on this surface can raise.
- *
- * ONE tag rather than one per code, and the reason is the wire: this error
- * crosses a re-serve hop (the MCP bridge decodes what the service encoded and
- * re-encodes it to its host), and a closed union of a dozen tags would have to
- * be extended in lockstep on both ends for every new reason. `code` is a
- * literal union INSIDE one tag, so adding a reason is additive on the wire and
- * a caller that does not know the new code still gets the tag, the message and
- * the recovery.
- */
+/** The one declared failure every procedure on this surface can raise. */
 export class ServiceRefused extends Schema.TaggedError<ServiceRefused>(
   "@odu/service/ServiceRefused",
 )("ServiceRefused", {
@@ -332,11 +149,7 @@ export class ServiceRefused extends Schema.TaggedError<ServiceRefused>(
   runId: Schema.optionalKey(Schema.String),
 }) {}
 
-/** Every procedure declares the same error channel. Named once so no member can
- *  quietly declare a narrower one and leave a face unable to branch. */
 const REFUSES = ServiceRefused;
-
-// ── the service cell ────────────────────────────────────────────────────────
 
 /**
  * WHO is serving, and whether a caller may believe what it says.
@@ -394,15 +207,10 @@ export const ServiceBuildSchema = Schema.Struct({
 });
 export type ServiceBuild = typeof ServiceBuildSchema.Type;
 
-/**
- * Whether the service is answering, and about what.
+/** Whether the service is answering, and about what.
  *
- * `starting` is a real state and not a gap: the service reconciles surviving
- * coordinators and terminal records before it claims to know the board, and a
- * caller that read the board during that window would see a partial catalog
- * and no way to tell. `draining` is the upgrade window — the service is still
- * answering reads, but it has been told to hand over.
- */
+ *  `starting` is a real state and not a gap: the service reconciles surviving
+ *  coordinators and terminal records before it claims to know the board. */
 export const ServiceReadinessSchema = Schema.Struct({
   state: Schema.Literals(["starting", "ready", "draining"]),
   /** `Date.now()` when the service entered this state. */
@@ -421,8 +229,7 @@ export type ServiceCell = typeof ServiceCellSchema.Type;
 
 /** What a client reads before the first frame arrives — a service that has
  *  said nothing about itself, spelled as such rather than as a plausible
- *  zero. `pid: 0` is not a process and `protocolVersion: ""` matches no
- *  contract, so no compatibility check can pass on the default by accident. */
+ *  zero. */
 export const UNKNOWN_SERVICE: ServiceCell = {
   identity: {
     pid: 0,
@@ -442,11 +249,8 @@ export const UNKNOWN_SERVICE: ServiceCell = {
  *
  * Two values, each carrying its version:
  *
- *   - `{ requires }` — the client is refused when that row is not mounted,
- *     because a face that needs the cache and is admitted without it would meet
- *     `unknown verb` on its first call and read it as a skew;
- *   - `{ ifMounted }` — for a face that draws a row only when the daemon has it
- *     (the door, the tunnel): absent is fine, mounted at another major is not.
+ *   - `{ requires }` — the client is refused when that row is not mounted;
+ *   - `{ ifMounted }` — absent is fine, mounted at another major is not.
  */
 export type RowNeed = { readonly requires: string } | { readonly ifMounted: string };
 
@@ -467,14 +271,6 @@ export const ifMounted = (version: string): RowNeed => ({ ifMounted: version });
 export const CI_NEEDS: RowNeeds = { [CI_ROW]: requires(CI_CONTRACT_VERSION) };
 
 /** The verdict on a daemon that ANSWERED — whether this build can speak to it.
- *
- *  THE ONE COMPARISON. A daemon and the client that dialled it are routinely
- *  different builds, so somebody has to decide whether the two can talk; the
- *  decision is made here, once, and every face receives it as a VALUE. A
- *  consumer that compared versions against the cell itself would be a second
- *  judge of compatibility — and the second judge is the one that gets the
- *  direction of the comparison wrong, because "older client, newer daemon" is
- *  fine and its mirror is not.
  *
  *  A refusal is {@link ServiceRefusal}: which contract it is ON, and only the
  *  facts that arm has. */
@@ -499,8 +295,6 @@ export type ServiceRefusal =
   | { on: "row"; row: string; speaks: string; expected: string; message: string }
   | { on: "absent"; row: string; expected: string; message: string };
 
-/** `major.minor` (an optional patch or prerelease suffix allowed), or null —
- *  the framework's grammar, so `2.1garbage` is not read as 2.1. */
 function contractMajor(version: string): number | null {
   const match = /^(\d+)\.(\d+)(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?$/.exec(version);
   return match === null ? null : Number(match[1]);
@@ -516,14 +310,7 @@ const needReads = (need: RowNeed): string =>
 
 /** The version a daemon publishes for one row, or `null` when it does not
  *  mount it. A daemon from before 2.5 publishes no `rows`: its one number
- *  versioned the whole composed wire, so it is read as every row's.
- *
- *  EXPORTED because it is the one spelling of this reading. A face that has
- *  to know what the daemon it dialled serves for a row — to refuse a member
- *  the daemon would answer WRONGLY rather than not at all, see
- *  {@link CI_LOG_STREAM_SINCE} — must not re-derive `rows?.[row] ??
- *  protocolVersion`, because the fallback is the easy half to forget and the
- *  one that decides what a pre-2.5 daemon is read as. */
+ *  versioned the whole composed wire, so it is read as every row's. */
 export function rowSpeaks(identity: ServiceIdentity, row: string): string | null {
   if (identity.rows === undefined) return identity.protocolVersion;
   return identity.rows[row] ?? null;
@@ -531,16 +318,8 @@ export function rowSpeaks(identity: ServiceIdentity, row: string): string | null
 
 /** Is what a daemon SPEAKS older, on the minor, than what a caller READS?
  *
- *  The majors are not compared: a differing major was already refused by
- *  {@link admitService}, and this question is only ever asked about a daemon
- *  that was adopted. `null` — a row the daemon does not mount — is not
- *  "behind": there is nothing to compare, and the absence is admission's to
- *  refuse, not a skew to warn about. A version neither side can parse is not
- *  behind either, for the same reason: a guess here would refuse a daemon
- *  over a string it could not read.
- *
- *  One spelling, two askers: {@link skewNote}, which explains every verb
- *  added since, and a caller that must check ONE member before it uses it. */
+ *  `null` — a row the daemon does not mount — is not "behind". A version
+ *  neither side can parse is not behind either. */
 export function minorBehind(speaks: string | null, reads: string): boolean {
   if (speaks === null) return false;
   const theirs = contractMinor(speaks);
@@ -559,10 +338,7 @@ const UPGRADE = "upgrade the daemon (`odu web --upgrade`) or this build.";
  *  because the cache moved. A needed row the daemon does not mount is refused
  *  with that fact (unless it was asked for {@link ifMounted}).
  *
- *  Not the framework's `isContractVersionCompatible`, which also refuses a
- *  daemon whose minor is behind — that made every added verb a flag day for
- *  every reader built after it. A malformed or empty version is refused: a
- *  daemon that has said nothing about itself is not a compatible one. */
+ *  A malformed or empty version is refused. */
 export function admitService(
   cell: ServiceCell,
   where: string,
@@ -617,12 +393,10 @@ export function admitService(
   return { kind: "adopt", identity };
 }
 
-/** THE ONE COST OF THE ADDITIVE RULE, said where it can be acted on: a daemon
- *  ADOPTED on the same major whose minor is behind this build lacks the verbs
- *  added since, and calling one answers "unknown" from inside the RPC layer. A
- *  face that adopted such a daemon prints this once, so that answer arrives
- *  already explained. PER ROW: it names every needed row (and the host) that is
- *  behind, and is `null` when none is. */
+/** THE ONE COST OF THE ADDITIVE RULE: a daemon ADOPTED on the same major
+ *  whose minor is behind this build lacks the verbs added since. PER ROW: it
+ *  names every needed row (and the host) that is behind, and is `null` when
+ *  none is. */
 export function skewNote(
   cell: ServiceCell,
   where: string,
@@ -647,23 +421,11 @@ export function skewNote(
 
 /**
  * How long a handshake waits for the cell, EVERYWHERE one is read.
- *
- * One in-memory snapshot, so the number is far beyond any healthy answer and
- * short enough that a person learns the daemon is wedged while still looking.
- * Unbounded is the failure this constant exists against: a daemon that accepts
- * the connection and never publishes (juspay/odu#113's wedged refresh loop)
- * leaves every caller waiting on a promise that has no reason to settle, and
- * the three-way answer the dial is written to give — absent, refused,
- * connected — simply never arrives.
  */
 export const SERVICE_HANDSHAKE_MS = 10_000;
 
 /** The sentence for a daemon that accepted the connection and then said
- *  nothing within its handshake deadline. Beside {@link admitService} because
- *  it is the same kind of fact — a verdict on a daemon that answered the
- *  socket — and because a face must not have to invent its own words for it:
- *  wedged reads the same whether a thin client, the launcher or a local socket
- *  dial met it. */
+ *  nothing within its handshake deadline. */
 export function handshakeTimedOut(where: string, deadlineMs: number): string {
   return (
     `the odu service at ${where} accepted the connection but did not answer ` +
@@ -672,19 +434,8 @@ export function handshakeTimedOut(where: string, deadlineMs: number): string {
   );
 }
 
-// ── the board ───────────────────────────────────────────────────────────────
-
 /**
  * Where a run stands, on the board.
- *
- * The four durable states come straight from the catalog's own attention fold
- * (`AttentionState`), because a board that classified runs by its own rules
- * would be a second authority on what "still running" means — and the whole
- * reason the catalog exists is that there was more than one. `provisioning` is
- * the one addition, and it is not a fifth state so much as a refinement of
- * `still_running`: a run holding a checkout while it waits for a cold box to
- * finish a `nix copy` has no lane yet, and telling an operator "running" about
- * a run with nothing running is how a multi-minute provision reads as a hang.
  */
 export const RunBoardStateSchema = Schema.Literals([
   "provisioning",
@@ -696,13 +447,10 @@ export const RunBoardStateSchema = Schema.Literals([
 export type RunBoardState = typeof RunBoardStateSchema.Type;
 
 /** The run's terminal word, as a bare union — the non-null half of the row's
- *  nullable `outcome`, which is what a total label table is written against. */
+ *  nullable `outcome`. */
 export type RunOutcome = typeof RunOutcomeSchema.Type;
 
-/** The run's own terminal word. Beside `passed` rather than derived from it,
- *  for the reason the attention payload gives: `passed: false` covers both a
- *  red node and a run torn down before every node finished, and reporting the
- *  second as "failed" sends an operator looking for a test that broke. */
+/** The run's own terminal word. */
 export const RunOutcomeSchema = Schema.Literals([
   "passed",
   "failed",
@@ -715,8 +463,7 @@ export const RunOutcomeSchema = Schema.Literals([
  *
  * ONE declaration for the board row and for `run_read`'s answer, because they
  * are one fact about one run and a second spelling is where two readers of the
- * same record learn to disagree. The answer adds counts; the shape they agree
- * on is this.
+ * same record learn to disagree.
  *
  * The token's ID is deliberately ABSENT from both. It is on the MANIFEST,
  * because the service revokes by it; it is a revocation handle, and a board
@@ -730,9 +477,7 @@ const PushedToSchema = Schema.Struct({
   skipped: Schema.NullOr(Schema.String),
   /** What is wrong while something WAS: the bucket's key is missing from the
    *  repository's `trusted-public-keys`, so what this run warmed will not be
-   *  substituted from. Null when there is nothing to say. Two fields rather
-   *  than one sentence, because a run that pushed and a run that did not are
-   *  opposite states and a reader must not have to guess which it holds. */
+   *  substituted from. Null when there is nothing to say. */
   keyWarning: Schema.NullOr(Schema.String),
 });
 
@@ -743,9 +488,7 @@ const PushedToSchema = Schema.Struct({
  * `sha` is the base commit; `contentSha`, when present, identifies the tested
  * working-tree snapshot. `dirty` says whether
  * the verdict is about that commit or about a working tree that merely claimed
- * it. Both are on the row rather than one line down, because "which commit is
- * this green about" is the question a board exists to answer and a row that
- * makes you click to find out has not answered it.
+ * it.
  */
 export const RunRowSchema = Schema.Struct({
   contentSha: Schema.optionalKey(Schema.String),
@@ -765,13 +508,9 @@ export const RunRowSchema = Schema.Struct({
   seq: Schema.NullOr(Schema.Int),
   pipeline: Schema.String,
   createdAt: Schema.Number,
-  /** When the run STOPPED, from its own verdict — null while it has not. On the
-   *  row because how long a run took is a durable fact about it, and the only
-   *  other way to have it was to subtract against `now`: that makes every
-   *  settled row's duration a function of when somebody looked, and a board
-   *  reopened tomorrow would say yesterday's green took a day. Read it through
-   *  `runElapsedMs` (`@odu/service-client/board`), which is the one rule that
-   *  turns this pair into a duration. */
+  /** When the run STOPPED, from its own verdict — null while it has not. Read
+   *  it through `runElapsedMs` (`@odu/service-client/board`), which is the one
+   *  rule that turns this pair into a duration. */
   finishedAt: Schema.NullOr(Schema.Number),
   state: RunBoardStateSchema,
   settled: Schema.Boolean,
@@ -784,8 +523,7 @@ export const RunRowSchema = Schema.Struct({
   unresolvedFailures: Schema.Int,
   /** What a green here actually covers. */
   scope: RunScopeSchema,
-  /** GitHub contexts this run still owes. Debt, kept apart from the verdict:
-   *  a run whose statuses did not land still passed or failed on its own. */
+  /** GitHub contexts this run still owes. Debt, kept apart from the verdict. */
   reportingDebt: Schema.Int,
   /** Where a live owner serves, when one does. Null for every other state, so
    *  a reader cannot mistake a stale address for a reachable one. */
@@ -823,25 +561,11 @@ export const RunRowSchema = Schema.Struct({
 });
 export type RunRow = typeof RunRowSchema.Type;
 
-// ── one run's DAG ───────────────────────────────────────────────────────────
-
 /**
  * One node of a run, as the board's detail view draws it.
  *
- * Exactly what the durable record knows, and nothing that would have to be
- * guessed at. Two absences are deliberate:
- *
- *   - **No `needs`.** The journal records the roster's ORDER, not its edges — a
- *     run's DAG is a fact about the `justfile` at the commit it ran, and the
- *     catalog never stored one. A field here would be filled from the live
- *     coordinator when there is one and left empty when there is not, which is
- *     a view that quietly changes shape as a run finishes. The order IS the
- *     schedule, and it is what a reader can act on.
- *   - **No `platform`.** A node id is `<namepath>@<platform>` and every face in
- *     this tree already reads it with `@odu/run-client/nodeId`. A second copy
- *     on the row would be a second thing to keep true. `host` stays, because
- *     which MACHINE the work landed on is not in the id and is exactly what a
- *     placement failure is about.
+ * **No `needs`.** The journal records the roster's ORDER, not its edges. The
+ * order IS the schedule, and it is what a reader can act on.
  */
 export const RunNodeSchema = Schema.Struct({
   id: NodeIdSchema,
@@ -860,16 +584,10 @@ export const RunNodeSchema = Schema.Struct({
   logKey: Schema.String,
   /** WHAT THIS NODE'S PUSH IS DOING (PLAN 4.1), read off the journal's
    *  `pushing` / `pushed` / `push_failed` lines. Absent for a node with no
-   *  push step — a run with no target, or a recipe that built no `result`.
-   *
-   *  The lane wire's own shape, re-used rather than restated: the two hops
-   *  carry the same three states, and a second spelling here would be a
-   *  second thing to keep true. */
+   *  push step — a run with no target, or a recipe that built no `result`. */
   push: Schema.optionalKey(NodePushSchema),
 });
 export type RunNode = typeof RunNodeSchema.Type;
-
-// ── one run's environment ───────────────────────────────────────────────────
 
 /** Where the run is in its lifecycle. The catalog's own three, which are the
  *  coordinator's `RunPhase` minus the `unstarted` a REGISTERED run cannot be
@@ -883,13 +601,6 @@ export type RunPhase = typeof RunPhaseSchema.Type;
 
 /**
  * One platform lane, as two states that carry different facts.
- *
- * A union rather than one struct with nullable fields, for the reason the
- * coordinator's own `RunLaneSchema` gives: a lane waiting for a venue HAS a
- * pool and HAS NO host, and one that landed has the opposite. Spelled as
- * optional fields, every reader would have to re-derive which pair is
- * meaningful, and a face that got it wrong would print `host: null` as though
- * the machine were unknown rather than not yet chosen.
  */
 export const RunLaneSchema = Schema.Union([
   Schema.Struct({
@@ -909,17 +620,6 @@ export type RunLane = typeof RunLaneSchema.Type;
 
 /**
  * The run's ENVIRONMENT — where its work is placed, and what it still owes.
- *
- * This is what `odu ci status` used to dial the checkout's `.ci/odu.sock` for,
- * and dialling was the whole reason a public command still held a run
- * authority of its own. Every field here is folded out of the durable journal,
- * which the service already owns and already reads: the coordinator has
- * written `lane` and `phase` lines all along and no reader read them.
- *
- * Reading it from the catalog rather than from a socket is not merely a
- * refactor. It changes what is ANSWERABLE: a run that finished last week, or
- * whose coordinator was killed, can still say which machines it landed on and
- * which statuses it never managed to post. A socket cannot be asked either.
  */
 export const RunEnvSchema = Schema.Struct({
   phase: RunPhaseSchema,
@@ -935,8 +635,7 @@ export const RunEnvSchema = Schema.Struct({
    *  GitHub origin. Derived ONCE, here, so no face assembles a URL. */
   commitUrl: Schema.NullOr(Schema.String),
   /** GitHub contexts this run still owes. The same debt `RunRow.reportingDebt`
-   *  counts, itemised — a count tells an operator something is wrong, and this
-   *  tells them which context and why. */
+   *  counts, itemised. */
   owed: Schema.Array(
     Schema.Struct({
       context: Schema.String,
@@ -948,8 +647,7 @@ export const RunEnvSchema = Schema.Struct({
 export type RunEnv = typeof RunEnvSchema.Type;
 
 /** What a reader sees for a run whose environment has not been established —
- *  spelled as such rather than as a plausible zero, the same rule
- *  `UNKNOWN_SERVICE` keeps. */
+ *  spelled as such rather than as a plausible zero. */
 export const UNKNOWN_ENV: RunEnv = {
   phase: "provisioning",
   elapsedMs: null,
@@ -961,34 +659,13 @@ export const UNKNOWN_ENV: RunEnv = {
 
 /**
  * A frame of `streams.nodes` — one whole picture of a run's work.
- *
- * **Every frame is self-contained, and that is a decision.** A delta protocol
- * would carry less on the wire and would make every consumer a fold: the
- * browser, a CLI watcher and a test would each keep a copy of the roster and
- * each re-derive it, and the three copies would be three chances to disagree
- * about which attempt a node is on. A run's roster is tens of nodes and a frame
- * is only sent when something actually moved, so the traffic this trades away
- * is small and the concept it removes is not.
- *
- * `done` is the terminal, and it rides the frame rather than being an arm of a
- * union for the reason the log wire learned the hard way: a terminal that
- * carried no payload would replace the last real frame with an empty one, and a
- * consumer holding "the latest frame" would watch its own view go blank at the
- * exact moment the run finished. A stream that cannot say it is finished leaves
- * "is more coming?" unobservable; one that says so by throwing away its content
- * has answered a different question.
  */
 export const NodesFrameSchema = Schema.Struct({
   /** Node ids in scheduling order — the row order a dashboard paints. */
   order: Schema.Array(NodeIdSchema),
   nodes: Schema.Array(RunNodeSchema),
   state: RunBoardStateSchema,
-  /** Where the work is placed and what the run owes. On the FRAME rather than
-   *  in a second subscription, for the reason the frame is self-contained at
-   *  all: a caller holding "the latest nodes" and "the latest environment" from
-   *  two streams can hold two readings of one moment, and the moment they most
-   *  often straddle is a phase change — exactly when the two disagree most
-   *  visibly. */
+  /** Where the work is placed and what the run owes. */
   env: RunEnvSchema,
   /** No further frame will arrive: the run has settled, expired, or lost its
    *  owner. In none of those three will anything move again. */
@@ -996,42 +673,20 @@ export const NodesFrameSchema = Schema.Struct({
 });
 export type NodesFrame = typeof NodesFrameSchema.Type;
 
-// ── one checkout ────────────────────────────────────────────────────────────
-
 /** How many of a checkout's runs a {@link CheckoutFrameSchema} carries. The
  *  head of the list is the run the checkout STANDS FOR; the rest is the short
- *  history a reader scans without opening anything. A bound rather than the
- *  whole catalog, because a checkout accumulates runs forever and a frame that
- *  grew without limit would make an old repository the expensive one. */
+ *  history a reader scans without opening anything. */
 export const CHECKOUT_RECENT_RUNS = 5;
 
 /**
  * A frame of `streams.checkout` — EVERYTHING ONE CHECKOUT IS DOING, as one
  * whole picture.
  *
- * This is the question every board asks and no member answered: a checkout is
- * what a person works in, and "what is my CI doing HERE" needs three facts
- * that used to be assembled by whoever was asking — which of a checkout's runs
- * stands for it, what that run's lanes are up to, and what ran before it. The
- * assembly is the service's, for the reason the registry exists at all: it is
- * a reading of the catalog on the catalog's own clock, and a consumer folding
- * it is a consumer that must re-fold on every row delta AND re-open a nodes
- * subscription every time the latest run swaps under it.
- *
- * Like {@link NodesFrameSchema}, every frame is SELF-CONTAINED — a full
- * replacement, sent only when something actually moved — so a consumer needs
- * no accumulator and a re-subscribe is a fresh snapshot rather than a delta
- * appended to a stale one.
- *
- * `latest` is null for a checkout with no runs at all, which is the honest
- * answer for the ordinary case of a repository nobody has run CI in — and the
+ * `latest` is null for a checkout with no runs at all — and the
  * same answer {@link CHECKOUT_NONE} gives for a service that is not there.
  */
 export const CheckoutFrameSchema = Schema.Struct({
-  /** The run this checkout stands for — its newest — and that run's work.
-   *  The nodes ride the SAME frame as the run they belong to, for the reason
-   *  `NodesFrameSchema` keeps its `env` on the frame: two subscriptions are two
-   *  readings of one moment, and the moment they straddle is a run swapping. */
+  /** The run this checkout stands for — its newest — and that run's work. */
   latest: Schema.NullOr(
     Schema.Struct({
       run: RunRowSchema,
@@ -1044,41 +699,23 @@ export const CheckoutFrameSchema = Schema.Struct({
    *  special-case the first row. */
   recent: Schema.Array(RunRowSchema),
   /** How many runs this checkout has in the catalog — the whole count, not the
-   *  number that fit in `recent`. A board collapsing a checkout to one row says
-   *  how many it stands for, and a count cut off at the page size would be a
-   *  promise the History button then contradicts. */
+   *  number that fit in `recent`. */
   total: Schema.Int,
 });
 export type CheckoutFrame = typeof CheckoutFrameSchema.Type;
 
 /** What a checkout looks like when there is NOTHING to say about it — no runs,
- *  or no service to ask.
- *
- *  Named here, beside the frame, for the reason {@link UNKNOWN_SERVICE} is: a
- *  consumer that has to draw "nothing" needs the shape of nothing to come from
- *  the contract rather than from its own idea of a plausible zero. A relay that
- *  holds this member open while its upstream is absent sends exactly this, so
- *  a face clears rather than keeping the last live frame on screen. */
+ *  or no service to ask. */
 export const CHECKOUT_NONE: CheckoutFrame = {
   latest: null,
   recent: [],
   total: 0,
 };
 
-// ── log tails ───────────────────────────────────────────────────────────────
-
 /**
  * One attempt's log, as a subscribable tail.
  *
- * The COLLECTION is the live read: a browser watching a running node, an agent
- * subscribing to `surface://collections/logTails/<key>`. `log.read` below is
- * the paged read — bytes at an offset, for a caller that wants the whole thing
- * or a specific window. Two members because they answer different questions:
- * "show me what is happening" is unbounded and wants the end, "give me the
- * evidence" is bounded and wants an address.
- *
- * The key is the encoded log key (`@odu/service-client/logKey`), which is what
- * makes this addressable from a host with no cwd.
+ * The key is the encoded log key (`@odu/service-client/logKey`).
  */
 export const LogTailSchema = Schema.Struct({
   /** The key this tail is for, echoed so a frame is self-describing. */
@@ -1096,9 +733,7 @@ export const LogTailSchema = Schema.Struct({
 export type LogTail = typeof LogTailSchema.Type;
 
 /** How much of a log a TAIL carries. The same bound the live wire already
- *  promises (`MAX_LOG_CHARS`), stated in bytes because this one is clamped on
- *  a byte budget: a log of box-drawing characters would blow a
- *  character-counted bound by a factor of three. */
+ *  promises (`MAX_LOG_CHARS`), stated in bytes. */
 export const LOG_TAIL_BYTES = 64 * 1024;
 
 /**
@@ -1107,55 +742,29 @@ export const LOG_TAIL_BYTES = 64 * 1024;
  * A page carries THREE facts and they are not interchangeable. `eof` is about
  * THIS read — the page reached the end of the file as it stands. `complete` is
  * about the PRODUCER — it said its last word. `open` is about the FUTURE — the
- * file can still grow. A follower needs two of them together, and each face
- * that wrote its own version got a different pair wrong:
- *
- *   - stopping on `!open` alone drops whatever the closing page carried. A read
- *     is bounded by `limit`, so a producer that finished after appending more
- *     than one page hands back `{open: false, eof: false}` with unread bytes
- *     behind it — and the follower discards the rest of the output, including
- *     the final diagnosis, which is the part somebody was reading it for.
- *   - stopping on `eof` alone spins forever on the log of a coordinator that
- *     was killed: that log is at EOF, is not complete, and is never getting
- *     another byte.
+ * file can still grow.
  *
  * So: keep reading while the file can still grow, OR while this read did not
- * reach the end. Stop only when both are settled. It cannot spin — with
- * `offset < size` and a positive limit the store always returns at least one
- * byte, so `nextOffset` strictly advances until `eof`.
+ * reach the end. Stop only when both are settled.
  */
 export function logHasMore(page: Pick<LogPage, "open" | "eof">): boolean {
   return page.open || !page.eof;
 }
 
-// ── procedures ──────────────────────────────────────────────────────────────
-
 /** A caller's idempotency key. Present on every mutating verb, and not
- *  optional on `start` and `retry`: those are the two calls whose lost reply
- *  costs a second execution, and a caller that cannot name its request cannot
- *  be told what happened to it. */
+ *  optional on `start` and `retry`. */
 const RequestId = Schema.String.check(Schema.isMinLength(1));
 
 /**
  * A checkout's path, as the verbs that take one OUTSIDE `run.start` declare it:
  * a plain string, with the rule (absolute, therefore non-empty) checked by the
  * VERB — `notAbsolute` / the catalog's own guard — rather than by the schema.
- *
- * Because a schema check is not a refusal. It fails the decode as a
- * `SchemaError` before any handler runs, so the caller is told nothing a person
- * can act on, and the board — which sends an empty field rather than greying a
- * button out — would show a defect where the row has a sentence. Loosening an
- * input is additive (2.2).
  */
 const CheckoutPath = Schema.String;
 
 const StartInputSchema = Schema.Struct({
   /** ABSOLUTE path of the checkout to run in, ON THE SERVICE'S MACHINE.
-   *  Explicit, never the caller's cwd: an MCP host's cwd is not a fact about
-   *  what the user meant, and against a daemon on another machine it is not
-   *  even a path that exists. From a shell this is `odu ci run --checkout
-   *  <path> --sha <sha>`; without those flags the CLI resolves the checkout
-   *  it is standing in, which is a claim about the caller's own filesystem. */
+   *  Explicit, never the caller's cwd. */
   checkout: Schema.String.check(Schema.isMinLength(1)),
   /** The commit the caller believes that checkout is on. Validated before
    *  acceptance — a checkout that has moved on is a REFUSAL, never a quiet
@@ -1167,18 +776,14 @@ const StartInputSchema = Schema.Struct({
    * service a commit rather than reading one back (PLAN 4.4).
    *
    * Absent — today's rule, unchanged: a checkout that is not already on
-   * `expectedSha` is REFUSED. That is the only safe answer about a directory
-   * somebody else may be working in, and it is what `odu ci run` means from
-   * the checkout you are standing in, which never sends this.
+   * `expectedSha` is REFUSED.
    *
    * Present — the caller is naming a clone the SERVICE keeps (the pod's
    * `/data/checkouts/<repo>`), so the service fetches `origin/<branch>`,
    * refuses unless `expectedSha` is an ancestor of it, and moves the clone to
-   * that commit ON that branch. A workflow calling this with the commit it
-   * just pushed is the case: the clone has never heard of it yet.
+   * that commit ON that branch.
    *
-   * ON A BRANCH, never a detached HEAD, because a run's pins are read from
-   * the branch its checkout is on — a detached clone pins nothing.
+   * ON A BRANCH, never a detached HEAD.
    *
    * A BRANCH NAME, held to git's own grammar and refused with a sentence
    * when it is not one — a name beginning with `-` most of all, because git
@@ -1194,17 +799,6 @@ const StartInputSchema = Schema.Struct({
   hostPins: Schema.optionalKey(Schema.Array(Schema.String)),
   /**
    * The CALLER's `$ODU_HOSTS`, forwarded verbatim.
-   *
-   * The service is a per-user singleton, so the process that launches the
-   * coordinator is not the process the person typed into, and `loadHosts`
-   * reads an environment. Without this field a run resolves its inventory
-   * from whatever shell happened to start the daemon — which is how a
-   * hermetic test that pins one platform still fanned out to the operator's
-   * real builders, and how `$ODU_HOSTS` stopped meaning anything at all.
-   *
-   * Only this one variable travels: the rest of the chain is `homedir()`, and
-   * the daemon is the same user on the same machine, so forwarding the
-   * variable makes the coordinator's chain EXACTLY the caller's chain.
    *
    * THREE READINGS, and the third is why an empty string is legal:
    *
@@ -1242,9 +836,7 @@ export type StartInput = typeof StartInputSchema.Encoded;
  *
  * `accepted` is false for the one non-refusal case — the caller asked for a
  * checkout that already has a live run and did not say `supersede`, so odu is
- * showing them that run instead of starting a second one. It is an ANSWER and
- * not a refusal: nothing went wrong, and the run the caller is pointed at is
- * the one they almost certainly wanted.
+ * showing them that run instead of starting a second one.
  */
 const StartReceiptSchema = Schema.Struct({
   accepted: Schema.Boolean,
@@ -1297,11 +889,6 @@ export type WaitInput = typeof WaitInputSchema.Encoded;
  * `AttentionAnswer`, because "what is this run's state" has one answer and a
  * second shape for the non-blocking case would be a second thing to keep true.
  * The difference is entirely in whether the service holds the call open.
- *
- * This is what `odu ci history show` is: a bounded read of one run's attention,
- * from the catalog, with no deadline. It used to open the catalog in the
- * caller's own process — beside a daemon reading the same files — which is why
- * it is here.
  */
 const ReadInputSchema = Schema.Struct({
   runId: Schema.String.check(Schema.isMinLength(1)),
@@ -1313,10 +900,7 @@ export type ReadInput = typeof ReadInputSchema.Encoded;
 /**
  * The board, filtered on the service's side — one call for "which run".
  *
- * Every face that needed ONE run by where it came from (`odu ci status`,
- * `attach`, `--run latest`, `<sha7>#<seq>`, `history list`) used to read the
- * whole `runs` collection a row per round trip and filter locally, so the cost
- * of naming one run grew with the catalog (juspay/odu#113). The filters are
+ * The filters are
  * those faces' own, ANDed, and every one absent is the whole board.
  *
  * `checkout` is the SUBJECT of the query, as an absolute path the caller
@@ -1341,8 +925,7 @@ export type ListInput = typeof ListInputSchema.Encoded;
  * One rule, stated on the contract both sides import — the procedure refuses a
  * `sha` that fails it, and the CLI's `<sha7>#<seq>` grammar declines to ask.
  * Two copies of the regex would be two answers to "is this a commit", kept in
- * step by nothing. The procedure keeps its own `bad_input` wording; only the
- * rule is shared.
+ * step by nothing.
  */
 export const isCommitPrefix = (s: string): boolean => /^[0-9a-fA-F]{7,}$/.test(s);
 
@@ -1429,19 +1012,12 @@ const AttentionAnswerSchema = Schema.Struct({
    * WHO STARTED THIS RUN (PLAN 4.4) — a login, or `@local` for a loopback
    * caller.
    *
-   * On the ANSWER as well as on the board row, because an agent that reads a
-   * run through `run_read` and nothing else must be able to answer "whose run
-   * is this" without listing the board. Absent for a run recorded before the
-   * field.
+   * Absent for a run recorded before the field.
    */
   actor: Schema.optionalKey(Schema.String),
   /**
    * WHERE THIS RUN PUSHED WHAT IT BUILT (PLAN 4.1) — the bucket a green run
    * warmed, or the sentence saying why it warmed nothing.
-   *
-   * On the ANSWER, not only on the board row, because an agent that reads a
-   * run through `run_read` and nothing else must be able to tell "green, and
-   * the cache has it" from "green, and the next machine will build it again".
    */
   push: Schema.optionalKey(
     Schema.Struct({
@@ -1457,14 +1033,8 @@ const AttentionAnswerSchema = Schema.Struct({
        * "3 pushed · 66 present" instead of "69 paths", which claimed
        * sixty-nine closures crossed the network when three did.
        *
-       * THE TOTAL IS NOT MOVED, and this is OPTIONAL, for the reason
-       * `failedOn` below is: `push` with its `paths` SHIPPED in 2.5. A 2.5
-       * daemon answers this struct without this key, and renaming `paths`
-       * (or requiring this one) would make every answer about a run with a
-       * push target fail to DECODE on a 2.6 client — losing the whole answer
-       * to gain one readout. Absent means "this daemon does not record the
-       * split"; read it as `0`, which says every path went up, and is what
-       * those daemons' own headers claimed.
+       * Absent means "this daemon does not record the
+       * split"; read it as `0`.
        */
       present: Schema.optionalKey(Schema.Int),
       bytes: Schema.Int,
@@ -1474,12 +1044,7 @@ const AttentionAnswerSchema = Schema.Struct({
        * from one that passed and could not reach the cache, which are
        * different problems with different fixes.
        *
-       * OPTIONAL, and that is the whole reason 2.6 may be a minor. `push`
-       * itself shipped in 2.5 — `paths` and `bytes` with it — so a 2.5 daemon
-       * ALREADY answers this struct, without this field. A required key here
-       * would make a 2.6 client fail to DECODE every `run_read`/`run_wait`
-       * answer about a run with a push target, losing the whole answer rather
-       * than one readout. Absent means "this daemon does not record which
+       * Absent means "this daemon does not record which
        * node's push failed"; read it as `[]`, never as "none failed".
        */
       failedOn: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -1509,8 +1074,7 @@ export type RetryInput = typeof RetryInputSchema.Encoded;
 /** What a retry actually did — and `mode` is the field that matters, because
  *  the caller did not choose it. `live` reset nodes on a coordinator still up;
  *  `relaunched` started a NEW run linked to the one retried, from its recorded
- *  inputs. The two need different next moves and a caller that could not tell
- *  them apart would resume the wrong run. */
+ *  inputs. */
 const RetryReceiptSchema = Schema.Struct({
   requestId: Schema.String,
   mode: Schema.Literals(["live", "relaunched"]),
@@ -1541,8 +1105,7 @@ export type RetryReceipt = typeof RetryReceiptSchema.Type;
  * A tagged union rather than three optional fields, because a request that
  * named both a node and a lane would have to be resolved by precedence — and a
  * precedence rule is exactly how a caller who meant to stop one node stops the
- * whole run. Cancellation is the verb where an ambiguous input costs the most,
- * so it is not expressible.
+ * whole run.
  */
 const CancelScopeSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("run") }),
@@ -1586,32 +1149,12 @@ const LogReadInputSchema = Schema.Struct({
    * Wait up to this many ms for the log to grow past the end of this page,
    * rather than answering an empty one at EOF. Absent means answer now — a
    * paged read must never block.
-   *
-   * **This is the follow, and it is a parameter rather than another verb.** The
-   * log's exact analogue of `run.wait`: bounded, resumable, and cursored by a
-   * value the CALLER holds (`nextOffset`), so a call that dies is re-issued
-   * from where it stopped rather than resumed from state a server was keeping
-   * for it. A stream member would have been the obvious shape and is the wrong
-   * one — a stream taking an input cannot be a static MCP resource (the same
-   * rule that keeps `nodes` off the agent face), so it would have given the
-   * browser and the terminal a follow and given an agent nothing.
-   *
-   * `collections.logTails` is NOT this. It is a live view of the last
-   * {@link LOG_TAIL_BYTES}, with no cursor, and a writer that outruns its tick
-   * by more than that loses bytes with nothing to say so. "Show me what is
-   * happening" and "give me every byte, resumably" are different questions.
    */
   waitMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
   /**
    * WHICH of the node's two logs: the recipe's output, or the push that sent
    * what it built to the cache. Absent is `"recipe"`, so every existing
    * caller reads exactly what it always read.
-   *
-   * A PARAMETER rather than a fourth segment in the key, because the key is an
-   * address a failure hands out and a caller echoes verbatim — widening it
-   * would have retyped a token every agent, every CLI invocation and the
-   * browser's address bar already hold. The stream is a choice the READER
-   * makes about an address, like `offset`.
    */
   stream: Schema.optionalKey(LogStreamSchema),
 });
@@ -1629,41 +1172,19 @@ const LogPageSchema = Schema.Struct({
   nextOffset: Schema.Int,
   eof: Schema.Boolean,
   /** Did the log get its producer's last word? Distinct from `eof`, which is
-   *  only about this read: a complete-false log that has been read to its end
-   *  is a truncated log, and saying so is the difference between "the recipe
-   *  was quiet" and "the evidence is gone". */
+   *  only about this read. */
   complete: Schema.Boolean,
   /**
    * Can this log still grow? False once the producer said its last word, and
    * false once the run reached a terminal record — after either, nothing will
    * ever append again.
-   *
-   * THREE facts, not two, and the third is what makes a follow terminate.
-   * `eof` is about THIS read, `complete` is about the producer, `open` is about
-   * the future. A follower that had to infer the future from the other two
-   * would spin forever on the one case that matters most: the log of a writer
-   * that was killed, which is not complete, is at EOF, and is never getting
-   * another byte.
    */
   open: Schema.Boolean,
 });
 export type LogPage = typeof LogPageSchema.Type;
 
-// ── the catalog itself ──────────────────────────────────────────────────────
-
 /**
  * The per-user run catalog, as operations rather than as a directory.
- *
- * `odu ci history import` and `odu ci history prune` used to open the catalog
- * and mutate it from the caller's own process, beside a daemon that was
- * reading and writing the same files. That is two writers on one store, and
- * the fact that it mostly worked is not the same as it being safe: a prune
- * deleting a run's directory while the service held its journal open is a race
- * with no owner.
- *
- * These are also the only two verbs on this surface whose SUBJECT is the
- * catalog rather than a run, which is why they get a namespace of their own
- * rather than joining `run.*`.
  */
 const CatalogImportInputSchema = Schema.Struct({
   /** ABSOLUTE path of the checkout whose legacy `.ci` records to bring in.
@@ -1685,8 +1206,7 @@ const ImportedRunSchema = Schema.Struct({
 const CatalogImportReportSchema = Schema.Struct({
   imported: Schema.Array(ImportedRunSchema),
   skipped: Schema.Array(ImportedRunSchema),
-  /** The catalog directory the runs landed in — the service's, which is the
-   *  point: a caller cannot import into a catalog nobody is serving. */
+  /** The catalog directory the runs landed in — the service's. */
   catalog: Schema.String,
   dryRun: Schema.Boolean,
   replayed: Schema.Boolean,
@@ -1705,8 +1225,7 @@ const CatalogPruneReportSchema = Schema.Struct({
   /** Runs whose evidence was expired. */
   expired: Schema.Array(Schema.String),
   /** Runs inside the window, or held back for a reason — a live owner, most
-   *  often. Carried with the reason so "why is this still here" is answerable
-   *  without a second call. */
+   *  often. Carried with the reason. */
   kept: Schema.Array(
     Schema.Struct({ runId: Schema.String, reason: Schema.String }),
   ),
@@ -1716,15 +1235,10 @@ const CatalogPruneReportSchema = Schema.Struct({
 });
 export type CatalogPruneReport = typeof CatalogPruneReportSchema.Type;
 
-// ── the pipeline a checkout declares ────────────────────────────────────────
-
 /** One recipe in a checkout's CI DAG, as the resolved pipeline sees it.
  *
- *  Re-spelled here rather than imported from `@odu/execution`, and that is not
- *  duplication for its own sake: this package is browser-safe by construction
- *  and may not import the engine. The engine's spec is the AUTHORITY; this is
- *  its projection onto the wire, and the service's own implementation is what
- *  proves the two agree. */
+ *  The engine's spec is the AUTHORITY; this is its projection onto the wire,
+ *  and the service's own implementation is what proves the two agree. */
 export const TaskRowSchema = Schema.Struct({
   id: NodeIdSchema,
   /** The `[name(...)]` label, when the recipe carries one. */
@@ -1754,8 +1268,6 @@ const PipelineSchema = Schema.Struct({
 });
 export type Pipeline = typeof PipelineSchema.Type;
 
-// ── venues: the machines, and the holds on them ─────────────────────────────
-
 /** Who holds a venue lock, and since when. */
 export const VenueHolderSchema = Schema.Struct({
   /** `user@short-hostname`. */
@@ -1768,10 +1280,6 @@ export type VenueHolder = typeof VenueHolderSchema.Type;
 
 /**
  * One venue — a slot on one machine, for one platform.
- *
- * A machine with four slots is four rows, because a slot is what a run
- * actually takes: reporting the machine as one "busy" row would make a box with
- * three free slots indistinguishable from a full one.
  */
 export const VenueRowSchema = Schema.Struct({
   platform: Schema.String,
@@ -1780,9 +1288,7 @@ export const VenueRowSchema = Schema.Struct({
   slots: Schema.Int,
   /** `down` is `unreachable` under the name an operator reads. `local` is a
    *  localhost lane, which takes no remote lock at all. `probing` is a host
-   *  that has been DIALLED and has not answered yet: the kept reading is
-   *  republished as the probe runs, so the fleet is on screen while an
-   *  unreachable box burns its ssh timeout rather than after it. */
+   *  that has been DIALLED and has not answered yet. */
   state: Schema.Literals(["probing", "free", "busy", "local", "down"]),
   heldBy: Schema.NullOr(VenueHolderSchema),
   /** Why the probe failed, for a `down` row. Null otherwise. */
@@ -1791,11 +1297,6 @@ export const VenueRowSchema = Schema.Struct({
 export type VenueRow = typeof VenueRowSchema.Type;
 
 /** Which venues to probe. Empty means every configured platform.
- *
- *  A filter and not decoration: a probe SSH-dials each machine, so
- *  `odu ci hosts` on a big inventory is as slow as the slowest box, and asking
- *  about the one platform you care about should not wait for a datacentre you
- *  do not.
  *
  *  It is also why this input is not `Schema.Struct({})`. An empty struct is
  *  what the verb wanted to say, and `@kolu/surface-cli` cannot project one —
@@ -1807,14 +1308,6 @@ const VenueProbeInputSchema = Schema.Struct({
    * The CALLER's `$ODU_HOSTS`, on the same three readings `run.start` takes it
    * on — a path, `""` for "my shell has none", absent for "I have no shell,
    * use the service's own".
-   *
-   * Present on EVERY verb that resolves a host inventory, because the service
-   * is a per-user singleton and the ports resolve that inventory in the
-   * SERVICE's process. Without it, `ODU_HOSTS=A odu ci hosts` and
-   * `ODU_HOSTS=A odu ci run` addressed different fleets — the first the
-   * daemon's, the second the caller's — which is a disagreement about what
-   * machines exist, reported by two commands a person would reasonably expect
-   * to agree.
    */
   hostsFile: Schema.optionalKey(Schema.String),
 });
@@ -1824,24 +1317,18 @@ const VenueProbeOutputSchema = Schema.Struct({
   /** The hosts file that won, or null when none existed. */
   source: Schema.NullOr(Schema.String),
   /** Configuration problems worth reporting but not worth refusing over — a
-   *  pool mixing localhost with remote hosts, most of all. Reported here
-   *  because the inventory view is where an operator diagnoses their hosts
-   *  file, and before this the rule's only messenger was a run that refused
-   *  later. */
+   *  pool mixing localhost with remote hosts, most of all. */
   warnings: Schema.Array(Schema.String),
   rows: Schema.Array(VenueRowSchema),
 });
 
 /**
  * THE LAST PROBE, as a FACT — what the Machines page reads on open.
- *
- * A probe SSH-dials every machine it is asked about, so a page that fired one
- * per open would cost a fleet's worth of connections per glance, and wait on
- * the slowest unreachable box. So the service keeps the answer of the most
+ * The service keeps the answer of the most
  * recent `venue.probe` of ITS OWN fleet — a probe with no caller `hostsFile`;
  * one naming a caller's file is that person's machines and is answered but not
- * kept — on this cell, with WHEN and FOR WHICH platforms, and the page draws
- * that with its age and offers "probe now". `null` until the first probe since the daemon
+ * kept — on this cell, with WHEN and FOR WHICH platforms.
+ * `null` until the first probe since the daemon
  * started. Read-only on the wire: the service is its one writer.
  */
 export const VenueReadingSchema = Schema.NullOr(
@@ -1868,25 +1355,12 @@ const VenueHoldInputSchema = Schema.Struct({
    * The CALLER's `$ODU_HOSTS`, on the same three readings `run.start` takes it
    * on — a path, `""` for "my shell has none", absent for "I have no shell,
    * use the service's own".
-   *
-   * Present on EVERY verb that resolves a host inventory, because the service
-   * is a per-user singleton and the ports resolve that inventory in the
-   * SERVICE's process. Without it, `ODU_HOSTS=A odu ci hosts` and
-   * `ODU_HOSTS=A odu ci run` addressed different fleets — the first the
-   * daemon's, the second the caller's — which is a disagreement about what
-   * machines exist, reported by two commands a person would reasonably expect
-   * to agree.
    */
   hostsFile: Schema.optionalKey(Schema.String),
   /** Do not queue behind an existing holder — answer `waiting` and return. */
   noWait: Schema.optionalKey(Schema.Boolean),
   /** Correlates a call with its answer in the service's log. NOT an
-   *  idempotency key, and the three venue/protect verbs are the only mutations
-   *  here where that distinction is worth spelling out: taking a hold you
-   *  already hold, dropping one you already dropped, and writing a ruleset that
-   *  already says what you asked for are all indistinguishable from doing it
-   *  once. There is nothing for a receipt to protect, so none is claimed — and
-   *  no `replayed` is reported, because a caller could never observe it true. */
+   *  idempotency key. */
   requestId: RequestId,
 });
 export type VenueHoldInput = typeof VenueHoldInputSchema.Encoded;
@@ -1898,17 +1372,14 @@ const VenueHoldOutputSchema = Schema.Struct({
       status: Schema.Literals(["held", "waiting", "already"]),
       host: Schema.NullOr(Schema.String),
       /** The holder process, which is now the SERVICE's child rather than the
-       *  caller's — a hold outlives the shell that asked for it, which is the
-       *  whole reason to take one. */
+       *  caller's. */
       holderPid: Schema.NullOr(Schema.Int),
       waitingBehind: Schema.NullOr(VenueHolderSchema),
       message: Schema.String,
     }),
   ),
   /** TRUE when this answer came from the request's RECEIPT rather than from
-   *  work this call did. The mutation happened once; you are being told what it
-   *  did. A caller that cannot tell the two apart cannot tell whether its first
-   *  attempt landed, which is the whole reason it repeated the call. */
+   *  work this call did. */
   replayed: Schema.Boolean,
 });
 export type VenueHoldOutput = typeof VenueHoldOutputSchema.Type;
@@ -1929,17 +1400,14 @@ const VenueReleaseOutputSchema = Schema.Struct({
     Schema.Struct({
       platform: Schema.String,
       /** `nothing` is an ANSWER: releasing a platform nobody held is not an
-       *  error, and telling the caller it worked would be a lie about state
-       *  they are about to act on. */
+       *  error. */
       effective: Schema.Literals(["released", "nothing"]),
       host: Schema.NullOr(Schema.String),
       detail: Schema.NullOr(Schema.String),
     }),
   ),
   /** TRUE when this answer came from the request's RECEIPT rather than from
-   *  work this call did. The mutation happened once; you are being told what it
-   *  did. A caller that cannot tell the two apart cannot tell whether its first
-   *  attempt landed, which is the whole reason it repeated the call. */
+   *  work this call did. */
   replayed: Schema.Boolean,
 });
 export type VenueReleaseOutput = typeof VenueReleaseOutputSchema.Type;
@@ -1958,28 +1426,18 @@ const ProtectInputSchema = Schema.Struct({
   platforms: Schema.optionalKey(Schema.Array(Schema.String)),
   /** The CALLER's `$ODU_HOSTS`, on the same three readings `run.start` takes
    *  it on — a path, `""` for "my shell has none", absent for "I have no
-   *  shell, use the service's own". Present here for the same reason it is
-   *  present there: the platform set is DERIVED from the hosts file when
-   *  `platforms` is absent, and that derivation runs in the service, whose
-   *  environment belongs to whoever started it. */
+   *  shell, use the service's own". */
   hostsFile: Schema.optionalKey(Schema.String),
   /** Compute and report the contexts without writing anything. */
   dryRun: Schema.optionalKey(Schema.Boolean),
-  /** Create the branch's ruleset when there is none. Explicit, because
-   *  creating protection somebody did not ask for is not a recovery. */
+  /** Create the branch's ruleset when there is none. */
   create: Schema.optionalKey(Schema.Boolean),
   requestId: RequestId,
 });
 export type ProtectInput = typeof ProtectInputSchema.Encoded;
 
 const ProtectOutputSchema = Schema.Struct({
-  /** `owner/repo`, once the forge has been consulted. NULL under `dryRun`:
-   *  the required contexts are the checkout's recipes crossed with a platform
-   *  set, which is knowable from the checkout alone — so a dry run answers
-   *  without a network round trip and without needing a GitHub remote at all.
-   *  Making these non-nullable would have turned "show me what this would
-   *  require" into a command that fails on a repository with no origin, which
-   *  is exactly the repository somebody is most likely to be experimenting in. */
+  /** `owner/repo`, once the forge has been consulted. NULL under `dryRun`. */
   repo: Schema.NullOr(Schema.String),
   branch: Schema.NullOr(Schema.String),
   /** Exactly the contexts `odu ci run` posts for this platform set. */
@@ -1994,14 +1452,10 @@ const ProtectOutputSchema = Schema.Struct({
   derivedFrom: Schema.NullOr(Schema.String),
   detail: Schema.NullOr(Schema.String),
   /** TRUE when this answer came from the request's RECEIPT rather than from
-   *  work this call did. The mutation happened once; you are being told what it
-   *  did. A caller that cannot tell the two apart cannot tell whether its first
-   *  attempt landed, which is the whole reason it repeated the call. */
+   *  work this call did. */
   replayed: Schema.Boolean,
 });
 export type ProtectOutput = typeof ProtectOutputSchema.Type;
-
-// ── the surface ─────────────────────────────────────────────────────────────
 
 export const oduServiceSurface = defineSurface({
   cells: {
@@ -2012,13 +1466,6 @@ export const oduServiceSurface = defineSurface({
     runs: {
       keySchema: Schema.String,
       schema: RunRowSchema,
-      // `deltas` on top of the default set, because the BOARD is the one member
-      // a reader follows rather than samples: a browser painting forty rows and
-      // a `odu surface watch runs` in a terminal both want "here is the set,
-      // then here is what changed", and without this verb each would have to
-      // re-read every row to notice one moved. `logTails` deliberately has no
-      // deltas — its key set is what happens to be watched, so a delta stream
-      // over it would describe subscriptions rather than runs.
       verbs: ["keys", "get", "upsert", "delete", "deltas"],
     },
     logTails: { keySchema: Schema.String, schema: LogTailSchema },
@@ -2128,12 +1575,7 @@ export type CheckoutStreamInput = ServiceSF["streams"]["checkout"]["InputWire"];
  *  procedure. */
 export type OduServiceClient = SurfaceClientOf<typeof oduServiceSurface.spec>;
 
-/** Build the service face over any dispatch. ONE cast, here, so no consumer
- *  writes its own: the runtime object carries every member the type names
- *  (minted by `defineSurface`'s own tag algebra); the cast only tells the
- *  compiler which projection of that walk it is looking at. The same idiom
- *  `oduClientOver` keeps for the coordinator surface, and for the same
- *  reason. */
+/** Build the service face over any dispatch. */
 export function oduServiceClientOver(
   dispatch: SurfaceDispatch,
 ): OduServiceClient {

@@ -1,20 +1,3 @@
-/**
- * The WALL, enforced — what this package is allowed to import.
- *
- * Same instrument as `@odu/run-client`'s and `@odu/run-history`'s, and
- * deliberately a SIBLING rather than a shared helper: each package must be able
- * to state its own closure from inside its own directory, because that is the
- * unit a consumer copies.
- *
- * The claim that is THIS package's own is BROWSER SAFETY. Every module here is
- * loaded into a tab by `packages/web-ui`, so a `node:` import — a filesystem
- * read, a `child_process` — would not fail here, where the bundler is happy to
- * resolve it, but in the browser, at runtime, as a blank page. There is no
- * compiler check for that, so it is checked here: `node:*` is refused
- * OUTRIGHT, and the refusal is the reason the service's platform half lives one
- * wall up in `@odu/service`.
- */
-
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize, relative, sep } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -28,37 +11,19 @@ const MANIFEST = JSON.parse(
 
 const DECLARED = Object.keys(MANIFEST.dependencies ?? {});
 
-/** What a consumer must satisfy, pinned as a literal set. Growing it is a
- *  decision every downstream pays for, so it is written down rather than
- *  derived from whatever the manifest happens to say today. */
 const EXPECTED_DEPENDENCIES = ["@odu/run-client", "@odu/run-history", "effect"];
 
-/** The `@kolu/*` sources a consumer must hydrate alongside this package. */
 const HYDRATED = new Set<string>([
-  // The framework's browser-safe half: the contract vocabulary
-  // (`defineSurface`), the face builder, the websocket link and the shell
-  // constant the dial reads its terminal close code from. A consumer that
-  // hydrates this package hydrates these two directories with it.
   "@kolu/surface",
   "@kolu/surface-app",
-  // The daemon-home algebra `./socket` derives the service's socket path from
-  // (`resolveDaemonHome`) — reached by the node-only half alone.
   "@kolu/surface-daemon",
 ]);
 
 /**
  * The NODE-ONLY modules — the platform half, which a browser must never reach.
- *
- * `./socket` is the service's LOCAL transport: a unix socket in the daemon's
- * home, plus the home's name derivation (`node:crypto`) and the path algebra
- * (`node:path`, via `@kolu/surface-daemon`). There is nowhere else for it to
- * live that would not make every local client re-derive the daemon's address,
- * so it lives here and is DECLARED — the wall below stops being a blanket over
- * the directory and becomes a statement about which modules are the browser's.
  */
 const NODE_ONLY = new Set(["src/socket.ts"]);
 
-/** Test-only imports — the harness, not the shipped closure. */
 const TEST_ONLY = new Set(["bun:test", "typescript"]);
 
 function tsFilesUnder(dir: string): string[] {
@@ -75,15 +40,12 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
-/** Every module specifier a consumer's compiler would have to resolve: static
- *  imports and re-exports (`import type` included), `import x = require("…")`,
- *  dynamic `import()`, and `import("…").T` in type position. */
 function specifiersIn(source: string, fileName: string): string[] {
   const parsed = ts.createSourceFile(
     fileName,
     source,
     ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
+    false,
     ts.ScriptKind.TS,
   );
   const out: string[] = [];
@@ -112,7 +74,6 @@ function specifiersIn(source: string, fileName: string): string[] {
   return out;
 }
 
-/** `@scope/name/sub` → `@scope/name`; `name/sub` → `name`. */
 function packageOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@")
@@ -131,8 +92,6 @@ const sources = tsFilesUnder(join(packageRoot, "src"))
 describe("@odu/service-client's import closure", () => {
   it("has sources to police", () => {
     expect(sources.length).toBeGreaterThan(0);
-    // A parser that silently returned nothing would make every assertion
-    // below vacuously true.
     expect(sources.flatMap((s) => s.specifiers).length).toBeGreaterThan(0);
   });
 
@@ -173,16 +132,8 @@ describe("@odu/service-client's import closure", () => {
   });
 
   it("never imports a node builtin outside the declared node-only modules", () => {
-    // The claim this package makes that its neighbours do not: every module the
-    // BROWSER reaches is bundled into a tab, where a `node:` import resolves at
-    // build time and is a blank page at runtime. `NODE_ONLY` names the platform
-    // half — the service's local socket transport — so the rule is about which
-    // modules the browser can reach rather than about the whole directory.
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
-      // THIS FILE is the exception, and the only one: a closure test reads the
-      // directory it polices. It is never bundled — `bun test` runs it — so the
-      // rule it enforces does not apply to the enforcer.
       if (rel.endsWith(".test.ts") || NODE_ONLY.has(rel)) continue;
       for (const spec of specifiers) {
         if (spec.startsWith("node:")) offenders.push(`${rel}: ${spec}`);
@@ -197,13 +148,6 @@ describe("@odu/service-client's import closure", () => {
   });
 
   it("keeps the node-only modules out of a browser's reach", () => {
-    // NODE_ONLY is a claim about what a BUNDLER follows, not about what a file
-    // says: a browser-safe module that imports `./socket` — directly, or
-    // through a re-export — pulls `node:crypto` into the tab regardless. One
-    // hop is enough to catch it, because the set of browser-reachable modules
-    // IS `src` minus NODE_ONLY: the first edge out of that set is the
-    // violation, and a module added to NODE_ONLY is exempt from the rule by
-    // the same declaration the other test reads.
     const offenders: string[] = [];
     for (const { rel, specifiers } of sources) {
       if (rel.endsWith(".test.ts") || NODE_ONLY.has(rel)) continue;
@@ -221,7 +165,6 @@ describe("@odu/service-client's import closure", () => {
   });
 
   it("reaches run-history's portable half, plus the state root from the node-only module", () => {
-    // The manifest says "the PORTABLE half alone — `./schema` and `./ids`".
     // `./paths` is `node:path`/`node:os`, so it is allowed from exactly one
     // module: the declared node-only one, where the daemon's home and the
     // client's dial have to agree about `$ODU_STATE_DIR`.
