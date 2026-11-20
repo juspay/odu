@@ -1,26 +1,7 @@
-/**
- * CLOUDFLARE'S API, AS FAR AS THIS ROW NEEDS IT.
- *
- * Six calls: verify the token, find the zone a name belongs to, make one
- * tunnel, give it its ingress, keep one proxied CNAME, and forget at the edge
- * what a collection deleted. Everything this row creates is named after this
- * server — the tunnel after the public origin — so a person looking at the
- * Cloudflare dashboard can tell two odu installs apart.
- *
- * The base URL and the fetch are constructor arguments so the suite records a
- * conversation instead of reaching the network. Errors are Cloudflare's own
- * sentence, joined from the envelope's `errors`, because "the API said no" is
- * not a reason a person can act on.
- */
-
 export class CloudflareApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    /** A REFUSAL is Cloudflare saying no (an inactive token, a missing
-     *  permission, a foreign record). An UNAVAILABLE API is a network error, a
-     *  5xx or a rate limit — a reason to retry, never a reason to take the
-     *  board down. */
     readonly kind: "refusal" | "unavailable",
   ) {
     super(message);
@@ -28,7 +9,6 @@ export class CloudflareApiError extends Error {
   }
 }
 
-/** Is this Cloudflare refusing, rather than being unreachable? */
 export function isRefusal(err: unknown): err is CloudflareApiError {
   return err instanceof CloudflareApiError && err.kind === "refusal";
 }
@@ -47,16 +27,13 @@ export interface TunnelCreated {
   token: string;
 }
 
-/** One ingress rule, as cloudflared's remotely-managed configuration takes it. */
 export interface IngressRule {
   hostname?: string;
   service: string;
 }
 
 export interface CloudflareApi {
-  /** `GET /user/tokens/verify` — a refusal names what Cloudflare said. */
   verify(): Promise<void>;
-  /** The zone a name belongs to, trying the name and then its parents. */
   zoneFor(host: string): Promise<ZoneRef | null>;
   createTunnel(accountId: string, name: string): Promise<TunnelCreated>;
   putTunnelConfig(
@@ -64,38 +41,19 @@ export interface CloudflareApi {
     tunnelId: string,
     ingress: readonly IngressRule[],
   ): Promise<void>;
-  /**
-   * THE RECORD FOR THIS NAME, AND ONLY IF IT IS ODU'S.
-   *
-   * `knownId` is the record this row already made (from its own database). A
-   * record is adopted when its id is known or its content already points at
-   * this tunnel; anything else is SOMEONE ELSE'S, and the row refuses rather
-   * than rewriting an operator's A/CNAME — which `unwire` would later delete.
-   */
   ensureRecord(
     zoneId: string,
     host: string,
     tunnelId: string,
     knownId: string | null,
   ): Promise<string>;
-  /** Delete one record — after checking it still points at this tunnel, so a
-   *  record somebody else repointed is left alone. */
   deleteRecord(zoneId: string, recordId: string, tunnelId: string): Promise<void>;
-  /**
-   * FORGET THESE URLS AT THE EDGE — `POST /zones/<id>/purge_cache`.
-   *
-   * What a garbage collection deleted at the origin, the edge may still be
-   * holding, and an edge serving a NAR the origin no longer has is a client
-   * importing a path that is gone. Cloudflare takes at most thirty files in
-   * one call, so the caller sends batches.
-   */
+  /** Cloudflare takes at most thirty files in one call, so the caller sends batches. */
   purge(zoneId: string, files: readonly string[]): Promise<void>;
 }
 
 export interface CloudflareApiOptions {
   readonly token: string;
-  /** `https://api.cloudflare.com/client/v4` in production; the suite's stub
-   *  otherwise. */
   readonly base?: string;
   readonly fetch?: typeof fetch;
 }
@@ -177,8 +135,6 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
 
     async zoneFor(host) {
       const labels = host.toLowerCase().split(".").filter((label) => label !== "");
-      // A zone is a registrable name; the tunnel's name is a subdomain of one.
-      // Try the name, then each parent, stopping before the bare TLD.
       for (let at = 0; at <= labels.length - 2; at++) {
         const candidate = labels.slice(at).join(".");
         const zones = await call<
@@ -232,8 +188,6 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
       }
       if (found.content === content) return found.id;
       if (knownId !== null && found.id === knownId) {
-        // THIS ROW MADE IT and something repointed it; putting it back is the
-        // row keeping its own promise.
         await call("PUT", `/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(found.id)}`, {
           type: "CNAME",
           name: host,
@@ -255,7 +209,6 @@ export function cloudflareApi(options: CloudflareApiOptions): CloudflareApi {
         "GET",
         `/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(recordId)}`,
       ).catch((err: unknown) => {
-        // ALREADY GONE is the state the caller wanted.
         if (err instanceof CloudflareApiError && err.status === 404) return null;
         throw err;
       });

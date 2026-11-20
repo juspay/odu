@@ -1,13 +1,3 @@
-/**
- * The tunnel row's steps — the page's two facts and the API's parity read.
- *
- * The arrange half is the CACHE row's vocabulary (`I open the cache`, the root
- * token, the bucket form): a tunnel carries a bucket's name, so a scenario
- * starts by making one. Everything asserted here is this row's: the route's
- * state, the connector's state, the reason, and `odu surface cloudflare
- * status_read`.
- */
-
 import * as assert from "node:assert";
 import { Then, When } from "@cucumber/cucumber";
 import { ROOT_TOKEN, surfaceCall, until } from "../../../web-acceptance/support/service.ts";
@@ -80,15 +70,6 @@ When("I clear the bucket's domain", async function (this: OduWorld) {
   assert.ok(name !== undefined, "no bucket was arranged");
   await this.open(`#/cache/${name}`);
   await this.page.getByRole("heading", { name, exact: true }).waitFor();
-  // OPENING THE BUCKET AGAIN IS A FRESH PAGE, so the in-memory root token the
-  // earlier step typed is gone on a daemon with no door; a person types it
-  // again, and so does this step.
-  //
-  // ONCE IS NOT ENOUGH, and that is a race this step used to lose: a box
-  // filled while the page is still booting comes back empty when the app
-  // draws over it, the admin column never arms, and the control this step is
-  // about never appears — 30 s of waiting for a button nobody was ever going
-  // to draw. So type until it is there.
   const clear = this.page.getByRole("button", { name: "Clear domain", exact: true });
   await until("the Clear domain control", async () => {
     const token = this.page.getByLabel("root token", { exact: true });
@@ -98,7 +79,6 @@ When("I clear the bucket's domain", async function (this: OduWorld) {
     return (await clear.count()) > 0 ? true : null;
   });
   await clear.click();
-  // The USE BLOCK goes back to the path form: the row accepted the clear.
   await until("the substituter block to drop the name", async () =>
     (await this.page.locator("pre.consume-block").innerText()).includes(`/cache/${name}`)
       ? true
@@ -111,7 +91,6 @@ When("I clear the bucket's domain", async function (this: OduWorld) {
 Then(
   "odu surface cloudflare status_read reports {string} as {string}",
   async function (this: OduWorld, domain: string, state: string) {
-    // `status.read` takes NO input, and answers the whole status object.
     const answer = surfaceCall(this.service, ["cloudflare", "status_read", "--json"]);
     assert.strictEqual(answer.status, 0, `status failed: ${answer.stderr}`);
     const status = JSON.parse(answer.stdout) as {

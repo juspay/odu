@@ -1,40 +1,20 @@
-/**
- * WHAT THIS ROW HAS MADE, so it can find it again.
- *
- * Cloudflare's API has no "give me the tunnel this install created" — a tunnel
- * is an account resource with a human name — so the id, the connector's token
- * and the DNS record ids live here. The token is the one SECRET in this file,
- * which is why the directory is 0700 and the file (and SQLite's siblings) 0600:
- * a copy of the database must not be a credential.
- *
- * The routes are the row's DIFF against the cache's published domains: a bucket
- * that has a domain but no route row is work to do, and a route row whose
- * domain is gone is a record to remove.
- */
-
 import { Database } from "bun:sqlite";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { RouteState } from "./surface";
 
-/** The ONE tunnel this server made. */
 export interface TunnelRow {
   tunnelId: string;
-  /** The human name: `odu <public origin host>`. */
   name: string;
-  /** The connector's credential. A secret, kept only here. */
   token: string;
   accountId: string;
   created: number;
 }
 
-/** One name the tunnel carries. */
 export interface RouteRow {
   domain: string;
-  /** The bucket, or null for the server's own public origin. */
   bucket: string | null;
   zoneId: string;
-  /** The DNS record this row made; empty while the row is still being wired. */
   recordId: string;
   state: RouteState;
   reason: string | null;
@@ -112,8 +92,6 @@ export function openCloudflareRepo(path: string): CloudflareRepo {
     try {
       chmodSync(dirname(path), 0o700);
     } catch {
-      // A state root somebody else owns is theirs to fix; the file modes below
-      // still apply to what this process creates.
     }
   }
   const db = new Database(path, { create: true });
@@ -141,8 +119,6 @@ export function openCloudflareRepo(path: string): CloudflareRepo {
     }
   }
 
-  // AFTER the migrations: `-wal` and `-shm` exist only after the first write,
-  // and this file holds a tunnel token.
   if (path !== ":memory:") {
     for (const file of [path, `${path}-wal`, `${path}-shm`]) {
       try {

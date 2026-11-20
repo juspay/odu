@@ -1,16 +1,3 @@
-/**
- * THE CLOUDFLARE ROW'S CONTRACT — a tunnel's state, the names it carries, and
- * one read verb for a terminal.
- *
- * The row's facts are CELLS because they are singular: there is one tunnel for
- * this server, and its state is one value. The routes are a COLLECTION because
- * a name is a row: a bucket's domain arrives and departs while a page is open,
- * and a person wants to see which name is still `wiring` and why.
- *
- * Browser-safe: schemas, a contract and a tagged refusal, nothing else. The API
- * client, the connector and the database are behind `./server`.
- */
-
 import type { RowAgent, RowFacts } from "@odu/cordis/services";
 import { Schema } from "effect";
 import { defineSurface } from "@kolu/surface/define";
@@ -18,25 +5,14 @@ import type { ExposeMap } from "@kolu/surface/expose";
 
 export const CLOUDFLARE_KEY = "cloudflare";
 
-/**
- * THIS ROW'S OWN CONTRACT VERSION, `major.minor` — the tunnel's surface below
- * and nothing served beside it. The host publishes it on the identity cell's
- * `rows`; the rule is the host's (MINOR grows, MAJOR changes what a reader
- * uses), and `contract.test.ts` pins it to a fingerprint of the surface.
- *
- * 2.4: where the composed wire stood when each row took a version of its own.
- */
 export const CLOUDFLARE_CONTRACT_VERSION = "2.4";
-
-// ── the facts ───────────────────────────────────────────────────────────────
 
 /**
  * THE CONNECTOR'S STATE, as `cloudflared` itself reports it.
  *
  * `running` is spawned and not yet registered; `connected` is the line
  * `cloudflared` prints when a connection to the edge is up. `stopped` is the
- * honest state when no name needs a tunnel — the connector is not left running
- * for a route nobody asked for.
+ * honest state when no name needs a tunnel.
  */
 export const TunnelStateSchema = Schema.Literals([
   "stopped",
@@ -65,8 +41,6 @@ export const OFF_TUNNEL: CloudflareTunnel = {
 };
 
 /**
- * ONE NAME THE TUNNEL CARRIES.
- *
  * `wiring` means the route and the record exist (or are being made) and the
  * name has not answered yet; `live` means `https://<domain>/nix-cache-info`
  * answered; `failed` carries Cloudflare's or the network's reason.
@@ -77,7 +51,7 @@ export type RouteState = typeof RouteStateSchema.Type;
 export const CloudflareRouteSchema = Schema.Struct({
   domain: Schema.String,
   /** The bucket this name belongs to; `null` is THE SERVER ITSELF (its public
-   *  origin), which the tunnel carries when that host is in an editable zone. */
+   *  origin). */
   bucket: Schema.NullOr(Schema.String),
   state: RouteStateSchema,
   reason: Schema.NullOr(Schema.String),
@@ -90,8 +64,6 @@ export const CloudflareStatusSchema = Schema.Struct({
   routes: Schema.Array(CloudflareRouteSchema),
 });
 export type CloudflareStatus = typeof CloudflareStatusSchema.Type;
-
-// ── the refusal ─────────────────────────────────────────────────────────────
 
 export const CloudflareRefusalCodeSchema = Schema.Literals([
   /** The API or the connector refused; `message` is its own sentence. */
@@ -106,8 +78,6 @@ export class CloudflareRefused extends Schema.TaggedError<CloudflareRefused>(
   code: CloudflareRefusalCodeSchema,
   message: Schema.String,
 }) {}
-
-// ── the surface ─────────────────────────────────────────────────────────────
 
 export const oduCloudflareSurface = defineSurface({
   cells: {
@@ -139,15 +109,12 @@ export const oduCloudflareSurface = defineSurface({
 
 export type OduCloudflareSurface = typeof oduCloudflareSurface;
 
-/** WHAT AN AGENT MAY REACH. Both facts are reads; the row has no mutating
- *  verb — a name is set on the BUCKET, and this row follows it. */
 export const ODU_CLOUDFLARE_EXPOSE = {
   tunnel: "resource",
   routes: "resource",
   "status.read": { tool: { mutates: false } },
 } as const satisfies ExposeMap<(typeof oduCloudflareSurface)["spec"]>;
 
-/** The paragraph an MCP host is taught at `initialize`. */
 export const ODU_CLOUDFLARE_MCP_INSTRUCTIONS = [
   "The cloudflare row carries a bucket's DNS name to the server through a",
   "Cloudflare Tunnel: it makes one tunnel for this server, a route per name, a",
@@ -164,9 +131,6 @@ export const CLOUDFLARE_AGENT: RowAgent = {
   instructions: ODU_CLOUDFLARE_MCP_INSTRUCTIONS,
 };
 
-/** THIS ROW'S FACTS — its word on the wire, what an agent is told and its own
- *  contract version, in one value beside the surface. The server's record adds
- *  the plugin; a face that composes rows reads these. */
 export const CLOUDFLARE_ROW: RowFacts = {
   name: CLOUDFLARE_KEY,
   key: CLOUDFLARE_KEY,

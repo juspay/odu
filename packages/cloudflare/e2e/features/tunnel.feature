@@ -1,8 +1,4 @@
 Feature: A bucket's own name, through a tunnel
-  # THE TUNNEL WORLD mounts the cloudflare row against a stub API and a
-  # `cloudflared` that says it registered. Every step below is the PAGE a person
-  # uses (the Domain field, the Tunnel panel) or the API's parity read; the
-  # route's state is the row's own fact, not a log line.
 
   @tunnel
   Scenario: Before any name, the tunnel is idle rather than stopped

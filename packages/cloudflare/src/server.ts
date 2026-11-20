@@ -1,38 +1,3 @@
-/**
- * THE CLOUDFLARE ROW — a bucket's name, made real.
- *
- * ## What it owns
- *
- * One tunnel per server, the routes it carries, the proxied DNS records, and
- * the `cloudflared` process that connects them. It REACTS: the cache row
- * publishes which buckets have a domain (`BucketDomains`), and this row makes
- * the tunnel match. It never reads the cache's database or calls the cache's
- * verbs, and the cache never learns this row exists.
- *
- * ## Two things are desired, not one
- *
- * A bucket's domain is the reason the row exists, but the SERVER's own public
- * origin rides the same tunnel when its host is in a zone this token can edit —
- * that is what lets the board, `/mcp` and the websocket reach Cloudflare and
- * retires a Tailscale Funnel. A route whose `bucket` is null is that origin.
- *
- * ## A REFUSAL IS NOT AN OUTAGE
- *
- * An inactive token or a missing permission refuses the row at mount, naming
- * what Cloudflare said — the operator asked for this and can fix it. An
- * UNREACHABLE API (network, 5xx, rate limit) mounts the row with the tunnel
- * `failed: <reason>` and retries with backoff: a Cloudflare incident must not
- * stop the board, the runs or the cache. The first reconcile therefore runs
- * after the mount, never on `apply`'s path.
- *
- * ## The connector and the database are acquired under the activation
- *
- * `open()` acquires the database; the row registers `close()` immediately
- * after it, before it mounts. `close()` waits for the reconcile in flight, for
- * every probe, and for the child's exit — a `cloudflared` that outlived its row
- * would be an orphan holding the tunnel token, and a restart would run two.
- */
-
 import type { Row } from "@odu/cordis/services";
 import { CLOUDFLARE_ROW } from "./surface";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -79,17 +44,11 @@ import { readCloudflareConfig } from "./config";
 type CloudflareSpec = (typeof oduCloudflareSurface)["spec"];
 export type CloudflareSurfaceDeps = ImplementSurfaceDeps<CloudflareSpec>;
 
-/** The connector's binary and the knobs a suite turns down. */
 export interface CloudflareRowConfig {
   readonly token: string;
-  /** The API's base URL (`…/client/v4`). */
   readonly apiBase?: string;
-  /** `cloudflared` on PATH, or an absolute path (the suite's stub). */
   readonly cloudflared?: string;
-  /** Confirm a name through this base instead of `https://<name>`: a proxy a
-   *  deployment's names resolve behind, and the browser suite's stub. */
   readonly probeBase?: string;
-  /** Do the names answer? Defaults to a real `fetch` of the https URL. */
   readonly probe?: (url: string, signal?: AbortSignal) => Promise<boolean>;
   readonly probeAttempts?: number;
   readonly probeIntervalMs?: number;
@@ -98,9 +57,7 @@ export interface CloudflareRowConfig {
 export interface CloudflareServerOptions {
   readonly config: CloudflareRowConfig;
   readonly stateRoot: string;
-  /** Where cloudflared forwards: the daemon's bound origin. */
   readonly localOrigin: string;
-  /** `ODU_PUBLIC_ORIGIN`'s hostname, or null; routed when its zone is editable. */
   readonly publicHost: string | null;
   readonly domains: BucketDomainFacts;
   readonly log: Logger;
@@ -108,7 +65,6 @@ export interface CloudflareServerOptions {
   readonly api?: CloudflareApi;
 }
 
-/** The sibling's publishing half, once the row is mounted. */
 export interface CloudflarePublisher {
   readonly tunnel: (row: CloudflareTunnel) => void;
   readonly routes: {
@@ -120,16 +76,11 @@ export interface CloudflarePublisher {
 export interface CloudflareServer {
   readonly surface: typeof oduCloudflareSurface;
   readonly deps: CloudflareSurfaceDeps;
-  /** Acquire the database. Call once, then register `close()` beside it. */
   open(): void;
   attach(publisher: CloudflarePublisher): void;
-  /** Verify the token. A REFUSAL throws (the row fails); an outage resolves
-   *  with the tunnel failed and a retry scheduled. */
   start(): Promise<void>;
   status(): CloudflareStatus;
   reconcile(): Promise<void>;
-  /** Forget these URLs at the edge, for whichever of them this row routes.
-   *  NEVER rejects: a collection announced them and has already moved on. */
   purge(urls: readonly string[]): Promise<void>;
   close(): Promise<void>;
 }
@@ -193,9 +144,7 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   };
 
   const tunnelStore = inMemoryStore<CloudflareTunnel>(OFF_TUNNEL);
-  /** The read model the surface serves. */
   const routeRows = new Map<string, CloudflareRoute>();
-  /** What was last handed to the publisher, so a publish is a DIFF. */
   const publishedTunnel = { encoded: "" };
   const publishedRoutes = new Map<string, string>();
   let publisher: CloudflarePublisher | null = null;
@@ -204,8 +153,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   let closed = false;
   let unsubscribe: (() => void) | null = null;
   let work: Promise<void> = Promise.resolve();
-  /** A generation per domain: a probe or a wiring pass from an older value must
-   *  not overwrite the one that replaced it. */
   const generations = new Map<string, number>();
   const confirmations = new Set<Promise<void>>();
   const stopProbes = new AbortController();
@@ -284,7 +231,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     }
   }
 
-  /** Bump the domain's generation and answer the new one. */
   function supersede(domain: string): number {
     const next = (generations.get(domain) ?? 0) + 1;
     generations.set(domain, next);
@@ -292,8 +238,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   }
 
   const current = (domain: string): number => generations.get(domain) ?? 0;
-
-  // ── the connector ────────────────────────────────────────────────────────
 
   function connect(tunnel: TunnelRow): void {
     if (closed) return;
@@ -357,8 +301,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     });
   }
 
-  /** Stop the connector and WAIT for the child: the row's release is not
-   *  finished while a process it started still holds the tunnel token. */
   async function stopConnector(): Promise<void> {
     const held = connector;
     if (held === null) {
@@ -377,15 +319,10 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     }
   }
 
-  // ── confirming a name ────────────────────────────────────────────────────
-
   function probeUrl(domain: string, bucket: string | null): string {
     return `https://${domain}${bucket === null ? "/_odu/door" : "/nix-cache-info"}`;
   }
 
-  /** Wait for the name to answer, then say `live` — or `failed` with the URL
-   *  that did not answer. Runs off the reconcile's clock, but every write is
-   *  checked against the domain's generation. */
   async function confirm(domain: string, bucket: string | null): Promise<void> {
     const generation = supersede(domain);
     const url = probeUrl(domain, bucket);
@@ -413,8 +350,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     confirmations.add(running);
   }
 
-  // ── unwiring ─────────────────────────────────────────────────────────────
-
   async function unwire(row: RouteRow, tunnel: TunnelRow | null): Promise<void> {
     supersede(row.domain);
     if (row.recordId !== "" && tunnel !== null) {
@@ -430,17 +365,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     dropRoute(row.domain);
   }
 
-  // ── forgetting what was deleted ──────────────────────────────────────────
-
-  /**
-   * WHICH ZONE EACH ANNOUNCED URL IS BEHIND, by the routes this row made.
-   *
-   * A URL whose host no route names is skipped: nothing of this row's stands
-   * in front of it, and a route still being wired has no zone yet — the same
-   * answer, for the same reason. The server's own public origin is a route
-   * like any other here, so a page this daemon deleted is forgotten with the
-   * NARs.
-   */
   function byZone(urls: readonly string[]): Map<string, string[]> {
     const zoneOf = new Map<string, string>();
     for (const row of db().routes()) {
@@ -463,11 +387,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     return grouped;
   }
 
-  /** Forget what a collection deleted. BEST EFFORT in both directions: nobody
-   *  is waiting for this (the announcement returned when it was made), and a
-   *  purge that fails is one line in the log — an edge holding a NAR an hour
-   *  longer than it should is a smaller harm than a collection that could not
-   *  finish because Cloudflare was busy. */
   async function purge(urls: readonly string[]): Promise<void> {
     if (closed || repo === null || urls.length === 0) return;
     for (const [zoneId, files] of byZone(urls)) {
@@ -486,10 +405,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     }
   }
 
-  // ── reconciliation ───────────────────────────────────────────────────────
-
-  /** An API call failed while wiring: mark one route failed, and schedule a
-   *  retry when the API (not the request) was the problem. */
   function failFrom(domain: string, bucket: string | null, err: unknown): void {
     fail(domain, bucket, messageOf(err));
     if (!isRefusal(err)) scheduleRetry();
@@ -497,8 +412,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
 
   async function reconcileNow(): Promise<void> {
     if (closed) return;
-    /** What SHOULD be routed: the cache's names, plus the server's if its host
-     *  is in an editable zone. */
     const desired = new Map<string, string | null>();
     for (const fact of domains.current()) desired.set(fact.domain, fact.bucket);
 
@@ -517,8 +430,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
       if (publicZone !== null) desired.set(options.publicHost, null);
     }
 
-    // A name that is no longer wanted loses its record — before anything new is
-    // made, so the tunnel config is the state it is about to be.
     const tunnelBefore = repo?.tunnel() ?? null;
     for (const row of db().routes()) {
       if (closed) return;
@@ -563,9 +474,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
       return;
     }
 
-    // ONE TUNNEL. Its account is the account of the first editable zone; a name
-    // in another account cannot ride it, and saying so is better than a route
-    // that silently never appears.
     const first = zones.values().next().value as ZoneRef;
     let tunnel = db().tunnel();
     if (tunnel === null) {
@@ -640,10 +548,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
       connect(tunnel);
       for (const row of db().routes()) {
         if (closed) return;
-        // ONLY A WIRING NAME IS CONFIRMED. A route that failed for a reason
-        // (a foreign record, a zone the token cannot see) may still ANSWER if
-        // something else owns the name — probing it would overwrite the reason
-        // with a `live` that is not this row's.
         if (row.state === "wiring") startConfirm(row.domain, row.bucket);
       }
     } else {
@@ -682,8 +586,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
     return work;
   }
 
-  /** Retry the API after an outage. Backs off, stops with the row, and never
-   *  schedules twice. */
   function scheduleRetry(): void {
     if (closed || retryTimer !== null) return;
     const delay = retryDelay;
@@ -762,8 +664,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
       }
       started = true;
       unsubscribe = domains.subscribe(() => void reconcile());
-      // AFTER THE MOUNT AND OFF THE APPLY PATH: the row is served while the
-      // first reconciliation runs.
       void reconcile();
     },
     status,
@@ -777,9 +677,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
       unsubscribe?.();
       unsubscribe = null;
       stopProbes.abort();
-      // A reconcile already awaiting an API call must not spawn a connector on
-      // a row that is leaving; `closed` is checked after every await, and this
-      // join is the last one before the database closes.
       await work.catch(() => {});
       await Promise.allSettled([...confirmations]);
       await stopConnector();
@@ -789,7 +686,6 @@ export function cloudflareServer(options: CloudflareServerOptions): CloudflareSe
   };
 }
 
-/** `http://127.0.0.1:18440` → `127.0.0.1:18440`, for a tunnel name. */
 function hostOf(origin: string): string {
   try {
     return new URL(origin).host;
@@ -798,12 +694,6 @@ function hostOf(origin: string): string {
   }
 }
 
-/** The row as a plugin — mounted by the host only when the token file is set.
- *
- *  THE ORDER IS THE LIFETIME: open the database, register its release, mount,
- *  register the mount's drop, claim the purge port, register its withdrawal,
- *  and only then start. A refusal from `start` unwinds through every
- *  finalizer; an outage does not throw at all. */
 export const cloudflareRow = (config: CloudflareRowConfig) =>
   definePlugin({
     name: CLOUDFLARE_KEY,
@@ -826,8 +716,6 @@ export const cloudflareRow = (config: CloudflareRowConfig) =>
         log,
       });
 
-      // ACQUIRE, THEN ARRANGE THE RELEASE — in the same step, before anything
-      // else can fail and leak it.
       server.open();
       yield* Effect.addFinalizer(() => Effect.promise(() => server.close()));
 
@@ -841,16 +729,9 @@ export const cloudflareRow = (config: CloudflareRowConfig) =>
       });
       yield* Effect.addFinalizer(() => Effect.promise(() => mounted.drop()));
 
-      // THIS ROW IS WHAT STANDS IN FRONT OF THE CACHE'S URLS, so it is the row
-      // that forgets them: a collection announces what it deleted, and this
-      // answers. The claim is withdrawn with the row — a purger outliving the
-      // row that made it would ask Cloudflare about routes read from a closed
-      // database.
       const withdraw = purges.register((urls) => void server.purge(urls));
       yield* Effect.addFinalizer(() => Effect.sync(withdraw));
 
-      // THE TOKEN BEFORE SERVING: a refusal fails the row; an outage marks the
-      // tunnel failed and retries.
       yield* Effect.promise(() => server.start());
 
       log.info(
@@ -860,7 +741,6 @@ export const cloudflareRow = (config: CloudflareRowConfig) =>
     }),
   });
 
-/** `https://board.example.org` → `board.example.org`: Cloudflare names hosts. */
 function hostOnly(origin: string): string {
   try {
     return new URL(origin).hostname.toLowerCase();
@@ -869,14 +749,8 @@ function hostOnly(origin: string): string {
   }
 }
 
-/** Re-exported for the host: the row's ONE environment read. */
 export { readCloudflareConfig };
 
-/**
- * THIS ROW, AS THE HOST LISTS IT — the tunnel, when the host read a token file.
- * Its own facts (`CLOUDFLARE_ROW`, beside its surface) and its plugin, in one
- * value. The host composes these records and names none of their parts.
- */
 export const cloudflareRowRecord = (config: CloudflareRowConfig): Row => ({
   ...CLOUDFLARE_ROW,
   plugin: cloudflareRow(config),

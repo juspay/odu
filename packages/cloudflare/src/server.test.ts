@@ -1,17 +1,3 @@
-/**
- * THE TUNNEL ROW, AGAINST A STUB THAT SPEAKS CLOUDFLARE'S ENVELOPE.
- *
- * The API is a server in this process rather than a mock module: what the row
- * sends is the thing the test reads — a tunnel named after this server, ONE of
- * them, an ingress with the names sorted and a 404 terminator, a proxied CNAME
- * per name — so a change to the request shape is a failure here rather than in
- * production. The envelopes (`{success, errors, result}`) and the endpoints are
- * Cloudflare's documented shapes; this is not a recording of a live account,
- * and it says so. `cloudflared` is a real child process (a shell script that
- * says "Registered tunnel connection" and sleeps), because the connector's
- * state is read off stdout and a fake object could not prove that.
- */
-
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,12 +19,9 @@ interface Stub {
   seen: Seen[];
   zones: Record<string, { id: string; name: string; account: string }>;
   records: Map<string, { id: string; content: string; proxied: boolean }>;
-  /** Records pre-populated before the row starts, keyed by name. */
   preexisting: Map<string, { id: string; content: string }>;
   tunnelCreates: number;
   verifyOk: boolean;
-  /** Does `purge_cache` refuse? A purge is best effort, and the suite proves
-   *  it by having Cloudflare say no. */
   purgeRefuses: boolean;
   stop: () => void;
 }
@@ -150,8 +133,6 @@ function startStub(): Stub {
   return state;
 }
 
-/** A `cloudflared` that reports a registered connection, records what it was
- *  given, and leaves a marker when it is stopped. */
 function fakeConnector(): { bin: string; markers: string } {
   scratch = mkdtempSync(join(tmpdir(), "odu-cloudflare-"));
   const markers = join(scratch, "markers");
@@ -185,8 +166,6 @@ function domainsWorld(initial: BucketDomainFact[]): {
         return () => listeners.delete(listener);
       },
       paths: [],
-      // The cache's grammar, as the row publishes it — this fake is the fact
-      // the tunnel row reads, and the gate that asks it lives in the host.
       bucketOf: (path) => {
         for (const prefix of ["/cache/", "/_odu/v1/buckets/"]) {
           if (!path.startsWith(prefix)) continue;
@@ -205,10 +184,6 @@ function domainsWorld(initial: BucketDomainFact[]): {
 
 const quiet: Logger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
 
-/** A real-time wait for a background effect (a child process's stdout, the
- *  connector's exit). Deterministic timers cannot drive those, so this is the
- *  integration-test exception: tiny and bounded, and the condition is always
- *  the thing awaited rather than a guessed duration. */
 async function until(what: string, ask: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!ask()) {
@@ -286,8 +261,6 @@ describe("the cloudflare row", () => {
       proxied: true,
     });
     expect(w.probes).toEqual(["https://cache.example.org/nix-cache-info"]);
-    // The tunnel's own state is the connector's, not a guess: the fake said
-    // "Registered tunnel connection".
     await until("the connector to connect", () => w.tunnel.at(-1)?.state === "connected");
   });
 
@@ -303,7 +276,6 @@ describe("the cloudflare row", () => {
     );
     expect(w.routes.get("board.example.org")).toMatchObject({ bucket: null, state: "live" });
     expect(w.probes).toContain("https://board.example.org/_odu/door");
-    // ONE tunnel for both names.
     expect(w.stub.tunnelCreates).toBe(1);
   });
 
@@ -337,8 +309,6 @@ describe("the cloudflare row", () => {
 
   it("mounts with the tunnel failed when Cloudflare is unreachable, and retries", async () => {
     const w = await world({ initial: [{ bucket: "kolu", domain: "cache.example.org" }] });
-    // A STOPS NOT A REFUSAL: the row mounts, the tunnel says why, and a retry
-    // is scheduled — the board and the runs never depend on Cloudflare.
     w.stub.stop();
     await expect(w.server.start()).resolves.toBeUndefined();
     await until("the tunnel to report the outage", () => w.tunnel.at(-1)?.state === "failed");
@@ -369,8 +339,6 @@ describe("the cloudflare row", () => {
     });
     await w.server.start();
     await until("the name to be live", () => w.routes.get("cache.example.org")?.state === "live");
-    // Adopted, not re-created: the row did not overwrite a record that was
-    // already pointing at its own tunnel.
     expect(w.stub.preexisting.get("cache.example.org")?.id).toBe("ours-by-content");
     expect(w.stub.records.size).toBe(0);
   });
@@ -380,7 +348,6 @@ describe("the cloudflare row", () => {
     await w.server.start();
     await until("the connector to connect", () => w.tunnel.at(-1)?.state === "connected");
     const markers = w.connector.markers;
-    // NEVER on argv: every local user can read `ps`.
     expect(readFileSync(join(markers, "args"), "utf8")).not.toContain("connector-token");
     expect(readFileSync(join(markers, "token"), "utf8").trim()).toBe("connector-token");
 
@@ -394,9 +361,6 @@ describe("the cloudflare row", () => {
     await w.server.start();
     await until("the name to be live", () => w.routes.get("cache.example.org")?.state === "live");
 
-    // THROUGH THE PORT, not the method: this is the shape the host's broker
-    // calls, and a collection has already moved on by the time the edge hears
-    // about it — so the suite keeps the promise the announcement discards.
     const purges = purgeBroker();
     const inFlight: Promise<void>[] = [];
     purges.register((urls) => void inFlight.push(w.server.purge(urls)));
@@ -423,8 +387,6 @@ describe("the cloudflare row", () => {
 
     await w.server.purge([
       "https://cache.example.org/9rk8.narinfo",
-      // A bucket whose domain this daemon never wired, and something that is
-      // not a URL at all: nothing of this row's stands in front of either.
       "https://cache.unknown.test/9rk8.narinfo",
       "nar/9rk8.nar.zst",
     ]);
@@ -445,8 +407,6 @@ describe("the cloudflare row", () => {
     );
     await w.server.purge(urls);
     const purged = w.stub.seen.filter((one) => one.path === "/zones/zone-1/purge_cache");
-    // THE SPLIT IS THE LIMIT, not a count: the thirty-first file rides a second
-    // call, in the order it was announced.
     expect(purged.map((one) => one.body)).toEqual([
       { files: urls.slice(0, 30) },
       { files: urls.slice(30) },
