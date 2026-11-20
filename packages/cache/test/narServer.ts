@@ -20,12 +20,13 @@ if (path === "routes") {
     throw new Error("narServer routes: a state dir, bucket and hash are required");
   }
   const flags = new Set(process.argv.slice(6));
-  const log = flags.has("log")
+  const options = { logJson: flags.has("log"), slowStore: flags.has("slow") };
+  const log = options.logJson
     ? (event: string, fields: Record<string, unknown>) =>
         process.stderr.write(`${JSON.stringify({ event, ...fields })}\n`)
     : undefined;
   const disk = diskObjectStore({ dir: join(stateRoot, "cache") });
-  const objects: ObjectStore = flags.has("slow")
+  const objects: ObjectStore = options.slowStore
     ? {
         ...disk,
         async get(key, range) {

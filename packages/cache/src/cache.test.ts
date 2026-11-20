@@ -671,7 +671,7 @@ describe("paths say what keeps them", () => {
     expect((await keptOf(cache)).get(pinned)).toMatchObject({ kind: "retention", pins: [] });
 
     travel(3 * DAY);
-    cache.missing(cache.bucket("main") as never, [{ path: pinned }], NOTHING_SAID, false);
+    cache.missing(cache.bucket("main") as never, [{ path: pinned }], NOTHING_SAID, "skip");
     expect((await keptOf(cache)).get(pinned)?.until).toBe(NOW + 2 * DAY + 3 * DAY + 7 * DAY);
 
     travel(30 * DAY);
@@ -736,7 +736,7 @@ describe("missing", () => {
         { path: "/nix/store/22222222222222222222222222222222-b", sigs: ["cache.nixos.org-1:AAAA"] },
       ],
       { run: null, commit: null },
-      false,
+      "skip",
     );
     expect(answer).toEqual({
       missing: ["/nix/store/11111111111111111111111111111111-a"],
@@ -752,11 +752,11 @@ describe("missing", () => {
     if (bucket === null) throw new Error("no bucket");
     const upstream = "/nix/store/22222222222222222222222222222222-b";
     const asked = [{ path: upstream, sigs: ["cache.nixos.org-1:AAAA"] }];
-    expect(cache.missing(bucket, asked, { run: null, commit: null }, true)).toEqual({
+    expect(cache.missing(bucket, asked, { run: null, commit: null }, "store")).toEqual({
       missing: [upstream],
       skipped: [],
     });
-    expect(cache.missing(bucket, asked, { run: null, commit: null }, false)).toEqual({
+    expect(cache.missing(bucket, asked, { run: null, commit: null }, "skip")).toEqual({
       missing: [],
       skipped: [upstream],
     });

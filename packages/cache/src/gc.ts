@@ -247,13 +247,13 @@ function decideBatch(
 ): GcBatch {
   const rows = batch.filter((row) => doomed.has(row.storePath));
   const going = new Set(rows.map((row) => row.storePath));
-  const closes = new Map(rows.map((row) => [row.narHash, row.storePath]));
+  const lastRowPerNarHash = new Map(rows.map((row) => [row.narHash, row.storePath]));
   const decided: GcBatch = { rows, narinfos: [], nars: [], removals: [], kept: 0, bytes: 0 };
   for (const row of rows) {
     const elsewhere = repo
       .objectsByNarHash(bucket, row.narHash)
       .some((other) => !going.has(other.storePath));
-    const takesBytes = !elsewhere && closes.get(row.narHash) === row.storePath;
+    const takesBytes = !elsewhere && lastRowPerNarHash.get(row.narHash) === row.storePath;
     decided.narinfos.push(narinfoKey(bucket, row.hash));
     if (takesBytes) {
       decided.nars.push(objectKey(bucket, row.narHash, row.compression));
@@ -280,6 +280,15 @@ function stoppedBy(bucket: string, err: unknown): string {
     `${bucket}: the store refused a delete — ${said}. ` +
     "Everything it would not delete is still recorded, so collecting again carries on from there."
   );
+}
+
+async function deleteBatchObjects(objects: ObjectStore, decided: GcBatch): Promise<void> {
+  await objects.deleteMany(decided.narinfos);
+  await objects.deleteMany(decided.nars);
+}
+
+function dropBatchRows(repo: CacheRepo, bucket: string, decided: GcBatch): void {
+  for (const row of decided.rows) repo.deleteObject(bucket, row.storePath);
 }
 
 export async function runGc(
@@ -312,14 +321,13 @@ export async function runGc(
       );
       if (decided.rows.length === 0) continue;
       try {
-        await objects.deleteMany(decided.narinfos);
-        await objects.deleteMany(decided.nars);
+        await deleteBatchObjects(objects, decided);
       } catch (err) {
         stopped = stoppedBy(entry.bucket, err);
         break;
       }
       await withLock(async () => {
-        for (const row of decided.rows) repo.deleteObject(entry.bucket, row.storePath);
+        dropBatchRows(repo, entry.bucket, decided);
       });
       left.push(...decided.removals);
       report.evicted += decided.rows.length;
@@ -353,18 +361,22 @@ function stillDoomed(repo: CacheRepo, bucket: string, now: number): ReadonlySet<
   return new Set((fresh?.evict ?? []).map((one) => one.storePath));
 }
 
-export async function sweepOrphans(
-  repo: CacheRepo,
-  bucket: string,
-  objects: ObjectStore,
-): Promise<number> {
-  const named = new Set([
+function keysBucketOwns(repo: CacheRepo, bucket: string): ReadonlySet<string> {
+  return new Set([
     ...repo.objects(bucket).flatMap((row) => [
       objectKey(bucket, row.narHash, row.compression),
       narinfoKey(bucket, row.hash),
     ]),
     cacheInfoKey(bucket),
   ]);
+}
+
+export async function sweepOrphans(
+  repo: CacheRepo,
+  bucket: string,
+  objects: ObjectStore,
+): Promise<number> {
+  const named = keysBucketOwns(repo, bucket);
   let swept = 0;
   for (const object of await objects.list(bucket)) {
     if (named.has(object.key)) continue;

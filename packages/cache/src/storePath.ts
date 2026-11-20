@@ -52,6 +52,10 @@ export interface SelfHashes {
   withOffsets: string;
 }
 
+type SelfHashForm = keyof SelfHashes;
+
+const SELF_HASH_FORMS: readonly SelfHashForm[] = ["withoutOffsets", "withOffsets"];
+
 export function contentAddressOf(input: {
   storePath: string;
   narHash: string;
@@ -73,7 +77,7 @@ export function contentAddressOf(input: {
     ? references.map((reference) => (reference === path ? "self" : reference))
     : references;
   const type = refs.length === 0 ? "source" : `source:${[...refs].sort().join(":")}`;
-  const proves = (hash: string): string | null => {
+  const provesStorePath = (hash: string): string | null => {
     let nar: string;
     try {
       nar = narHashBase32(`sha256:${hash}`);
@@ -86,9 +90,9 @@ export function contentAddressOf(input: {
   if (self) {
     const selfHash = input.selfHash;
     if (selfHash === undefined || selfHash === null) return null;
-    for (const form of [selfHash.withoutOffsets, selfHash.withOffsets]) {
-      const modulo = /^sha256:([0-9abcdfghijklmnpqrsvwxyz]{52})$/.exec(form);
-      const proved = modulo === null ? null : proves(modulo[1] as string);
+    for (const form of SELF_HASH_FORMS) {
+      const modulo = /^sha256:([0-9abcdfghijklmnpqrsvwxyz]{52})$/.exec(selfHash[form]);
+      const proved = modulo === null ? null : provesStorePath(modulo[1] as string);
       if (proved !== null) return proved;
     }
     return null;

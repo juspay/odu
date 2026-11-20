@@ -30,7 +30,7 @@ import {
 } from "./paths";
 import { isUploadSession } from "./staging";
 import type { BucketRow, Scope } from "./db";
-import { isStagedFileName, isStorePathHash } from "./narinfo";
+import { isSafeNarFileName, isSafeStorePathHash } from "./narinfo";
 import {
   actionsBlock,
   FLAKE_CONFIG_NOTE,
@@ -267,7 +267,7 @@ function narinfoRoot(cache: Cache) {
   return (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
       const hash = yield* param("hash");
-      if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
+      if (!isSafeStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
       const admitted = admitByHost(cache, request, "read");
       if (!admitted.ok) return admitted.response;
       return narinfoAnswer(cache, request, admitted.bucket, hash);
@@ -487,7 +487,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
   const uploadPart = (request: HttpServerRequest.HttpServerRequest) =>
           Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+        if (!isSafeNarFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const index = Number(yield* param("index"));
         if (!Number.isSafeInteger(index) || index < 0) {
           return refused(cache, request, `"${yield* param("index")}" is not a part index`);
@@ -532,7 +532,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
   const completeParts = (request: HttpServerRequest.HttpServerRequest) =>
           Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+        if (!isSafeNarFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
         const total = Number(request.headers[PARTS_HEADER] ?? "");
@@ -559,7 +559,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
   const beginUpload = (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
       const file = yield* param("file");
-      if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+      if (!isSafeNarFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
       const admitted = admit(cache, request, yield* param("bucket"), "write");
       if (!admitted.ok) return admitted.response;
       const floor = partSizeOf(yield* Effect.promise(() => bodyText(request)));
@@ -573,7 +573,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
   const directPart = (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
       const file = yield* param("file");
-      if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+      if (!isSafeNarFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
       const index = Number(yield* param("index"));
       const upload = yield* param("upload");
       const admitted = admit(cache, request, yield* param("bucket"), "write");
@@ -588,7 +588,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
   const completeDirect = (request: HttpServerRequest.HttpServerRequest) =>
     Effect.gen(function* () {
       const file = yield* param("file");
-      if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+      if (!isSafeNarFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
       const admitted = admit(cache, request, yield* param("bucket"), "write");
       if (!admitted.ok) return admitted.response;
       const upload = yield* param("upload");
@@ -630,7 +630,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
         const name = yield* param("name");
         if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
-        if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
+        if (!isSafeStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "read");
         if (!admitted.ok) return admitted.response;
         return narinfoAnswer(cache, request, admitted.bucket, hash);
@@ -640,7 +640,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
     HttpRouter.add("GET", `${CACHE_MOUNT}/:bucket/nar/:file`, (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+        if (!isSafeNarFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admit(cache, request, yield* param("bucket"), "read");
         if (!admitted.ok) return admitted.response;
         const source = yield* Effect.promise(() => cache.narSource(admitted.bucket, file));
@@ -659,7 +659,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
     HttpRouter.add("PUT", `${CACHE_MOUNT}/:bucket/nar/:file`, (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+        if (!isSafeNarFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
         const upload = yield* Effect.promise(() => cache.beginUpload(admitted.bucket, file));
@@ -681,7 +681,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
         const name = yield* param("name");
         if (!name.endsWith(NARINFO_SUFFIX)) return missingRoute();
         const hash = name.slice(0, -NARINFO_SUFFIX.length);
-        if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
+        if (!isSafeStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
         const admitted = admit(cache, request, yield* param("bucket"), "write");
         if (!admitted.ok) return admitted.response;
         const outcome = yield* Effect.promise(() =>
@@ -712,7 +712,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
     HttpRouter.add("GET", "/nar/:file", (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+        if (!isSafeNarFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admitByHost(cache, request, "read");
         if (!admitted.ok) return admitted.response;
         const source = yield* Effect.promise(() => cache.narSource(admitted.bucket, file));
@@ -731,7 +731,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
     HttpRouter.add("PUT", "/nar/:file", (request) =>
       Effect.gen(function* () {
         const file = yield* param("file");
-        if (!isStagedFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
+        if (!isSafeNarFileName(file)) return refused(cache, request, `"${file}" is not a NAR file name`);
         const admitted = admitByHost(cache, request, "write");
         if (!admitted.ok) return admitted.response;
         const upload = yield* Effect.promise(() => cache.beginUpload(admitted.bucket, file));
@@ -751,7 +751,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
     HttpRouter.add("PUT", `/:hash(${HASH_PATTERN}).narinfo`, (request) =>
       Effect.gen(function* () {
         const hash = yield* param("hash");
-        if (!isStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
+        if (!isSafeStorePathHash(hash)) return refused(cache, request, `"${hash}" is not a store path hash`);
         const admitted = admitByHost(cache, request, "write");
         if (!admitted.ok) return admitted.response;
         const outcome = yield* Effect.promise(() =>
@@ -823,7 +823,7 @@ function cacheLayer(cache: Cache, urlFor: (name: string) => string) {
           admitted.bucket,
           paths,
           provenanceStated(request.headers),
-          whole,
+          whole ? "store" : "skip",
         );
         return HttpServerResponse.jsonUnsafe({
           missing: answer.missing,

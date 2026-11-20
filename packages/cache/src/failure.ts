@@ -2,6 +2,13 @@ const DIAGNOSTIC_FIELDS = ["code", "errno", "syscall", "hostname", "address", "p
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 
+function scalarFact(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "" || typeof value === "object") {
+    return undefined;
+  }
+  return oneLine(String(value));
+}
+
 function describeLink(value: unknown): string {
   if (typeof value !== "object" || value === null) return oneLine(String(value));
   const bag = value as Record<string, unknown>;
@@ -9,16 +16,16 @@ function describeLink(value: unknown): string {
   const message = typeof bag.message === "string" ? oneLine(bag.message) : "";
   const facts: string[] = [];
   for (const field of DIAGNOSTIC_FIELDS) {
-    const fact = bag[field];
-    if (fact === undefined || fact === null || fact === "" || typeof fact === "object") continue;
-    facts.push(`${field}=${oneLine(String(fact))}`);
+    const fact = scalarFact(bag[field]);
+    if (fact === undefined) continue;
+    facts.push(`${field}=${fact}`);
   }
   const head = message === "" ? name : `${name}: ${message}`;
   return facts.length === 0 ? head : `${head} (${facts.join(", ")})`;
 }
 
-function linksOf(err: unknown): string[] {
-  const seen = new Set<object>();
+function walkCauseChain(err: unknown): string[] {
+  const visited = new Set<object>();
   const links: string[] = [];
   const pending: unknown[] = [err];
   while (pending.length > 0) {
@@ -27,8 +34,8 @@ function linksOf(err: unknown): string[] {
       links.push(describeLink(link));
       continue;
     }
-    if (seen.has(link)) continue;
-    seen.add(link);
+    if (visited.has(link)) continue;
+    visited.add(link);
     links.push(describeLink(link));
     const bag = link as { cause?: unknown; errors?: unknown };
     if (bag.cause !== undefined && bag.cause !== null) pending.push(bag.cause);
@@ -43,7 +50,7 @@ function linksOf(err: unknown): string[] {
 
 export function describeFailure(err: unknown): string {
   try {
-    return linksOf(err).join(" ← ");
+    return walkCauseChain(err).join(" ← ");
   } catch {
     return "an error that refused to describe itself";
   }

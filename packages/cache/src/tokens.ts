@@ -15,18 +15,39 @@ export function scopeAtLeast(have: Scope, need: Scope): boolean {
   return RANK[have] >= RANK[need];
 }
 
+export interface BucketGlob {
+  readonly patterns: readonly (readonly string[])[];
+}
+
+export function parseBucketGlob(glob: string): BucketGlob {
+  return {
+    patterns: glob
+      .split(",")
+      .map((pattern) => pattern.trim())
+      .filter((pattern) => pattern !== "")
+      .map((pattern) => pattern.split("*")),
+  };
+}
+
+function patternMatches(segments: readonly string[], bucket: string): boolean {
+  const first = segments[0] as string;
+  if (!bucket.startsWith(first)) return false;
+  if (segments.length === 1) return bucket.length === first.length;
+  const last = segments[segments.length - 1] as string;
+  if (bucket.length < first.length + last.length || !bucket.endsWith(last)) return false;
+  const end = bucket.length - last.length;
+  let at = first.length;
+  for (const segment of segments.slice(1, -1)) {
+    if (segment === "") continue;
+    const found = bucket.indexOf(segment, at);
+    if (found === -1 || found + segment.length > end) return false;
+    at = found + segment.length;
+  }
+  return true;
+}
+
 export function globMatches(glob: string, bucket: string): boolean {
-  return glob
-    .split(",")
-    .map((pattern) => pattern.trim())
-    .filter((pattern) => pattern !== "")
-    .some((pattern) => {
-      const escaped = pattern
-        .split("*")
-        .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-        .join(".*");
-      return new RegExp(`^${escaped}$`).test(bucket);
-    });
+  return parseBucketGlob(glob).patterns.some((segments) => patternMatches(segments, bucket));
 }
 
 export const TOKEN_TOUCH_MS = 60_000;

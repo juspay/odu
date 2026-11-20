@@ -20,12 +20,11 @@ import {
   Routes,
   StateDir,
 } from "@odu/cordis/services";
+import { type Authority, roleAuthority } from "./authority";
 import {
   createCache,
   type CacheMountRefusal,
   mountRefusalMessage,
-  roleAuthority,
-  type Authority,
   type BucketFacts,
   type Cache,
   type CacheOutcome,

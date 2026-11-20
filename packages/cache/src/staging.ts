@@ -19,8 +19,8 @@ import {
 import {
   narFileName,
   isDerivationPath,
-  isStagedFileName,
-  isStorePathHash,
+  isSafeNarFileName,
+  isSafeStorePathHash,
   type NarInfo,
   parseNarinfo,
   SERVED_EXTENSION,
@@ -671,7 +671,7 @@ export function createStaging(deps: StagingDeps): Staging {
     },
 
     async beginDirect(bucket, file, floor) {
-      if (!isStagedFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
+      if (!isSafeNarFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
       await sweep();
       const store = directUploads(storeOf(bucket));
       if (store === null) return { mode: "staged" };
@@ -757,7 +757,7 @@ export function createStaging(deps: StagingDeps): Staging {
       await sweep();
       const dirForBucket = stagedDir(bucket.name);
       await mkdir(join(dirForBucket, "nar"), { recursive: true, mode: 0o700 });
-      if (!isStagedFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
+      if (!isSafeNarFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
       await touchUpload(dirForBucket, file);
       return openAt(join(dirForBucket, "nar", file), null, (bytes) => {
         log?.("cache.nar.uploaded", { bucket: bucket.name, file, mode: "staged", parts: 1, bytes });
@@ -765,7 +765,7 @@ export function createStaging(deps: StagingDeps): Staging {
     },
 
     async beginPart(bucket, file, index, limit, session = null) {
-      if (!isStagedFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
+      if (!isSafeNarFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
       if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_PARTS) {
         throw new Error(`"${index}" is not a part index`);
       }
@@ -780,7 +780,7 @@ export function createStaging(deps: StagingDeps): Staging {
     },
 
     async completeUpload(bucket, file, total, session = null) {
-      if (!isStagedFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
+      if (!isSafeNarFileName(file)) throw new Error(`"${file}" is not a NAR file name`);
       if (!Number.isSafeInteger(total) || total < 1 || total > MAX_PARTS) {
         throw new Error(`"${total}" is not a part count`);
       }
@@ -797,7 +797,7 @@ export function createStaging(deps: StagingDeps): Staging {
     },
 
     async acceptNarinfo(bucket, hash, body, provenance) {
-      if (!isStorePathHash(hash)) {
+      if (!isSafeStorePathHash(hash)) {
         return { ok: false, status: 400, message: `"${hash}" is not a store path hash` };
       }
       const dirForBucket = stagedDir(bucket.name);
@@ -841,7 +841,7 @@ export function createStaging(deps: StagingDeps): Staging {
       }
 
       const name = basename(info.url);
-      if (!isStagedFileName(name)) {
+      if (!isSafeNarFileName(name)) {
         return {
           ok: false,
           status: 400,

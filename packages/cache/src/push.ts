@@ -717,10 +717,11 @@ export async function pushToCache(options: PushOptions): Promise<PushSummary> {
     (storePath) => !refused.has(storePath) && !upstream.has(storePath),
   );
 
-  const pinned =
+  const pinIfNothingRefused = async (): Promise<PushSummary["pinned"]> =>
     options.pin === undefined || options.pin === "" || failures.length > 0
       ? null
       : await pinClosure(resolved, headers, options.pin, served, say);
+  const pinned = await pinIfNothingRefused();
   return {
     pushed,
     bytes,
@@ -1046,6 +1047,20 @@ async function putPart(
   return { ok: false, refusal: everyAttempt(tried) };
 }
 
+function negotiationUnsupported(url: string): { refusal: PushRefusal; retry: boolean } {
+  return {
+    refusal: {
+      message:
+        `${url} does not take uploads this way: it predates cache surface ` +
+        `${UPLOAD_NEGOTIATION_SINCE}, which added the upload negotiation — upgrade the cache`,
+      url,
+      status: 404,
+      body: null,
+    },
+    retry: false,
+  };
+}
+
 async function beginUpload(
   base: string,
   headers: Record<string, string>,
@@ -1062,17 +1077,7 @@ async function beginUpload(
   const { response } = dialed;
   if (response.status === 404) {
     await response.body?.cancel().catch(() => {});
-    return {
-      refusal: {
-        message:
-          `${url} does not take uploads this way: it predates cache surface ` +
-          `${UPLOAD_NEGOTIATION_SINCE}, which added the upload negotiation — upgrade the cache`,
-        url,
-        status: 404,
-        body: null,
-      },
-      retry: false,
-    };
+    return negotiationUnsupported(url);
   }
   if (!response.ok) {
     return {
@@ -1322,34 +1327,39 @@ async function uploadOne(
   const tried: PushRefusal[] = [];
 
   const narName = `${narHashBase32(entry.narHash)}.nar.zst`;
-  const session = randomUUID();
+  const uploadSessionForThisPath = randomUUID();
+  const rebeginIfDirect = async (
+    current: UploadPlan | { refusal: PushRefusal; retry: boolean },
+  ): Promise<UploadPlan | { refusal: PushRefusal; retry: boolean }> =>
+    "refusal" in current || current.mode === "direct"
+      ? await beginUpload(base, headers, narName, options.partSize)
+      : current;
+  const attemptUpload = async (ready: UploadPlan): Promise<NarUpload> =>
+    ready.mode === "direct"
+      ? await uploadDirect(base, headers, entry, platform, say, ready, narName)
+      : await uploadStaged(
+          base,
+          headers,
+          entry,
+          platform,
+          attempts,
+          say,
+          options.partSize,
+          uploadSessionForThisPath,
+        );
   let plan = await beginUpload(base, headers, narName, options.partSize);
   for (let attempt = 0; attempt < attempts; attempt++) {
     const previous = tried.at(-1);
     if (previous !== undefined) {
       say(retryLine(entry.storePath, attempt, attempts, previous));
-      if ("refusal" in plan || plan.mode === "direct") {
-        plan = await beginUpload(base, headers, narName, options.partSize);
-      }
+      plan = await rebeginIfDirect(plan);
     }
     if ("refusal" in plan) {
       tried.push(plan.refusal);
       if (!plan.retry) break;
       continue;
     }
-    const uploaded =
-      plan.mode === "direct"
-        ? await uploadDirect(base, headers, entry, platform, say, plan, narName)
-        : await uploadStaged(
-            base,
-            headers,
-            entry,
-            platform,
-            attempts,
-            say,
-            options.partSize,
-            session,
-          );
+    const uploaded = await attemptUpload(plan);
     if (!uploaded.ok) {
       tried.push(uploaded.refusal);
       if (!uploaded.retry) break;

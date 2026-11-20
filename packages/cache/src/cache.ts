@@ -1,5 +1,7 @@
 import { statfs } from "node:fs/promises";
 import { join } from "node:path";
+import { type Authority, mintedByThisRow } from "./authority";
+import { holdsCache } from "./holdsCache";
 import type {
   BucketGauge,
   BucketRow,
@@ -35,7 +37,7 @@ import {
   formatNarinfo,
   generateKeypair,
   isDerivationPath,
-  isStorePathHash,
+  isSafeStorePathHash,
   keyNameOf,
   compressionOfFile,
   canonicalNarHash,
@@ -163,15 +165,9 @@ export type CacheOutcome<T> =
   | { ok: true; value: T }
   | { ok: false; code: CacheRefusalCode; message: string };
 
-const roleSeal: unique symbol = Symbol("odu:cache/role");
+export type UpstreamPaths = "skip" | "store";
 
-export type Authority =
-  | { readonly kind: "root"; readonly rootToken: string }
-  | { readonly kind: "role"; readonly login: string; readonly [roleSeal]: true };
-
-export function roleAuthority(login: string): Authority {
-  return { kind: "role", login, [roleSeal]: true };
-}
+type CollectScope = "one-bucket" | "every-bucket";
 
 export interface CacheAdmin {
   readonly mount: string;
@@ -381,7 +377,7 @@ export interface Cache {
     bucket: BucketRow,
     paths: readonly { path: string; sigs?: readonly string[] }[],
     provenance: Provenance,
-    whole: boolean,
+    upstream: UpstreamPaths,
   ): { missing: readonly string[]; skipped: readonly string[] };
   snapshot(): readonly BucketFacts[];
   meterGauges(): readonly BucketGauge[];
@@ -468,34 +464,11 @@ export function createCache(options: CacheOptions): Cache {
   const writers = newChain();
   const withWriteLock = <T>(work: () => Promise<T>): Promise<T> => serial(writers, work);
 
-  const holdsMemo = new Map<
-    string,
-    { revision: number; holds: Map<string, Hold>; byName: Map<string, string[]> }
-  >();
-  function holdsFor(bucket: BucketRow): {
-    holds: Map<string, Hold>;
-    byName: Map<string, string[]>;
-  } {
-    const revision = repo.revision(bucket.name);
-    const kept = holdsMemo.get(bucket.name);
-    if (kept !== undefined && kept.revision === revision) return kept;
-    const objects = repo.objects(bucket.name);
-    const holds = holdsOf(bucket, objects, repo.pins(bucket.name));
-    const byName = new Map<string, string[]>();
-    for (const row of objects) {
-      const name = storePathParts(row.storePath).name;
-      const versions = byName.get(name);
-      if (versions === undefined) byName.set(name, [row.storePath]);
-      else versions.push(row.storePath);
-    }
-    const fresh = { revision, holds, byName };
-    holdsMemo.set(bucket.name, fresh);
-    return fresh;
-  }
+  const heldPaths = holdsCache(repo);
 
   function requireRoot(input: { authority: Authority }): CacheOutcome<null> {
     if (input.authority.kind === "role") {
-      if (roleSeal in input.authority && input.authority[roleSeal] === true) {
+      if (mintedByThisRow(input.authority)) {
         return { ok: true, value: null };
       }
       return {
@@ -518,7 +491,7 @@ export function createCache(options: CacheOptions): Cache {
     return { ok: true, value: null };
   }
 
-  const exposure = (isPublic: boolean, store: string): CacheOutcome<never> | null =>
+  const privateBucketOnWorldReadableStore = (isPublic: boolean, store: string): CacheOutcome<never> | null =>
     isPublic || !fronted.has(store)
       ? null
       : {
@@ -825,7 +798,7 @@ export function createCache(options: CacheOptions): Cache {
           message: `no store "${store}" — this daemon declares ${[...stores.keys()].join(", ")}`,
         };
       }
-      const exposed = exposure(input.public, store);
+      const exposed = privateBucketOnWorldReadableStore(input.public, store);
       if (exposed !== null) return exposed;
       const keypair = generateKeypair(`${input.name}-1`);
       const bucket: BucketRow = {
@@ -1001,7 +974,7 @@ export function createCache(options: CacheOptions): Cache {
               message: `"${bucket.name}" already keeps its objects in "${input.store}"`,
             };
           }
-          const exposed = exposure(bucket.isPublic, input.store);
+          const exposed = privateBucketOnWorldReadableStore(bucket.isPublic, input.store);
           if (exposed !== null) return exposed;
           const running = repo.migration(bucket.name);
           if (running !== null) {
@@ -1088,9 +1061,7 @@ export function createCache(options: CacheOptions): Cache {
             objects += 1;
             bytes += size;
           },
-          failed: (_key, reason) => {
-            throw reason;
-          },
+          failed: () => "stop",
         });
         objects += await store.sweepTemp(bucket.name, now());
         options.purged?.({
@@ -1101,7 +1072,7 @@ export function createCache(options: CacheOptions): Cache {
           cacheInfo: true,
         });
         repo.deleteBucket(bucket.name);
-        holdsMemo.delete(bucket.name);
+        heldPaths.forget(bucket.name);
         options.log?.("cache.bucket.deleted", { bucket: bucket.name, objects, bytes });
         notify();
         return { ok: true as const, value: { name: bucket.name, objects, bytes } };
@@ -1153,7 +1124,10 @@ export function createCache(options: CacheOptions): Cache {
       if (!root.ok) return root;
       const chosen = bucketsFor(input.bucket);
       if (!chosen.ok) return chosen;
-      return { ok: true, value: await collectNow(chosen.value, input.bucket === null) };
+      return {
+        ok: true,
+        value: await collectNow(chosen.value, input.bucket === null ? "every-bucket" : "one-bucket"),
+      };
     },
 
     async gcPlan(input) {
@@ -1194,7 +1168,7 @@ export function createCache(options: CacheOptions): Cache {
         sort: input.sort ?? "pushed",
         descending: input.descending ?? true,
       };
-      const { holds, byName } = holdsFor(bucket);
+      const { holds, byName } = heldPaths.of(bucket);
       const at = now();
       if (input.group === "name") {
         const grouped = repo.objectGroupsPage(bucket.name, page);
@@ -1328,12 +1302,12 @@ export function createCache(options: CacheOptions): Cache {
 
   async function collectNow(
     buckets: readonly BucketRow[],
-    sweep: boolean,
+    scope: CollectScope,
   ): Promise<GcCollection> {
     const plan = await withWriteLock(async () => planFor(buckets));
     const collected = await runGc(repo, plan, objectsOf, { now, withLock: withWriteLock });
     const { report } = collected;
-    if (sweep && report.stopped === null) {
+    if (scope === "every-bucket" && report.stopped === null) {
       for (const bucket of buckets) {
         const swept = await sweepOrphans(repo, bucket.name, storeOf(bucket));
         const entry = report.buckets.find((one) => one.bucket === bucket.name);
@@ -1593,6 +1567,88 @@ export function createCache(options: CacheOptions): Cache {
     return { migrated, failures, complete, paused };
   }
 
+  async function writeNarinfoObjectIfStale(
+    bucketName: string,
+    row: ObjectRow,
+  ): Promise<WriteOutcome | "failed" | "gone"> {
+    const at = repo.bucket(bucketName);
+    if (at === null) return "gone";
+    const key = narinfoKey(at.name, row.hash);
+    const text = narinfoFor(at, row);
+    const size = await storeOf(at).head(key).catch(() => null);
+    if (row.fileHash === null || size === new TextEncoder().encode(text).length) return "same";
+    return await withWriteLock(async () => {
+      const now = repo.bucket(bucketName);
+      if (now === null || repo.object(now.name, row.storePath) === null) {
+        return "same" as const;
+      }
+      return keepNarinfoObject(now, row);
+    });
+  }
+
+  function requireDeclaredStores(): CacheMountRefusal | null {
+    for (const bucket of repo.buckets()) {
+      if (!stores.has(bucket.store)) {
+        return {
+          kind: "undeclared_store",
+          bucket: bucket.name,
+          store: bucket.store,
+          declared: [...stores.keys()],
+        };
+      }
+    }
+    return null;
+  }
+
+  function proveContentAddresses(): number {
+    let caProved = 0;
+    for (const row of repo.objects().filter(
+      (one) => one.caProof === "unknown" && !one.references.includes(one.storePath),
+    )) {
+      const ca = contentAddressOf({
+        storePath: row.storePath,
+        narHash: row.narHash,
+        references: row.references,
+      });
+      repo.putObject({
+        ...row,
+        ca,
+        caProof: ca === null ? "not-content-addressed" : "content-addressed",
+      });
+      if (ca !== null) caProved += 1;
+    }
+    if (caProved > 0) {
+      options.log?.("cache.boot.ca", { proved: caProved });
+      notify();
+    }
+    return caProved;
+  }
+
+  async function sweepOrphansAndTemps(): Promise<{ orphansSwept: number; tempSwept: number }> {
+    const owned = new Set([
+      ...repo.objects().flatMap((row) => [
+        objectKey(row.bucket, row.narHash, row.compression),
+        narinfoKey(row.bucket, row.hash),
+      ]),
+      ...repo.buckets().map((bucket) => cacheInfoKey(bucket.name)),
+    ]);
+    let tempSwept = 0;
+    let orphansSwept = 0;
+    for (const bucket of repo.buckets()) {
+      const objects = storeOf(bucket);
+      tempSwept += await objects.sweepTemp(bucket.name, now());
+      for (const object of await objects.list(bucket.name)) {
+        if (owned.has(object.key)) continue;
+        await objects.delete(object.key);
+        orphansSwept += 1;
+      }
+    }
+    if (orphansSwept > 0 || tempSwept > 0) {
+      options.log?.("cache.boot.orphans", { swept: orphansSwept, temp: tempSwept });
+    }
+    return { orphansSwept, tempSwept };
+  }
+
   async function backfillNow(): Promise<ObjectBackfillReport> {
     const buckets = repo.buckets();
     let rows = 0;
@@ -1613,24 +1669,12 @@ export function createCache(options: CacheOptions): Cache {
       let inBucket = 0;
       const one = async (row: ObjectRow): Promise<void> => {
         if (stopping) return;
-        const at = repo.bucket(bucket.name);
-        if (at === null) return;
-        const key = narinfoKey(at.name, row.hash);
-        const text = narinfoFor(at, row);
-        const size = await storeOf(at).head(key).catch(() => null);
-        if (row.fileHash !== null && size !== new TextEncoder().encode(text).length) {
-          const outcome = await withWriteLock(async () => {
-            const now = repo.bucket(bucket.name);
-            if (now === null || repo.object(now.name, row.storePath) === null) {
-              return "same" as const;
-            }
-            return keepNarinfoObject(now, row);
-          });
-          if (outcome === "failed") failures += 1;
-          else if (outcome !== "same") {
-            written += 1;
-            inBucket += 1;
-          }
+        const outcome = await writeNarinfoObjectIfStale(bucket.name, row);
+        if (outcome === "gone") return;
+        if (outcome === "failed") failures += 1;
+        else if (outcome !== "same") {
+          written += 1;
+          inBucket += 1;
         }
         done += 1;
         if (done % 500 === 0) {
@@ -1688,7 +1732,7 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     narinfoText(bucket, hash) {
-      if (!isStorePathHash(hash)) return null;
+      if (!isSafeStorePathHash(hash)) return null;
       const row = repo.objectByHash(bucket.name, hash);
       return row === null ? null : narinfoFor(bucket, row);
     },
@@ -1698,7 +1742,7 @@ export function createCache(options: CacheOptions): Cache {
     log: (event, fields) => options.log?.(event, fields),
 
     touch(bucket, hash) {
-      if (!isStorePathHash(hash)) return;
+      if (!isSafeStorePathHash(hash)) return;
       const row = repo.objectByHash(bucket.name, hash);
       if (row === null) return;
       repo.countRead(bucket.name, row.storePath);
@@ -1771,7 +1815,7 @@ export function createCache(options: CacheOptions): Cache {
       return outcome;
     },
 
-    missing(bucket, paths, provenance, whole) {
+    missing(bucket, paths, provenance, upstream) {
       const missing: string[] = [];
       const skipped: string[] = [];
       const wanted: string[] = [];
@@ -1780,19 +1824,19 @@ export function createCache(options: CacheOptions): Cache {
           wanted.push(path);
           continue;
         }
-        const upstream =
-          !whole &&
+        const signedUpstream =
+          upstream === "skip" &&
           (sigs ?? []).some((sig) => {
             const key = keyNameOf(sig);
             return key !== null && bucket.upstreamKeys.includes(key);
           });
-        (upstream ? skipped : missing).push(path);
+        (signedUpstream ? skipped : missing).push(path);
       }
       repo.want(bucket.name, wanted, now(), provenance);
       return { missing, skipped };
     },
 
-    collect: () => collectNow(repo.buckets(), true),
+    collect: () => collectNow(repo.buckets(), "every-bucket"),
 
     pinAs: (bucket, input) => pinChecked(bucket, input, "write"),
 
@@ -1842,62 +1886,10 @@ export function createCache(options: CacheOptions): Cache {
     },
 
     async boot() {
-      for (const bucket of repo.buckets()) {
-        if (!stores.has(bucket.store)) {
-          return {
-            ok: false as const,
-            refusal: {
-              kind: "undeclared_store" as const,
-              bucket: bucket.name,
-              store: bucket.store,
-              declared: [...stores.keys()],
-            },
-          };
-        }
-      }
-
-      let caProved = 0;
-      for (const row of repo.objects().filter(
-        (one) => one.caProof === "unknown" && !one.references.includes(one.storePath),
-      )) {
-        const ca = contentAddressOf({
-          storePath: row.storePath,
-          narHash: row.narHash,
-          references: row.references,
-        });
-        repo.putObject({
-          ...row,
-          ca,
-          caProof: ca === null ? "not-content-addressed" : "content-addressed",
-        });
-        if (ca !== null) caProved += 1;
-      }
-      if (caProved > 0) {
-        options.log?.("cache.boot.ca", { proved: caProved });
-        notify();
-      }
-
-      const owned = new Set([
-        ...repo.objects().flatMap((row) => [
-          objectKey(row.bucket, row.narHash, row.compression),
-          narinfoKey(row.bucket, row.hash),
-        ]),
-        ...repo.buckets().map((bucket) => cacheInfoKey(bucket.name)),
-      ]);
-      let tempSwept = 0;
-      let orphansSwept = 0;
-      for (const bucket of repo.buckets()) {
-        const objects = storeOf(bucket);
-        tempSwept += await objects.sweepTemp(bucket.name, now());
-        for (const object of await objects.list(bucket.name)) {
-          if (owned.has(object.key)) continue;
-          await objects.delete(object.key);
-          orphansSwept += 1;
-        }
-      }
-      if (orphansSwept > 0 || tempSwept > 0) {
-        options.log?.("cache.boot.orphans", { swept: orphansSwept, temp: tempSwept });
-      }
+      const undeclared = requireDeclaredStores();
+      if (undeclared !== null) return { ok: false as const, refusal: undeclared };
+      const caProved = proveContentAddresses();
+      const { orphansSwept, tempSwept } = await sweepOrphansAndTemps();
       return { ok: true as const, report: { caProved, orphansSwept, tempSwept } };
     },
 
@@ -1963,20 +1955,28 @@ export function createCache(options: CacheOptions): Cache {
  *  input and treating it as part of the scheme is the safe reading. */
 const headerSpace = (ch: string): boolean => ch === " " || ch === "\t";
 
-function credentialOf(header: string | undefined): string | null {
+function parseAuthorization(
+  header: string | undefined,
+): { scheme: string; credential: string } | null {
   if (header === undefined) return null;
   let at = 0;
   while (at < header.length && !headerSpace(header[at] as string)) at++;
-  const scheme = header.slice(0, at).toLowerCase();
   if (at === header.length) return null;
-  let payloadAt = at;
-  while (payloadAt < header.length && headerSpace(header[payloadAt] as string)) payloadAt++;
-  const payload = header.slice(payloadAt).trim();
-  if (scheme === "bearer") return payload;
-  if (scheme !== "basic") return null;
+  let credentialAt = at;
+  while (credentialAt < header.length && headerSpace(header[credentialAt] as string)) {
+    credentialAt++;
+  }
+  return { scheme: header.slice(0, at).toLowerCase(), credential: header.slice(credentialAt).trim() };
+}
+
+function credentialOf(header: string | undefined): string | null {
+  const parsed = parseAuthorization(header);
+  if (parsed === null) return null;
+  if (parsed.scheme === "bearer") return parsed.credential;
+  if (parsed.scheme !== "basic") return null;
   let decoded: string;
   try {
-    decoded = Buffer.from(payload, "base64").toString("utf8");
+    decoded = Buffer.from(parsed.credential, "base64").toString("utf8");
   } catch {
     return null;
   }

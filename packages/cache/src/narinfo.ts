@@ -90,7 +90,7 @@ export function canonicalNarHash(hash: string): string {
   return `sha256:${narHashBase32(hash)}`;
 }
 
-export function isStorePathHash(value: string): boolean {
+export function isSafeStorePathHash(value: string): boolean {
   return /^[0-9abcdfghijklmnpqrsvwxyz]{32}$/.test(value);
 }
 
@@ -103,14 +103,14 @@ export function keyNameOf(signature: string): string | null {
   return keyParts(signature)?.name ?? null;
 }
 
-export function isStagedFileName(value: string): boolean {
+export function isSafeNarFileName(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && !value.includes("..");
 }
 
 export function storePathHash(storePath: string): string {
   const base = storePath.slice(storePath.lastIndexOf("/") + 1);
   const hash = base.slice(0, 32);
-  if (!isStorePathHash(hash)) {
+  if (!isSafeStorePathHash(hash)) {
     throw new NarinfoError(`not a store path: ${storePath}`);
   }
   return hash;

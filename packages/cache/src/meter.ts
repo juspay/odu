@@ -19,14 +19,23 @@ const textOf = (fields: Record<string, unknown>, key: string): string | null => 
   return typeof value === "string" ? value : null;
 };
 
-const bucketOf = (fields: Record<string, unknown>): string => textOf(fields, "bucket") ?? "";
+const UNATTRIBUTED = "";
+
+const bucketLabelOrUnattributed = (fields: Record<string, unknown>): string =>
+  textOf(fields, "bucket") ?? UNATTRIBUTED;
+
+const PATH_KINDS: ReadonlyArray<{ matches: (bare: string) => boolean; kind: string }> = [
+  { matches: (bare) => bare.startsWith(`${PUSH_API}/`), kind: "other" },
+  { matches: (bare) => bare.includes("/nar/"), kind: "nar" },
+  { matches: (bare) => bare.endsWith(NARINFO_SUFFIX), kind: "narinfo" },
+];
 
 function kindOfPath(path: string | null): string {
   if (path === null) return "other";
   const bare = path.split("?")[0] ?? path;
-  if (bare.startsWith(`${PUSH_API}/`)) return "other";
-  if (bare.includes("/nar/")) return "nar";
-  if (bare.endsWith(NARINFO_SUFFIX)) return "narinfo";
+  for (const entry of PATH_KINDS) {
+    if (entry.matches(bare)) return entry.kind;
+  }
   return "other";
 }
 
@@ -58,13 +67,13 @@ export function cacheMeter(now: () => number = Date.now): CacheMeter {
       switch (event) {
         case "cache.narinfo.served": {
           requests.add(
-            { bucket: bucketOf(fields), kind: "narinfo", outcome: fields["hit"] === true ? "hit" : "miss" },
+            { bucket: bucketLabelOrUnattributed(fields), kind: "narinfo", outcome: fields["hit"] === true ? "hit" : "miss" },
             1,
           );
           return;
         }
         case "cache.nar.served": {
-          const bucket = bucketOf(fields);
+          const bucket = bucketLabelOrUnattributed(fields);
           const source = textOf(fields, "source") ?? "object";
           requests.add(
             { bucket, kind: "nar", outcome: source === "redirect" ? "redirect" : "hit" },
@@ -75,20 +84,20 @@ export function cacheMeter(now: () => number = Date.now): CacheMeter {
         }
         case "cache.request.refused": {
           requests.add(
-            { bucket: bucketOf(fields), kind: kindOfPath(textOf(fields, "path")), outcome: "refused" },
+            { bucket: bucketLabelOrUnattributed(fields), kind: kindOfPath(textOf(fields, "path")), outcome: "refused" },
             1,
           );
           return;
         }
         case "cache.nar.uploaded": {
-          const bucket = bucketOf(fields);
+          const bucket = bucketLabelOrUnattributed(fields);
           const mode = textOf(fields, "mode") ?? "unknown";
           uploads.add({ bucket, mode, outcome: "recorded" }, 1);
           bytes.add({ bucket, direction: "uploaded", mode }, numberOf(fields, "bytes") ?? 0);
           return;
         }
         case "cache.import.recorded": {
-          const bucket = bucketOf(fields);
+          const bucket = bucketLabelOrUnattributed(fields);
           uploads.add({ bucket, mode: "import", outcome: "recorded" }, 1);
           bytes.add(
             { bucket, direction: "uploaded", mode: "import" },
@@ -99,7 +108,7 @@ export function cacheMeter(now: () => number = Date.now): CacheMeter {
         case "cache.nar.verify_failed":
         case "cache.object.put_failed": {
           uploads.add(
-            { bucket: bucketOf(fields), mode: textOf(fields, "mode") ?? "unknown", outcome: "failed" },
+            { bucket: bucketLabelOrUnattributed(fields), mode: textOf(fields, "mode") ?? "unknown", outcome: "failed" },
             1,
           );
           return;

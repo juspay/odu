@@ -26,7 +26,7 @@ import {
 
 export type CacheClient = SurfaceClientOf<(typeof oduCacheSurface)["spec"]>;
 
-function cacheClientOver(dispatch: SurfaceDispatch): CacheClient {
+function composedCacheSibling(dispatch: SurfaceDispatch): CacheClient {
   return composedClients(
     { [CACHE_KEY]: oduCacheSurface },
     dispatch,
@@ -130,7 +130,7 @@ async function withService(
     return REFUSED;
   }
   try {
-    return await use(cacheClientOver(connection.dispatch));
+    return await use(composedCacheSibling(connection.dispatch));
   } finally {
     await connection.dispose();
   }

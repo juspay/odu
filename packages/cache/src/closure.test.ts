@@ -37,6 +37,8 @@ const TEST_ONLY = new Set([
   "@kolu/surface-daemon",
 ]);
 
+const POLICED_EXTENSIONS = [".ts", ".tsx"] as const;
+
 function tsFilesUnder(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -46,7 +48,7 @@ function tsFilesUnder(dir: string): string[] {
       out.push(...tsFilesUnder(path));
       continue;
     }
-    if (entry.endsWith(".ts") || entry.endsWith(".tsx")) out.push(path);
+    if (POLICED_EXTENSIONS.some((extension) => entry.endsWith(extension))) out.push(path);
   }
   return out;
 }

@@ -25,14 +25,16 @@ export function provenanceHeaders(stated: {
 
 const MAX_PROVENANCE = 200;
 
-export function provenanceStated(
-  headers: Record<string, string | undefined>,
-): Provenance {
-  const stated = (header: string): string | null => {
-    const value = (headers[header] ?? "").trim();
-    return value === "" ? null : value.slice(0, MAX_PROVENANCE);
+function clipProvenance(value: string | undefined): string | null {
+  const stated = (value ?? "").trim();
+  return stated === "" ? null : stated.slice(0, MAX_PROVENANCE);
+}
+
+export function provenanceStated(headers: Record<string, string | undefined>): Provenance {
+  return {
+    run: clipProvenance(headers[RUN_HEADER]),
+    commit: clipProvenance(headers[COMMIT_HEADER]),
   };
-  return { run: stated(RUN_HEADER), commit: stated(COMMIT_HEADER) };
 }
 
 export const PUSH_API = "/_odu/v1";

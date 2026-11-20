@@ -24,6 +24,10 @@ interface MigrationKey {
 
 const PROGRESS_EVERY = 25;
 
+const MAX_DELTA_PASSES = 10;
+
+const ignoreLeftovers = (): "continue" => "continue";
+
 const headersFor = (kind: KeyKind): { contentType: string; cacheControl: string } =>
   kind === "nar"
     ? { contentType: NAR_CONTENT_TYPE, cacheControl: NAR_CACHE_CONTROL }
@@ -149,7 +153,7 @@ export async function runMigration(row: MigrationRow, deps: MigrationDeps): Prom
 
   try {
     if (state.state === "copying") {
-      for (let round = 0; round < 10; round += 1) {
+      for (let round = 0; round < MAX_DELTA_PASSES; round += 1) {
         if (deps.stopping()) return;
         if ((await pass()) === 0) break;
       }
@@ -181,7 +185,7 @@ export async function runMigration(row: MigrationRow, deps: MigrationDeps): Prom
         keys: migrationKeys(repo, state.bucket).map((entry) => entry.key),
         slots: deps.slots,
         stop: deps.stopping,
-        failed: () => {},
+        failed: ignoreLeftovers,
       });
       if (deps.stopping()) return;
       deps.purged?.({

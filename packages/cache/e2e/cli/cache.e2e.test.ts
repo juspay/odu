@@ -68,7 +68,7 @@ function startStoreProxy(upstream: string): { port: number; stop: () => void } {
 
 const dirs: string[] = [];
 
-const HOST_BUILD = currentNixSystem().endsWith("-darwin");
+const BUILDS_VIA_HOST_STORE = currentNixSystem().endsWith("-darwin");
 
 beforeAll(async () => {
   odu = buildOduBinary();
@@ -199,12 +199,12 @@ function build(name: string): string {
 
 function realised(expr: string, what: string): string {
   const args = ["build", "--no-link", "--print-out-paths", "--impure", "--expr", expr];
-  const res = HOST_BUILD
+  const res = BUILDS_VIA_HOST_STORE
     ? spawnSync("nix", args, { encoding: "utf-8", maxBuffer: BIG, env: process.env })
     : nix([...args.slice(0, 1), "--store", builderStore, ...args.slice(1)]);
   if (res.status !== 0) throw new Error(`nix build ${what} failed:\n${res.stderr}`);
   const out = res.stdout.trim();
-  if (!HOST_BUILD) return out;
+  if (!BUILDS_VIA_HOST_STORE) return out;
   const copied = spawnSync("nix", ["copy", "--no-check-sigs", "--to", builderStore, out], {
     encoding: "utf-8",
     maxBuffer: BIG,
@@ -274,24 +274,29 @@ interface Served {
   source: "object" | "transition" | "redirect";
 }
 
-function narServed(storePath: string): Served[] {
+function logLines<T extends object>(event: string, keep: (entry: T) => boolean): T[] {
   let text: string;
   try {
     text = readFileSync(world.logPath, "utf-8");
   } catch {
     return [];
   }
-  const lines: Served[] = [];
+  const lines: T[] = [];
   for (const line of text.split("\n")) {
-    if (!line.includes("cache.nar.served")) continue;
+    if (!line.includes(event)) continue;
+    let entry: T & { msg?: string };
     try {
-      const entry = JSON.parse(line) as Served & { msg?: string };
-      if (entry.msg === "odu cache: cache.nar.served" && entry.path === storePath) lines.push(entry);
+      entry = JSON.parse(line) as T & { msg?: string };
     } catch {
+      continue;
     }
+    if (entry.msg === `odu cache: ${event}` && keep(entry)) lines.push(entry);
   }
   return lines;
 }
+
+const narServed = (storePath: string): Served[] =>
+  logLines<Served>("cache.nar.served", (entry) => entry.path === storePath);
 
 interface Uploaded {
   bucket: string;
@@ -301,24 +306,8 @@ interface Uploaded {
   bytes: number;
 }
 
-function narUploaded(bucket: string): Uploaded[] {
-  let text: string;
-  try {
-    text = readFileSync(world.logPath, "utf-8");
-  } catch {
-    return [];
-  }
-  const lines: Uploaded[] = [];
-  for (const line of text.split("\n")) {
-    if (!line.includes("cache.nar.uploaded")) continue;
-    try {
-      const entry = JSON.parse(line) as Uploaded & { msg?: string };
-      if (entry.msg === "odu cache: cache.nar.uploaded" && entry.bucket === bucket) lines.push(entry);
-    } catch {
-    }
-  }
-  return lines;
-}
+const narUploaded = (bucket: string): Uploaded[] =>
+  logLines<Uploaded>("cache.nar.uploaded", (entry) => entry.bucket === bucket);
 
 interface VerifyFailed {
   bucket: string;
@@ -327,24 +316,8 @@ interface VerifyFailed {
   reason: string;
 }
 
-function verifyFailed(bucket: string): VerifyFailed[] {
-  let text: string;
-  try {
-    text = readFileSync(world.logPath, "utf-8");
-  } catch {
-    return [];
-  }
-  const lines: VerifyFailed[] = [];
-  for (const line of text.split("\n")) {
-    if (!line.includes("cache.nar.verify_failed")) continue;
-    try {
-      const entry = JSON.parse(line) as VerifyFailed & { msg?: string };
-      if (entry.msg === "odu cache: cache.nar.verify_failed" && entry.bucket === bucket) lines.push(entry);
-    } catch {
-    }
-  }
-  return lines;
-}
+const verifyFailed = (bucket: string): VerifyFailed[] =>
+  logLines<VerifyFailed>("cache.nar.verify_failed", (entry) => entry.bucket === bucket);
 
 let main: Bucket;
 let writeToken: string;

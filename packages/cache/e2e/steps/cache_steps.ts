@@ -44,26 +44,29 @@ function mintedToken(answer: { stdout: string }): string {
   return payload.token;
 }
 
+const provenanceArgs = (stated: StatedProvenance | undefined): string[] =>
+  stated === undefined ? [] : ["--run", stated.run, "--commit", stated.commit];
+
 interface FileSpec {
   readonly name: string;
   readonly body: string;
 }
 
-function arrangePush(world: OduWorld, howMany = 1, states: readonly string[] = []): void {
+function arrangePush(world: OduWorld, howMany = 1, provenance?: StatedProvenance): void {
   arrangeFiles(
     world,
     Array.from({ length: howMany }, (_, index) => {
       const name = unique(index === 0 ? "path" : `path-${index}`);
       return { name, body: `odu web acceptance: ${name}\n` };
     }),
-    states,
+    provenance,
   );
 }
 
 function arrangeFiles(
   world: OduWorld,
   specs: readonly FileSpec[],
-  states: readonly string[] = [],
+  provenance?: StatedProvenance,
 ): void {
   const bucket = unique("bucket");
   const paths: string[] = [];
@@ -100,7 +103,7 @@ function arrangeFiles(
 
   const pushed = oduCli(
     world.service,
-    ["cache", "push", bucket, ...paths, ...states, "-o", "json"],
+    ["cache", "push", bucket, ...paths, ...provenanceArgs(provenance), "-o", "json"],
     { ODU_CACHE_TOKEN: mintedToken(minted) },
   );
   assert.strictEqual(pushed.status, 0, `odu cache push failed: ${pushed.stderr}`);
@@ -184,7 +187,7 @@ Given(
       commit: "abcdef0123456789".repeat(3).slice(0, 40),
     };
     this.rowState.set(PROVENANCE, stated);
-    arrangePush(this, 1, ["--run", stated.run, "--commit", stated.commit]);
+    arrangePush(this, 1, stated);
   },
 );
 

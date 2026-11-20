@@ -19,16 +19,14 @@ export interface PathInfo {
   sigs: readonly string[];
 }
 
-interface Run {
-  code: number | null;
+type RunOutcome = {
   stdout: string;
   stderr: string;
-  failure: string | null;
   argv: string;
-}
+} & ({ kind: "exited"; code: number | null } | { kind: "never-ran"; failure: string });
 
-function run(command: string, args: readonly string[]): Promise<Run> {
-  const { promise, resolve } = Promise.withResolvers<Run>();
+function run(command: string, args: readonly string[]): Promise<RunOutcome> {
+  const { promise, resolve } = Promise.withResolvers<RunOutcome>();
   const argv = [command, ...args].join(" ");
   const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
@@ -36,16 +34,18 @@ function run(command: string, args: readonly string[]): Promise<Run> {
   child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
   child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
   child.on("error", (err) =>
-    resolve({ code: null, stdout, stderr, argv, failure: describeFailure(err) }),
+    resolve({ kind: "never-ran", stdout, stderr, argv, failure: describeFailure(err) }),
   );
-  child.on("close", (code) => resolve({ code, stdout, stderr, argv, failure: null }));
+  child.on("close", (code) => resolve({ kind: "exited", stdout, stderr, argv, code }));
   return promise;
 }
 
-function whyRunFailed(result: Run): string {
+const exitedCleanly = (result: RunOutcome): boolean => result.kind === "exited" && result.code === 0;
+
+function whyRunFailed(result: RunOutcome): string {
   const said = result.stderr.trim();
   const head =
-    result.failure === null
+    result.kind === "exited"
       ? `\`${result.argv}\` exited ${String(result.code)}`
       : `\`${result.argv}\` could not be run: ${result.failure}`;
   return said === "" ? head : `${head}: ${said}`;
@@ -65,12 +65,12 @@ async function pathInfoArgs(
   paths: readonly string[],
 ): Promise<{ ok: true; stdout: string } | { ok: false; message: string }> {
   const formatted = await run("nix", [...base, "--json", "--json-format", "1", ...storeArgsOf(store), ...paths]);
-  if (formatted.code === 0) return { ok: true, stdout: formatted.stdout };
+  if (exitedCleanly(formatted)) return { ok: true, stdout: formatted.stdout };
   if (!/unrecognised flag|unrecognized option|unknown flag/i.test(formatted.stderr)) {
     return { ok: false, message: whyRunFailed(formatted) };
   }
   const plain = await run("nix", [...base, "--json", ...storeArgsOf(store), ...paths]);
-  return plain.code === 0
+  return exitedCleanly(plain)
     ? { ok: true, stdout: plain.stdout }
     : { ok: false, message: `${whyRunFailed(plain)} (after ${whyRunFailed(formatted)})` };
 }
@@ -378,7 +378,7 @@ function readableOf(stream: ReadableStream<Uint8Array>): Readable {
   return readable;
 }
 
-const unjudged = (err: unknown): NarCheck => ({
+const classifyReadFailure = (err: unknown): NarCheck => ({
   ok: false,
   message: String(err),
   ...(err instanceof ObjectChanged
@@ -430,7 +430,7 @@ async function verifyNar(
     try {
       actual = bytes.size();
     } catch (err) {
-      resolve(unjudged(err));
+      resolve(classifyReadFailure(err));
       return;
     }
     if (actual !== fileSize) {
@@ -486,7 +486,7 @@ async function verifyNar(
       settled = true;
       // Its stdin stays open while it waits for bytes that are not coming.
       child.stdin?.end();
-      resolve(unjudged(err));
+      resolve(classifyReadFailure(err));
     });
     file.pipe(child.stdin as NodeJS.WritableStream);
     source = child.stdout;
@@ -504,7 +504,7 @@ async function verifyNar(
   source.on("error", (err) => {
     if (settled) return;
     settled = true;
-    resolve(unjudged(err));
+    resolve(classifyReadFailure(err));
   });
   source.on("end", () => {
     ended = true;
