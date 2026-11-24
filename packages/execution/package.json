@@ -17,6 +17,6 @@
     "@odu/cache": "workspace:*",
     "@odu/run-client": "workspace:*",
     "@odu/run-history": "workspace:*",
-    "effect": "4.1.4"
+    "effect": "4.1.5"
   }
 }
