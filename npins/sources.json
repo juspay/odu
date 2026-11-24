@@ -1,5 +1,18 @@
 {
   "pins": {
+    "cordis": {
+      "type": "Git",
+      "repository": {
+        "type": "GitHub",
+        "owner": "cordiverse",
+        "repo": "cordis"
+      },
+      "branch": "main",
+      "submodules": false,
+      "revision": "f8ea3cd50f1a5724e8e715995bcde131c9c12b2c",
+      "url": "https://github.com/cordiverse/cordis/archive/f8ea3cd50f1a5724e8e715995bcde131c9c12b2c.tar.gz",
+      "hash": "sha256-EekAM/om1vtOnLVxvU0gqB6LvkhyJ8ZZ8xt5Ke3Yboo="
+    },
     "kolu": {
       "type": "Git",
       "repository": {
@@ -9,9 +22,9 @@
       },
       "branch": "master",
       "submodules": false,
-      "revision": "2371891ca435cfaffdff704b9a07399718a7095d",
-      "url": "https://github.com/juspay/kolu/archive/2371891ca435cfaffdff704b9a07399718a7095d.tar.gz",
-      "hash": "sha256-LXriAuDGxS4YJBwrinrKl4WuUTcJWi1q1pXMxnu+Sg0="
+      "revision": "f672aff9e227ddc6bca3390214be86c5f920b4b4",
+      "url": "https://github.com/juspay/kolu/archive/f672aff9e227ddc6bca3390214be86c5f920b4b4.tar.gz",
+      "hash": "sha256-eXvWF/hqV2+VeN7bjkw2JfadsipuvlzlNxi1Hj8TiQA="
     },
     "nixpkgs": {
       "type": "Git",
@@ -26,32 +39,6 @@
       "url": "https://github.com/nixos/nixpkgs/archive/104240a772428cc2e20d8fd86c9ddbb886bbaff2.tar.gz",
       "hash": "sha256-D740uKsMbgsfK2oaDenJLLPIZfq7W0/g4KN/Fls8eKs="
     },
-    "osfacts": {
-      "type": "Git",
-      "repository": {
-        "type": "GitHub",
-        "owner": "juspay",
-        "repo": "osfacts"
-      },
-      "branch": "main",
-      "submodules": false,
-      "revision": "1b13477b72c24f6feba450720e33d582045382a6",
-      "url": "https://github.com/juspay/osfacts/archive/1b13477b72c24f6feba450720e33d582045382a6.tar.gz",
-      "hash": "sha256-qNE0NFO6/jSABe2H/PTNHsqhOTJnN7j24f4vvClTzbY="
-    },
-    "cordis": {
-      "type": "Git",
-      "repository": {
-        "type": "GitHub",
-        "owner": "cordiverse",
-        "repo": "cordis"
-      },
-      "branch": "main",
-      "submodules": false,
-      "revision": "f8ea3cd50f1a5724e8e715995bcde131c9c12b2c",
-      "url": "https://github.com/cordiverse/cordis/archive/f8ea3cd50f1a5724e8e715995bcde131c9c12b2c.tar.gz",
-      "hash": "sha256-EekAM/om1vtOnLVxvU0gqB6LvkhyJ8ZZ8xt5Ke3Yboo="
-    },
     "olai": {
       "type": "Git",
       "repository": {
@@ -64,6 +51,19 @@
       "revision": "e835a9207c96ccb53cdb62759d1ca5657ae3130c",
       "url": "https://github.com/juspay/olai/archive/e835a9207c96ccb53cdb62759d1ca5657ae3130c.tar.gz",
       "hash": "sha256-/ZIP+T4ubyhcd9IT2ubz/0ZWoCd0FSmzmj+oMax3Y0A="
+    },
+    "osfacts": {
+      "type": "Git",
+      "repository": {
+        "type": "GitHub",
+        "owner": "juspay",
+        "repo": "osfacts"
+      },
+      "branch": "main",
+      "submodules": false,
+      "revision": "a91cd2acdb000bb27784919a996f5d779450ac0b",
+      "url": "https://github.com/juspay/osfacts/archive/a91cd2acdb000bb27784919a996f5d779450ac0b.tar.gz",
+      "hash": "sha256-UsjW86fkhUX6e9NCL6ROVSAPZskxPTZtMiIIKsznVCE="
     }
   },
   "version": 7
